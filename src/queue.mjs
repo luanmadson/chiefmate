@@ -128,7 +128,8 @@ export function resume(id, ignoreLimits = false) {
   const run = readRun(id);
   if (!run) throw new Error(t('Run not found.'));
   if (live.has(id) || !['paused', 'waiting', 'failed', 'canceled'].includes(run.status)) return run.status;
-  for (const step of stepsOf(run)) if (step.status === 'failed' || step.status === 'running') step.status = 'pending';
+  // Steps skipped after a team lead's failed planning come back too: the plan is made again.
+  for (const step of stepsOf(run)) if (['failed', 'running', 'skipped'].includes(step.status)) step.status = 'pending';
   Object.assign(run, { status: 'queued', notBefore: null, note: null, ended: null, ignoreLimits: ignoreLimits || run.ignoreLimits || false });
   saveRun(run);
   nudgeQueue();

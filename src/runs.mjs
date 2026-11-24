@@ -1,14 +1,20 @@
 // How a run (a mission or a one-off task) goes: working copy, the crew in sequence, the manager's review,
 // the project's checks and a pull request.
+import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { instructionFiles, stepAccess, stepMcp } from './access.mjs';
 import { contextWindow, runClaude } from './claude.mjs';
 import { loadConfig, projectCrew } from './config.mjs';
 import { formatDate, formatDateTime, formatDuration, formatNumber, formatPercent, t } from './i18n.mjs';
+import {
+  applyPlan, finalReviewLines, LEAD, leadLines, leadPlanStep, leadReviewStep, memberLines, readMemory, saveMemory, takeMemory,
+} from './leads.mjs';
+import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { projectInstructions } from './prompts.mjs';
 import { readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
+import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
 import { clip, languageName, now, ROOT, slug, stamp } from './util.mjs';
 import {
   baseBranch, changedFiles, checkoutBranch, commitPending, createBranch, deliverToClone, newCommits, openPullRequest, prepareLibrary,
@@ -50,6 +56,7 @@ function crewRules(config, project) {
 - If you get stuck, undo whatever is half-done and explain it in your report.
 - Never read, list or copy Chiefmate's \`data/\` folder (including \`data/browser-profile\`, the browser profile Chiefmate uses for the owner), other projects' working copies or other projects' personal documentation. You only get the folders this step needs.
 - When you need ${config.owner || 'the owner'} to act (sign in somewhere, confirm something, do what only a person can do), don't stop and don't work around it: run \`${needsYouCommand()} "<what to do, in ${owner}>" [--url <address>] [--wait] [--check "<command that succeeds once it is done>"]\` with the Bash tool's timeout at 600000 ms. Chiefmate shows the request to the owner and opens the address in their browser. With --wait the command returns once the owner clicks Done (or the check succeeds); if it says it is still waiting, run the command it prints. If it gives up waiting, finish what you can and say in your report what is left for the owner. Never type passwords or codes yourself.
+- ${config.owner || 'The owner'} may write to you directly from the app while you work: the message arrives as your next turn, with your work kept as it was. Answer it in one short message, then go on. To ask ${config.owner || 'the owner'} something, use needs-you with --wait: they can answer from the app, and the answer comes back as the command's output.
 - Your last message is the step's report, in ${owner}: short markdown with what you did (and the files), the sources you used, what you left out and why, and what the reviewer should check.`;
 }
 
@@ -63,13 +70,24 @@ export function createRun({ kind, missionId, projectId, agent, instruction, revi
     title = mission.name;
     const agents = projectCrew(config, project);
     for (const s of [...mission.steps, ...(mission.review ? [mission.review] : [])]) {
-      if (!agents[s.agent]) throw new Error(t('{agent} is not in the crew of {project}.', { agent: s.agent, project }));
+      if (!agents[s.agent] || s.agent === LEAD) throw new Error(t('{agent} is not in the crew of {project}.', { agent: s.agent, project }));
     }
     steps = mission.steps.map(s => ({ agent: s.agent, part: s.part, status: 'pending' }));
     finalReview = mission.review ? { agent: mission.review.agent, part: mission.review.part, status: 'pending' } : null;
+  } else if (kind === 'ask') {
+    // A request for a project's team lead: it plans the tasks, the crew does them, the lead and then the manager review.
+    if (!config.projects?.[projectId]) throw new Error(t('Unknown project: {id}', { id: projectId }));
+    const lead = projectCrew(config, projectId)[LEAD];
+    if (!lead) throw new Error(t('{project} has no team lead: add "lead" to its settings, or queue a task or a mission.', { project: projectId }));
+    if (!instruction?.trim()) throw new Error(t('Write what the agent should do.'));
+    project = projectId;
+    title = `${t(lead.name)}: ${clip(instruction, 70)}`;
+    steps = [leadPlanStep(instruction)];
+    finalReview = { agent: 'manager', part: 'Review the work done for this request and write the pull request text.', status: 'pending' };
   } else {
     if (!config.projects?.[projectId]) throw new Error(t('Unknown project: {id}', { id: projectId }));
     const agents = projectCrew(config, projectId);
+    if (agent === LEAD) throw new Error(t('The team lead takes requests, not tasks: use "ask".'));
     if (!agents[agent]) throw new Error(t('{agent} is not in the crew of {project}.', { agent, project: projectId }));
     if (!instruction?.trim()) throw new Error(t('Write what the agent should do.'));
     project = projectId;
@@ -78,7 +96,9 @@ export function createRun({ kind, missionId, projectId, agent, instruction, revi
     finalReview = review ? { agent: 'manager', part: 'Review the work of this task and write the pull request text.', status: 'pending' } : null;
   }
   if (!config.projects?.[project]) throw new Error(t('Unknown project: {id}', { id: project }));
-  const base = `${stamp()}-${slug(missionId ?? agent)}`;
+  // In a project with a team lead, the lead reviews the crew's work first in every run, and keeps the memory.
+  if (kind !== 'ask' && projectCrew(config, project)[LEAD]) steps.push(leadReviewStep());
+  const base = `${stamp()}-${slug(missionId ?? agent ?? LEAD)}`;
   let id = base;
   for (let n = 2; existsSync(runFile(id)); n++) id = `${base}-${n}`;
   return saveRun({
@@ -164,7 +184,7 @@ function logAction(l, event) {
   if (l.actions.length > 300) l.actions.splice(0, l.actions.length - 300);
 }
 
-function stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries, base, access, built }) {
+function stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries, base, access, built, agents }) {
   const prLanguage = project.language || config.language || 'en';
   const local = project.deliver === 'local';
   const lines = [
@@ -172,9 +192,13 @@ function stepPrompt({ run, step, project, previous, finalReview, changes, config
     `Project: ${project.name}${project.site ? ` (${project.site})` : ''}. ${project.about ?? ''}`.trim(),
     `Today: ${formatDateTime(new Date())}. Run branch: ${run.branch}, started from ${base}.${local ? ' Nothing from this run goes to GitHub: the branch is handed to the owner, who decides what to send.' : ''}`,
     '',
-    finalReview ? '## What to do in this review' : '## Your part',
+    finalReview ? '## What to do in this review' : step.agent === LEAD && step.role === 'plan' ? '## The request to plan' : '## Your part',
     step.part,
   ];
+  // In a project with a team lead: the lead gets its memory and how to plan or review; the crew, the memory to read.
+  const lead = agents?.[LEAD] ?? null;
+  if (lead && step.agent === LEAD) lines.push(...leadLines({ run, step, agents, memory: readMemory(run.project), base }));
+  else if (lead && !finalReview) lines.push(...memberLines({ run, step, lead, memory: readMemory(run.project) }));
   if (project.playbook && run.kind === 'mission') {
     lines.push('', `This mission's playbook is \`${project.playbook}\`. Read it before you start and do only your part.`);
   }
@@ -188,7 +212,7 @@ function stepPrompt({ run, step, project, previous, finalReview, changes, config
       '',
       `You are the manager. The crew finished the work below. Before it goes to the owner for approval${local ? ' (as a branch, not a pull request)' : ' as a pull request'}:`,
       `1. See what changed: \`git log --oneline origin/${base}..HEAD\` and the diff of every file that matters.`,
-      '2. Check it against the reports and the project\'s rules. Fix whatever is wrong or incomplete, committing as "Chiefmate: manager review".',
+      `2. Check it against the reports and the project's rules${run.lead?.opinion ? ", weighing the team lead's opinion below (its first review)" : ''}. Fix whatever is wrong or incomplete, committing as "Chiefmate: manager review". When the owner guided a step directly (a "direct talk" section at the end of its report), check that the work follows what they said.`,
       `3. Run the checks: ${(project.checks ?? []).map(c => `\`${c}\``).join(', ') || 'the ones the project and its documentation describe, as far as this machine allows'}.`,
       `4. Your last message presents the work for approval${local ? ', as the note that goes with the branch' : ', as the pull request text'}, in markdown and in ${languageName(prLanguage)}. End it with a section titled "${t("Manager's verdict", {}, prLanguage)}": what you fixed, the risks and your recommendation (approve, approve with caveats, or do not approve).`,
       '',
@@ -198,9 +222,12 @@ function stepPrompt({ run, step, project, previous, finalReview, changes, config
       '```',
     );
   }
-  if (previous.length) {
+  if (finalReview) lines.push(...finalReviewLines(run, lead));
+  // The final review reads the lead's plan and opinion above, so its steps are not repeated among the crew's reports.
+  const reports = finalReview && lead ? previous.filter(p => p.agent !== LEAD) : previous;
+  if (reports.length) {
     lines.push('', finalReview ? '## Crew reports' : '## What the previous steps did');
-    for (const p of previous) lines.push('', `### ${p.agent} (${p.status})`, p.report || p.error || '(no report)');
+    for (const p of reports) lines.push('', `### ${p.agent}${p.role ? `, ${p.role === 'plan' ? 'planning' : 'first review'}` : ''} (${p.status})`, p.report || p.error || '(no report)');
   }
   lines.push('', crewRules(config, project));
   return lines.join('\n');
@@ -299,7 +326,7 @@ function appendLoaded(file, init) {
 async function runStep({ l, run, step, index, dir, project, config, agents, libraries, base, finalReview = false }) {
   const agent = agents[step.agent];
   if (!agent) throw new Error(t('Unknown agent: {id}', { id: step.agent }));
-  const previous = run.steps.filter(s => s !== step && s.status !== 'pending');
+  const previous = run.steps.filter(s => s !== step && s.status !== 'pending' && s.status !== 'skipped');
   const changes = finalReview ? await changedFiles(dir, base).catch(() => '') : '';
   const model = agent.model ?? config.default_model;
   const access = stepAccess({ config, projectId: run.project, project, libraries, manager: step.agent === 'manager' });
@@ -311,19 +338,22 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     logAction(l, { type: 'action', text: t("Couldn't read the prompt builder: {error}", { error: error.message }) });
   }
   for (const a of built?.adaptations ?? []) logAction(l, { type: 'action', text: t('Prompt builder: a line of "{block}" was adapted to the crew\'s rules', { block: a.block }) });
-  const prompt = stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries, base, access, built });
+  const prompt = stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries, base, access, built, agents });
   const tools = [...new Set([...(agent.tools ?? []), ...mcp.tools])];
   const disallowed = [...new Set([...ALWAYS_DISALLOWED, ...(agent.disallowed ?? []), ...access.denied])];
   const name = `${String(index + 1).padStart(2, '0')}-${step.agent}`;
   const contextFile = path.join(runDir(run.id), `${name}.context.md`);
 
+  // A team lead reads and judges: whatever it changes in the working copy (through the shell) is dropped after its step.
+  const before = agent.lead ? await headCommit(dir) : null;
   Object.assign(step, { status: 'running', started: now(), error: null, model, promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
-  Object.assign(l, { step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0 });
+  Object.assign(l, { step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0, talking: false, reply: null, session: null });
   saveRun(run);
 
-  const { promise, cancel, pid, args } = runClaude({
+  // Every step keeps its Claude Code session, so a message from the owner can resume it (src/talk.mjs).
+  let session = { id: randomUUID() };
+  const common = {
     dir,
-    prompt,
     system: agent.instructions,
     model,
     effort: agent.effort,
@@ -340,26 +370,69 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     onEvent: event => {
       followContext(l, event);
       logAction(l, event);
-      if (event.type === 'start' && event.init) appendLoaded(contextFile, event.init);
+      if (event.type === 'start' && event.session) l.session = event.session;
+      if (event.type === 'start' && event.init && !session.resume) appendLoaded(contextFile, event.init);
+      // The first thing the agent says after the owner's message is its answer, shown next to the message.
+      if (event.type === 'say' && l.reply) {
+        agentSays(run, { step: index + 1, agent: step.agent, text: event.text, replyTo: l.reply });
+        l.reply = null;
+        saveRun(run);
+      }
     },
-  });
-  try {
-    writeFileSync(contextFile, contextReport({ run, step, index, agent, dir, model, prompt, tools, disallowed, access, mcp, built, args }));
-  } catch (error) {
-    logAction(l, { type: 'action', text: t("Couldn't write the context report: {error}", { error: error.message }) });
+  };
+  let turn = prompt;
+  let spentMs = 0;
+  const total = { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, turns: 0, durationMs: 0, subagents: 0 };
+  let r;
+  l.talking = true;
+  for (;;) {
+    const proc = runClaude({ ...common, prompt: turn, session, spentMs });
+    if (!session.resume) {
+      try {
+        writeFileSync(contextFile, contextReport({ run, step, index, agent, dir, model, prompt, tools, disallowed, access, mcp, built, args: proc.args }));
+      } catch (error) {
+        logAction(l, { type: 'action', text: t("Couldn't write the context report: {error}", { error: error.message }) });
+      }
+    }
+    l.process = { cancel: proc.cancel, interrupt: proc.interrupt };
+    l.pid = proc.pid; // the agent's process: its memory counts for the project, and it is never stopped from the Projects section
+    // Canceled while the step was being prepared (or between two turns): stop the agent that just started.
+    if (l.cancelRequest) proc.cancel(l.cancelRequest);
+    r = await proc.promise;
+    l.process = null;
+    l.pid = null;
+    spentMs = r.spentMs ?? spentMs;
+    for (const k of Object.keys(total.tokens)) total.tokens[k] += r.tokens?.[k] ?? 0;
+    total.turns += r.turns ?? 0;
+    total.durationMs += r.durationMs ?? 0;
+    total.subagents += r.subagents ?? 0;
+    // Messages the owner sent meanwhile: resume the same session with them as the next turn. Checked and closed with
+    // no wait in between, so a message sent at the very end is never left behind.
+    const messages = pendingTalk(run, index + 1);
+    if (!messages.length) {
+      l.talking = false;
+      break;
+    }
+    if (l.cancelRequest || r.canceled || limitHit(r) || (!r.ok && !r.interrupted)) {
+      l.talking = false;
+      for (const m of messages) Object.assign(m, { status: 'undelivered' });
+      saveRun(run);
+      break;
+    }
+    for (const m of messages) Object.assign(m, { status: 'delivered', delivered: now(), via: 'resume' });
+    l.reply = messages.at(-1).id;
+    session = { id: r.session ?? l.session ?? session.id, resume: true };
+    turn = ownerTurn(messages, config);
+    logAction(l, { type: 'action', text: t('Your message was delivered: the agent goes on in the same session') });
+    saveRun(run);
   }
-  l.process = { cancel };
-  l.pid = pid; // the agent's process: its memory counts for the project, and it is never stopped from the Projects section
-  // Canceled while the step was being prepared: stop the agent that just started.
-  if (l.cancelRequest) cancel(l.cancelRequest);
-  const r = await promise;
-  l.process = null;
-  l.pid = null;
+  l.reply = null;
+  Object.assign(r, total);
 
   const waitUntil = limitHit(r);
   Object.assign(step, {
     status: waitUntil ? 'pending' : r.ok ? 'done' : 'failed', ended: waitUntil ? null : now(), tokens: r.tokens, turns: r.turns,
-    durationMs: r.durationMs, report: r.text, error: r.error ?? null, subagents: r.subagents, actions: l.actions.length,
+    durationMs: r.durationMs, report: (r.text || '') + talkSection(run, index + 1, id => t(agents[id]?.name ?? id), config), error: r.error ?? null, subagents: r.subagents, actions: l.actions.length,
     context: r.context ? { ...r.context, compactions: l.context?.compactions ?? r.context.compactions } : null,
   });
   if (r.context?.used) {
@@ -367,14 +440,17 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
       used: formatNumber(r.context.used), window: formatNumber(r.context.window), percent: formatPercent(r.context.used / r.context.window), count: step.context.compactions,
     }) });
   }
-  await commitPending(dir, `Chiefmate: ${t(agent.name)} (${run.title})`).catch(e => (step.error = `${step.error ?? ''} Commit: ${e.message}`.trim()));
+  if (before) {
+    const dropped = await discardSince(dir, before).catch(e => (step.error = `${step.error ?? ''} Discard: ${e.message}`.trim(), false));
+    if (dropped) logAction(l, { type: 'action', text: t('The team lead changed files, which it may not do: the changes were dropped') });
+  } else await commitPending(dir, `Chiefmate: ${t(agent.name)} (${run.title})`).catch(e => (step.error = `${step.error ?? ''} Commit: ${e.message}`.trim()));
   saveRun(run);
   return { waitUntil };
 }
 
 /** The pull request's text, in the project's language (lang). */
 function pullRequestBody(run, checks, agents, lang) {
-  const labels = { pending: t('Pending', {}, lang), running: t('Running', {}, lang), done: t('Done', {}, lang), failed: t('Failed', {}, lang) };
+  const labels = { pending: t('Pending', {}, lang), running: t('Running', {}, lang), done: t('Done', {}, lang), failed: t('Failed', {}, lang), skipped: t('Skipped', {}, lang) };
   const name = id => t(agents[id]?.name ?? id, {}, lang);
   const main = run.review?.report || run.steps.map(s => `## ${name(s.agent)}\n\n${s.report || s.error || t('(no report)', {}, lang)}`).join('\n\n');
   const table = stepsOf(run).map(s => `| ${name(s.agent)} | ${labels[s.status] ?? s.status} | ${formatDuration(s.durationMs)} | ${s.turns ?? ''} |`);
@@ -386,6 +462,39 @@ function pullRequestBody(run, checks, agents, lang) {
     `**${t('Checks after the review:', {}, lang)}**`, ...(checkList.length ? checkList : [`- ${t('(none)', {}, lang)}`]), '',
     t('Run `{id}`.', { id: run.id }, lang),
   ].join('\n');
+}
+
+/**
+ * After a step of the team lead: the project memory it returned is saved (and taken out of its report); its plan
+ * puts the crew's tasks in the run; its first review becomes the opinion the manager reads in the final review.
+ * Everything it decided stays in the run (run.lead) and in the logbook.
+ */
+function afterLead(run, step, agents, log) {
+  const name = t(agents[LEAD]?.name ?? LEAD);
+  if (step.status === 'done') {
+    const { memory, report } = takeMemory(step.report);
+    if (memory) {
+      try {
+        saveMemory(run.project, memory);
+        step.report = report;
+        step.memory = true;
+        log(t('{lead} updated the project memory', { lead: name }));
+      } catch (error) {
+        log(t("Couldn't save the project memory: {error}", { error: error.message }));
+      }
+    }
+  }
+  if (step.role === 'plan') {
+    const plan = applyPlan(run, step, agents);
+    log(plan.tasks.length
+      ? t('{lead} planned {count} task(s): {list}', { lead: name, count: plan.tasks.length, list: plan.tasks.map(x => t(agents[x.agent]?.name ?? x.agent)).join(', ') })
+      : t('{lead} planned no task: {note}', { lead: name, note: plan.note || plan.error || t('no reason given') }));
+    if (plan.dropped.length) log(t('{lead} left out of the plan: {list}', { lead: name, list: plan.dropped.join('; ') }));
+  } else if (step.role === 'review' && step.status === 'done') {
+    run.lead = { ...run.lead, opinion: step.report, opinionAt: now() };
+    log(t('{lead} wrote its opinion for the final review', { lead: name }));
+  }
+  saveRun(run);
 }
 
 /** Runs (or resumes) a run until the end, a pause for a limit, or a cancellation. */
@@ -413,6 +522,7 @@ export async function execute(run) {
         ? t('{note}. I will resume on my own at {when}.', { note, when: formatDateTime(waitUntil) })
         : t('{note}. Open the app to decide.', { note }),
     );
+    reportEvent('run_paused', `Run ${run.id} "${run.title}" (project ${run.project}) paused: ${note}. ${waitUntil ? `It resumes on its own at ${formatDateTime(waitUntil)}.` : 'It waits for the owner to decide (resume or cancel).'}`);
   };
 
   try {
@@ -436,14 +546,22 @@ export async function execute(run) {
     const base = run.base ?? project.main_branch;
     const libraries = await prepareLibraries(config, libraryIds(project), log);
 
-    const order =[...run.steps.map(step => ({ step, finalReview: false })), ...(run.review ? [{ step: run.review, finalReview: true }] : [])];
-    for (const [index, { step, finalReview }] of order.entries()) {
-      if (step.status === 'done' || step.status === 'failed') continue;
-      if (l.cancelRequest) break;
+    // The steps in order, the final review last. The order is read again after every step: a team lead's plan adds
+    // the crew's tasks right after its planning step.
+    for (;;) {
+      const order = [...run.steps.map(step => ({ step, finalReview: false })), ...(run.review ? [{ step: run.review, finalReview: true }] : [])];
+      const index = order.findIndex(x => x.step.status === 'pending' || x.step.status === 'running');
+      if (index < 0 || l.cancelRequest) break;
+      const { step, finalReview } = order[index];
       const limit = checkLimits(config, run);
       if (limit) return wait(limit.waitUntil, limit.note);
       const { waitUntil } = await runStep({ l, run, step, index, dir, project, config, agents, libraries, base, finalReview });
       if (waitUntil) return wait(waitUntil, t('Your account reached its limit in the middle of a step'));
+      if (step.agent === LEAD) afterLead(run, step, agents, log);
+    }
+    const planning = run.steps.find(s => s.agent === LEAD && s.role === 'plan');
+    if (planning?.status === 'failed' && !l.cancelRequest) {
+      throw new Error(t("The team lead's planning failed: {error}", { error: clip(planning.error || t('no reason given'), 300) }));
     }
 
     if (l.cancelRequest) {
@@ -457,9 +575,14 @@ export async function execute(run) {
     const commits = await newCommits(dir, base);
     run.commits = commits.length;
     if (!commits.length) {
-      Object.assign(run, { status: 'done', ended: now(), result: t('Finished with no changes to review.') });
+      const plan = run.lead?.plan;
+      const result = plan && !plan.tasks.length
+        ? t('The team lead planned no task: {note}', { note: plan.note || plan.error || t('no reason given') })
+        : t('Finished with no changes to review.');
+      Object.assign(run, { status: 'done', ended: now(), result });
       saveRun(run);
       notify(t('Chiefmate finished'), t('{title}: no changes to review.', { title: run.title }));
+      reportEvent('run_finished', `Run ${run.id} "${run.title}" (project ${run.project}) finished with no changes to review: ${result}`);
       return;
     }
     const failed = run.checks.filter(c => !c.ok).length;
@@ -481,6 +604,7 @@ export async function execute(run) {
       Object.assign(run, { status: 'done', ended: now(), result, delivered: project.local_clone ?? dir });
       saveRun(run);
       notify(t('Ready for your review'), t('{title}: {result}', { title: run.title, result }), 'chiefmate:log');
+      reportEvent('run_finished', `Run ${run.id} "${run.title}" (project ${run.project}) finished and was delivered locally, waiting for the owner's review: ${result}`);
       return;
     }
 
@@ -492,10 +616,12 @@ export async function execute(run) {
     Object.assign(run, { status: 'done', ended: now(), result });
     saveRun(run);
     notify(t('Ready for your review'), t('{title}: {result}', { title: run.title, result }), run.pullRequest);
+    reportEvent('pr_ready', `Run ${run.id} "${run.title}" (project ${run.project}) finished: pull request ${run.pullRequest} waits for the owner's approval. ${result}`);
   } catch (error) {
     Object.assign(run, { status: 'failed', ended: now(), result: error.message });
     saveRun(run);
     notify(t('Chiefmate hit an error'), t('{title}: {error}', { title: run.title, error: clip(error.message, 180) }));
+    reportEvent('run_failed', `Run ${run.id} "${run.title}" (project ${run.project}) failed: ${clip(error.message, 400)}`);
   } finally {
     live.delete(run.id);
   }

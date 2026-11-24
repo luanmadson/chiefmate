@@ -3,15 +3,17 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { runClaude } from './claude.mjs';
-import { loadAgents, loadConfig, projectCrew } from './config.mjs';
+import { loadAgents, loadConfig, projectCrew, projectLead } from './config.mjs';
 import { formatDateTime, formatDuration, formatNumber, formatPercent, t } from './i18n.mjs';
+import { LEAD, leadSituation } from './leads.mjs';
 import { processes } from './machine.mjs';
 import { computerLine, planLine } from './plan.mjs';
 import { planningLine } from './planning.mjs';
 import { focus, maxParallel, queued } from './queue.mjs';
-import { ALWAYS_DISALLOWED, liveRuns, prepareLibraries } from './runs.mjs';
+import { activeRun, ALWAYS_DISALLOWED, liveRuns, prepareLibraries } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { sessionsLine } from './sessions.mjs';
+import { talkSituation } from './talk.mjs';
 import { addMessage, listRuns, readPending, readState, readUsage, savePending, saveState, stepsOf } from './store.mjs';
 import { updateInfo } from './update.mjs';
 import { DATA, ensureDir, languageName, now, ROOT, VERSION } from './util.mjs';
@@ -117,6 +119,10 @@ export function situation(libraries = []) {
     lines.push(`- [${r.id}] ${r.title} (project ${r.project}): ${r.status}, ${formatDuration(work)} of agent work${r.pullRequest ? `, PR ${r.pullRequest}` : ''}${r.result ? `. ${r.result}` : ''}${r.note ? `. ${r.note}` : ''}`);
   }
   if (!latest.length) lines.push('- none yet');
+  // What the owner told the crew directly, from the agent's panel (src/talk.mjs): the runs going on and the latest.
+  // A run going on is also among the latest: each run once, the live copy first.
+  const talked = [...going.map(l => activeRun(l.run)).filter(Boolean), ...latest].filter((r, i, all) => all.findIndex(x => x.id === r.id) === i);
+  lines.push(talkSituation(talked, config.owner || 'the owner'));
   const window = (w, name) => `${name} ${formatPercent(w?.used)}${w?.resets ? ` (resets ${formatDateTime(w.resets)})` : ''}`;
   const limits = config.limits ?? {};
   lines.push(`${config.owner}'s account: ${window(usage.five_hour, '5-hour window')}; ${window(usage.seven_day, 'plan week')}. Measured ${usage.updated ? formatDateTime(usage.updated) : 'never'}. Runs pause at ${formatPercent(limits.pause_at_5h_window)} of the 5-hour window and ${formatPercent(limits.pause_at_plan_week)} of the plan week.`);
@@ -131,8 +137,14 @@ export function situation(libraries = []) {
   lines.push(`Crew: ${Object.values(agents).map(a => `${a.id} (${a.name}, ${a.model ?? config.default_model})`).join(', ')}.`);
   // Missions and tasks of a project with a crew of its own take only its members (you, the manager, stay global).
   for (const [id, p] of Object.entries(config.projects ?? {}).filter(([, p]) => p.crew)) {
-    const team = Object.values(projectCrew(config, id, agents)).filter(a => a.id !== 'manager');
+    const team = Object.values(projectCrew(config, id, agents)).filter(a => a.id !== 'manager' && a.id !== LEAD);
     lines.push(`Crew of project ${id} (only these take its tasks): ${team.map(a => `${a.id} (${a.name}${a.base !== a.id ? `, based on ${a.base}` : ''})`).join(', ') || 'none'}.`);
+  }
+  // The team leads (src/leads.mjs): one line each, with what it is on now. They only run when their project has work.
+  const projectRun = id => going.map(l => activeRun(l.run)).find(r => r?.project === id) ?? null;
+  for (const id of Object.keys(config.projects ?? {})) {
+    const lead = projectLead(config, id, agents);
+    if (lead) lines.push(leadSituation(id, lead, projectRun(id), queue.find(r => r.project === id) ?? null));
   }
   for (const [id, m] of Object.entries(config.missions ?? {})) {
     const next = nextRun(m.schedule);
@@ -163,6 +175,26 @@ export function sendToManager(text) {
   return { ...item, position: queued ? list.length : 0 };
 }
 
+/**
+ * Chiefmate's news for the manager (src/news.mjs): the events go as a system message of their own, marked as not
+ * coming from the owner. When the manager is free, it is woken at once; while it answers, the news waits in the queue
+ * (joined to news already waiting there) and goes with it. Returns the item.
+ */
+export function deliverNews(events) {
+  if (!events?.length) return null;
+  const list = readPending();
+  let item = list.find(m => m.from === 'chiefmate');
+  if (item) item.events = [...item.events, ...events].slice(-30);
+  else {
+    item = { id: randomUUID().slice(0, 8), from: 'chiefmate', events: [...events], at: now(), queued: chat.responding || list.length > 0 };
+    list.push(item);
+  }
+  item.text = item.events.map(e => `${e.kind}: ${e.text}`).join('\n');
+  savePending(list);
+  deliverPending();
+  return item;
+}
+
 /** Changes a message still in the queue. Returns the queue, or null when the message is no longer there. */
 export function editPending(id, text) {
   const message = String(text ?? '').trim();
@@ -170,6 +202,7 @@ export function editPending(id, text) {
   const list = readPending();
   const item = list.find(m => m.id === id);
   if (!item) return null;
+  if (item.from === 'chiefmate') throw new Error(t("Chiefmate's notices can't be edited, only removed."));
   Object.assign(item, { text: message, edited: now() });
   savePending(list);
   return list;
@@ -208,17 +241,32 @@ export function interruptManager() {
   return true;
 }
 
-/** The text the manager receives: your message, or the queue in order with the time of each one. */
+const isNews = m => m.from === 'chiefmate';
+
+/** Chiefmate's news for the manager: marked as a system message, not the owner's, with what to do with it. */
+export function newsMessage(owner, events, alongside = false) {
+  const head = `[System message from Chiefmate, not from ${owner}] ${events.length === 1 ? 'An event' : `${events.length} events`} ${owner} should know about${events.length > 1 ? ', oldest first' : ''}:`;
+  const lines = events.map(e => `- [${formatDateTime(e.at)}] ${e.kind}: ${e.text}`);
+  const ask = alongside
+    ? `Answer ${owner}'s message(s) and, in the same reply, tell ${owner} about these events in a few lines.`
+    : `Write ${owner} a short, clear notice in the conversation: what happened and, when something needs ${owner}, what to do. A few lines, no headings, no greeting. Check the records when the situation is not enough, but don't queue or change anything because of this notice alone.`;
+  return `${head}\n${lines.join('\n')}\n\n${ask}`;
+}
+
+/** The text the manager receives: your message, or the queue in order with the time of each one, and Chiefmate's news. */
 export function composeMessage(owner, items, interrupted = null) {
   const parts = [];
+  const mine = items.filter(m => !isNews(m));
+  const events = items.filter(isNews).flatMap(m => m.events ?? []);
   if (interrupted) {
     parts.push(`${owner} interrupted your previous answer at ${formatDateTime(interrupted)}. What you were doing then may be half done: check it before you carry on.`);
   }
-  if (items.length === 1 && !items[0].queued) parts.push(`Message from ${owner}:\n${items[0].text}`);
-  else {
-    const head = items.length === 1 ? `A message from ${owner}, sent while you were busy` : `${items.length} messages from ${owner}, sent while you were busy, oldest first`;
-    parts.push(`${head}:\n\n${items.map(m => `[sent ${formatDateTime(m.at)}${m.edited ? `, edited ${formatDateTime(m.edited)}` : ''}]\n${m.text}`).join('\n\n')}`);
+  if (mine.length === 1 && !mine[0].queued) parts.push(`Message from ${owner}:\n${mine[0].text}`);
+  else if (mine.length) {
+    const head = mine.length === 1 ? `A message from ${owner}, sent while you were busy` : `${mine.length} messages from ${owner}, sent while you were busy, oldest first`;
+    parts.push(`${head}:\n\n${mine.map(m => `[sent ${formatDateTime(m.at)}${m.edited ? `, edited ${formatDateTime(m.edited)}` : ''}]\n${m.text}`).join('\n\n')}`);
   }
+  if (events.length) parts.push(newsMessage(owner, events, mine.length > 0));
   return parts.join('\n\n');
 }
 
@@ -227,7 +275,7 @@ async function answer(items) {
   Object.assign(chat, { responding: true, interrupting: false, partial: '', actions: [], cancel: null, since: now() });
   let state = null;
   try {
-    for (const m of items) addMessage('you', m.text, { at: m.at, ...(m.queued ? { queued: true, delivered: now() } : {}), ...(m.edited ? { edited: m.edited } : {}) });
+    for (const m of items.filter(x => !isNews(x))) addMessage('you', m.text, { at: m.at, ...(m.queued ? { queued: true, delivered: now() } : {}), ...(m.edited ? { edited: m.edited } : {}) });
     const config = loadConfig();
     const manager = loadAgents(config).manager;
     if (!manager) throw new Error(t('agents/manager.md is missing.'));
@@ -282,12 +330,14 @@ async function answer(items) {
       r = await attempt({ id, resume: false });
       if (!r.session) r.session = id;
     }
+    // An answer to Chiefmate's news alone is a notice: the app shows it apart, with the events it is about.
+    const news = items.every(isNews) ? { news: [...new Set(items.flatMap(m => (m.events ?? []).map(e => e.kind)))] } : {};
     if (r.canceled && chat.interrupting) {
-      if (chat.partial) addMessage('manager', chat.partial, { model, interrupted: true });
+      if (chat.partial) addMessage('manager', chat.partial, { model, interrupted: true, ...news });
       addMessage('system', t('You interrupted the answer. The conversation goes on in the same session, and the manager is told in your next message.'));
       state.manager.interrupted = now();
     } else {
-      addMessage('manager', r.text || t("I couldn't answer: {error}", { error: r.error }), { model, ...(r.ok ? {} : { error: r.error }) });
+      addMessage('manager', r.text || t("I couldn't answer: {error}", { error: r.error }), { model, ...news, ...(r.ok ? {} : { error: r.error }) });
       delete state.manager.interrupted; // this message told it
     }
     let compacted = 0;

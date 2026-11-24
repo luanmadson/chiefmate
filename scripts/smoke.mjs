@@ -1,7 +1,7 @@
 // Starts a temporary Chiefmate on a spare port (only the app and the API: no queue, no schedule, no updates)
 // and checks that everything answers. Usage: npm run smoke
-import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -20,6 +20,19 @@ writeFileSync(path.join(data, 'manager', 'plan.md'), [
   '| 3 | Sample | First thing | Alta | Em andamento |', '| 7 | Sample | Second thing | Baixa | Aguarda o dono decidir |', '| 8 | Other | Third thing | Média | Depende do item 3 |',
 ].join('\n'));
 writeFileSync(path.join(data, 'manager', 'pending.json'), JSON.stringify([{ id: 'smoke1', text: 'Waiting', at: new Date().toISOString(), queued: true }]));
+// A finished run with a step's log, for the agent's panel: a text, an action and a last line still being written.
+mkdirSync(path.join(data, 'runs', 'smoke-feed'), { recursive: true });
+writeFileSync(path.join(data, 'runs', 'smoke-feed.json'), JSON.stringify({
+  id: 'smoke-feed', kind: 'task', project: 'none', title: 'Generalist: smoke', status: 'done', created: new Date().toISOString(),
+  steps: [{ agent: 'generalist', status: 'done', started: new Date().toISOString() }],
+}));
+const feedLines = [
+  { type: 'system', subtype: 'init', session_id: 's' },
+  { type: 'assistant', message: { content: [{ type: 'text', text: 'Reading the README first.' }, { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test' } }] } },
+  { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } },
+].map(e => JSON.stringify(e)).join('\n');
+const feedWhole = `${feedLines}\n`;
+writeFileSync(path.join(data, 'runs', 'smoke-feed', '01-generalist.jsonl'), `${feedWhole}{"type":"assistant","message":{"content":[{"type":"text","text":"half`);
 const child = spawn(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'server'], {
   cwd: root,
   env: { ...process.env, CHIEFMATE_PORT: String(port), CHIEFMATE_SMOKE: '1' },
@@ -113,6 +126,35 @@ try {
     expect((await post('/api/task', { project: 'none', agent: 'generalist', instruction: 'x', plan: 999 })).status === 400, 'a task linked to an item that does not exist was not refused');
     const archived = await post('/api/planning', { action: 'archive', id: 9 });
     expect(archived.ok && (await archived.json()).item?.archived, 'an item was not archived');
+    // The agent's panel: the step's log read live, from where it stopped, and the direct talk refused off a step.
+    const feed = await (await fetch(`${base}/api/run/smoke-feed/feed`)).json();
+    expect(feed.step === 1 && feed.items?.length === 2 && feed.items[0].type === 'say' && feed.items[1].tool === 'Bash', `the agent's panel did not read the step's log: ${JSON.stringify(feed.items)}`);
+    expect(feed.next === Buffer.byteLength(feedWhole) && !feed.live && !feed.talking, 'the panel read a line still being written, or took a finished run as going on');
+    const again = await (await fetch(`${base}/api/run/smoke-feed/feed?step=1&from=${feed.next}`)).json();
+    expect(again.items?.length === 0 && again.next === feed.next, 'reading the log again from where it stopped repeated what was already shown');
+    expect((await fetch(`${base}/api/run/none/feed`)).status === 404, 'the panel of a run that does not exist did not answer 404');
+    expect((await post('/api/run/talk', { run: 'smoke-feed', text: 'Hello' })).status === 400, 'a message to a run not going on was not refused');
+    expect((await post('/api/run/talk', { run: 'smoke-feed', text: ' ' })).status === 400, 'an empty message to an agent was not refused');
+    expect(state.crew.every(a => Array.isArray(a.runs) && 'waitingFor' in a), "the crew has no runs to open a panel on, or no \"waiting for\"");
+    // A request for a team lead: refused for a project that does not exist, and with no request.
+    expect(state.teams.every(x => 'lead' in x), '/api/state has no team lead (or null) for each project');
+    expect((await post('/api/ask', { project: 'none', request: 'Do something' })).status === 400, 'a request for a project that does not exist was not refused');
+    expect((await post('/api/ask', { project: 'none', request: 'x', plan: 999 })).status === 400, 'a request linked to an item that does not exist was not refused');
+    // A project's page: refused for a project that does not exist; for the installation's first project, read only
+    // (nothing opens: the actions are refused or asked for as a dry run).
+    expect((await fetch(`${base}/api/project/no-such-project`)).status === 400, "the page of a project that does not exist did not answer 400");
+    expect((await post('/api/project/open', { project: 'no-such-project', app: 'folder', dryRun: true })).status === 400, 'opening the folder of a project that does not exist was not refused');
+    expect((await post('/api/project/dev', { project: 'no-such-project', action: 'start', dryRun: true })).status === 400, 'starting the environment of a project that does not exist was not refused');
+    expect((await post('/api/project/dev', { project: 'no-such-project', action: 'other' })).status === 400, 'an unknown action on the development environment was not refused');
+    expect((await post('/api/session', { profile: 'no-such-profile', dryRun: true })).status === 400, 'a dry run of an unknown session profile was not refused');
+    expect(state.projects.every(p => ['claude', 'codex'].every(tool => state.sessions.profiles.some(x => x.project === p.id && x.tool === tool))), 'a project has no live session profile (its own or automatic) for each tool');
+    const first = state.projects[0];
+    if (first) {
+      const page = await fetch(`${base}/api/project/${encodeURIComponent(first.id)}`);
+      const info = page.ok ? await page.json() : {};
+      expect(page.ok && info.id === first.id && Array.isArray(info.history) && 'clone' in info && 'branch' in info && 'dev' in info && typeof info.vscode === 'boolean', `the page of a project is incomplete: ${JSON.stringify(info).slice(0, 300)}`);
+      expect(info.history?.every(r => r.project === first.id), "a project's page lists runs of another project");
+    }
     const interrupt = await post('/api/manager/interrupt', {});
     expect(interrupt.ok && (await interrupt.json()).interrupted === false, 'interrupting a manager that is not answering did something');
   }
@@ -137,6 +179,43 @@ try {
   expect(composeMessage('Owner', [{ text: 'Hi', at: first.at, queued: false }]) === 'Message from Owner:\nHi', 'a message sent to a free manager changed its form');
   removePending(first.id);
   removePending(second.id);
+
+  // The manager's news: events gathered and handed over as one system message, marked as not the owner's; into the
+  // queue while the manager answers (still made up: nothing runs), joined to news already waiting; the settings pick
+  // the events. Never delivered for real.
+  const news = await import(pathToFileURL(path.join(root, 'src', 'news.mjs')).href);
+  const { editPending } = await import(pathToFileURL(path.join(root, 'src', 'manager.mjs')).href);
+  const picked = news.newsSettings({ manager_updates: ['run_failed', 'nonsense'] });
+  expect(news.newsSettings({}).events.size === news.NEWS_EVENTS.length && !news.newsSettings({ manager_updates: false }).enabled && !news.newsSettings({ manager_updates: { enabled: false } }).enabled, '"manager_updates" does not default to every event, or false does not turn the news off');
+  expect(picked.enabled && picked.events.size === 1 && picked.events.has('run_failed'), `a list in "manager_updates" did not pick its events: ${[...picked.events]}`);
+  const only = { manager_updates: ['run_failed', 'pr_ready'] };
+  expect(news.reportEvent('run_paused', 'Paused', { config: only }) === null, 'an event left out by the settings was kept');
+  news.reportEvent('run_failed', 'Run a failed', { config: only });
+  news.reportEvent('pr_ready', 'Run b has a pull request', { config: only });
+  const item = await news.flushNews();
+  expect(item?.from === 'chiefmate' && item.queued && item.events.map(e => e.kind).join() === 'run_failed,pr_ready', `the events were not handed over together, in the queue of a busy manager: ${JSON.stringify(item)}`);
+  news.reportEvent('run_failed', 'Run c failed', { config: only });
+  const joined = await news.flushNews();
+  expect(joined?.id === item.id && joined.events.length === 3 && (await news.flushNews()) === null, 'news for a manager still busy was not joined to the news already in the queue');
+  const told = composeMessage('Owner', [joined]);
+  expect(told.startsWith('[System message from Chiefmate, not from Owner]') && told.includes('pr_ready: Run b has a pull request') && !told.includes('Message from Owner'), `the news is not marked as a system message, apart from the owner's: ${told}`);
+  const both = composeMessage('Owner', [{ text: 'Hi', at: first.at, queued: false }, joined]);
+  expect(both.startsWith('Message from Owner:\nHi') && both.includes("Answer Owner's message(s)"), "the news did not go along with the owner's message");
+  let locked = false;
+  try {
+    editPending(joined.id, 'Changed');
+  } catch {
+    locked = true;
+  }
+  expect(locked, "Chiefmate's news could be edited as if the owner had written it");
+  removePending(joined.id);
+  const { watchEnded } = await import(pathToFileURL(path.join(root, 'src', 'sessions.mjs')).href);
+  watchEnded([{ id: 's1', status: 'open' }, { id: 's2', status: 'open' }]);
+  const ended = watchEnded([{ id: 's1', status: 'ended', name: 'X', tool: 'claude' }, { id: 's2', status: 'ended', endedBy: 'owner' }]);
+  expect(ended.map(s => s.id).join() === 's1', 'a live session that ended was not noticed, or one ended by the owner was');
+  const left = await news.flushNews(); // the installation's own settings decide whether that one was kept
+  if (left) removePending(left.id);
+
   Object.assign(chat, { responding: false, interrupting: false, cancel: null });
   expect(!managerBusy(), 'the queue did not empty');
 } catch (error) {
@@ -160,6 +239,72 @@ try {
   expect(line.includes('#3 Sample: First thing') && line.includes('waiting for Owner: #7'), `the manager's summary of the board is wrong: ${line}`);
 } catch (error) {
   failures.push(`planning checks: ${error.message}`);
+}
+
+// The direct talk with an agent at work, in this process: a made-up step going on (nothing real runs), then a
+// stand-in for Claude Code (a small script) interrupted at a safe point and resumed with the owner's message.
+try {
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const { live } = await import(src('runs.mjs'));
+  const { pendingTalk, talkSection, talkSituation, talkTo, ownerTurn } = await import(src('talk.mjs'));
+  const { pollRequest } = await import(src('needs.mjs'));
+  const { runClaude } = await import(src('claude.mjs'));
+  const run = { id: 'smoke-talk', title: 'Generalist: smoke', project: 'none', status: 'running', created: new Date().toISOString(), steps: [{ agent: 'generalist', status: 'running' }], requests: [] };
+  let interrupted = 0;
+  live.set(run.id, { run: run.id, memory: run, agent: 'generalist', step: 1, talking: true, heldUntil: 0, actions: [], process: { interrupt: () => interrupted++ } });
+  const first = talkTo(run.id, 'Use the other file');
+  expect(first.status === 'pending' && interrupted === 1 && pendingTalk(run, 1).length === 1, 'a message to an agent at work did not interrupt it, or was not kept to deliver');
+  // The agent waits for the owner (needs-you --wait, polled just now): the message answers the request instead.
+  run.requests.push({ id: 'r1', step: 1, agent: 'generalist', what: 'Which file?', wait: true, status: 'open', at: new Date().toISOString() });
+  live.get(run.id).heldUntil = Date.now() + 20_000;
+  const answer = talkTo(run.id, 'The second one');
+  const polled = pollRequest(run.id, 'r1');
+  expect(answer.via === 'request' && interrupted === 1 && polled.status === 'done' && polled.answer === 'The second one', "a message to an agent waiting for the owner did not answer its request");
+  const section = talkSection(run, 1, id => id, { owner: 'Owner', language: 'en' });
+  expect(section.includes('Owner') && section.includes('Use the other file') && section.includes('The second one'), `the step's report does not get the direct talk: ${section}`);
+  expect(talkSituation([run], 'Owner').includes('Owner guided step 1 (generalist): "Use the other file"'), "the manager's situation does not get the direct talk");
+  live.get(run.id).talking = false;
+  let refused = false;
+  try {
+    talkTo(run.id, 'Between steps');
+  } catch {
+    refused = true;
+  }
+  expect(refused, 'a message was accepted while no step was at work');
+  live.delete(run.id);
+
+  // The stand-in: it starts an action, finishes it after a moment, then "works" for 30 seconds; resumed with a
+  // message, it answers at once. The interruption must wait for the action and stop the rest.
+  const fake = path.join(data, 'fake-claude.mjs');
+  writeFileSync(fake, [
+    "const args = process.argv.slice(2);",
+    "const id = args[args.indexOf('--resume') + 1] && args.includes('--resume') ? args[args.indexOf('--resume') + 1] : args[args.indexOf('--session-id') + 1];",
+    "let prompt = ''; process.stdin.on('data', d => (prompt += d)); process.stdin.on('end', () => {",
+    "  const say = e => process.stdout.write(JSON.stringify(e) + '\\n');",
+    "  say({ type: 'system', subtype: 'init', session_id: id, model: 'm' });",
+    "  if (args.includes('--resume')) { say({ type: 'assistant', message: { content: [{ type: 'text', text: 'Understood.' }] } }); say({ type: 'result', subtype: 'success', result: 'Report after: ' + prompt.split('\\n')[3], session_id: id, num_turns: 1 }); return; }",
+    "  say({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test' } }] } });",
+    "  setTimeout(() => say({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } }), 700);",
+    "  setTimeout(() => say({ type: 'result', subtype: 'success', result: 'too late', session_id: id }), 30000);",
+    "});",
+  ].join('\n'));
+  process.env.CHIEFMATE_CLAUDE = fake;
+  const log = path.join(data, 'fake.jsonl');
+  const started = Date.now();
+  let stoppedAt = null;
+  const proc = runClaude({ dir: data, prompt: 'Work', model: 'm', session: { id: 'smoke-session' }, log, onEvent: e => e.type === 'action' && proc.interrupt() });
+  const r = await proc.promise;
+  stoppedAt = Date.now() - started;
+  expect(proc.args.includes('--session-id') && !proc.args.includes('--no-session-persistence'), "a step's session is not kept, so it could not be resumed");
+  expect(r.interrupted && !r.ok && !r.error && !r.canceled, `the interrupted step did not end as interrupted: ${JSON.stringify({ ...r, context: undefined })}`);
+  expect(stoppedAt >= 600 && stoppedAt < 20_000, `the interruption did not wait for the action under way, or did not stop the agent (${stoppedAt} ms)`);
+  const resumed = runClaude({ dir: data, prompt: ownerTurn([{ text: 'Use the other file', at: new Date().toISOString() }], { owner: 'Owner', language: 'en' }), model: 'm', session: { id: 'smoke-session', resume: true }, log });
+  const back = await resumed.promise;
+  expect(resumed.args[resumed.args.indexOf('--resume') + 1] === 'smoke-session', 'the step was not resumed in the same session');
+  expect(back.ok && back.text === 'Report after: Use the other file', `the resumed session did not get the owner's message as its next turn: ${back.text ?? back.error}`);
+  process.env.CHIEFMATE_CLAUDE = path.join(data, 'no-claude.exe');
+} catch (error) {
+  failures.push(`direct talk checks: ${error.message}`);
 }
 
 // Without the server: the crews by project, what a step may see, the command line and the prompt builder,
@@ -199,6 +344,63 @@ try {
   expect(Object.keys(alpha).sort().join() === 'builder,manager', "a project's own crew is not just its members and the manager");
   expect(alpha.builder.base === 'generalist' && alpha.builder.instructions.includes('Alpha only.'), "a member of a project's crew lost its base agent or its instructions");
   expect(Object.keys(projectCrew(config, 'beta', agents)).length === 3, 'a project without a crew does not get the general crew');
+
+  // The team leads: a member "lead" of the project's crew, based on the manager, that never edits; its plan (at most
+  // three tasks, members of the crew only), its memory and what the manager sees.
+  const leads = await import(src('leads.mjs'));
+  const leadConfig = {
+    owner: 'Owner',
+    projects: {
+      gamma: { name: 'Gamma', lead: { name: 'Gamma lead', extra_instructions: 'Gamma only.' }, crew: { generalist: {}, front: { agent: 'designer', name: 'Front' } } },
+      delta: { name: 'Delta', lead: { agent: 'generalist' } },
+    },
+  };
+  const gamma = projectCrew(leadConfig, 'gamma', { ...agents, manager: { ...agents.manager, tools: ['Bash', 'Read', 'Edit', 'Write'] } });
+  const lead = gamma.lead;
+  expect(lead?.base === 'manager' && lead.name === 'Gamma lead' && lead.instructions.includes('Gamma only.') && lead.instructions.includes('team lead of Gamma'), "a project's team lead lost its base agent, its name or its instructions");
+  expect(!lead.tools.includes('Edit') && !lead.tools.includes('Write') && lead.disallowed.includes('Edit'), 'a team lead may edit the project');
+  expect(projectCrew(leadConfig, 'delta', agents).lead?.base === 'generalist' && !projectCrew(config, 'alpha', agents).lead, 'a lead was based on the wrong agent, or a project without "lead" got one');
+  const ask = { id: 'smoke-ask', kind: 'ask', project: 'gamma', title: 'Gamma lead: x', instruction: 'Improve the home page', steps: [leads.leadPlanStep('Improve the home page')], review: { agent: 'manager', status: 'pending' } };
+  const memoryBlock = '~~~project-memory\n# Gamma\n- 2026-01-02: home page asked\n~~~';
+  Object.assign(ask.steps[0], { status: 'done', report: `Plan below.\n\n~~~chiefmate-plan\n${JSON.stringify({ tasks: [
+    { agent: 'front', task: 'Redo the header' }, { agent: 'nobody', task: 'x' }, { agent: 'Generalist', task: 'Fix the links' }, { agent: 'generalist', task: 'Test' }, { agent: 'front', task: 'One too many' },
+  ], note: 'Two members' })}\n~~~\n\n${memoryBlock}` });
+  const taken = leads.takeMemory(ask.steps[0].report);
+  expect(taken.memory === '# Gamma\n- 2026-01-02: home page asked' && !taken.report.includes('project-memory') && taken.report.includes('chiefmate-plan'), 'the project memory was not taken out of the lead\'s report');
+  leads.saveMemory('gamma', taken.memory);
+  expect(leads.readMemory('gamma').startsWith('# Gamma') && leads.memoryInfo('gamma')?.lines === 2, 'the project memory was not saved where the lead reads it');
+  const plan = leads.applyPlan(ask, ask.steps[0], gamma);
+  expect(plan.tasks.map(x => x.agent).join() === 'front,generalist,generalist' && plan.dropped.length === 2, `the lead's plan was not kept to three tasks of the crew: ${JSON.stringify(plan)}`);
+  expect(ask.steps.map(s => `${s.agent}${s.role ? `/${s.role}` : ''}`).join() === 'lead/plan,front,generalist,generalist,lead/review' && ask.steps[1].by === 'lead' && ask.lead.plan.note === 'Two members', `the plan's tasks did not become the run's steps: ${ask.steps.map(s => s.agent).join()}`);
+  const prompt = leads.leadLines({ run: ask, step: ask.steps[0], agents: gamma, memory: leads.readMemory('gamma'), base: 'main' }).join('\n');
+  expect(prompt.includes('~~~chiefmate-plan') && prompt.includes('`front` (Front') && !prompt.includes('`lead`') && prompt.includes('home page asked'), "the lead's planning prompt lacks the format, the crew or the memory");
+  expect(leads.memberLines({ run: ask, step: ask.steps[1], lead, memory: 'Remember X' }).join('\n').includes('Task 1 of 3'), 'a planned task does not say which request it is part of');
+  ask.lead.opinion = 'Approve with caveats.';
+  expect(leads.finalReviewLines(ask, lead).join('\n').includes('Approve with caveats.'), "the manager's final review does not get the lead's opinion");
+  ask.steps[0].status = 'running';
+  expect(leads.leadSituation('gamma', lead, ask, null).includes('planning the request "Improve the home page"') && leads.leadSituation('gamma', lead, null, null).includes('off'), "the manager's line about the lead is wrong");
+  const empty = { id: 'smoke-ask-2', kind: 'ask', project: 'gamma', steps: [{ ...leads.leadPlanStep('x'), status: 'done', report: '~~~chiefmate-plan\n{"tasks": [], "note": "Already done"}\n~~~' }], review: { agent: 'manager', status: 'pending' } };
+  leads.applyPlan(empty, empty.steps[0], gamma);
+  expect(empty.review.status === 'skipped' && empty.steps.length === 1 && empty.lead.plan.note === 'Already done', 'a plan with no task did not skip the rest of the run');
+  // What a lead changes through the shell (a file, a commit) is dropped after its step: the working copy goes back.
+  const { discardSince, headCommit } = await import(src('workspace.mjs'));
+  const repo = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-git-'));
+  try {
+    const g = (...a) => execFileSync('git', ['-C', repo, '-c', 'user.name=smoke', '-c', 'user.email=smoke@example.com', ...a], { stdio: 'pipe' });
+    g('init', '-q');
+    writeFileSync(path.join(repo, 'a.txt'), 'one\n');
+    g('add', '-A');
+    g('commit', '-qm', 'one');
+    const before = await headCommit(repo);
+    expect(!(await discardSince(repo, before)), 'a lead step that changed nothing was said to have changed files');
+    writeFileSync(path.join(repo, 'a.txt'), 'two\n');
+    g('commit', '-qam', 'two');
+    writeFileSync(path.join(repo, 'new.txt'), 'x\n');
+    expect(await discardSince(repo, before) && (await headCommit(repo)) === before && !existsSync(path.join(repo, 'new.txt')), "a lead's changes were not dropped");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+
   const mcp = stepMcp(config, config.projects.alpha, alpha.builder);
   expect(mcp.names.join() === 'browser' && mcp.tools.join() === 'mcp__browser', "the project's MCP server was not released");
 
@@ -266,6 +468,49 @@ try {
     }
     expect(refused, 'a session with an unknown tool was not refused');
     expect(sessionIdOf('"C:\\nodejs\\node.exe" "C:\\chiefmate\\src\\cli.mjs" session-run 2026-01-02-0900-review') === '2026-01-02-0900-review' && sessionIdOf('node src/cli.mjs server') === null, "a session's window process is not recognized");
+
+    // A project's page: the automatic session profile (only for a tool the settings have no profile of), opened in
+    // the owner's clone with the project's block and the environment; the folder, VS Code and the development
+    // environment as dry runs. Nothing opens.
+    const projects = await import(src('projects.mjs'));
+    const { devIdOf } = await import(src('machine.mjs'));
+    const { sessionProfiles } = await import(src('sessions.mjs'));
+    const clone = path.join(sessionTemp, 'clone');
+    mkdirSync(clone);
+    const pageConfig = {
+      ...sessionConfig, default_model: 'some-model', prompt_builder: { file: builder, environment: 'Office' },
+      projects: { alpha: { name: 'Alpha', about: 'A sample.', local_clone: clone, prompt_block: 'Sample project', dev_start: 'npm run dev' }, beta: { name: 'Beta' } },
+      sessions: { mine: { name: 'Mine', tool: 'codex', project: 'alpha', cwd: sessionTemp } },
+    };
+    const auto = sessionProfiles(pageConfig).filter(p => p.auto);
+    expect(auto.map(p => p.id).join() === 'project-alpha-claude,project-beta-claude,project-beta-codex', `the automatic session profiles are wrong: ${auto.map(p => p.id).join()}`);
+    expect(auto[0].prompt_blocks.join() === 'Sample project,Office' && auto[0].model === 'some-model' && !auto[1].prompt_blocks.length, "an automatic profile did not get the project's block and the environment");
+    const opened = planSession(pageConfig, 'project-alpha-claude');
+    expect(opened.folder.dir === path.resolve(clone) && opened.prompt.text.includes('Project: Alpha. A sample.') && opened.prompt.text.includes('Work on SAMPLE.') && opened.prompt.text.includes('Work from the office.'), `an automatic session did not open in the clone with the project's prompt: ${opened.prompt.text.slice(0, 300)}`);
+    let noClone = false;
+    try {
+      planSession(pageConfig, 'project-beta-codex');
+    } catch {
+      noClone = true;
+    }
+    expect(noClone, "an automatic session of a project without the owner's clone was not refused");
+    const folder = projects.openProjectApp('alpha', 'folder', { dryRun: true, config: pageConfig });
+    expect(folder.dryRun && folder.dir === path.resolve(clone) && folder.args.join() === path.resolve(clone), `opening the project's folder would not open the clone: ${JSON.stringify(folder)}`);
+    process.env.CHIEFMATE_VSCODE = path.join(sessionTemp, 'Code.exe');
+    const code = projects.openProjectApp('alpha', 'vscode', { dryRun: true, config: pageConfig });
+    expect(code.command === process.env.CHIEFMATE_VSCODE && code.args.join() === path.resolve(clone), `opening VS Code would not open the clone: ${JSON.stringify(code)}`);
+    const dev = await projects.startDev('alpha', { dryRun: true, config: pageConfig });
+    expect(dev.dryRun && dev.command === 'npm run dev' && dev.cwd === path.resolve(clone) && dev.window.join(' ') === 'dev-run alpha', `the development environment would not run "dev_start" in the clone: ${JSON.stringify(dev)}`);
+    let noDev = false;
+    try {
+      projects.devPlan(pageConfig, 'beta');
+    } catch {
+      noDev = true;
+    }
+    expect(noDev, 'a project without "dev_start" was offered a development environment');
+    expect(devIdOf('"C:\\nodejs\\node.exe" "C:\\chiefmate\\src\\cli.mjs" dev-run alpha') === 'alpha' && devIdOf('node src/cli.mjs session-run x') === null, "a development environment's window process is not recognized");
+    const info = await projects.projectInfo('alpha', pageConfig, { dev: [{ project: 'alpha', pids: [42], ram: 1024 }] });
+    expect(info.clone === path.resolve(clone) && info.dev?.status === 'running' && info.dev.ram === 1024 && info.vscode && info.deliver === 'pull_request', `the project's page facts are wrong: ${JSON.stringify(info)}`);
   } finally {
     rmSync(sessionTemp, { recursive: true, force: true });
   }

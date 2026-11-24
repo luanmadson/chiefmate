@@ -73,6 +73,10 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 queues a one-off task; --review has the manager review it at the end;
                                                 --modules adds optional blocks of the prompt builder; --plan links it
                                                 to item n of the planning board, which then follows the run
+  node src/cli.mjs ask <project> "<request>" [--plan <n>]
+                                                queues a request for the project's team lead ("lead" in its settings):
+                                                the lead plans it into at most 3 tasks for the project's crew, reviews
+                                                their work first, and the manager does the final review
   node src/cli.mjs plan [list] [--project <id>] [--status <s>] [--priority <p>] [--all]
                                                 the planning board: open items by priority (--all: done and archived too)
   node src/cli.mjs plan add <project> "<title>" [--priority high|medium|low] [--status <s>] [--description "<text>"]
@@ -93,6 +97,9 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 blocks; with no profile, lists the profiles and the sessions open;
                                                 --dry-run shows the folder, the command and the first message only
   node src/cli.mjs session end <id>             ends a live session (its window closes)
+  node src/cli.mjs dev <project> [--dry-run]    starts the project's development environment ("dev_start" in its settings)
+                                                in a window of its own, in your clone; --dry-run shows what would run
+  node src/cli.mjs dev stop <project>           stops it, with everything it started
   node src/cli.mjs cancel <id>                  cancels a run
   node src/cli.mjs resume <id> [--ignore-limits]
                                                 resumes a paused, failed or canceled run
@@ -149,7 +156,8 @@ async function needsYou() {
   for (;;) {
     const s = await api('/api/needs-you/poll', { run, id });
     if (s.status === 'done') {
-      console.log(s.by === 'check' ? 'Done: the check succeeded.' : 'Done: the owner signaled it is done. Go on.');
+      if (s.answer) console.log(`The owner answered you from the app:\n${s.answer}\n\nTake the answer into account and go on.`);
+      else console.log(s.by === 'check' ? 'Done: the check succeeded.' : 'Done: the owner signaled it is done. Go on.');
       return;
     }
     if (s.timedOut) {
@@ -204,13 +212,13 @@ async function chatCommand() {
       const g = (await api('/api/state')).manager;
       const who = { you: 'You', manager: 'Manager', system: 'Chiefmate' };
       for (const m of g.messages.slice(-(Number(action) || 10))) {
-        const extra = [m.queued ? `delivered ${time(m.delivered)}` : '', m.interrupted ? 'interrupted' : ''].filter(Boolean).join(', ');
+        const extra = [m.news ? `notice: ${m.news.join(', ')}` : '', m.queued ? `delivered ${time(m.delivered)}` : '', m.interrupted ? 'interrupted' : ''].filter(Boolean).join(', ');
         console.log(`[${time(m.at)}] ${who[m.who] ?? m.who}${extra ? ` (${extra})` : ''}:\n${m.text}\n`);
       }
       if (g.responding) {
         console.log(`Now: ${g.context?.renewing ? 'renewing the conversation' : 'answering'} since ${time(g.since)}.${g.lastAction ? ` Last action, ${time(g.lastAction.at)}: ${g.lastAction.text}` : ''}`);
       } else console.log('Now: waiting for you.');
-      for (const m of g.pending) console.log(`In the queue [${m.id}], sent ${time(m.at)}${m.edited ? ', edited' : ''}: ${m.text}`);
+      for (const m of g.pending) console.log(m.from === 'chiefmate' ? `In the queue [${m.id}], Chiefmate's news for the manager since ${time(m.at)}: ${m.text}` : `In the queue [${m.id}], sent ${time(m.at)}${m.edited ? ', edited' : ''}: ${m.text}`);
     }
   }
 }
@@ -329,6 +337,7 @@ async function main() {
         // The update waits for every run going on to end (and for the manager); the sessions' windows stay open.
         startUpdates({ isBusy: () => live.size > 0 || managerBusy(), beforeRestart: () => new Promise(resolve => server.close(() => resolve())) });
         deliverPending(); // messages left in the queue when Chiefmate stopped
+        (await import('./news.mjs')).startNews(); // and the news for the manager, such as "update installed"
       }
       console.log(`Chiefmate running at http://localhost:${p} (${new Date().toISOString()})`);
       return;
@@ -359,6 +368,12 @@ async function main() {
       const modules = (option('--modules') ?? '').split(',').map(m => m.trim()).filter(Boolean);
       const run = await api('/api/task', { project, agent, instruction, review: has('--review'), modules, origin: option('--origin') ?? 'manager', plan: option('--plan') });
       console.log(`Queued: ${run.title} [${run.id}]`);
+      return;
+    }
+    case 'ask': {
+      const [project, request] = rest;
+      const run = await api('/api/ask', { project, request, origin: option('--origin') ?? 'manager', plan: option('--plan') });
+      console.log(`Queued: ${run.title} [${run.id}]. The team lead plans it into at most 3 tasks for the crew.`);
       return;
     }
     case 'chat':
@@ -408,6 +423,27 @@ async function main() {
       // Inside the session's window (see src/sessions.mjs).
       const { runSession } = await import('./sessions.mjs');
       await runSession(rest[0]);
+      return;
+    }
+    case 'dev': {
+      const projects = await import('./projects.mjs');
+      const [first, second] = rest.filter(x => !x.startsWith('--'));
+      const stop = first === 'stop';
+      const id = stop ? second : first;
+      if (!id) throw new Error('Which project? node src/cli.mjs dev <project> | dev stop <project>');
+      const body = { project: id, action: stop ? 'stop' : 'start', dryRun: has('--dry-run') };
+      const local = () => (stop ? projects.stopDev(id, body) : projects.startDev(id, body));
+      const r = await apiOr('/api/project/dev', body, local);
+      if (r.dryRun && !stop) console.log(`Would run, in a window of its own:\n  ${r.command}\nin ${r.cwd}`);
+      else if (r.dryRun) console.log(r.pids.length ? `Would stop the window process(es) ${r.pids.join(', ')} and everything under them.` : 'Nothing running.');
+      else if (stop) console.log(r.stopped ? 'Development environment stopped.' : 'Nothing running.');
+      else console.log(`Development environment started (${r.window === 'terminal' ? 'Windows Terminal' : 'PowerShell'}): ${r.command}, in ${r.cwd}`);
+      return;
+    }
+    case 'dev-run': {
+      // Inside the development environment's window (see src/projects.mjs).
+      const { runDev } = await import('./projects.mjs');
+      await runDev(rest[0]);
       return;
     }
     case 'prompts-sync': {
