@@ -1,7 +1,7 @@
 // Starts a temporary Chiefmate on a spare port (only the app and the API: no queue, no schedule, no updates)
 // and checks that everything answers. Usage: npm run smoke
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -9,6 +9,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const port = 47000 + Math.floor(Math.random() * 900);
 const base = `http://localhost:${port}`;
+// Records of its own, so nothing of the installation's conversation, runs or usage is read or changed; and a Claude
+// Code that does not exist, so nothing here can start a real answer.
+const data = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-data-'));
+Object.assign(process.env, { CHIEFMATE_DATA: data, CHIEFMATE_CLAUDE: path.join(data, 'no-claude.exe') });
+mkdirSync(path.join(data, 'manager'), { recursive: true });
+writeFileSync(path.join(data, 'manager', 'pending.json'), JSON.stringify([{ id: 'smoke1', text: 'Waiting', at: new Date().toISOString(), queued: true }]));
 const child = spawn(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'server'], {
   cwd: root,
   env: { ...process.env, CHIEFMATE_PORT: String(port), CHIEFMATE_SMOKE: '1' },
@@ -70,11 +76,46 @@ try {
     expect((await fetch(`${base}/api/run/none/context/1`)).status === 404, "a step's context of a run that does not exist did not answer 404");
     const outside = await fetch(`${base}/../package.json`);
     expect(!outside.ok || !(await outside.text()).includes('"name": "chiefmate"'), 'a file outside ui/ was served');
+    // The conversation: what the manager is doing, the queue (edited and removed in place) and the interruption.
+    // No message is sent for real: with the manager free, it would start an answer.
+    const g = state.manager;
+    expect('lastAction' in g && typeof g.interrupting === 'boolean' && 'since' in g, "/api/state has no last action or clock for the manager");
+    expect(g.pending?.length === 1 && g.pending[0].id === 'smoke1', '/api/state does not show the messages waiting in the queue');
+    expect((await post('/api/manager', { message: '  ' })).status === 400, 'an empty message to the manager was not refused');
+    const edited = await post('/api/manager/edit', { id: 'smoke1', message: 'Changed' });
+    expect(edited.ok && (await edited.json()).pending?.[0]?.text === 'Changed', 'a message in the queue was not edited');
+    expect((await post('/api/manager/edit', { id: 'none', message: 'x' })).status === 404, 'editing a message that is not in the queue did not answer 404');
+    const removed = await post('/api/manager/remove', { id: 'smoke1' });
+    expect(removed.ok && (await removed.json()).pending?.length === 0, 'a message was not taken out of the queue');
+    expect((await post('/api/manager/remove', { id: 'smoke1' })).status === 404, 'removing a message twice did not answer 404');
+    const interrupt = await post('/api/manager/interrupt', {});
+    expect(interrupt.ok && (await interrupt.json()).interrupted === false, 'interrupting a manager that is not answering did something');
   }
 } catch (error) {
   failures.push(error.message);
 } finally {
   child.kill();
+}
+
+// The queue of messages, in this process: a busy manager (made up, nothing runs) keeps them in order and is stopped.
+try {
+  const { chat, composeMessage, deliverPending, interruptManager, managerBusy, removePending, sendToManager } = await import(pathToFileURL(path.join(root, 'src', 'manager.mjs')).href);
+  let stopped = null;
+  Object.assign(chat, { responding: true, cancel: reason => (stopped = reason) });
+  const first = sendToManager('First');
+  const second = sendToManager('Second\nwith two lines');
+  expect(first.queued && second.queued && first.position === 1 && second.position === 2, 'messages sent while the manager answers were not queued in order');
+  expect(managerBusy() && !deliverPending(), 'the queue was delivered while the manager was still answering');
+  expect(interruptManager() && chat.interrupting && stopped, 'the interruption did not stop the answer');
+  const text = composeMessage('Owner', [first, second], '2026-01-02T10:00:00Z');
+  expect(text.includes('interrupted your previous answer') && text.indexOf('First') < text.indexOf('Second') && (text.match(/\[sent /g) ?? []).length === 2, 'the queue was not put together in order, with the time of each message and the interruption');
+  expect(composeMessage('Owner', [{ text: 'Hi', at: first.at, queued: false }]) === 'Message from Owner:\nHi', 'a message sent to a free manager changed its form');
+  removePending(first.id);
+  removePending(second.id);
+  Object.assign(chat, { responding: false, interrupting: false, cancel: null });
+  expect(!managerBusy(), 'the queue did not empty');
+} catch (error) {
+  failures.push(`conversation checks: ${error.message}`);
 }
 
 // Without the server: the crews by project, what a step may see, the command line and the prompt builder,
@@ -143,6 +184,12 @@ try {
   expect(built.adaptations.length === 1 && built.text.includes('Never push without review.'), "the prompt builder's adaptation to the crew's rules is wrong");
 } catch (error) {
   failures.push(`unit checks: ${error.message}`);
+}
+
+try {
+  rmSync(data, { recursive: true, force: true, maxRetries: 5 });
+} catch {
+  // a temporary folder left behind is harmless
 }
 
 if (failures.length) {
