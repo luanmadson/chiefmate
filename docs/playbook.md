@@ -11,9 +11,10 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
 | `src/server.mjs` | The app's web server and API. It listens on this computer only. |
 | `src/runs.mjs` | How a run goes: the working copy, the crew in sequence, the review, the checks and the pull request. Several runs (of different projects) go on at once: what the app shows of each is in `live`, by run id. |
 | `src/queue.mjs`, `src/schedule.mjs` | One run per project at a time, runs of different projects side by side up to `max_parallel`; missions on their days and times. |
-| `src/sessions.mjs` | The live sessions: the profiles, the first message from the prompt builder, the window (Windows Terminal or PowerShell) that runs Claude Code or Codex, and finding, measuring and ending their processes. |
+| `src/sessions.mjs` | The live sessions: the profiles (the settings' own, then an automatic one per project and tool, never saved), the first message from the prompt builder, the window (Windows Terminal or PowerShell, `openConsole`) that runs Claude Code or Codex, and finding, measuring and ending their processes. |
+| `src/projects.mjs` | What a project's page in the app reads and does: the project's facts, your clone and the branch checked out there, opening the clone in File Explorer or VS Code, and the development environment (`dev_start`), run in a window of its own through `cli.mjs dev-run <project>` and stopped with everything it started. Every action takes `dryRun`. |
 | `src/manager.mjs` | The conversation with the manager: the queue of messages sent while it answers (delivered together when it ends), the interruption that keeps the session, and the renewal with a summary when its context fills up. |
-| `src/machine.mjs` | This computer: the projects' processes, their memory and stopping them (Windows). |
+| `src/machine.mjs` | This computer: the projects' processes (the development environments started from the app included), their memory and stopping them (Windows). |
 | `src/planning.mjs` | The owner's planning board (`data/plan.json`): its items, the import of the manager's old `data/manager/plan.md`, the items that follow their runs (through `onRunSaved` in `src/store.mjs`) and the summary for the manager. |
 | `src/plan.mjs` | The plan's free resets, the week's pace and the alerts (usage, memory, resets), which only warn. |
 | `src/usagepage.mjs` | The optional, read-only reading of the account's usage page on claude.ai, through Edge or Chrome. |
@@ -60,7 +61,7 @@ Pick one thing and finish it. Say in your report which issue it closes, if any.
 ## How to test
 
 - `npm run check`: the syntax of every script, and the translations.
-- `npm run smoke`: starts a temporary Chiefmate on a spare port, with records of its own in a temporary folder, and checks that the app and the API answer. Never let it send a real message to the manager: that starts Claude Code.
+- `npm run smoke`: starts a temporary Chiefmate on a spare port, with records of its own in a temporary folder, and checks that the app and the API answer. Never let it send a real message to the manager: that starts Claude Code. Never let it open a window, a browser or a program on the owner's computer either: test what opens things with `dryRun` (or `--dry-run`) and made-up settings.
 - For a change in the app's look, describe in your report what changed and where, so it can be checked without reading code.
 
 ## The pull request

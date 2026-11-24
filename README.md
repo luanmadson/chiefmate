@@ -26,7 +26,8 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
   | **Log** | Every run, with each step's report, the checks and the pull request link. |
   | **Usage** | Your Claude account's usage, when Chiefmate pauses to look after it, the week's pace and the plan's free resets. |
 
-- **Crew portraits** that show at a glance who is standing by, working, thinking or waiting for a limit to reset. The title bar tells you whether Chiefmate is online and waiting for you, and which project is in focus: the one being worked on the longest (the mission or task, the agent at work and for how long, and the other projects being worked on at the same time) or, when nothing is running, the next one in the queue. A click on a project in focus that is being worked on opens the panel of its agent at work.
+- **A page for each project** (see "Project pages" below), reached from the list of projects at the top of the window or by clicking a project's name in the crews by project, the focus, the Projects section, Planning and Missions.
+- **Crew portraits** that show at a glance who is standing by, working, thinking or waiting for a limit to reset. The title bar tells you whether Chiefmate is online and waiting for you, and which project is in focus: the one being worked on the longest (the mission or task, the agent at work and for how long, and the other projects being worked on at the same time) or, when nothing is running, the next one in the queue. A click on a project in focus that is being worked on opens the panel of its agent at work; a click on its name opens its page.
 - **Running, seen from afar.** While a run goes on, a brass square pulses beside Operations in the sections and beside the project in focus, the window's title starts with ● (the agent, the step, how many are waiting: `● Writer 2/3 · 1 in the queue · Chiefmate`; with several runs at once, how many: `● 2 running · Chiefmate`) and the icon gets a brass square. With runs only waiting in the queue, the title starts with ○ and the square in the icon is hollow. The animations stop when Windows is set to show fewer animations (reduced motion); the app reads the state every 2.5 seconds, as it always has.
 - **Scheduled missions**, for example every Monday at 9:00. They wake the computer from sleep.
 - **Windows notifications**: the evening before a mission, when a run starts, when it pauses for a limit and when it is ready for your review.
@@ -157,6 +158,26 @@ Keep the existing comments.
 
 To copy the document from Google Docs, set `prompt_builder.doc_id` and `browser_cdp`, install the optional `playwright-core` (`npm install --no-save playwright-core` in the Chiefmate folder) and run `node src/cli.mjs prompts-sync`, or use the button in the Crew section. Chiefmate borrows your browser's session to download the document's Markdown export: it never changes the document and never touches your tabs.
 
+## Project pages
+
+Each project has a page of its own in the app (`#project/<id>`): pick it in the list of projects at the top of the window, or click the project's name in the crews by project, the focus, the Projects section, Planning or Missions. It shows:
+
+- **The project**: its name and the sentence `about` it; your own clone (`local_clone`, or `Documents/GitHub/<repository name>`) and the branch checked out there right now; how its work is delivered (a pull request, or a branch handed to your clone with `"deliver": "local"`); the repository, the site, the personal documentation and the development environment's command.
+- **Its crew**, with its team lead above it when it has one, each with what it is doing (a click on a member at work opens its panel).
+- **Its runs going on and in the queue**, each with a button to cancel it, and **its recent history**: the latest runs, with their result, the pull request and a **Reports** button that opens each step's report in the Log.
+- **Its open items on the planning board**, with a button that opens Planning filtered by the project.
+- **The project on this computer**: its state, its memory and its processes, with the button to stop them, and its development environment.
+- **Its live sessions**: those open, with **End**, and its profiles, each with **Open**.
+
+And these buttons:
+
+- **New task** goes to the form at the bottom: a member of the project's crew (or, when the project has a team lead, a request for the lead to plan), the instruction and whether the manager reviews it.
+- **Live session: Claude Code** and **Live session: Codex** open a session in your clone of the project. They use the project's own profile for that tool when `sessions` has one; otherwise an automatic profile (`project-<id>-claude`, `project-<id>-codex`), never written to the settings, whose first message has the project's sentence `about` it, its block of the prompt builder (`prompt_block`) and the environment (`prompt_builder.environment`), when there is a copy of the prompt builder. A Claude Code session uses `default_model`.
+- **Open folder** opens your clone in File Explorer, and **Open in VS Code** in VS Code (shown when the `code` command is found).
+- **Start the development environment**, for a project with `dev_start` in its settings (such as `"dev_start": "npm run dev"`): runs that command in your clone, in a window of its own (Windows Terminal, or PowerShell), through `node src/cli.mjs dev-run <project>`. Its processes count in the project's memory, marked "development environment", and **Stop** closes the window with everything it started. From the command line: `node src/cli.mjs dev <project>` (`--dry-run` shows what would run) and `dev stop <project>`.
+
+Without your own clone of the project, the buttons that need it are disabled and the page says to set `local_clone`.
+
 ## Live sessions
 
 Besides the work the crew does in the background, you can open a conversation with an agent to work together, live: review a text with Claude Code while Codex helps you with something else in another window, for example. Each session is a profile in `sessions`:
@@ -184,6 +205,7 @@ Besides the work the crew does in the background, you can open a conversation wi
 - Where it opens: `cwd` when you give it; for a `project`, your own clone of it (`local_clone`, or `Documents/GitHub/<repository name>`), never the crew's working copy, which is reset before every run; for a `library_folder` (`<library>/<folder>`), that folder in your own clone of the library or, failing that, in Chiefmate's read-only copy (anything changed there is lost, and the first message says so).
 - `prompt_blocks`: blocks of the prompt builder, by name, in any section. They are put together as for a step: the automatic and required blocks they bring come along and the variables are filled in. Nothing is adapted to the crew's rules: you are there. Without `prompt_blocks`, the session starts with no first message.
 - `model`: optional.
+- Each project also gets an automatic profile per tool it has no profile of, opened from its page (see "Project pages"). Operations lists only the profiles in your settings.
 
 Open one with its **Open** button in Operations, or `node src/cli.mjs session <profile>` (`--dry-run` shows the folder, the command and the first message without opening anything). Chiefmate writes the first message to `data/sessions/<id>.md`, records the session in `data/sessions/<id>.json` and opens a Windows Terminal window (or PowerShell, when there is no Windows Terminal) in the session's folder, running the tool with that first message.
 
@@ -229,7 +251,7 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `default_model` | The model for agents that don't set one |
 | `attribution` | `false` keeps the crew's commits and pull requests from crediting Claude (they are credited to you alone) |
 | `backup_dir` | A folder of your own, such as one in a private repository, where Chiefmate keeps an up-to-date copy of these settings |
-| `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. Optional: `crew` (its own crew), `lead` (its team lead, see "The crew"), `mcp` (external tools it releases), `prompt_block` and `prompt_modules` (the prompt builder). See also "Local delivery" below |
+| `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. Optional: `crew` (its own crew), `lead` (its team lead, see "The crew"), `mcp` (external tools it releases), `prompt_block` and `prompt_modules` (the prompt builder), `dev_start` (the command that starts its development environment from its page, such as `npm run dev`). See also "Local delivery" below |
 | `missions` | For each mission: the `project`, the `steps` (an agent and its part, in order), the final `review`, the `schedule` (`days` such as `["mon"]` and a `time` such as `"09:00"`) and the `eve_reminder` time |
 | `crew` | Settings for one agent in this installation only, such as `{ "writer": { "model": "claude-opus-5-5", "max_minutes": 90, "extra_instructions": "..." } }` |
 | `library` | Reference libraries: git repositories the manager and the crew may read, such as your personal documentation. Each has a `name`, a `repository`, a `main_branch` and a sentence `about` it, and optionally `local_clone`, your own clone of it, where the live sessions of its folders open. A project uses one with `"library": ["<id>"]`, or with `"docs": "<id>/<folder>"` for its personal documentation, which then takes precedence over the instructions inside the project's own repository |
@@ -250,7 +272,7 @@ The libraries are read from a copy that Chiefmate refreshes from GitHub before u
 - `repository` may be your clone's folder itself, which makes copying instant and includes commits you haven't pushed;
 - `clone_filter` (such as `"blob:none"`) makes a partial copy of a very large repository.
 
-**Projects on this computer.** The Projects section finds a project's processes by its folders: `local_clone`, `repository` when it is a folder, `Documents/GitHub/<repository name>` in your user folder when it exists, the working copy in `workspaces/` and any extra folders in the project's `local_dirs`.
+**Projects on this computer.** The Projects section finds a project's processes by its folders: `local_clone`, `repository` when it is a folder, `Documents/GitHub/<repository name>` in your user folder when it exists, the working copy in `workspaces/` and any extra folders in the project's `local_dirs`. The development environment started from the project's page counts too, with everything it started.
 
 **To put a project under Chiefmate:**
 1. add it to `projects`;
@@ -357,6 +379,8 @@ node src/cli.mjs chat interrupt               ends the current answer; the conve
 node src/cli.mjs session [<profile>]          opens a live session (--dry-run shows what it would open); with no profile,
                                               lists the profiles and the sessions open
 node src/cli.mjs session end <id>             ends a live session
+node src/cli.mjs dev <project>                starts the project's development environment ("dev_start") in a window of
+                                              its own (--dry-run shows what would run); dev stop <project> stops it
 node src/cli.mjs cancel <id>                  cancels a run
 node src/cli.mjs resume <id>                  resumes a run (--ignore-limits goes past the limits this one time)
 node src/cli.mjs history                      the latest runs

@@ -140,6 +140,21 @@ try {
     expect(state.teams.every(x => 'lead' in x), '/api/state has no team lead (or null) for each project');
     expect((await post('/api/ask', { project: 'none', request: 'Do something' })).status === 400, 'a request for a project that does not exist was not refused');
     expect((await post('/api/ask', { project: 'none', request: 'x', plan: 999 })).status === 400, 'a request linked to an item that does not exist was not refused');
+    // A project's page: refused for a project that does not exist; for the installation's first project, read only
+    // (nothing opens: the actions are refused or asked for as a dry run).
+    expect((await fetch(`${base}/api/project/no-such-project`)).status === 400, "the page of a project that does not exist did not answer 400");
+    expect((await post('/api/project/open', { project: 'no-such-project', app: 'folder', dryRun: true })).status === 400, 'opening the folder of a project that does not exist was not refused');
+    expect((await post('/api/project/dev', { project: 'no-such-project', action: 'start', dryRun: true })).status === 400, 'starting the environment of a project that does not exist was not refused');
+    expect((await post('/api/project/dev', { project: 'no-such-project', action: 'other' })).status === 400, 'an unknown action on the development environment was not refused');
+    expect((await post('/api/session', { profile: 'no-such-profile', dryRun: true })).status === 400, 'a dry run of an unknown session profile was not refused');
+    expect(state.projects.every(p => ['claude', 'codex'].every(tool => state.sessions.profiles.some(x => x.project === p.id && x.tool === tool))), 'a project has no live session profile (its own or automatic) for each tool');
+    const first = state.projects[0];
+    if (first) {
+      const page = await fetch(`${base}/api/project/${encodeURIComponent(first.id)}`);
+      const info = page.ok ? await page.json() : {};
+      expect(page.ok && info.id === first.id && Array.isArray(info.history) && 'clone' in info && 'branch' in info && 'dev' in info && typeof info.vscode === 'boolean', `the page of a project is incomplete: ${JSON.stringify(info).slice(0, 300)}`);
+      expect(info.history?.every(r => r.project === first.id), "a project's page lists runs of another project");
+    }
     const interrupt = await post('/api/manager/interrupt', {});
     expect(interrupt.ok && (await interrupt.json()).interrupted === false, 'interrupting a manager that is not answering did something');
   }
@@ -416,6 +431,49 @@ try {
     }
     expect(refused, 'a session with an unknown tool was not refused');
     expect(sessionIdOf('"C:\\nodejs\\node.exe" "C:\\chiefmate\\src\\cli.mjs" session-run 2026-01-02-0900-review') === '2026-01-02-0900-review' && sessionIdOf('node src/cli.mjs server') === null, "a session's window process is not recognized");
+
+    // A project's page: the automatic session profile (only for a tool the settings have no profile of), opened in
+    // the owner's clone with the project's block and the environment; the folder, VS Code and the development
+    // environment as dry runs. Nothing opens.
+    const projects = await import(src('projects.mjs'));
+    const { devIdOf } = await import(src('machine.mjs'));
+    const { sessionProfiles } = await import(src('sessions.mjs'));
+    const clone = path.join(sessionTemp, 'clone');
+    mkdirSync(clone);
+    const pageConfig = {
+      ...sessionConfig, default_model: 'some-model', prompt_builder: { file: builder, environment: 'Office' },
+      projects: { alpha: { name: 'Alpha', about: 'A sample.', local_clone: clone, prompt_block: 'Sample project', dev_start: 'npm run dev' }, beta: { name: 'Beta' } },
+      sessions: { mine: { name: 'Mine', tool: 'codex', project: 'alpha', cwd: sessionTemp } },
+    };
+    const auto = sessionProfiles(pageConfig).filter(p => p.auto);
+    expect(auto.map(p => p.id).join() === 'project-alpha-claude,project-beta-claude,project-beta-codex', `the automatic session profiles are wrong: ${auto.map(p => p.id).join()}`);
+    expect(auto[0].prompt_blocks.join() === 'Sample project,Office' && auto[0].model === 'some-model' && !auto[1].prompt_blocks.length, "an automatic profile did not get the project's block and the environment");
+    const opened = planSession(pageConfig, 'project-alpha-claude');
+    expect(opened.folder.dir === path.resolve(clone) && opened.prompt.text.includes('Project: Alpha. A sample.') && opened.prompt.text.includes('Work on SAMPLE.') && opened.prompt.text.includes('Work from the office.'), `an automatic session did not open in the clone with the project's prompt: ${opened.prompt.text.slice(0, 300)}`);
+    let noClone = false;
+    try {
+      planSession(pageConfig, 'project-beta-codex');
+    } catch {
+      noClone = true;
+    }
+    expect(noClone, "an automatic session of a project without the owner's clone was not refused");
+    const folder = projects.openProjectApp('alpha', 'folder', { dryRun: true, config: pageConfig });
+    expect(folder.dryRun && folder.dir === path.resolve(clone) && folder.args.join() === path.resolve(clone), `opening the project's folder would not open the clone: ${JSON.stringify(folder)}`);
+    process.env.CHIEFMATE_VSCODE = path.join(sessionTemp, 'Code.exe');
+    const code = projects.openProjectApp('alpha', 'vscode', { dryRun: true, config: pageConfig });
+    expect(code.command === process.env.CHIEFMATE_VSCODE && code.args.join() === path.resolve(clone), `opening VS Code would not open the clone: ${JSON.stringify(code)}`);
+    const dev = await projects.startDev('alpha', { dryRun: true, config: pageConfig });
+    expect(dev.dryRun && dev.command === 'npm run dev' && dev.cwd === path.resolve(clone) && dev.window.join(' ') === 'dev-run alpha', `the development environment would not run "dev_start" in the clone: ${JSON.stringify(dev)}`);
+    let noDev = false;
+    try {
+      projects.devPlan(pageConfig, 'beta');
+    } catch {
+      noDev = true;
+    }
+    expect(noDev, 'a project without "dev_start" was offered a development environment');
+    expect(devIdOf('"C:\\nodejs\\node.exe" "C:\\chiefmate\\src\\cli.mjs" dev-run alpha') === 'alpha' && devIdOf('node src/cli.mjs session-run x') === null, "a development environment's window process is not recognized");
+    const info = await projects.projectInfo('alpha', pageConfig, { dev: [{ project: 'alpha', pids: [42], ram: 1024 }] });
+    expect(info.clone === path.resolve(clone) && info.dev?.status === 'running' && info.dev.ram === 1024 && info.vscode && info.deliver === 'pull_request', `the project's page facts are wrong: ${JSON.stringify(info)}`);
   } finally {
     rmSync(sessionTemp, { recursive: true, force: true });
   }
