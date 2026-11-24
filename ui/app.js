@@ -303,10 +303,12 @@ const toolName = tool => (tool === 'codex' ? 'Codex' : 'Claude Code');
 
 // ---------- Navigation ----------
 
-// A project's page is "#project/<id>".
-const VIEWS = ['manager', 'operations', 'planning', 'missions', 'crew', 'projects', 'log', 'usage', 'project'];
+// A project's page is "#project/<id>"; the prompt builder is "#builder", or "#builder/<id>" for a project.
+const VIEWS = ['manager', 'operations', 'planning', 'missions', 'crew', 'projects', 'builder', 'log', 'usage', 'project'];
 const pageProject = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length)) : null);
-const currentView = () => (pageProject() ? 'project' : VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
+const builderHash = () => /^#builder(\/|$)/.test(location.hash);
+const builderProjectOf = () => (location.hash.startsWith('#builder/') ? decodeURIComponent(location.hash.slice('#builder/'.length)) : '');
+const currentView = () => (pageProject() ? 'project' : builderHash() ? 'builder' : VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
 function showView() {
   const view = currentView();
   for (const v of VIEWS) $(`#view-${v}`).classList.toggle('active', v === view);
@@ -318,6 +320,7 @@ function showView() {
     drawProjectPage();
     refreshProjectPage();
   }
+  if (view === 'builder' && state) openBuilder(builderProjectOf());
 }
 window.addEventListener('hashchange', showView);
 
@@ -1187,6 +1190,7 @@ function drawProjectActions(id, info) {
     `<button type="button" class="button" data-project-task>${esc(t('New task'))}</button>`,
     session('claude'),
     session('codex'),
+    state.prompts?.configured ? `<a class="button secondary" href="#builder/${encodeURIComponent(id)}">${esc(t('Prompt builder'))}</a>` : '',
     `<button type="button" class="button secondary" data-project-open="folder"${noClone}>${esc(t('Open folder'))}</button>`,
     info?.vscode ? `<button type="button" class="button secondary" data-project-open="vscode"${noClone}>${esc(t('Open in VS Code'))}</button>` : '',
     devButton,
@@ -1334,6 +1338,253 @@ $('#project-task-form').addEventListener('submit', async event => {
     form.instruction.value = '';
     toast(t('Task queued.'));
     refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+// ---------- The prompt builder ----------
+
+// The document of blocks, the choice made for the project and the prompt it gives. "chosen" are the blocks marked by
+// hand, "off" the automatic blocks turned off; the server puts them together (src/prompts.mjs) and remembers the
+// choice per project. The prompt can be edited before it goes to a live session, a task or the clipboard.
+const builder = { project: null, data: null, chosen: [], off: [], result: null, edited: false, loading: null, seq: 0, allCombos: false };
+const sameName = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+const hasName = (list, name) => (list ?? []).some(x => sameName(x, name));
+const withoutName = (list, name) => list.filter(x => !sameName(x, name));
+const builderSections = () => builder.data?.document?.sections ?? [];
+
+async function openBuilder(project, { reload = false } = {}) {
+  if (!reload && builder.project === project && builder.data) return drawBuilder();
+  if (builder.loading === project) return;
+  builder.loading = project;
+  try {
+    const data = await api(`/api/prompt-builder?project=${encodeURIComponent(project)}`);
+    if (builderProjectOf() !== project) return;
+    const keep = reload && builder.project === project;
+    Object.assign(builder, { project, data, result: null, edited: false });
+    if (!keep) {
+      // The last choice made for the project; the first time, its block, the environment and its modules.
+      const names = builderSections().flatMap(s => s.blocks.map(b => b.name));
+      const start = data.last ?? { chosen: data.defaults, off: [] };
+      builder.chosen = (start.chosen ?? []).filter(n => hasName(names, n));
+      builder.off = (start.off ?? []).filter(n => hasName(names, n));
+      builder.allCombos = false;
+      $('#builder-text').value = '';
+    }
+    drawBuilder();
+    if (data.document) await composeBuilder({ remember: false });
+  } catch (error) {
+    Object.assign(builder, { project, data: { error: error.message }, result: null });
+    drawBuilder();
+  } finally {
+    builder.loading = null;
+  }
+}
+
+async function composeBuilder({ remember = true } = {}) {
+  const seq = ++builder.seq;
+  try {
+    const result = await api('/api/prompt-builder/compose', { project: builder.project, chosen: builder.chosen, off: builder.off, remember });
+    if (seq !== builder.seq) return;
+    Object.assign(builder, { result, edited: false });
+    $('#builder-text').value = result.text;
+  } catch (error) {
+    toast(error.message);
+  }
+  drawBuilder();
+}
+
+function drawBuilder() {
+  if (!state) return;
+  const list = [['', t('No project')], ...state.projects.map(p => [p.id, p.name ?? p.id])];
+  const options = planOptions(list, builderProjectOf());
+  if (!draw('#builder-project', options, options)) $('#builder-project').value = builderProjectOf();
+  drawBuilderTop();
+  drawBuilderSections();
+  drawBuilderNotes();
+  fillBuilderAgents();
+}
+
+/** The copy's date (with a warning when it is old), the reload button and the ready choices. */
+function drawBuilderTop() {
+  const d = builder.data;
+  const p = state.prompts ?? {};
+  let status;
+  if (!d) status = `<div class="hint">${esc(t('Loading…'))}</div>`;
+  else if (d.error) status = `<div class="panel">${stateHtml([d.error, 'error'])}</div>`;
+  else if (!d.status.configured) status = `<div class="empty">${esc(t('No prompt builder set: add "prompt_builder" with the "file" of your document of blocks to the settings (see the README).'))}</div>`;
+  else {
+    const s = d.status;
+    const syncing = p.syncing ?? d.syncing;
+    const sync = p.sync ?? s.sync ?? {};
+    const canSync = s.docId && d.cdp;
+    const copy = s.copied ? t('Copy of the document from {when}.', { when: shortDate(s.copied) }) : t('No copy of the document on this computer yet.');
+    status = `<div class="builder-status"><p>${esc(copy)}</p>
+      ${s.stale ? stateHtml([t('The copy is more than {days} days old: reload it to get your latest changes.', { days: s.staleDays }), 'warn']) : ''}
+      ${sync.ok === false ? stateHtml([sync.error, 'error']) : ''}
+      <button type="button" class="button secondary small" data-builder-reload title="${esc(canSync ? t('Copies the document from Google Docs again, then reads it.') : t('Reads the copy on this computer again.'))}"${syncing ? ' disabled' : ''}>${esc(syncing ? t('Copying…') : t('Reload document'))}</button></div>`;
+  }
+  draw('#builder-status', status, status);
+
+  // The ready choices: the project's ones (those with its block), or all of them.
+  const combos = d?.document?.combinations ?? [];
+  const mine = d?.projectBlock ? combos.filter(c => hasName(c.blocks, d.projectBlock)) : combos;
+  const shown = builder.allCombos || !mine.length ? combos : mine;
+  const current = c => c.blocks.length === builder.chosen.length && c.blocks.every(b => hasName(builder.chosen, b));
+  const html = combos.length
+    ? `<div class="builder-combos"><span class="label">${esc(t('Ready choices'))}</span>${shown.map(c => `<button type="button" class="button small${current(c) ? '' : ' secondary'}" data-builder-combo="${esc(c.name)}" title="${esc(c.blocks.join(' + '))}">${esc(c.name)}</button>`).join('')}
+      ${mine.length && mine.length < combos.length ? `<button type="button" class="button secondary small" data-builder-all-combos>${esc(builder.allCombos ? t('Only this project') : t('All ({count})', { count: combos.length }))}</button>` : ''}</div>`
+    : '';
+  draw('#builder-combos', html, html);
+}
+
+const selectionHint = kind => ({ one: t('choose one'), several: t('choose any'), automatic: t('come in by themselves') })[kind] ?? '';
+
+/** Each section with its blocks: marked, automatic, turned off, or not allowed now ("requires" not met). */
+function drawBuilderSections() {
+  const d = builder.data;
+  const r = builder.result;
+  $('#builder-main').hidden = !d?.document;
+  if (!d?.document) return draw('#builder-sections', '', '');
+  const html = builderSections().map(s => `<div class="panel builder-section">
+      <div class="label"><span>${esc(s.name)}</span><span class="hint">${esc(selectionHint(s.selection))}</span></div>
+      ${s.blocks.map(b => {
+        const on = r ? hasName(r.blocks, b.name) : hasName(builder.chosen, b.name);
+        const automatic = !!r && hasName(r.automatic, b.name);
+        const unavailable = !on && !!r && hasName(r.unavailable, b.name);
+        const unmet = (r?.unmet ?? []).some(u => sameName(u.block, b.name));
+        const facts = [
+          b.tags.length ? t('tags: {list}', { list: b.tags.join(', ') }) : '',
+          b.access.length ? t('sign-in: {list}', { list: b.access.join(', ') }) : '',
+          b.requires ? t('requires: {list}', { list: b.requires }) : '',
+          b.includeWith ? t('comes with: {list}', { list: b.includeWith }) : '',
+          hasName(builder.off, b.name) ? t('turned off') : '',
+        ].filter(Boolean).join(' · ');
+        return `<label class="builder-block${automatic ? ' automatic' : ''}${unavailable ? ' unavailable' : ''}${unmet ? ' unmet' : ''}" data-auto="${esc(t('automatic'))}" title="${esc(b.text.slice(0, 500))}">
+          <input type="checkbox" data-builder-block="${esc(b.name)}" data-selection="${esc(b.selection)}" data-section="${esc(s.name)}"${on ? ' checked' : ''}${unavailable ? ' disabled' : ''}>
+          <span class="name">${esc(b.name)}</span>${facts ? `<span class="hint">${esc(facts)}</span>` : ''}</label>`;
+      }).join('')}
+    </div>`).join('');
+  draw('#builder-sections', html, html);
+}
+
+function drawBuilderNotes() {
+  const r = builder.result;
+  const notes = [];
+  if (r?.unresolved?.length) notes.push([t('Variables without a value in the document: {list}', { list: r.unresolved.map(v => `{${v}}`).join(', ') }), 'warn']);
+  for (const u of r?.unmet ?? []) notes.push([t('"{block}" requires {list}, which is not chosen.', { block: u.block, list: u.requires }), 'warn']);
+  if (r?.missing?.length) notes.push([t('Not in the document: {list}', { list: r.missing.join(', ') }), 'warn']);
+  if (builder.edited) notes.push([t('Edited by hand: changing the blocks writes the prompt again.'), 'info']);
+  const html = notes.length ? `<div class="builder-notes">${notes.map(n => `<div>${stateHtml(n)}</div>`).join('')}</div>` : '';
+  draw('#builder-notes', html, html);
+  const empty = !$('#builder-text').value.trim();
+  $('#builder-session').disabled = !builder.project || empty;
+  $('#builder-task').querySelector('[type=submit]').disabled = !builder.project || empty;
+  $('#builder-copy').disabled = empty;
+}
+
+/** The task's members: the project's crew (the team lead takes requests, not tasks). */
+function fillBuilderAgents() {
+  const select = $('#builder-agent');
+  const team = state.teams?.find(x => x.project === builder.project);
+  const members = builder.project ? team?.members ?? state.crew.filter(a => a.id !== 'manager') : [];
+  const list = members.map(a => [a.id, `${t(a.name)}: ${t(a.title ?? '')}`]);
+  const key = `${builder.project}|${list.map(([value]) => value).join(',')}`;
+  if (select.dataset.list === key) return;
+  const kept = select.value;
+  select.innerHTML = planOptions(list, list.some(([value]) => value === kept) ? kept : list[0]?.[0]);
+  select.dataset.list = key;
+}
+
+$('#builder-project').addEventListener('change', event => {
+  const id = event.target.value;
+  location.hash = id ? `#builder/${encodeURIComponent(id)}` : '#builder';
+});
+
+$('#builder-sections').addEventListener('change', event => {
+  const input = event.target.closest('[data-builder-block]');
+  if (!input) return;
+  const name = input.dataset.builderBlock;
+  if (input.checked) {
+    builder.off = withoutName(builder.off, name);
+    if (input.dataset.selection === 'one') {
+      // One block per section: the others of the section leave the choice.
+      const section = builderSections().find(s => s.name === input.dataset.section);
+      for (const b of section?.blocks ?? []) if (b.selection === 'one' && !sameName(b.name, name)) builder.chosen = withoutName(builder.chosen, b.name);
+    }
+    builder.chosen = [...withoutName(builder.chosen, name), name];
+  } else {
+    builder.chosen = withoutName(builder.chosen, name);
+    if (input.dataset.selection === 'automatic') builder.off = [...withoutName(builder.off, name), name];
+  }
+  composeBuilder();
+});
+
+$('#builder-text').addEventListener('input', () => {
+  builder.edited = true;
+  drawBuilderNotes();
+});
+
+$('#builder-copy').addEventListener('click', async () => {
+  const text = $('#builder-text').value;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    $('#builder-text').select();
+    document.execCommand('copy');
+  }
+  toast(t('Prompt copied.'));
+});
+
+$('#builder-session').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const session = await api('/api/prompt-builder/session', { project: builder.project, tool: $('#builder-tool').value, prompt: $('#builder-text').value });
+    toast(session.status === 'login' ? t('Codex is not signed in: see the request at the top.') : t('Session opened in a window of its own.'));
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+  drawBuilderNotes();
+});
+
+$('#builder-task').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.target;
+  try {
+    await api('/api/task', { project: builder.project, agent: form.agent.value, instruction: form.instruction.value, review: form.review.checked, prompt: $('#builder-text').value });
+    form.instruction.value = '';
+    toast(t('Task queued.'));
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+$('#view-builder').addEventListener('click', async event => {
+  const target = event.target.closest('[data-builder-combo],[data-builder-all-combos],[data-builder-reload]');
+  if (!target) return;
+  try {
+    if (target.dataset.builderCombo) {
+      const combo = (builder.data?.document?.combinations ?? []).find(c => c.name === target.dataset.builderCombo);
+      if (!combo) return;
+      Object.assign(builder, { chosen: [...combo.blocks], off: [] });
+      await composeBuilder();
+    } else if (target.hasAttribute('data-builder-all-combos')) {
+      builder.allCombos = !builder.allCombos;
+      drawBuilderTop();
+    } else {
+      target.disabled = true;
+      const d = builder.data;
+      if (d?.status?.docId && d.cdp) {
+        toast(t('Copying the prompt builder…'));
+        const status = await api('/api/prompts-sync', {});
+        toast(status.ok ? t('Prompt builder copied.') : status.error);
+      } else toast(t('Document read again.'));
+      await openBuilder(builder.project, { reload: true });
+    }
   } catch (error) {
     toast(error.message);
   }
@@ -1809,6 +2060,10 @@ async function refresh() {
   if (currentView() === 'project') {
     drawProjectPage();
     refreshProjectPage();
+  }
+  if (currentView() === 'builder') {
+    if (builder.project !== builderProjectOf() || !builder.data) openBuilder(builderProjectOf());
+    else drawBuilderTop();
   }
   tickClocks();
   if (currentView() === 'log') refreshDetail();

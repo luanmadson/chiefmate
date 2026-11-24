@@ -12,7 +12,7 @@ import {
 } from './leads.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
-import { projectInstructions } from './prompts.mjs';
+import { projectInstructions, writtenInstructions } from './prompts.mjs';
 import { readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
 import { clip, languageName, now, ROOT, slug, stamp } from './util.mjs';
@@ -60,7 +60,7 @@ function crewRules(config, project) {
 - Your last message is the step's report, in ${owner}: short markdown with what you did (and the files), the sources you used, what you left out and why, and what the reviewer should check.`;
 }
 
-export function createRun({ kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [], plan = null }) {
+export function createRun({ kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [], plan = null, prompt = null }) {
   const config = loadConfig();
   let title, steps, finalReview, project;
   if (kind === 'mission') {
@@ -89,6 +89,8 @@ export function createRun({ kind, missionId, projectId, agent, instruction, revi
     const agents = projectCrew(config, projectId);
     if (agent === LEAD) throw new Error(t('The team lead takes requests, not tasks: use "ask".'));
     if (!agents[agent]) throw new Error(t('{agent} is not in the crew of {project}.', { agent, project: projectId }));
+    // A task sent from the app's prompt builder carries its prompt: the instruction may then be left out.
+    if (!instruction?.trim() && prompt?.trim()) instruction = 'Do what the project instructions below (written in the prompt builder) ask.';
     if (!instruction?.trim()) throw new Error(t('Write what the agent should do.'));
     project = projectId;
     title = `${t(agents[agent].name)}: ${clip(instruction, 70)}`;
@@ -107,6 +109,8 @@ export function createRun({ kind, missionId, projectId, agent, instruction, revi
     modules: (Array.isArray(modules) ? modules : String(modules ?? '').split(',')).map(m => String(m).trim()).filter(Boolean),
     // The planning board's item this run was queued for: the item follows the run (src/planning.mjs).
     ...(plan != null && plan !== '' ? { plan: Number(String(plan).replace(/^#/, '')) } : {}),
+    // The prompt written in the app's prompt builder: the steps get it instead of the one put together from the document.
+    ...(prompt?.trim() ? { builderPrompt: prompt.trim() } : {}),
   });
 }
 
@@ -290,6 +294,7 @@ function contextReport({ run, step, index, agent, dir, model, prompt, tools, dis
       `- File: \`${built.file}\``,
       `- Blocks: ${built.blocks.join(', ')}`,
       ...built.missing.map(m => `- Not found: ${m}`),
+      ...(built.unresolved?.length ? [`- Variables left unfilled (no value in the document): ${built.unresolved.map(v => `{${v}}`).join(', ')}`] : []),
       ...built.adaptations.map(a => `- Adapted in "${a.block}" (Chiefmate's rules prevail): ${a.line}`),
     ].join('\n')
     : "- Not used (no file, or no block for the project): the project's notes went instead.";
@@ -361,7 +366,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   const mcp = stepMcp(config, project, agent);
   let built = null;
   try {
-    built = projectInstructions(config, project, run.modules ?? []);
+    built = run.builderPrompt ? writtenInstructions(run.builderPrompt) : projectInstructions(config, project, run.modules ?? []);
   } catch (error) {
     logAction(l, { type: 'action', text: t("Couldn't read the prompt builder: {error}", { error: error.message }) });
   }

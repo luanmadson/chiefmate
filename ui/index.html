@@ -26,6 +26,7 @@
       <a href="#missions" data-view="missions"><span data-t="Missions">Missions</span></a>
       <a href="#crew" data-view="crew"><span data-t="Crew">Crew</span></a>
       <a href="#projects" data-view="projects"><span data-t="Projects">Projects</span><span class="counter" id="counter-projects"></span></a>
+      <a href="#builder" data-view="builder"><span data-t="Builder">Builder</span></a>
       <a href="#log" data-view="log"><span data-t="Log">Log</span></a>
       <a href="#usage" data-view="usage"><span data-t="Usage">Usage</span></a>
       <div class="nav-footer" id="version">Chiefmate</div>
@@ -167,6 +168,42 @@
           <label class="option"><input type="checkbox" name="review" checked> <span data-t="The manager reviews the work before the pull request (recommended)">The manager reviews the work before the pull request (recommended)</span></label>
           <div class="actions"><button type="submit" class="button" data-t="Queue it">Queue it</button></div>
         </form>
+      </section>
+
+      <section class="view" id="view-builder">
+        <div class="view-header">
+          <div>
+            <h1 data-t="Prompt builder">Prompt builder</h1>
+            <p data-t="Put a prompt together from your document of blocks, then open a live session with it, send it with a task or copy it.">Put a prompt together from your document of blocks, then open a live session with it, send it with a task or copy it.</p>
+          </div>
+          <label class="builder-project"><span data-t="Project">Project</span><select id="builder-project"></select></label>
+        </div>
+        <div id="builder-status"></div>
+        <div id="builder-combos"></div>
+        <div class="builder-grid" id="builder-main">
+          <div id="builder-sections"></div>
+          <div class="panel builder-preview">
+            <div class="section-head"><div class="label" data-t="Final prompt">Final prompt</div><button type="button" class="button secondary small" id="builder-copy" data-t="Copy">Copy</button></div>
+            <div id="builder-notes"></div>
+            <textarea id="builder-text" rows="22" spellcheck="false" data-t-label="Final prompt" aria-label="Final prompt"></textarea>
+            <div class="builder-destination">
+              <div class="label" data-t="Open a live session">Open a live session</div>
+              <div class="builder-row">
+                <select id="builder-tool" data-t-label="Tool" aria-label="Tool"><option value="claude">Claude Code</option><option value="codex">Codex</option></select>
+                <button type="button" class="button" id="builder-session" data-t="Open live session">Open live session</button>
+              </div>
+              <p class="hint" data-t="In your clone of the project, with this prompt as the first message.">In your clone of the project, with this prompt as the first message.</p>
+            </div>
+            <form class="builder-destination form" id="builder-task">
+              <div class="label" data-t="Send as a task">Send as a task</div>
+              <label><span data-t="Crew member">Crew member</span><select name="agent" id="builder-agent"></select></label>
+              <label><span data-t="Instruction (optional)">Instruction (optional)</span><textarea name="instruction" rows="2" placeholder="What to do, when the prompt doesn't say it." data-t-placeholder="What to do, when the prompt doesn't say it."></textarea></label>
+              <label class="option"><input type="checkbox" name="review" checked> <span data-t="The manager reviews the work before the pull request (recommended)">The manager reviews the work before the pull request (recommended)</span></label>
+              <p class="hint" data-t="The steps get this prompt as the project's instructions, instead of the one put together from the document.">The steps get this prompt as the project's instructions, instead of the one put together from the document.</p>
+              <div class="actions left"><button type="submit" class="button" data-t="Send as a task">Send as a task</button></div>
+            </form>
+          </div>
+        </div>
       </section>
 
       <section class="view" id="view-log">

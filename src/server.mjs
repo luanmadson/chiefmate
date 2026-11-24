@@ -12,12 +12,12 @@ import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs'
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { changePlan, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
 import { openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
-import { builderStatus } from './prompts.mjs';
+import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
 import { activeRun, createRun, liveRuns } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
-import { endSession, finishSessionRequest, openSession, planSession, sessionRequests, sessionsState } from './sessions.mjs';
+import { endSession, finishSessionRequest, openSession, planSession, profileFor, sessionRequests, sessionsState } from './sessions.mjs';
 import { talkTo } from './talk.mjs';
 import { listRuns, readConversation, readNotifications, readPending, readRun, readUsage, runDir, stepsOf } from './store.mjs';
 import { checkNow, updateInfo, updateMode, updateNow } from './update.mjs';
@@ -313,6 +313,11 @@ export function startServer() {
           const data = runFeed(decodeURIComponent(feed[1]), url.searchParams);
           return data ? reply(res, 200, data) : reply(res, 404, { error: t('Run not found.') });
         }
+        // The app's prompt builder: the document and the project's last choice ("?project=<id>").
+        if (url.pathname === '/api/prompt-builder') {
+          const config = loadConfig();
+          return reply(res, 200, { ...builderPage(config, url.searchParams.get('project') ?? ''), syncing: isSyncing(), cdp: !!config.browser_cdp });
+        }
         const page = url.pathname.match(/^\/api\/project\/([^/]+)$/);
         if (page) return reply(res, 200, await projectPage(decodeURIComponent(page[1])));
         if (url.pathname.startsWith('/api/run/')) {
@@ -340,6 +345,8 @@ export function startServer() {
           const run = createRun({
             kind: 'task', projectId: body.project, agent: body.agent, instruction: body.instruction, review: !!body.review, origin: body.origin ?? 'app',
             modules: body.modules ?? [], plan: body.plan ?? null,
+            // From the app's prompt builder: the steps get this prompt instead of the one put together from the document.
+            prompt: typeof body.prompt === 'string' ? body.prompt : null,
           });
           nudgeQueue();
           return reply(res, 200, summary(run));
@@ -380,6 +387,22 @@ export function startServer() {
         }
         case '/api/session/end':
           return reply(res, 200, await endSession(String(body.id ?? '')));
+        case '/api/prompt-builder/compose':
+          // A choice of blocks ("chosen", and "off": automatic blocks turned off) put together; remembered for "project".
+          return reply(res, 200, composeFromApp(loadConfig(), { project: String(body.project ?? ''), chosen: body.chosen, off: body.off, remember: body.remember !== false }));
+        case '/api/prompt-builder/session': {
+          // A live session in the project's folder with the prompt written in the prompt builder as its first message.
+          // With "dryRun": what it would open, and nothing opens.
+          const config = loadConfig();
+          const tool = String(body.tool ?? '');
+          const profile = profileFor(config, String(body.project ?? ''), tool);
+          if (!String(body.prompt ?? '').trim()) return reply(res, 400, { error: t('The prompt is empty.') });
+          if (body.dryRun) {
+            const { folder, prompt } = planSession(config, profile, { prompt: String(body.prompt) });
+            return reply(res, 200, { dryRun: true, profile, tool, cwd: folder.dir, prompt: prompt.text });
+          }
+          return reply(res, 200, await openSession(profile, { origin: 'app', prompt: String(body.prompt) }));
+        }
         case '/api/prompts-sync':
           return reply(res, 200, await syncPrompts());
         case '/api/cancel':
