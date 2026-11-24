@@ -77,7 +77,7 @@ A one-off task follows the same path, with a single agent and, if you tick the b
 
 ### What each step sees
 
-- **Only its project.** A step gets the project's working copy and the project's own personal documentation folder (`docs`), not the whole library it lives in. Libraries in the project's `library` list come too. Everything else is denied to the file tools by permission rules: other projects' working copies, other projects' documentation folders in the libraries, the libraries the project doesn't list and Chiefmate's `data/`. The manager's review sees every library.
+- **Only its project.** A step gets the project's working copy and the project's own personal documentation folder (`docs`), not the whole library it lives in. Libraries in the project's `library` list come too. Everything else is denied to the file tools by permission rules: other projects' working copies, other projects' documentation folders in the libraries, the libraries the project doesn't list and Chiefmate's `data/`. The manager's review sees every library. These rules bind Claude Code's file tools (Read, Edit, Glob, Grep), not the shell: an agent that runs a command such as `cat` through Bash can still read those folders. Treat this as keeping each step's attention on its project, not as a sandbox.
 - **None of your own Claude Code configuration.** Steps never load your user settings, hooks, plugins, skills, MCP servers or `~/.claude/CLAUDE.md` (`--setting-sources project,local`, `claudeMdExcludes`, `--strict-mcp-config`). This is deliberate and has no switch. The project's own instruction files (its `CLAUDE.md`, `.claude/`) still apply.
 - **External tools only from Chiefmate's settings.** Declare MCP servers in `mcp_servers` and release them to a project or an agent with `"mcp": ["<name>"]`.
 - **What it received, on record.** Each step writes `data/runs/<id>/<NN>-<agent>.context.md`: the system prompt, the prompt, the model, the tools allowed and denied, the MCP servers, the folders, the repository's instruction files and what Claude Code reported loading. Open it with the "Context received" button in the Log, or `node src/cli.mjs context <id> [step]`.
@@ -91,7 +91,7 @@ node <chiefmate>/src/cli.mjs needs-you "<what to do>" [--url <address>] [--wait]
 ```
 
 Chiefmate records the request in the run and shows it at once: a band at the top of the app ("Needs you: <task> — <what to do>") with a **Done** button, a mark on the window's icon and title, the app's taskbar badge and a Windows notification. With `--url`, the address opens for you:
-- with `browser_cdp` set (the address of your own browser started with remote debugging, such as `http://127.0.0.1:9333`), in a new tab of that browser, where you are already signed in;
+- with `browser_cdp` set (the address of your own browser started with remote debugging, such as `http://127.0.0.1:9333`), in a new tab of that browser, where you are already signed in. Mind the risk: while remote debugging is on, any program on this computer, the crew's shell commands included, can drive that browser and its signed-in sessions. Prefer a separate browser profile for it (recent Chrome versions only allow remote debugging with their own `--user-data-dir`);
 - without it, in a visible browser with Chiefmate's own profile in `data/browser-profile`, which the crew can never read (through Playwright when `playwright-core` is installed, else by starting Edge or Chrome on that profile).
 
 With `--wait`, the agent waits until you click Done, or until its `--check` command succeeds. While it waits, the step's time limit stands still. The wait has a ceiling (`needs_you.max_wait_minutes`, 120 by default): past it, the agent goes on with what it can and the request stays open in the app. The run is never canceled for it, and shows "Waiting for you" meanwhile.
@@ -170,7 +170,7 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `limits` | When runs pause: `pause_at_5h_window` and `pause_at_plan_week`, as shares of your account's usage (0.85 is 85%) |
 | `plan_resets` | The plan's free resets, which Claude Code doesn't report: `[{ "kind": "full", "expires": "<ISO date>", "used": false, "note": "..." }]`. Easier from the Usage section or `node src/cli.mjs reset-grant` |
 | `mcp_servers` | External tools (MCP servers) the crew may use, in Claude Code's format: `{ "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] } }`. Nothing is released until a project or an agent lists it in `mcp` |
-| `browser_cdp` | The address of your own browser with remote debugging on, such as `http://127.0.0.1:9333`: sign-ins asked by the crew open there, and the prompt builder is copied through it |
+| `browser_cdp` | The address of your own browser with remote debugging on, such as `http://127.0.0.1:9333`: sign-ins asked by the crew open there, and the prompt builder is copied through it. Any local program can control a browser with remote debugging on: prefer a separate profile |
 | `needs_you` | `{ "max_wait_minutes": 120 }`: the longest a step waits for you before it goes on without you |
 | `prompt_builder` | The optional prompt builder: `{ "file": "data/manager/prompt-builder.md", "doc_id": "<Google Docs id>", "environment": "<block>" }` |
 | `usage_reader` | The optional reading of your usage page on claude.ai (see below): `{ "enabled": false, "every_hours": 4 }`, and `browser` with the path to Edge or Chrome if it isn't found |
@@ -237,9 +237,9 @@ The self-update only touches Chiefmate's own files. Your settings, the history a
 
 - **Only you reach the app.** It listens on this computer only, and it refuses commands sent by other websites open in your browser.
 - **Agents have limits.** They cannot push to GitHub, open or merge pull requests, or change the repository's address.
-- **Each step sees only its project.** Other projects' working copies and documentation, the libraries a project doesn't list and Chiefmate's `data/` are denied by permission rules (see "What each step sees").
+- **Each step sees only its project.** Other projects' working copies and documentation, the libraries a project doesn't list and Chiefmate's `data/` are denied to the file tools by permission rules (see "What each step sees"). A shell command can still read them: this is not a sandbox.
 - **None of your own configuration.** Agents run without your Claude Code settings, hooks, plugins, skills, `~/.claude/CLAUDE.md` and MCP servers, and without the variables of your own Claude session. The only external tools are those in `mcp_servers`, released by project or agent.
-- **Sign-ins are yours.** Agents never type passwords: they ask for you with `needs-you`, and the address opens in your browser.
+- **Sign-ins are yours.** Agents never type passwords: they ask for you with `needs-you`, and the address opens in your browser. The address comes from the agent (only `http` and `https`), so look at it before you act on it. With `browser_cdp`, remote debugging leaves that browser open to any local program: use a profile of its own.
 - **Your data stays home.** Your settings, the history and the working copies (`config/chiefmate.json`, `data/`, `workspaces/`) never go to git.
 - **Stopping processes asks first.** The Projects section and `stop-project` show what will stop and end only those processes. They never stop Chiefmate, what started it or the crew at work (cancel the run for that).
 - **The optional claude.ai reading** keeps a signed-in browser profile in `data/browser-profile`. See its risks above.
