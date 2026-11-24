@@ -383,6 +383,8 @@ async function renewIfFull() {
 
 /** Starts a new conversation: the manager forgets the history (its notes in data/manager/notes.md stay). */
 export function newConversation() {
+  // The end of an answer saves the manager's session, which would undo the reset.
+  if (chat.responding) throw new Error(t('The manager is answering. Wait for it to finish, or interrupt it, before starting a new conversation.'));
   const state = readState();
   state.manager = {};
   saveState(state);

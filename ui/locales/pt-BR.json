@@ -68,6 +68,7 @@
   "Mission tomorrow": "Amanhã tem missão",
   "{name}: {when}. Leave the computer on or asleep; it wakes up by itself to work.": "{name}: {when}. Deixe o computador ligado ou em espera; ele acorda sozinho para trabalhar.",
   "Write a message.": "Escreva uma mensagem.",
+  "The manager is answering. Wait for it to finish, or interrupt it, before starting a new conversation.": "O gerente está respondendo. Espere ele terminar, ou interrompa a resposta, antes de começar uma conversa nova.",
   "git {command} failed: {output}": "git {command} falhou: {output}",
   "Updating the working copy": "Atualizando a cópia de trabalho",
   "Installing dependencies ({command})": "Instalando as dependências ({command})",
