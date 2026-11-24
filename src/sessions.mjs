@@ -193,7 +193,9 @@ export function profileFor(config, projectId, tool) {
   if (!config.projects?.[projectId]) throw new Error(t('Unknown project: {id}', { id: projectId }));
   if (!TOOLS.includes(tool)) throw new Error(t('Choose Claude Code or Codex.'));
   const all = sessionProfiles(config);
-  return (all.find(p => p.project === projectId && p.tool === tool && !p.auto) ?? all.find(p => p.id === `project-${projectId}-${tool}`)).id;
+  const profile = all.find(p => p.project === projectId && p.tool === tool && !p.auto) ?? all.find(p => p.id === `project-${projectId}-${tool}`);
+  if (!profile) throw new Error(t('Unknown session profile: {id}', { id: `project-${projectId}-${tool}` }));
+  return profile.id;
 }
 
 /**
