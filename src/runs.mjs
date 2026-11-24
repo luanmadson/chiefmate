@@ -187,7 +187,7 @@ export async function prepareLibraries(config, ids, onStep = () => {}) {
   return list;
 }
 
-const libraryIds = project => [...(project.library ?? []), ...(project.docs ? [project.docs.split('/')[0]] : [])];
+export const libraryIds = project => [...(project.library ?? []), ...(project.docs ? [project.docs.split('/')[0]] : [])];
 
 /**
  * The prompt's lines about the libraries this step may read and the project's personal documentation.
@@ -216,30 +216,48 @@ function logAction(l, event) {
   if (l.actions.length > 300) l.actions.splice(0, l.actions.length - 300);
 }
 
-function stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries, base, access, built, agents }) {
+/**
+ * A step's prompt in parts, in order, each with a key and where it comes from (the project's Context tab shows them,
+ * src/context.mjs): their lines, joined, are the prompt as it is sent.
+ */
+export function promptParts({ run, step, project, previous, finalReview, changes, config, libraries, base, access, built, agents }) {
   const prLanguage = project.language || config.language || 'en';
   const local = project.deliver === 'local';
-  const lines = [
+  const parts = [];
+  const add = (key, source, lines) => {
+    if (lines.length) parts.push({ key, source, lines });
+  };
+  add('header', 'Chiefmate: the run and the step', [
     finalReview ? `# Final review: ${run.title}` : `# ${run.title}`,
     `Project: ${project.name}${project.site ? ` (${project.site})` : ''}. ${project.about ?? ''}`.trim(),
     `Today: ${formatDateTime(new Date())}. Run branch: ${run.branch}, started from ${base}.${local ? ' Nothing from this run goes to GitHub: the branch is handed to the owner, who decides what to send.' : ''}`,
     '',
     finalReview ? '## What to do in this review' : step.agent === LEAD && step.role === 'plan' ? '## The request to plan' : '## Your part',
     step.part,
-  ];
+  ]);
   // In a project with a team lead: the lead gets its memory and how to plan or review; the crew, the memory to read.
   const lead = agents?.[LEAD] ?? null;
-  if (lead && step.agent === LEAD) lines.push(...leadLines({ run, step, agents, memory: readMemory(run.project), base }));
-  else if (lead && !finalReview) lines.push(...memberLines({ run, step, lead, memory: readMemory(run.project) }));
+  const memorySource = `data/projects/${run.project}/memory.md`;
+  if (lead && step.agent === LEAD) {
+    const lines = leadLines({ run, step, agents, memory: readMemory(run.project), base });
+    // Its first three lines are the memory ('', its heading, its text); the rest, how to plan or to review.
+    add('memory', memorySource, lines.slice(0, 3));
+    add('lead', 'Chiefmate (src/leads.mjs)', lines.slice(3));
+  } else if (lead && !finalReview) add('memory', memorySource, memberLines({ run, step, lead, memory: readMemory(run.project) }));
   if (project.playbook && run.kind === 'mission') {
-    lines.push('', `This mission's playbook is \`${project.playbook}\`. Read it before you start and do only your part.`);
+    add('playbook', `projects.${run.project}.playbook`, ['', `This mission's playbook is \`${project.playbook}\`. Read it before you start and do only your part.`]);
   }
   // From the prompt builder when there is one for the project; else the project's notes.
-  if (built) lines.push('', '## Project instructions (from the prompt builder)', built.text);
-  const notes = [built ? null : project.notes, project.agent_notes?.[step.agent] ?? project.agent_notes?.[agentBase(step.agent, run, config)]].filter(Boolean).join('\n\n');
-  if (notes) lines.push('', '## Notes for this project', notes);
-  lines.push(...libraryLines(project, libraries, access));
+  if (built) add('builder', built.file, ['', '## Project instructions (from the prompt builder)', built.text]);
+  const projectNotes = (built ? null : project.notes) || null;
+  const noteKey = project.agent_notes?.[step.agent] != null ? step.agent : agentBase(step.agent, run, config);
+  const memberNotes = project.agent_notes?.[noteKey] || null;
+  const notesHead = ['', '## Notes for this project'];
+  if (projectNotes) add('notes', `projects.${run.project}.notes`, [...notesHead, projectNotes]);
+  if (memberNotes) add('agent-notes', `projects.${run.project}.agent_notes.${noteKey}`, projectNotes ? ['', memberNotes] : [...notesHead, memberNotes]);
+  add('libraries', `projects.${run.project}.library, projects.${run.project}.docs`, libraryLines(project, libraries, access));
   if (finalReview) {
+    const lines = [];
     lines.push(
       '',
       `You are the manager. The crew finished the work below. Before it goes to the owner for approval${local ? ' (as a branch, not a pull request)' : ' as a pull request'}:`,
@@ -253,16 +271,28 @@ function stepPrompt({ run, step, project, previous, finalReview, changes, config
       changes || '(none)',
       '```',
     );
+    add('review', 'Chiefmate: the final review (src/runs.mjs)', lines);
+    add('lead-review', "Chiefmate: the team lead's plan and opinion", finalReviewLines(run, lead));
   }
-  if (finalReview) lines.push(...finalReviewLines(run, lead));
   // The final review reads the lead's plan and opinion above, so its steps are not repeated among the crew's reports.
   const reports = finalReview && lead ? previous.filter(p => p.agent !== LEAD) : previous;
   if (reports.length) {
-    lines.push('', finalReview ? '## Crew reports' : '## What the previous steps did');
+    const lines = ['', finalReview ? '## Crew reports' : '## What the previous steps did'];
     for (const p of reports) lines.push('', `### ${p.agent}${p.role ? `, ${p.role === 'plan' ? 'planning' : 'first review'}` : ''} (${p.status})`, p.report || p.error || '(no report)');
+    add('reports', 'The reports of the steps before', lines);
   }
-  lines.push('', crewRules(config, project));
-  return lines.join('\n');
+  add('rules', 'Chiefmate (src/runs.mjs, crewRules)', ['', crewRules(config, project)]);
+  return parts;
+}
+
+const stepPrompt = args => promptParts(args).flatMap(p => p.lines).join('\n');
+
+/** What a step may use: the agent's tools and its MCP servers', and what is denied (always, by the agent, by access). */
+export function stepTools(agent, mcp, access) {
+  return {
+    tools: [...new Set([...(agent.tools ?? []), ...mcp.tools])],
+    disallowed: [...new Set([...ALWAYS_DISALLOWED, ...(agent.disallowed ?? []), ...access.denied])],
+  };
 }
 
 /**
@@ -293,6 +323,7 @@ function contextReport({ run, step, index, agent, dir, model, prompt, tools, dis
     ? [
       `- File: \`${built.file}\``,
       `- Blocks: ${built.blocks.join(', ')}`,
+      ...(built.off?.length ? [`- Turned off for the project ("prompt_exclude"): ${built.off.join(', ')}`] : []),
       ...built.missing.map(m => `- Not found: ${m}`),
       ...(built.unresolved?.length ? [`- Variables left unfilled (no value in the document): ${built.unresolved.map(v => `{${v}}`).join(', ')}`] : []),
       ...built.adaptations.map(a => `- Adapted in "${a.block}" (Chiefmate's rules prevail): ${a.line}`),
@@ -372,8 +403,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   }
   for (const a of built?.adaptations ?? []) logAction(l, { type: 'action', text: t('Prompt builder: a line of "{block}" was adapted to the crew\'s rules', { block: a.block }) });
   const prompt = stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries, base, access, built, agents });
-  const tools = [...new Set([...(agent.tools ?? []), ...mcp.tools])];
-  const disallowed = [...new Set([...ALWAYS_DISALLOWED, ...(agent.disallowed ?? []), ...access.denied])];
+  const { tools, disallowed } = stepTools(agent, mcp, access);
   const name = `${String(index + 1).padStart(2, '0')}-${step.agent}`;
   const contextFile = path.join(runDir(run.id), `${name}.context.md`);
 

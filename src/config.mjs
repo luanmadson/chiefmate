@@ -84,11 +84,18 @@ export function loadAgents(config = loadConfig()) {
     if (!parts) continue;
     const id = file.replace(/\.md$/, '');
     const { extra_instructions: extra, ...settings } = config.crew?.[id] ?? {};
-    const instructions = fill(parts[2].trim()) + (extra ? `\n\n## Notes for this installation\n\n${fill(extra)}` : '');
-    agents[id] = { id, ...parseHeader(parts[1]), ...settings, instructions, file: `agents/${file}` };
+    // Each part of the instructions with where it comes from (the project's Context tab shows them); joined, they are
+    // the instructions, as they are sent.
+    const instructionParts = [{ key: 'agent', source: `agents/${file}`, text: fill(parts[2].trim()) }];
+    if (extra) instructionParts.push({ key: 'installation', source: `crew.${id}.extra_instructions`, text: `\n\n## Notes for this installation\n\n${fill(extra)}` });
+    agents[id] = { id, ...parseHeader(parts[1]), ...settings, instructions: joinParts(instructionParts), instructionParts, file: `agents/${file}` };
   }
   return Object.fromEntries(Object.entries(agents).sort(([, a], [, b]) => (a.order ?? 99) - (b.order ?? 99)));
 }
+
+const joinParts = parts => parts.map(p => p.text).join('');
+/** An agent's instruction parts; an agent made elsewhere (without them) has one: its whole instructions. */
+const partsOf = agent => agent.instructionParts ?? [{ key: 'agent', source: agent.file ?? `agents/${agent.id}.md`, text: agent.instructions ?? '' }];
 
 /** A project's "crew" setting as [member id, settings] pairs: a list of agent ids, or { "<member id>": { ... } }. */
 function memberSpecs(crew) {
@@ -113,8 +120,11 @@ export function projectCrew(config = loadConfig(), projectId, agents = loadAgent
     const base = agents[baseId];
     if (!base || baseId === 'manager' || id === 'lead') continue;
     const { agent: _base, id: _id, extra_instructions: extra, ...settings } = spec;
-    const instructions = base.instructions + (extra ? `\n\n## Notes for this project's crew (${project.name ?? projectId})\n\n${extra}` : '');
-    team[id] = { ...base, ...settings, id, base: baseId, project: projectId, instructions };
+    const instructionParts = [
+      ...partsOf(base),
+      ...(extra ? [{ key: 'project-member', source: `projects.${projectId}.crew.${id}.extra_instructions`, text: `\n\n## Notes for this project's crew (${project.name ?? projectId})\n\n${extra}` }] : []),
+    ];
+    team[id] = { ...base, ...settings, id, base: baseId, project: projectId, instructions: joinParts(instructionParts), instructionParts };
   }
   return team;
 }
@@ -141,6 +151,11 @@ export function projectLead(config, projectId, agents = loadAgents(config)) {
 - You plan each request sent to this project into a few tasks for the project's crew.
 - You do the first review of the crew's work and write your opinion for the manager, who does the final review and talks with ${config.owner || 'the owner'}.
 - You read, search and run commands that change nothing. You never edit, write or commit the project's files.`;
+  const instructionParts = [
+    ...partsOf(base),
+    { key: 'lead-role', source: 'Chiefmate (src/config.mjs, projectLead)', text: `\n\n## Your role here: team lead of ${projectName}\n\n${role}` },
+    ...(extra ? [{ key: 'lead-notes', source: `projects.${projectId}.lead.extra_instructions`, text: `\n\n## Notes for the team lead of ${projectName}\n\n${extra}` }] : []),
+  ];
   return {
     ...base,
     ...settings,
@@ -153,7 +168,8 @@ export function projectLead(config, projectId, agents = loadAgents(config)) {
     lead: true,
     tools: (base.tools ?? []).filter(x => !LEAD_NO_EDIT.includes(x)),
     disallowed: [...new Set([...(base.disallowed ?? []), ...LEAD_NO_EDIT, 'Bash(git commit:*)'])],
-    instructions: `${base.instructions}\n\n## Your role here: team lead of ${projectName}\n\n${role}${extra ? `\n\n## Notes for the team lead of ${projectName}\n\n${extra}` : ''}`,
+    instructions: joinParts(instructionParts),
+    instructionParts,
   };
 }
 
