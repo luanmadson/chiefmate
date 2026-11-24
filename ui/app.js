@@ -241,13 +241,19 @@ const agentName = (id, project) => t(member(id, project).name ?? id);
 const faceState = agent => (online ? agent.status ?? 'idle' : 'offline');
 const stepFace = step => ({ running: step.review ? 'reviewing' : 'working', done: 'done', failed: 'failed', pending: 'queued' })[step.status] ?? 'still';
 
+/** Whom a step waiting its turn waits for: the agent at work on its run, or the project of the run ahead of it. */
+const waitingWho = w => (w.agent ? agentName(w.agent, w.project) : projectName(w.project));
+
+/** The attribute that opens the agent's panel on a click, for a member at work on a run. */
+const opensPanel = runId => (runId ? ` data-agent-run="${esc(runId)}" title="${esc(t('Click to watch live and talk to the agent'))}"` : '');
+
 function agentStatus(agent) {
   if (!online) return [t('Offline'), 'error'];
   switch (agent.status) {
     case 'working': return [t('Working'), 'info'];
     case 'reviewing': return [t('Reviewing'), 'info'];
     case 'thinking': return [t('Thinking'), 'info'];
-    case 'queued': return [t('Next in line'), 'neutral'];
+    case 'queued': return [agent.waitingFor ? t('Waiting for {who}: {task}', { who: waitingWho(agent.waitingFor), task: agent.waitingFor.task }) : t('Next in line'), 'neutral'];
     case 'waiting': return [t('Waiting for the limit'), 'warn'];
     case 'offline': return [t('Offline'), 'error'];
     default: return [agent.id === 'manager' ? t('Waiting for you') : t('Standing by'), 'ok'];
@@ -317,6 +323,9 @@ function drawPresence() {
 function drawFocus() {
   const f = online ? state.focus : null;
   const label = `<span class="label">${esc(t('Focus'))}</span>`;
+  // A run going on in focus: a click opens the panel of its agent at work.
+  if (f?.state === 'running') $('#focus').dataset.agentRun = f.run;
+  else delete $('#focus').dataset.agentRun;
   if (!f) {
     const text = online ? t('No project in focus') : '—';
     const html = `${label}<span class="focus-none">${esc(text)}</span>`;
@@ -617,7 +626,7 @@ function liveCard(a, key) {
   const step = a.steps[(a.step ?? 1) - 1];
   const who = a.agent ? agentName(a.agent, a.project) : t('Chiefmate, preparing the working copy');
   const segments = a.steps.map((s, i) => `<span class="${s.status}" title="${esc(`${i + 1}. ${agentName(s.agent, a.project)}: ${runState(s.status)[0]}`)}"></span>`);
-  return `<div class="panel live${online ? '' : ' stalled'}">
+  return `<div class="panel live${online ? '' : ' stalled'}"${a.agent ? opensPanel(a.id) : ''}>
       ${face(working, look, 56, `${who}: ${t('Running')}`)}
       <div class="live-main">
         <div class="live-label">${online ? liveDot() : ''}<span class="label">${esc(t('Running now'))}</span></div>
@@ -653,7 +662,7 @@ function runBlock(a) {
           <div class="label">${esc(t('Steps'))}</div>
           <ol class="steps" id="${k}-steps"></ol>
           <div id="${k}-context"></div>
-          <div class="actions"><button type="button" class="button danger small" data-cancel="${esc(a.id)}">${esc(t('Cancel run'))}</button></div>
+          <div class="actions"><button type="button" class="button secondary small" data-agent-run="${esc(a.id)}">${esc(t('Watch and talk'))}</button><button type="button" class="button danger small" data-cancel="${esc(a.id)}">${esc(t('Cancel run'))}</button></div>
         </div>
         <div>
           <div class="logbook-head" id="${k}-head"></div>
@@ -670,7 +679,7 @@ function drawRun(a) {
   if (draw(`#${k}-live`, JSON.stringify([online, a.title, a.step, a.agent, a.stepStarted, statuses, working?.status]), liveCard(a, k))) delete signatures[`#${k}-last`];
   const last = a.actions.at(-1);
   draw(`#${k}-last`, JSON.stringify([last?.at, last?.text]), lastAction(a));
-  const steps = a.steps.map((s, i) => `<li>${face(member(s.agent, a.project), online ? stepFace(s) : 'offline', 30)}<div><div class="name">${i + 1}. ${esc(agentName(s.agent, a.project))}${s.review ? `, ${esc(t('review'))}` : ''}</div><div class="hint">${esc(runState(s.status)[0])}${s.status === 'running' && a.stepStarted ? ` · ${ticking(a.stepStarted)}` : ''}</div></div></li>`);
+  const steps = a.steps.map((s, i) => `<li${s.status === 'running' ? opensPanel(a.id) : ''}>${face(member(s.agent, a.project), online ? stepFace(s) : 'offline', 30)}<div><div class="name">${i + 1}. ${esc(agentName(s.agent, a.project))}${s.review ? `, ${esc(t('review'))}` : ''}</div><div class="hint">${esc(runState(s.status)[0])}${s.status === 'running' && a.stepStarted ? ` · ${ticking(a.stepStarted)}` : ''}</div></div></li>`);
   draw(`#${k}-steps`, JSON.stringify([online, statuses, a.stepStarted]), steps.join(''));
   draw(`#${k}-context`, JSON.stringify([a.agent, a.context]), a.agent ? `<div class="step-context">${agentContextMeter(a)}</div>` : '');
   const head = `${working ? face(working, faceState(working), 28) : ''}<div class="label">${esc(working ? t('Logbook: {agent} at work', { agent: t(working.name) }) : t('Logbook: preparing the working copy'))}</div>`;
@@ -769,7 +778,7 @@ function drawCrew() {
     const busy = online && a.status !== 'idle';
     let last = t('No work yet');
     if (a.last) last = a.last.chat ? t('Answered you {when}', { when: relative(a.last.at) }) : t('{when}: {title}', { when: relative(a.last.at), title: a.last.title });
-    return `<article class="crew-card" style="--agent:${esc(a.color ?? '#8a93a0')}">
+    return `<article class="crew-card" style="--agent:${esc(a.color ?? '#8a93a0')}"${online ? opensPanel(a.runs?.[0]) : ''}>
       ${face(a, faceState(a), 72, `${t(a.name)}: ${status[0]}`)}
       <div>
         <div class="crew-top"><div><h2>${esc(t(a.name))}</h2><div class="hint">${esc(t(a.title ?? ''))}</div></div><span class="model" title="${esc(a.model)}">${esc(shortModel(a.model))}</span></div>
@@ -810,7 +819,7 @@ function drawTeams() {
   const html = `<div class="teams">${teams.map(team => `
     <div class="team">
       <div class="team-top"><h3>${esc(team.name)}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>
-      ${team.members.map(a => `<div class="team-member">${face(a, faceState(a), 30)}<div><div class="name">${esc(t(a.name))}</div><div class="hint">${esc([a.base && a.base !== a.id ? t('Based on {agent}', { agent: agentName(a.base) }) : t(a.title ?? ''), a.extra ? t('with instructions for this project') : '', (a.mcp ?? []).length ? t('tools: {list}', { list: a.mcp.join(', ') }) : ''].filter(Boolean).join(' · '))}</div></div>${stateHtml(agentStatus(a))}</div>`).join('') || `<div class="hint">${esc(t('No members.'))}</div>`}
+      ${team.members.map(a => `<div class="team-member"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 30)}<div><div class="name">${esc(t(a.name))}</div><div class="hint">${esc([a.base && a.base !== a.id ? t('Based on {agent}', { agent: agentName(a.base) }) : t(a.title ?? ''), a.extra ? t('with instructions for this project') : '', (a.mcp ?? []).length ? t('tools: {list}', { list: a.mcp.join(', ') }) : ''].filter(Boolean).join(' · '))}</div></div>${stateHtml(agentStatus(a))}</div>`).join('') || `<div class="hint">${esc(t('No members.'))}</div>`}
     </div>`).join('')}</div>`;
   draw('#teams', html, html);
 }
@@ -1247,6 +1256,148 @@ $('#plan-form').addEventListener('submit', async event => {
   }
 });
 
+// ---------- The agent's panel: live, and the direct talk ----------
+
+// The run whose agent the panel shows, the step it reads and where its log was read up to.
+const agentPanel = { run: null, step: null, next: null, timer: null, loading: false };
+
+function openAgentPanel(id) {
+  Object.assign(agentPanel, { run: id, step: null, next: null });
+  $('#agent-feed').innerHTML = '';
+  for (const key of ['#agent-head', '#agent-talk']) delete signatures[key];
+  $('#agent-panel').hidden = false;
+  clearInterval(agentPanel.timer);
+  agentPanel.timer = setInterval(pollAgent, 1500);
+  pollAgent();
+  setTimeout(() => $('#agent-form').text.focus(), 0);
+}
+
+function closeAgentPanel() {
+  clearInterval(agentPanel.timer);
+  agentPanel.run = null;
+  $('#agent-panel').hidden = true;
+}
+
+/** Adds what the agent did since the last reading, keeping the view at the end when it was there. */
+function appendFeed(f, first) {
+  const box = $('#agent-feed');
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  const html = [];
+  if (first) html.push(`<div class="feed-step">${esc(t('Step {n} of {total}', { n: f.step, total: f.total }))} · ${esc(f.agent ? agentName(f.agent, f.project) : t('preparing'))}</div>`);
+  for (const i of f.items) {
+    html.push(i.type === 'say'
+      ? `<div class="feed-say">${md(i.text)}</div>`
+      : `<div class="feed-action"><span class="feed-tool" title="${esc(i.tool)}">${esc(i.tool)}</span><span>${esc(i.text)}</span></div>`);
+  }
+  if (!html.length) return;
+  box.insertAdjacentHTML('beforeend', html.join(''));
+  while (box.childElementCount > 800) box.firstElementChild.remove();
+  if (atBottom || first) box.scrollTop = box.scrollHeight;
+}
+
+function drawAgentHead(f) {
+  const who = f.agent ? member(f.agent, f.project) : member('manager');
+  const look = online ? stepFace({ status: f.stepStatus, review: f.review }) : 'offline';
+  const status = f.live ? (f.stepStatus === 'running' ? [f.review ? t('Reviewing') : t('Working'), 'info'] : [t('Preparing…'), 'info']) : runState(f.status);
+  const where = [projectName(f.project), t('Step {n} of {total}', { n: f.step, total: f.total })].join(' · ');
+  const html = `${face(who, look, 40)}<div style="min-width:0">
+      <div class="name">${esc(f.agent ? agentName(f.agent, f.project) : t('Chiefmate, preparing the working copy'))}</div>
+      <div class="hint" title="${esc(f.title)}">${esc(f.title)}</div>
+      <div class="hint">${esc(where)}${f.live && f.stepStatus === 'running' && f.stepStarted ? ` · ${ticking(f.stepStarted)}` : ''}</div>
+      ${stateHtml(status)}
+    </div>`;
+  draw('#agent-head', JSON.stringify([online, f.run, f.step, f.agent, f.stepStatus, f.live, f.status]), html);
+  $('#agent-form').querySelector('button').disabled = !f.talking;
+  $('#agent-form-hint').textContent = f.talking
+    ? t('Your message reaches the agent at a safe point: it answers here and goes on with its work.')
+    : f.live ? t('The agent is between two steps: write again in a moment.') : t('This run is no longer going on.');
+}
+
+function drawAgentTalk(f) {
+  const open = new Set(f.requests.map(r => r.id));
+  const entries = f.talk.map(m => {
+    const meta = [clockTime(m.at), t('step {n}', { n: m.step })];
+    if (m.who === 'owner') {
+      const status = { pending: t('waiting for a safe point'), delivered: m.via === 'request' ? t('delivered as the answer to the request') : t('delivered'), undelivered: t('not delivered') }[m.status];
+      return `<div class="talk owner"><div class="talk-head"><span class="talk-who">${esc(t('You'))}</span> · ${esc([...meta, status].filter(Boolean).join(' · '))}</div><div class="talk-text">${esc(m.text)}</div></div>`;
+    }
+    const asking = m.kind === 'request';
+    const waiting = asking && open.has(m.request);
+    const button = waiting ? ` <button type="button" class="button small" data-needs-done="${esc(f.run)}" data-request="${esc(m.request)}">${esc(t('Mark as done'))}</button>` : '';
+    return `<div class="talk${asking ? ' request' : ''}"><div class="talk-head"><span class="talk-who">${esc(agentName(m.agent, f.project))}</span> · ${esc([...meta, asking ? t('asks for your help') : ''].filter(Boolean).join(' · '))}${button}</div><div class="talk-text">${esc(m.text)}</div>${waiting ? `<div class="hint">${esc(t('Answer below: your message goes to the agent as the answer.'))}</div>` : ''}</div>`;
+  });
+  const html = entries.join('') || `<div class="hint">${esc(t('Nothing yet. Write below: the agent pauses at a safe point, reads your message and goes on in the same session, on the same branch.'))}</div>`;
+  if (draw('#agent-talk', JSON.stringify([f.run, f.talk.map(m => [m.id, m.status]), [...open]]), html)) $('#agent-talk').scrollTop = $('#agent-talk').scrollHeight;
+}
+
+async function pollAgent() {
+  const id = agentPanel.run;
+  if (!id || agentPanel.loading) return;
+  agentPanel.loading = true;
+  let again = false;
+  try {
+    const query = new URLSearchParams();
+    if (agentPanel.step) query.set('step', agentPanel.step);
+    if (agentPanel.next != null) query.set('from', agentPanel.next);
+    const f = await api(`/api/run/${encodeURIComponent(id)}/feed?${query}`);
+    if (agentPanel.run !== id) return;
+    // The run went on to another step: follow it, from the start of that step.
+    if (agentPanel.step && f.live && f.current !== f.step) {
+      Object.assign(agentPanel, { step: f.current, next: null });
+      again = true;
+      return;
+    }
+    const first = agentPanel.next == null;
+    Object.assign(agentPanel, { step: f.step, next: f.next });
+    appendFeed(f, first);
+    drawAgentHead(f);
+    drawAgentTalk(f);
+  } catch (error) {
+    $('#agent-form-hint').textContent = error.message;
+  } finally {
+    agentPanel.loading = false;
+    if (again) pollAgent();
+  }
+}
+
+async function sendToAgent() {
+  const area = $('#agent-form').text;
+  const text = area.value.trim();
+  if (!text || !agentPanel.run) return;
+  try {
+    const sent = await api('/api/run/talk', { run: agentPanel.run, text });
+    area.value = '';
+    toast(sent.via === 'request' ? t("Sent as the answer to the agent's request.") : t('Sent. The agent reads it at the next safe point.'));
+    pollAgent();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+$('#agent-form').addEventListener('submit', event => {
+  event.preventDefault();
+  sendToAgent();
+});
+$('#agent-form').text.addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    sendToAgent();
+  }
+});
+$('#agent-close').addEventListener('click', closeAgentPanel);
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && agentPanel.run && !document.querySelector('dialog[open]')) closeAgentPanel();
+});
+// A click on an agent at work (in Operations, the crew, the teams or the focus) opens its panel; the buttons inside
+// those places keep their own action.
+document.addEventListener('click', event => {
+  const target = event.target.closest('[data-agent-run]');
+  if (!target) return;
+  const control = event.target.closest('button, a, input, textarea, select, summary');
+  if (control && control !== target) return;
+  openAgentPanel(target.dataset.agentRun);
+});
+
 // ---------- Cycle ----------
 
 function drawOffline() {
@@ -1271,6 +1422,7 @@ function writing() {
   return (
     !!document.querySelector('dialog[open]') ||
     $('#message').value.trim() !== '' ||
+    $('#agent-form').text.value.trim() !== '' ||
     (['INPUT', 'TEXTAREA'].includes(field?.tagName) && field.value.trim() !== '')
   );
 }
