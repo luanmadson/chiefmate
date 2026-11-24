@@ -77,7 +77,7 @@ queue ─► fresh working copy ─► the crew, one after another ─► manage
 
 A one-off task follows the same path, with a single agent and, if you tick the box, the manager's review.
 
-Runs going on at the same time never share a working copy: each project has its own. The reference libraries are shared, so Chiefmate updates each one once at a time, and a run that asks for a library while it is being updated gets that same update. The self-update waits until every run has ended.
+Runs going on at the same time never share a working copy: each project has its own. The reference libraries are shared, so Chiefmate runs only one update of each library at a time, and a run that asks for a library while it is being updated gets that same update. The self-update waits until every run has ended.
 
 ### What each step sees
 
