@@ -40,5 +40,14 @@
   "limits": {
     "pause_at_5h_window": 0.85,
     "pause_at_plan_week": 0.9
+  },
+  "plan_resets": [],
+  "usage_reader": {
+    "enabled": false,
+    "every_hours": 4
+  },
+  "mcp_servers": {},
+  "needs_you": {
+    "max_wait_minutes": 120
   }
 }

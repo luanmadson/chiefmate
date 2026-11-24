@@ -4,7 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export const DATA = path.join(ROOT, 'data');
+// CHIEFMATE_DATA points a temporary Chiefmate (the smoke test) at a folder of its own, away from the installation's records.
+export const DATA = process.env.CHIEFMATE_DATA ? path.resolve(process.env.CHIEFMATE_DATA) : path.join(ROOT, 'data');
 export const WORKSPACES = path.join(ROOT, 'workspaces');
 export const RUNS = path.join(DATA, 'runs');
 export const VERSION = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
