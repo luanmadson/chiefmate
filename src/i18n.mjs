@@ -42,7 +42,7 @@ export const formatMoney = value => new Intl.NumberFormat(locale(), { style: 'cu
 
 export const formatNumber = value => new Intl.NumberFormat(locale()).format(value ?? 0);
 
-export const formatPercent =value => (typeof value === 'number' ? `${Math.round(value * 100)}%` : '—');
+export const formatPercent = value => (typeof value === 'number' ? `${Math.round(value * 100)}%` : '—');
 
 export function formatDuration(ms) {
   if (!ms && ms !== 0) return '';
