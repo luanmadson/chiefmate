@@ -189,6 +189,7 @@ async function runStep({ run, step, index, dir, project, config, agents, librari
     tools: agent.tools ?? [],
     disallowed: [...ALWAYS_DISALLOWED, ...(agent.disallowed ?? [])],
     addDirs: libraries.map(l => l.dir),
+    attribution: config.attribution !== false,
     maxMinutes: agent.max_minutes ?? 60,
     log: path.join(runDir(run.id), `${String(index + 1).padStart(2, '0')}-${step.agent}.jsonl`),
     onEvent: logAction,

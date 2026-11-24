@@ -80,14 +80,17 @@ function stop(child) {
 /**
  * Runs one step. Returns { promise, cancel }. The time limit is the only cap: there is no spending cap.
  * options: dir, prompt, system (the agent's instructions), model, effort, tools, disallowed, addDirs (more folders
- * the agent may read), maxMinutes, session ({ id, resume }), log (a .jsonl file), onEvent(event).
+ * the agent may read), attribution (false: commits and pull requests don't credit Claude), maxMinutes,
+ * session ({ id, resume }), log (a .jsonl file), onEvent(event).
  */
 export function runClaude(options) {
   const {
-    dir, prompt, system, model, effort, tools = [], disallowed = [], addDirs = [], maxMinutes = 60, session, log, onEvent = () => {},
+    dir, prompt, system, model, effort, tools = [], disallowed = [], addDirs = [], attribution = true, maxMinutes = 60, session, log,
+    onEvent = () => {},
   } = options;
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--permission-mode', 'dontAsk', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'];
   if (effort) args.push('--effort', String(effort));
+  if (!attribution) args.push('--settings', JSON.stringify({ includeCoAuthoredBy: false, attribution: { commit: '', pr: '' } }));
   if (system) {
     const systemFile = `${log}.instructions.md`;
     writeFileSync(systemFile, system);

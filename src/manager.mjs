@@ -93,6 +93,7 @@ export async function talkToManager(message) {
       tools: manager.tools ?? [],
       disallowed: CHAT_DISALLOWED,
       addDirs: libraries.map(l => l.dir),
+      attribution: config.attribution !== false,
       maxMinutes: 15,
       session,
       log: path.join(ensureDir(path.join(DATA, 'manager')), 'conversation.jsonl'),
