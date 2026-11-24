@@ -7,6 +7,7 @@ import { loadAgents, loadConfig, projectCrew } from './config.mjs';
 import { formatDateTime, formatDuration, formatNumber, formatPercent, t } from './i18n.mjs';
 import { processes } from './machine.mjs';
 import { computerLine, planLine } from './plan.mjs';
+import { planningLine } from './planning.mjs';
 import { focus, maxParallel, queued } from './queue.mjs';
 import { ALWAYS_DISALLOWED, liveRuns, prepareLibraries } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
@@ -122,6 +123,7 @@ export function situation(libraries = []) {
   lines.push(planLine(config, usage));
   lines.push(computerLine(config));
   lines.push(sessionsLine(config));
+  lines.push(planningLine(config.owner || 'the owner'));
   lines.push(contextLine());
   const delivery = p => (p.deliver === 'local' ? `, local delivery: the result is a branch in ${p.local_clone ?? 'the working copy'}, nothing goes to GitHub` : ', delivered as a pull request');
   lines.push(`Projects: ${Object.entries(config.projects ?? {}).map(([id, p]) => `${id} (${p.name}, ${p.repository}${delivery(p)}${p.docs ? `, personal docs in ${p.docs}` : ''})`).join('; ') || 'none'}.`);

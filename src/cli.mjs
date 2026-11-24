@@ -68,10 +68,19 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs server [--log]               starts the app, the queue, the schedule and the updates (http://localhost:${port()});
                                                 --log writes what it prints to data/server.log
   node src/cli.mjs status                       what is running, the queue, the account's usage and the crew
-  node src/cli.mjs mission <id>                 queues a mission (the ids are in config/chiefmate.json)
-  node src/cli.mjs task <project> <agent> "<what to do>" [--review] [--modules A,B]
+  node src/cli.mjs mission <id> [--plan <n>]    queues a mission (the ids are in config/chiefmate.json)
+  node src/cli.mjs task <project> <agent> "<what to do>" [--review] [--modules A,B] [--plan <n>]
                                                 queues a one-off task; --review has the manager review it at the end;
-                                                --modules adds optional blocks of the prompt builder
+                                                --modules adds optional blocks of the prompt builder; --plan links it
+                                                to item n of the planning board, which then follows the run
+  node src/cli.mjs plan [list] [--project <id>] [--status <s>] [--priority <p>] [--all]
+                                                the planning board: open items by priority (--all: done and archived too)
+  node src/cli.mjs plan add <project> "<title>" [--priority high|medium|low] [--status <s>] [--description "<text>"]
+                                                adds an item; statuses: future, todo, queued, in_progress, waiting_owner, done
+  node src/cli.mjs plan set <n> [--title ...] [--description ...] [--project ...] [--priority ...] [--status ...]
+                            [--run <id>] [--pr <url>] [--archive | --restore]
+                                                changes item n (--run "" or --pr "" removes the link)
+  node src/cli.mjs plan done <n>                marks item n as done
   node src/cli.mjs chat [n]                     the conversation with the manager: the last n messages (10), what it is
                                                 doing now and the messages waiting in the queue
   node src/cli.mjs chat say "<message>"         writes to the manager; while it answers, the message waits in the queue
@@ -206,6 +215,47 @@ async function chatCommand() {
   }
 }
 
+/** "plan": the planning board, read and changed in data/plan.json (with or without Chiefmate running). */
+async function planCommand() {
+  const planning = await import('./planning.mjs');
+  const keys = ['title', 'description', 'project', 'priority', 'status', 'run', 'pr']; // the options that take a value
+  const [action = 'list', ...args] = rest.filter((x, i) => !x.startsWith('--') && !keys.includes(rest[i - 1]?.slice(2)));
+  const fields = () => Object.fromEntries(keys.filter(k => option(`--${k}`) !== undefined).map(k => [k, option(`--${k}`)]));
+  const line = i => `#${String(i.id).padEnd(3)} ${i.priority.padEnd(6)} ${i.status.padEnd(13)} ${i.project}: ${i.title}${i.run ? `  [run ${i.run}${i.run_status ? `, ${i.run_status}` : ''}]` : ''}${i.pr ? `  ${i.pr}` : ''}${i.archived ? '  (archived)' : ''}`;
+  const show = (verb, i) => console.log(`${verb} ${line(i)}${i.description ? `\n      ${i.description.replace(/\n/g, '\n      ')}` : ''}`);
+  switch (action) {
+    case 'list': {
+      const status = option('--status') && planning.parseStatus(option('--status'));
+      const priority = option('--priority') && planning.parsePriority(option('--priority'));
+      const project = option('--project');
+      const items = planning.planItems().filter(i =>
+        (has('--all') || status || (!i.archived && i.status !== 'done')) && (!i.archived || has('--all'))
+        && (!status || i.status === status) && (!priority || i.priority === priority) && (!project || i.project === project));
+      for (const i of items) console.log(line(i));
+      if (!items.length) console.log('No items on the planning board for this filter. Add one: node src/cli.mjs plan add <project> "<title>"');
+      return;
+    }
+    case 'add': {
+      const [project, ...title] = args;
+      show('Added', planning.addItem({ ...fields(), project, title: title.join(' ') }));
+      return;
+    }
+    case 'set': {
+      if (!args[0]) throw new Error('Which item? node src/cli.mjs plan set <n> --status <s>');
+      let item = planning.updateItem(args[0], fields());
+      if (has('--archive') || has('--restore')) item = planning.archiveItem(args[0], has('--archive'));
+      show('Changed', item);
+      return;
+    }
+    case 'done':
+      if (!args[0]) throw new Error('Which item? node src/cli.mjs plan done <n>');
+      show('Done', planning.updateItem(args[0], { status: 'done' }));
+      return;
+    default:
+      throw new Error('Use: plan [list] | add <project> "<title>" | set <n> [--status ...] | done <n>');
+  }
+}
+
 /** "session": opens, lists or ends the live sessions. */
 async function sessionCommand() {
   const sessions = await import('./sessions.mjs');
@@ -300,19 +350,22 @@ async function main() {
       return;
     }
     case 'mission': {
-      const run = await api('/api/mission', { mission: rest[0], origin: option('--origin') ?? 'manager' });
+      const run = await api('/api/mission', { mission: rest[0], origin: option('--origin') ?? 'manager', plan: option('--plan') });
       console.log(`Queued: ${run.title} [${run.id}]`);
       return;
     }
     case 'task': {
       const [project, agent, instruction] = rest;
       const modules = (option('--modules') ?? '').split(',').map(m => m.trim()).filter(Boolean);
-      const run = await api('/api/task', { project, agent, instruction, review: has('--review'), modules, origin: option('--origin') ?? 'manager' });
+      const run = await api('/api/task', { project, agent, instruction, review: has('--review'), modules, origin: option('--origin') ?? 'manager', plan: option('--plan') });
       console.log(`Queued: ${run.title} [${run.id}]`);
       return;
     }
     case 'chat':
       await chatCommand();
+      return;
+    case 'plan':
+      await planCommand();
       return;
     case 'cancel':
       console.log((await api('/api/cancel', { id: rest[0] })).status);

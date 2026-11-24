@@ -14,6 +14,7 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
 | `src/sessions.mjs` | The live sessions: the profiles, the first message from the prompt builder, the window (Windows Terminal or PowerShell) that runs Claude Code or Codex, and finding, measuring and ending their processes. |
 | `src/manager.mjs` | The conversation with the manager: the queue of messages sent while it answers (delivered together when it ends), the interruption that keeps the session, and the renewal with a summary when its context fills up. |
 | `src/machine.mjs` | This computer: the projects' processes, their memory and stopping them (Windows). |
+| `src/planning.mjs` | The owner's planning board (`data/plan.json`): its items, the import of the manager's old `data/manager/plan.md`, the items that follow their runs (through `onRunSaved` in `src/store.mjs`) and the summary for the manager. |
 | `src/plan.mjs` | The plan's free resets, the week's pace and the alerts (usage, memory, resets), which only warn. |
 | `src/usagepage.mjs` | The optional, read-only reading of the account's usage page on claude.ai, through Edge or Chrome. |
 | `src/claude.mjs` | Runs Claude Code headless (`claude -p`), without the user's own configuration, and follows each action and how full the context is. |

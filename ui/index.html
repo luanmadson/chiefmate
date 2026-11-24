@@ -22,6 +22,7 @@
     <nav class="nav" aria-label="Sections" data-t-label="Sections">
       <a href="#manager" data-view="manager"><span data-t="Manager">Manager</span><span class="counter" id="counter-manager"></span></a>
       <a href="#operations" data-view="operations"><span data-t="Operations">Operations</span><span class="counter" id="counter-operations"></span></a>
+      <a href="#planning" data-view="planning"><span data-t="Planning">Planning</span><span class="counter" id="counter-planning"></span></a>
       <a href="#missions" data-view="missions"><span data-t="Missions">Missions</span></a>
       <a href="#crew" data-view="crew"><span data-t="Crew">Crew</span></a>
       <a href="#projects" data-view="projects"><span data-t="Projects">Projects</span><span class="counter" id="counter-projects"></span></a>
@@ -71,6 +72,33 @@
           </div>
         </div>
         <div id="operations"></div>
+      </section>
+
+      <section class="view" id="view-planning">
+        <div class="view-header">
+          <div>
+            <h1 data-t="Planning">Planning</h1>
+            <p data-t="What is to be done in each project, by priority. An item linked to a run follows it on its own; the manager keeps the board too.">What is to be done in each project, by priority. An item linked to a run follows it on its own; the manager keeps the board too.</p>
+          </div>
+        </div>
+        <div id="planning-waiting"></div>
+        <div id="planning-filters" class="plan-filters"></div>
+        <div id="planning-list"></div>
+        <form id="plan-form" class="panel form">
+          <div class="label" data-t="Add an item">Add an item</div>
+          <div class="fields">
+            <label><span data-t="Project">Project</span><select name="project" id="plan-project" required></select></label>
+            <label><span data-t="Priority">Priority</span><select name="priority" id="plan-priority"></select></label>
+            <label><span data-t="Status">Status</span><select name="status" id="plan-status"></select></label>
+          </div>
+          <label><span data-t="Title">Title</span><input name="title" type="text" maxlength="200" required></label>
+          <label><span data-t="Description (optional)">Description (optional)</span><textarea name="description" rows="2" maxlength="4000"></textarea></label>
+          <div class="fields">
+            <label><span data-t="Run (optional)">Run (optional)</span><input name="run" type="text" maxlength="80" placeholder="2026-11-24-1717-generalist"></label>
+            <label><span data-t="Pull request (optional)">Pull request (optional)</span><input name="pr" type="text" maxlength="300" placeholder="https://github.com/…/pull/12"></label>
+          </div>
+          <div class="actions"><button type="submit" class="button" data-t="Add">Add</button></div>
+        </form>
       </section>
 
       <section class="view" id="view-missions">

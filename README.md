@@ -13,12 +13,13 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
 
 ## What you get
 
-- **An app window**, with no browser bar, and seven sections:
+- **An app window**, with no browser bar, and eight sections:
 
   | Section | What it is for |
   |---|---|
   | **Manager** | Talk to Chiefmate. Ask how things are going, request a job, adjust the crew. It answers with the real situation: what is running, the queue, usage and your account's plan usage. You can write at any time, even while it answers (see "Talking while the manager answers" below), and you see live what it is doing. Beside the conversation, how full its context is and the context of the agent at work (see "The conversation's context" below). |
   | **Operations** | What the crew is doing right now. Each run going on (up to three at once by default, one per project) has its own block, with a discreet brass animation: the agent at work and their portrait, the step out of how many, the time counting live (for the run and for the step) and the agent's last action, updated as it happens; then the steps, the context of the agent at work and the logbook (every action of the agent, with the time). Below, the queue, numbered in the order it will run, with the next run marked and when each one is expected to start, and the live sessions: those open (alive or not, memory, for how long, a button to end them) and a button to open each profile. |
+  | **Planning** | Your board of what is to be done in each project, by priority (see "Planning" below). The items waiting for you stand out at the top, and their number shows beside the section. |
   | **Missions** | Complete jobs with their own schedule. "Run now" starts one at any time. |
   | **Crew** | Who is on board, what each one is doing and the model behind them. Give any of them a one-off task. |
   | **Projects** | Which of your projects are running on this computer (development servers, node, python, IDEs, started by you or by the crew) and the memory each one uses, with a button to stop them. |
@@ -233,6 +234,16 @@ The libraries are read from a copy that Chiefmate refreshes from GitHub before u
 3. create a mission for it, if you want a schedule;
 4. run the installer again.
 
+## Planning
+
+The Planning section is your board: what is to be done in each project, kept by you and by the manager.
+
+- **Each item** has a number, a project, a title, an optional description, a priority (high, medium or low), a status (future, to do, queued, in progress, waiting for you, completed), when it was created and last updated, and an optional link to a run (its id) or a pull request.
+- **In the app:** filter by project, priority and status (open items by default, or all, or the archived ones), sort by priority (then what is waiting for you first), by the latest updated or by number, change the priority and the status right in the list, edit the rest with **Edit**, add items with the form below the list, and archive what you no longer want to see (**Restore** brings it back). The items waiting for you are highlighted at the top.
+- **Items follow their runs.** Queue a task or a mission with `--plan <n>` (or link a run to an item with `plan set <n> --run <id>`) and the item changes by itself: queued while the run waits, in progress while it runs, waiting for you when it ends with a pull request to approve (the link to the pull request is kept) or a branch delivered locally, completed when it ends with nothing to approve, and back to "to do" if it fails or is canceled. You can still change the status by hand: the item only moves again when its run does.
+- **The manager keeps it too**, with the `plan` commands (see "Command line"), and gets a short summary with each of your messages: the open high-priority items and the ones waiting for you.
+- **Where it lives:** `data/plan.json`, outside the repository. The first time, if the manager kept a board in `data/manager/plan.md` (a Markdown table with the columns #, Projeto, Item, Prioridade, Situação), Chiefmate imports it, keeping the numbers; a status it doesn't recognize goes into the description, and the item stays "to do" or the closest status.
+
 ## Usage and limits
 
 Chiefmate measures what really counts on a subscription plan: your account's usage in the 5-hour window and in the plan's week, which Claude Code reports on every run. There are no spending caps in dollars.
@@ -305,9 +316,14 @@ The manager uses these commands (all but the `chat` ones, which are yours), and 
 ```
 node src/cli.mjs server [--log]               starts Chiefmate (the shortcut does this for you); --log writes to data/server.log
 node src/cli.mjs status                       what is running, the queue, usage and the crew
-node src/cli.mjs mission <id>                 queues a mission
+node src/cli.mjs mission <id>                 queues a mission (--plan <n>: item n of the planning board follows it)
 node src/cli.mjs task <project> <agent> "..." queues a one-off task (--review: the manager reviews it at the end;
-                                              --modules A,B: optional blocks of the prompt builder)
+                                              --modules A,B: optional blocks of the prompt builder; --plan <n>)
+node src/cli.mjs plan [list]                  the planning board's open items (--project, --status, --priority; --all)
+node src/cli.mjs plan add <project> "..."     adds an item (--priority high|medium|low, --status, --description)
+node src/cli.mjs plan set <n> --status ...    changes an item (--title, --description, --project, --priority, --run,
+                                              --pr, --archive, --restore)
+node src/cli.mjs plan done <n>                marks an item as completed
 node src/cli.mjs chat [n]                     the conversation with the manager: the last n messages, what it is doing, the queue
 node src/cli.mjs chat say "..."               writes to the manager; while it answers, the message waits in the queue
 node src/cli.mjs chat edit <id> "..."         changes a message still in the queue (chat remove <id> takes it out)
@@ -351,7 +367,7 @@ English is the source. The app, the notifications and the reports follow `langua
 | `agents/` | The crew, one file per agent |
 | `config/` | `example.json`, and your `chiefmate.json` (not in git) |
 | `scripts/` | Installation on Windows, launchers and checks |
-| `data/` (not in git) | Runs, each step's log and context, the live sessions' first messages and records, the conversation with the manager, your account's usage, the schedule's and the alerts' state and, if you use the claude.ai reading, its browser profile |
+| `data/` (not in git) | Runs, each step's log and context, the live sessions' first messages and records, the planning board (`plan.json`), the conversation with the manager, your account's usage, the schedule's and the alerts' state and, if you use the claude.ai reading, its browser profile |
 | `workspaces/` (not in git) | The projects' working copies |
 
 Chiefmate has no dependencies besides Node.js. It drives Claude Code (`claude -p`), which uses your account's login and plan. The only optional one is `playwright-core`, for copying the prompt builder from Google Docs (and, if present, for the browser that opens for sign-ins): Chiefmate loads it only when needed and says how to install it when it is missing.
