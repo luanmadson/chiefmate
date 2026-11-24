@@ -73,6 +73,10 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 queues a one-off task; --review has the manager review it at the end;
                                                 --modules adds optional blocks of the prompt builder; --plan links it
                                                 to item n of the planning board, which then follows the run
+  node src/cli.mjs ask <project> "<request>" [--plan <n>]
+                                                queues a request for the project's team lead ("lead" in its settings):
+                                                the lead plans it into at most 3 tasks for the project's crew, reviews
+                                                their work first, and the manager does the final review
   node src/cli.mjs plan [list] [--project <id>] [--status <s>] [--priority <p>] [--all]
                                                 the planning board: open items by priority (--all: done and archived too)
   node src/cli.mjs plan add <project> "<title>" [--priority high|medium|low] [--status <s>] [--description "<text>"]
@@ -360,6 +364,12 @@ async function main() {
       const modules = (option('--modules') ?? '').split(',').map(m => m.trim()).filter(Boolean);
       const run = await api('/api/task', { project, agent, instruction, review: has('--review'), modules, origin: option('--origin') ?? 'manager', plan: option('--plan') });
       console.log(`Queued: ${run.title} [${run.id}]`);
+      return;
+    }
+    case 'ask': {
+      const [project, request] = rest;
+      const run = await api('/api/ask', { project, request, origin: option('--origin') ?? 'manager', plan: option('--plan') });
+      console.log(`Queued: ${run.title} [${run.id}]. The team lead plans it into at most 3 tasks for the crew.`);
       return;
     }
     case 'chat':

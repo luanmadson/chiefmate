@@ -8,6 +8,7 @@ const EXPRESSIONS = {
   working: { eyes: 'open', look: [-1.6, 1.4], mouth: 'flat', busy: true },
   reviewing: { eyes: 'open', look: [1.6, 1.2], mouth: 'flat', busy: true },
   thinking: { eyes: 'open', look: [1.4, -1.6], mouth: 'small', busy: true },
+  planning: { eyes: 'open', look: [-1.4, -1.6], mouth: 'small', busy: true }, // a team lead splitting a request into tasks
   waiting: { eyes: 'half', mouth: 'flat' },
   done: { eyes: 'happy', mouth: 'grin' },
   failed: { eyes: 'open', mouth: 'frown', brows: true },

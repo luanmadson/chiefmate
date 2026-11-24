@@ -21,7 +21,7 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
   | **Operations** | What the crew is doing right now. Each run going on (up to three at once by default, one per project) has its own block, with a discreet brass animation: the agent at work and their portrait, the step out of how many, the time counting live (for the run and for the step) and the agent's last action, updated as it happens; then the steps, the context of the agent at work and the logbook (every action of the agent, with the time). Click the agent at work, or "Watch and talk", to open its panel (see "Talking to an agent at work" below). Below, the queue, numbered in the order it will run, with the next run marked and when each one is expected to start, and the live sessions: those open (alive or not, memory, for how long, a button to end them) and a button to open each profile. |
   | **Planning** | Your board of what is to be done in each project, by priority (see "Planning" below). The items waiting for you stand out at the top, and their number shows beside the section. |
   | **Missions** | Complete jobs with their own schedule. "Run now" starts one at any time. |
-  | **Crew** | Who is on board, what each one is doing and the model behind them. Give any of them a one-off task. Click a member at work to open its panel. A member waiting its turn says what it waits for: "Waiting for Generalist: <task>" (the agent at work on its run) or "Waiting for <project>: <task>" (the run ahead of it in the queue). |
+  | **Crew** | Who is on board, what each one is doing and the model behind them, and the crews by project, each with its team lead above it when it has one. Give any of them a one-off task. Click a member at work to open its panel. A member waiting its turn says what it waits for: "Waiting for Generalist: <task>" (the agent at work on its run) or "Waiting for <project>: <task>" (the run ahead of it in the queue). |
   | **Projects** | Which of your projects are running on this computer (development servers, node, python, IDEs, started by you or by the crew) and the memory each one uses, with a button to stop them. |
   | **Log** | Every run, with each step's report, the checks and the pull request link. |
   | **Usage** | Your Claude account's usage, when Chiefmate pauses to look after it, the week's pace and the plan's free resets. |
@@ -63,6 +63,20 @@ Every agent runs on **Claude Opus 5.5** by default.
 
 A plain list (`["generalist", "designer"]`) works too. Without `crew`, a project uses the general crew. The manager is global: it reviews every project. The Crew section shows the crews grouped by project.
 
+**Team leads by project.** A project can also have a team lead, with `"lead"` in its settings (all optional):
+
+```json
+"lead": { "name": "Site lead", "agent": "manager", "extra_instructions": "Instructions for the lead of this project only." }
+```
+
+- `agent` is the lead's base agent (`manager` by default): its model, face and instructions, plus the role of team lead. `model` and `max_minutes` may be set too.
+- **It keeps the project's memory** in `data/projects/<id>/memory.md`: the decisions, the history, your preferences in this project and what was tried. Chiefmate gives the memory to the lead in every run of the project and saves the version the lead returns at the end of its step; the crew's steps read it too. The lead never opens `data/` itself.
+- **It plans requests.** The manager sends a project with a lead its work with `node src/cli.mjs ask <project> "<request>"`. The run starts with a short planning step: the lead splits the request into at most 3 tasks for the project's crew, and Chiefmate puts them in the same run, linked to the request, one after another. With no task to do (the request is unclear or already done), the run ends there and says why.
+- **It reviews first.** After the crew's steps, in every run of the project (requests, missions and tasks), the lead does a first review and writes an opinion. The final review and the talk with you stay with the manager, whose final review gets the lead's plan and opinion.
+- **It only runs when the project has work**, as steps of the project's runs, and sees only its project and the project's own documentation, like any step. It reads and judges, but never edits the project's files.
+
+Everything the lead decides stays in the run (`lead` in `data/runs/<id>.json`: the plan, what it left out and why, the opinion) and in the logbook. The Crew section shows each lead above its project's crew, with its memory's size and date; Operations shows the request, the lead's plan and, after its review, its opinion, under the run's steps. The manager gets one line per lead in its situation, with what the lead is on.
+
 ## How a mission runs
 
 ```
@@ -76,7 +90,7 @@ queue ─► fresh working copy ─► the crew, one after another ─► manage
 5. **The checks.** Chiefmate runs the project's checks, pushes the branch and opens the pull request. Agents cannot push anything to GitHub.
 6. **Your approval.** You review and merge on GitHub. From there, your project's own deployment does the rest.
 
-A one-off task follows the same path, with a single agent and, if you tick the box, the manager's review.
+A one-off task follows the same path, with a single agent and, if you tick the box, the manager's review. A request to a project's team lead (`ask`) does too: the lead's planning first, then the tasks it planned, its first review and the manager's final review.
 
 Runs going on at the same time never share a working copy: each project has its own. The reference libraries are shared, so Chiefmate runs only one update of each library at a time, and a run that asks for a library while it is being updated gets that same update. The self-update waits until every run has ended.
 
@@ -215,7 +229,7 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `default_model` | The model for agents that don't set one |
 | `attribution` | `false` keeps the crew's commits and pull requests from crediting Claude (they are credited to you alone) |
 | `backup_dir` | A folder of your own, such as one in a private repository, where Chiefmate keeps an up-to-date copy of these settings |
-| `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. Optional: `crew` (its own crew), `mcp` (external tools it releases), `prompt_block` and `prompt_modules` (the prompt builder). See also "Local delivery" below |
+| `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. Optional: `crew` (its own crew), `lead` (its team lead, see "The crew"), `mcp` (external tools it releases), `prompt_block` and `prompt_modules` (the prompt builder). See also "Local delivery" below |
 | `missions` | For each mission: the `project`, the `steps` (an agent and its part, in order), the final `review`, the `schedule` (`days` such as `["mon"]` and a `time` such as `"09:00"`) and the `eve_reminder` time |
 | `crew` | Settings for one agent in this installation only, such as `{ "writer": { "model": "claude-opus-5-5", "max_minutes": 90, "extra_instructions": "..." } }` |
 | `library` | Reference libraries: git repositories the manager and the crew may read, such as your personal documentation. Each has a `name`, a `repository`, a `main_branch` and a sentence `about` it, and optionally `local_clone`, your own clone of it, where the live sessions of its folders open. A project uses one with `"library": ["<id>"]`, or with `"docs": "<id>/<folder>"` for its personal documentation, which then takes precedence over the instructions inside the project's own repository |
@@ -329,6 +343,8 @@ node src/cli.mjs status                       what is running, the queue, usage 
 node src/cli.mjs mission <id>                 queues a mission (--plan <n>: item n of the planning board follows it)
 node src/cli.mjs task <project> <agent> "..." queues a one-off task (--review: the manager reviews it at the end;
                                               --modules A,B: optional blocks of the prompt builder; --plan <n>)
+node src/cli.mjs ask <project> "..."          queues a request for the project's team lead, who plans it into at most
+                                              3 tasks for the crew and reviews them first (--plan <n>)
 node src/cli.mjs plan [list]                  the planning board's open items (--project, --status, --priority; --all)
 node src/cli.mjs plan add <project> "..."     adds an item (--priority high|medium|low, --status, --description)
 node src/cli.mjs plan set <n> --status ...    changes an item (--title, --description, --project, --priority, --run,
@@ -377,7 +393,7 @@ English is the source. The app, the notifications and the reports follow `langua
 | `agents/` | The crew, one file per agent |
 | `config/` | `example.json`, and your `chiefmate.json` (not in git) |
 | `scripts/` | Installation on Windows, launchers and checks |
-| `data/` (not in git) | Runs, each step's log and context, the live sessions' first messages and records, the planning board (`plan.json`), the conversation with the manager, your account's usage, the schedule's and the alerts' state and, if you use the claude.ai reading, its browser profile |
+| `data/` (not in git) | Runs, each step's log and context, the live sessions' first messages and records, the planning board (`plan.json`), the team leads' project memories (`projects/<id>/memory.md`), the conversation with the manager, your account's usage, the schedule's and the alerts' state and, if you use the claude.ai reading, its browser profile |
 | `workspaces/` (not in git) | The projects' working copies |
 
 Chiefmate has no dependencies besides Node.js. It drives Claude Code (`claude -p`), which uses your account's login and plan. The only optional one is `playwright-core`, for copying the prompt builder from Google Docs (and, if present, for the browser that opens for sign-ins): Chiefmate loads it only when needed and says how to install it when it is missing.

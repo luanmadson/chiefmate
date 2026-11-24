@@ -136,6 +136,10 @@ try {
     expect((await post('/api/run/talk', { run: 'smoke-feed', text: 'Hello' })).status === 400, 'a message to a run not going on was not refused');
     expect((await post('/api/run/talk', { run: 'smoke-feed', text: ' ' })).status === 400, 'an empty message to an agent was not refused');
     expect(state.crew.every(a => Array.isArray(a.runs) && 'waitingFor' in a), "the crew has no runs to open a panel on, or no \"waiting for\"");
+    // A request for a team lead: refused for a project that does not exist, and with no request.
+    expect(state.teams.every(x => 'lead' in x), '/api/state has no team lead (or null) for each project');
+    expect((await post('/api/ask', { project: 'none', request: 'Do something' })).status === 400, 'a request for a project that does not exist was not refused');
+    expect((await post('/api/ask', { project: 'none', request: 'x', plan: 999 })).status === 400, 'a request linked to an item that does not exist was not refused');
     const interrupt = await post('/api/manager/interrupt', {});
     expect(interrupt.ok && (await interrupt.json()).interrupted === false, 'interrupting a manager that is not answering did something');
   }
@@ -288,6 +292,45 @@ try {
   expect(Object.keys(alpha).sort().join() === 'builder,manager', "a project's own crew is not just its members and the manager");
   expect(alpha.builder.base === 'generalist' && alpha.builder.instructions.includes('Alpha only.'), "a member of a project's crew lost its base agent or its instructions");
   expect(Object.keys(projectCrew(config, 'beta', agents)).length === 3, 'a project without a crew does not get the general crew');
+
+  // The team leads: a member "lead" of the project's crew, based on the manager, that never edits; its plan (at most
+  // three tasks, members of the crew only), its memory and what the manager sees.
+  const leads = await import(src('leads.mjs'));
+  const leadConfig = {
+    owner: 'Owner',
+    projects: {
+      gamma: { name: 'Gamma', lead: { name: 'Gamma lead', extra_instructions: 'Gamma only.' }, crew: { generalist: {}, front: { agent: 'designer', name: 'Front' } } },
+      delta: { name: 'Delta', lead: { agent: 'generalist' } },
+    },
+  };
+  const gamma = projectCrew(leadConfig, 'gamma', { ...agents, manager: { ...agents.manager, tools: ['Bash', 'Read', 'Edit', 'Write'] } });
+  const lead = gamma.lead;
+  expect(lead?.base === 'manager' && lead.name === 'Gamma lead' && lead.instructions.includes('Gamma only.') && lead.instructions.includes('team lead of Gamma'), "a project's team lead lost its base agent, its name or its instructions");
+  expect(!lead.tools.includes('Edit') && !lead.tools.includes('Write') && lead.disallowed.includes('Edit'), 'a team lead may edit the project');
+  expect(projectCrew(leadConfig, 'delta', agents).lead?.base === 'generalist' && !projectCrew(config, 'alpha', agents).lead, 'a lead was based on the wrong agent, or a project without "lead" got one');
+  const ask = { id: 'smoke-ask', kind: 'ask', project: 'gamma', title: 'Gamma lead: x', instruction: 'Improve the home page', steps: [leads.leadPlanStep('Improve the home page')], review: { agent: 'manager', status: 'pending' } };
+  const memoryBlock = '~~~project-memory\n# Gamma\n- 2026-01-02: home page asked\n~~~';
+  Object.assign(ask.steps[0], { status: 'done', report: `Plan below.\n\n~~~chiefmate-plan\n${JSON.stringify({ tasks: [
+    { agent: 'front', task: 'Redo the header' }, { agent: 'nobody', task: 'x' }, { agent: 'Generalist', task: 'Fix the links' }, { agent: 'generalist', task: 'Test' }, { agent: 'front', task: 'One too many' },
+  ], note: 'Two members' })}\n~~~\n\n${memoryBlock}` });
+  const taken = leads.takeMemory(ask.steps[0].report);
+  expect(taken.memory === '# Gamma\n- 2026-01-02: home page asked' && !taken.report.includes('project-memory') && taken.report.includes('chiefmate-plan'), 'the project memory was not taken out of the lead\'s report');
+  leads.saveMemory('gamma', taken.memory);
+  expect(leads.readMemory('gamma').startsWith('# Gamma') && leads.memoryInfo('gamma')?.lines === 2, 'the project memory was not saved where the lead reads it');
+  const plan = leads.applyPlan(ask, ask.steps[0], gamma);
+  expect(plan.tasks.map(x => x.agent).join() === 'front,generalist,generalist' && plan.dropped.length === 2, `the lead's plan was not kept to three tasks of the crew: ${JSON.stringify(plan)}`);
+  expect(ask.steps.map(s => `${s.agent}${s.role ? `/${s.role}` : ''}`).join() === 'lead/plan,front,generalist,generalist,lead/review' && ask.steps[1].by === 'lead' && ask.lead.plan.note === 'Two members', `the plan's tasks did not become the run's steps: ${ask.steps.map(s => s.agent).join()}`);
+  const prompt = leads.leadLines({ run: ask, step: ask.steps[0], agents: gamma, memory: leads.readMemory('gamma'), base: 'main' }).join('\n');
+  expect(prompt.includes('~~~chiefmate-plan') && prompt.includes('`front` (Front') && !prompt.includes('`lead`') && prompt.includes('home page asked'), "the lead's planning prompt lacks the format, the crew or the memory");
+  expect(leads.memberLines({ run: ask, step: ask.steps[1], lead, memory: 'Remember X' }).join('\n').includes('Task 1 of 3'), 'a planned task does not say which request it is part of');
+  ask.lead.opinion = 'Approve with caveats.';
+  expect(leads.finalReviewLines(ask, lead).join('\n').includes('Approve with caveats.'), "the manager's final review does not get the lead's opinion");
+  ask.steps[0].status = 'running';
+  expect(leads.leadSituation('gamma', lead, ask, null).includes('planning the request "Improve the home page"') && leads.leadSituation('gamma', lead, null, null).includes('off'), "the manager's line about the lead is wrong");
+  const empty = { id: 'smoke-ask-2', kind: 'ask', project: 'gamma', steps: [{ ...leads.leadPlanStep('x'), status: 'done', report: '~~~chiefmate-plan\n{"tasks": [], "note": "Already done"}\n~~~' }], review: { agent: 'manager', status: 'pending' } };
+  leads.applyPlan(empty, empty.steps[0], gamma);
+  expect(empty.review.status === 'skipped' && empty.steps.length === 1 && empty.lead.plan.note === 'Already done', 'a plan with no task did not skip the rest of the run');
+
   const mcp = stepMcp(config, config.projects.alpha, alpha.builder);
   expect(mcp.names.join() === 'browser' && mcp.tools.join() === 'mcp__browser', "the project's MCP server was not released");
 

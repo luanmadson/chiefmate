@@ -295,6 +295,16 @@ textarea { resize: vertical; min-height: 64px; }
 .team h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--strong); }
 .team-member { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
 .team-member .name { color: var(--strong); }
+/* The project's team lead, above its crew: a brass rule on the left and a stronger line below. */
+.team-lead { grid-template-columns: 34px minmax(0, 1fr) auto; padding: 8px 0 8px 10px; border-left: 2px solid var(--accent); border-bottom: 1px solid var(--line-strong); }
+/* A team lead's plan and opinion, in Operations under the run's steps. */
+.lead-plan { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line-strong); }
+.lead-plan .label + * { margin-top: 4px; }
+.lead-request { margin: 4px 0 8px; padding-left: 10px; border-left: 2px solid var(--accent); color: var(--text); white-space: pre-wrap; }
+.lead-tasks { list-style: none; margin: 0 0 6px; padding: 0; }
+.lead-tasks li { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 8px; align-items: start; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.lead-tasks .name { color: var(--strong); margin-right: 6px; }
+.lead-opinion { white-space: pre-wrap; max-height: 160px; overflow-y: auto; margin-top: 4px; }
 #prompt-builder .panel { margin-top: 16px; }
 
 /* Log */

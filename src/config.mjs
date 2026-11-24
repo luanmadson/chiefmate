@@ -104,17 +104,57 @@ function memberSpecs(crew) {
  */
 export function projectCrew(config = loadConfig(), projectId, agents = loadAgents(config)) {
   const project = config.projects?.[projectId];
-  if (!project?.crew) return agents;
+  const lead = projectLead(config, projectId, agents);
+  if (!project?.crew) return lead ? { ...agents, lead } : agents;
   const team = agents.manager ? { manager: agents.manager } : {};
+  if (lead) team.lead = lead;
   for (const [id, spec] of memberSpecs(project.crew)) {
     const baseId = spec.agent ?? id;
     const base = agents[baseId];
-    if (!base || baseId === 'manager') continue;
+    if (!base || baseId === 'manager' || id === 'lead') continue;
     const { agent: _base, id: _id, extra_instructions: extra, ...settings } = spec;
     const instructions = base.instructions + (extra ? `\n\n## Notes for this project's crew (${project.name ?? projectId})\n\n${extra}` : '');
     team[id] = { ...base, ...settings, id, base: baseId, project: projectId, instructions };
   }
   return team;
+}
+
+// The lead reads and judges; it never changes the project's files.
+const LEAD_NO_EDIT = ['Edit', 'Write', 'NotebookEdit', 'MultiEdit'];
+
+/**
+ * A project's team lead, from "projects.<id>.lead": { "name": "...", "agent": "<base agent, manager by default>",
+ * "extra_instructions": "...", "model": "...", "max_minutes": 30 }. It is a member of the project's crew with the id
+ * "lead": it keeps the project's memory, plans the requests sent with "ask" and reviews the crew's work first
+ * (src/leads.mjs). It sees only its project. null when the project has no lead.
+ */
+export function projectLead(config, projectId, agents = loadAgents(config)) {
+  const project = config.projects?.[projectId];
+  const spec = project?.lead === true ? {} : project?.lead;
+  if (!spec || typeof spec !== 'object') return null;
+  const { agent: baseId = 'manager', name, extra_instructions: extra, ...settings } = spec;
+  const base = agents[baseId] ?? agents.manager;
+  if (!base) return null;
+  const projectName = project.name ?? projectId;
+  const role = `In this run you work only as the team lead of the project ${projectName}: not as Chiefmate's manager, and not as any other agent the instructions above describe. You don't talk to ${config.owner || 'the owner'}, you don't queue work with Chiefmate's command line and you don't look at other projects: you see only this project, its working copy and its own documentation.
+- You keep the project's memory: the decisions, the history, ${config.owner || 'the owner'}'s preferences in this project and what was tried. Chiefmate gives it to you in each prompt and saves the version you return.
+- You plan each request sent to this project into a few tasks for the project's crew.
+- You do the first review of the crew's work and write your opinion for the manager, who does the final review and talks with ${config.owner || 'the owner'}.
+- You read, search and run commands that change nothing. You never edit, write or commit the project's files.`;
+  return {
+    ...base,
+    ...settings,
+    id: 'lead',
+    name: name || 'Team lead',
+    title: 'Team lead',
+    role: "Keeps the project's memory, plans each request into tasks for the crew and reviews their work first.",
+    base: base.id,
+    project: projectId,
+    lead: true,
+    tools: (base.tools ?? []).filter(x => !LEAD_NO_EDIT.includes(x)),
+    disallowed: [...new Set([...(base.disallowed ?? []), ...LEAD_NO_EDIT, 'Bash(git commit:*)'])],
+    instructions: `${base.instructions}\n\n## Your role here: team lead of ${projectName}\n\n${role}${extra ? `\n\n## Notes for the team lead of ${projectName}\n\n${extra}` : ''}`,
+  };
 }
 
 /** Whether a project has a crew of its own. */

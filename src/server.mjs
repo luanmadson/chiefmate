@@ -3,8 +3,9 @@ import { readdirSync, readFileSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
-import { loadAgents, loadConfig, projectCrew, saveConfig } from './config.mjs';
+import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
 import { t } from './i18n.mjs';
+import { LEAD, memoryInfo } from './leads.mjs';
 import { computer, processes, stoppable, stopProject } from './machine.mjs';
 import { chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
 import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
@@ -78,7 +79,10 @@ const summary = run => ({
   id: run.id, title: run.title, kind: run.kind, mission: run.mission, project: run.project, origin: run.origin, status: run.status,
   created: run.created, started: run.started, ended: run.ended, notBefore: run.notBefore, note: run.note, result: run.result,
   pullRequest: run.pullRequest, needsYou: (run.requests ?? []).filter(r => r.status === 'open').length,
-  steps: stepsOf(run).map(s => ({ agent: s.agent, status: s.status, review: s === run.review })),
+  steps: stepsOf(run).map(s => ({ agent: s.agent, status: s.status, review: s === run.review, role: s.role ?? null, task: s.task ?? null })),
+  // A request to a project's team lead, and what the lead decided: its plan and its opinion (src/leads.mjs).
+  request: run.kind === 'ask' ? run.instruction : null,
+  lead: run.lead ? { plan: run.lead.plan ?? null, opinion: run.lead.opinion ? clip(run.lead.opinion, 700) : null } : null,
 });
 
 /**
@@ -87,13 +91,18 @@ const summary = run => ({
  */
 function teams(config, agents, general, runs, going, queue, conversation) {
   return Object.entries(config.projects ?? {}).map(([id, p]) => {
-    if (!p.crew) return { project: id, name: p.name ?? id, own: false, members: general.filter(a => a.id !== 'manager') };
-    const team = Object.fromEntries(Object.entries(projectCrew(config, id, agents)).filter(([key]) => key !== 'manager'));
     const mine = r => r.project === id;
+    // The project's team lead, shown above its crew: its presence counts on this project's runs only.
+    const leader = projectLead(config, id, agents);
+    const lead = leader
+      ? { ...crew({ [LEAD]: leader }, config, runs.filter(mine), going.filter(mine), queue.filter(mine), [])[0], base: leader.base, extra: !!p.lead?.extra_instructions, memory: memoryInfo(id) }
+      : null;
+    if (!p.crew) return { project: id, name: p.name ?? id, own: false, lead, members: general.filter(a => a.id !== 'manager') };
+    const team = Object.fromEntries(Object.entries(projectCrew(config, id, agents)).filter(([key]) => key !== 'manager' && key !== LEAD));
     const members = crew(team, config, runs.filter(mine), going.filter(mine), queue.filter(mine), []).map(m => ({
       ...m, base: team[m.id].base, extra: !!p.crew?.[m.id]?.extra_instructions, mcp: team[m.id].mcp ?? [],
     }));
-    return { project: id, name: p.name ?? id, own: true, members };
+    return { project: id, name: p.name ?? id, own: true, lead, members };
   });
 }
 
@@ -157,8 +166,11 @@ function crew(agents, config, runs, going, queue, conversation) {
     const waitingIn = going.filter(pendingFor(agent.id));
     if (claudeInfo.found === false) status = 'offline';
     else if (working.length) {
-      const reviewing = working.every(r => r.review?.status === 'running' && r.review.agent === agent.id);
-      [status, run] = [reviewing ? 'reviewing' : 'working', titles(working)];
+      // A team lead plans a request or reviews the crew's work first (its steps have a "role").
+      const role = r => stepsOf(r).find(s => s.status === 'running' && s.agent === agent.id)?.role;
+      const reviewing = working.every(r => (r.review?.status === 'running' && r.review.agent === agent.id) || role(r) === 'review');
+      const planning = working.every(r => role(r) === 'plan');
+      [status, run] = [planning ? 'planning' : reviewing ? 'reviewing' : 'working', titles(working)];
     } else if (agent.id === 'manager' && chat.responding) status = 'thinking';
     else if (waitingIn.length) [status, run, waitingFor] = ['queued', titles(waitingIn), inRun(waitingIn[0])];
     else {
@@ -313,6 +325,13 @@ export function startServer() {
             kind: 'task', projectId: body.project, agent: body.agent, instruction: body.instruction, review: !!body.review, origin: body.origin ?? 'app',
             modules: body.modules ?? [], plan: body.plan ?? null,
           });
+          nudgeQueue();
+          return reply(res, 200, summary(run));
+        }
+        case '/api/ask': {
+          // A request for a project's team lead, who plans it into tasks for the project's crew.
+          if (body.plan) planItem(body.plan);
+          const run = createRun({ kind: 'ask', projectId: body.project, instruction: body.request, origin: body.origin ?? 'app', plan: body.plan ?? null });
           nudgeQueue();
           return reply(res, 200, summary(run));
         }

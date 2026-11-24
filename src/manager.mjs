@@ -3,8 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { runClaude } from './claude.mjs';
-import { loadAgents, loadConfig, projectCrew } from './config.mjs';
+import { loadAgents, loadConfig, projectCrew, projectLead } from './config.mjs';
 import { formatDateTime, formatDuration, formatNumber, formatPercent, t } from './i18n.mjs';
+import { LEAD, leadSituation } from './leads.mjs';
 import { processes } from './machine.mjs';
 import { computerLine, planLine } from './plan.mjs';
 import { planningLine } from './planning.mjs';
@@ -136,8 +137,14 @@ export function situation(libraries = []) {
   lines.push(`Crew: ${Object.values(agents).map(a => `${a.id} (${a.name}, ${a.model ?? config.default_model})`).join(', ')}.`);
   // Missions and tasks of a project with a crew of its own take only its members (you, the manager, stay global).
   for (const [id, p] of Object.entries(config.projects ?? {}).filter(([, p]) => p.crew)) {
-    const team = Object.values(projectCrew(config, id, agents)).filter(a => a.id !== 'manager');
+    const team = Object.values(projectCrew(config, id, agents)).filter(a => a.id !== 'manager' && a.id !== LEAD);
     lines.push(`Crew of project ${id} (only these take its tasks): ${team.map(a => `${a.id} (${a.name}${a.base !== a.id ? `, based on ${a.base}` : ''})`).join(', ') || 'none'}.`);
+  }
+  // The team leads (src/leads.mjs): one line each, with what it is on now. They only run when their project has work.
+  const projectRun = id => going.map(l => activeRun(l.run)).find(r => r?.project === id) ?? null;
+  for (const id of Object.keys(config.projects ?? {})) {
+    const lead = projectLead(config, id, agents);
+    if (lead) lines.push(leadSituation(id, lead, projectRun(id), queue.find(r => r.project === id) ?? null));
   }
   for (const [id, m] of Object.entries(config.missions ?? {})) {
     const next = nextRun(m.schedule);

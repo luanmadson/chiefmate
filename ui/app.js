@@ -171,6 +171,7 @@ function runState(status) {
     case 'failed': return [t('Failed'), 'error'];
     case 'canceled': return [t('Canceled'), 'neutral'];
     case 'pending': return [t('Pending'), 'neutral'];
+    case 'skipped': return [t('Skipped'), 'neutral'];
     default: return [status ?? '', 'neutral'];
   }
 }
@@ -232,14 +233,21 @@ const agentContextMeter = a => contextMeter(t('Context: {agent}', { agent: agent
 const FALLBACK_MANAGER = { id: 'manager', name: 'Chiefmate', title: 'Manager', color: '#c9a45d', face: 'cap', status: 'idle' };
 function member(id, project) {
   const team = project ? state?.teams?.find(x => x.project === project) : null;
-  return team?.members.find(a => a.id === id)
+  return (team?.lead?.id === id ? team.lead : null)
+    ?? team?.members.find(a => a.id === id)
     ?? state?.crew.find(a => a.id === id)
     ?? state?.teams?.flatMap(x => x.members).find(a => a.id === id)
     ?? (id === 'manager' ? FALLBACK_MANAGER : { id, name: id });
 }
 const agentName = (id, project) => t(member(id, project).name ?? id);
 const faceState = agent => (online ? agent.status ?? 'idle' : 'offline');
-const stepFace = step => ({ running: step.review ? 'reviewing' : 'working', done: 'done', failed: 'failed', pending: 'queued' })[step.status] ?? 'still';
+const stepFace = step => ({
+  running: step.review || step.role === 'review' ? 'reviewing' : step.role === 'plan' ? 'planning' : 'working', done: 'done', failed: 'failed', pending: 'queued',
+})[step.status] ?? 'still';
+/** A step's role, said after its agent's name: the final review, or a team lead's planning or first review. */
+const stepRole = s => (s.review ? t('review') : s.role === 'plan' ? t('planning') : s.role === 'review' ? t('first review') : '');
+/** What kind of run: a mission, a request to a project's team lead, or a one-off task. */
+const kindLabel = kind => (kind === 'mission' ? t('Mission') : kind === 'ask' ? t('Request') : t('Task'));
 
 /** Whom a step waiting its turn waits for: the agent at work on its run, or the project of the run ahead of it. */
 const waitingWho = w => (w.agent ? agentName(w.agent, w.project) : projectName(w.project));
@@ -252,6 +260,7 @@ function agentStatus(agent) {
   switch (agent.status) {
     case 'working': return [t('Working'), 'info'];
     case 'reviewing': return [t('Reviewing'), 'info'];
+    case 'planning': return [t('Planning tasks'), 'info'];
     case 'thinking': return [t('Thinking'), 'info'];
     case 'queued': return [agent.waitingFor ? t('Waiting for {who}: {task}', { who: waitingWho(agent.waitingFor), task: agent.waitingFor.task }) : t('Next in line'), 'neutral'];
     case 'waiting': return [t('Waiting for the limit'), 'warn'];
@@ -264,6 +273,7 @@ function agentDetail(agent) {
   if (!online) return t('No connection to Chiefmate');
   switch (agent.status) {
     case 'working':
+    case 'planning':
     case 'reviewing': return t('On {title}', { title: agent.run ?? '' });
     case 'thinking': return t('Answering you');
     case 'queued': return t('Next: {title}', { title: agent.run ?? '' });
@@ -333,11 +343,11 @@ function drawFocus() {
     draw('#focus', html, html);
     return;
   }
-  const parts = [f.kind === 'mission' ? t('Mission') : t('Task'), f.title];
-  if (f.state === 'running') parts.push(f.agent ? agentName(f.agent) : t('preparing'), t('for {time}', { time: elapsed(f.since) }));
+  const parts = [kindLabel(f.kind), f.title];
+  if (f.state === 'running') parts.push(f.agent ? agentName(f.agent, f.project) : t('preparing'), t('for {time}', { time: elapsed(f.since) }));
   else {
     parts.unshift(t('Next in the queue'));
-    if (f.agent) parts.push(agentName(f.agent));
+    if (f.agent) parts.push(agentName(f.agent, f.project));
     if (f.notBefore && new Date(f.notBefore).getTime() > Date.now()) parts.push(t('not before {when}', { when: shortDate(f.notBefore) }));
   }
   const others = f.others ?? [];
@@ -631,11 +641,11 @@ function liveCard(a, key) {
       <div class="live-main">
         <div class="live-label">${online ? liveDot() : ''}<span class="label">${esc(t('Running now'))}</span></div>
         <div class="live-title">${esc(a.title)}</div>
-        <div class="hint">${esc([projectName(a.project), a.kind === 'mission' ? t('Mission') : t('Task'), t('started at {time}', { time: clockTime(a.started) })].join(' · '))}</div>
+        <div class="hint">${esc([projectName(a.project), kindLabel(a.kind), t('started at {time}', { time: clockTime(a.started) })].join(' · '))}</div>
       </div>
       <div class="live-clock"><span class="label">${esc(t('Elapsed'))}</span><strong>${ticking(a.started)}</strong></div>
       <div class="live-progress">
-        <div class="live-step"><strong>${esc(t('Step {n} of {total}', { n: a.step ?? 1, total: a.steps.length }))}</strong> · ${esc(who)}${step?.review ? ` · ${esc(t('review'))}` : ''}${a.agent && a.stepStarted ? ` · ${ticking(a.stepStarted)} ${esc(t('on this step'))}` : ''}</div>
+        <div class="live-step"><strong>${esc(t('Step {n} of {total}', { n: a.step ?? 1, total: a.steps.length }))}</strong> · ${esc(who)}${step && stepRole(step) ? ` · ${esc(stepRole(step))}` : ''}${a.agent && a.stepStarted ? ` · ${ticking(a.stepStarted)} ${esc(t('on this step'))}` : ''}</div>
         <div class="live-steps">${segments.join('')}</div>
       </div>
       <div class="live-last" id="${key}-last"></div>
@@ -661,6 +671,7 @@ function runBlock(a) {
         <div class="panel">
           <div class="label">${esc(t('Steps'))}</div>
           <ol class="steps" id="${k}-steps"></ol>
+          <div id="${k}-lead"></div>
           <div id="${k}-context"></div>
           <div class="actions"><button type="button" class="button secondary small" data-agent-run="${esc(a.id)}">${esc(t('Watch and talk'))}</button><button type="button" class="button danger small" data-cancel="${esc(a.id)}">${esc(t('Cancel run'))}</button></div>
         </div>
@@ -679,8 +690,9 @@ function drawRun(a) {
   if (draw(`#${k}-live`, JSON.stringify([online, a.title, a.step, a.agent, a.stepStarted, statuses, working?.status]), liveCard(a, k))) delete signatures[`#${k}-last`];
   const last = a.actions.at(-1);
   draw(`#${k}-last`, JSON.stringify([last?.at, last?.text]), lastAction(a));
-  const steps = a.steps.map((s, i) => `<li${s.status === 'running' ? opensPanel(a.id) : ''}>${face(member(s.agent, a.project), online ? stepFace(s) : 'offline', 30)}<div><div class="name">${i + 1}. ${esc(agentName(s.agent, a.project))}${s.review ? `, ${esc(t('review'))}` : ''}</div><div class="hint">${esc(runState(s.status)[0])}${s.status === 'running' && a.stepStarted ? ` · ${ticking(a.stepStarted)}` : ''}</div></div></li>`);
+  const steps = a.steps.map((s, i) => `<li${s.status === 'running' ? opensPanel(a.id) : ''}>${face(member(s.agent, a.project), online ? stepFace(s) : 'offline', 30)}<div><div class="name">${i + 1}. ${esc(agentName(s.agent, a.project))}${stepRole(s) ? `, ${esc(stepRole(s))}` : ''}</div><div class="hint">${esc(runState(s.status)[0])}${s.status === 'running' && a.stepStarted ? ` · ${ticking(a.stepStarted)}` : ''}</div></div></li>`);
   draw(`#${k}-steps`, JSON.stringify([online, statuses, a.stepStarted]), steps.join(''));
+  draw(`#${k}-lead`, JSON.stringify([a.request, a.lead, statuses]), leadPlan(a));
   draw(`#${k}-context`, JSON.stringify([a.agent, a.context]), a.agent ? `<div class="step-context">${agentContextMeter(a)}</div>` : '');
   const head = `${working ? face(working, faceState(working), 28) : ''}<div class="label">${esc(working ? t('Logbook: {agent} at work', { agent: t(working.name) }) : t('Logbook: preparing the working copy'))}</div>`;
   draw(`#${k}-head`, head, head);
@@ -690,6 +702,29 @@ function drawRun(a) {
   // The server sends the last 80 actions: the signature looks at the newest one, not only at how many there are.
   const changed = draw(`#${k}-logbook`, JSON.stringify([a.actions.length, last?.at, last?.text]), lines.join('') || `<div><time></time><span>${esc(t('Preparing…'))}</span></div>`);
   if (changed && atBottom) before.scrollTop = before.scrollHeight;
+}
+
+/**
+ * What a project's team lead decided in a run: the request, the tasks it planned for the crew (with what it left out
+ * and why) and, after its first review, its opinion for the manager. Empty for a run without a lead.
+ */
+function leadPlan(a) {
+  const plan = a.lead?.plan;
+  const planning = a.steps.some(s => s.role === 'plan' && s.status === 'running');
+  if (!a.request && !a.lead) return '';
+  const who = agentName('lead', a.project);
+  const parts = [`<div class="label">${esc(t("{lead}'s plan", { lead: who }))}</div>`];
+  if (a.request) parts.push(`<p class="lead-request">${esc(a.request)}</p>`);
+  if (plan) {
+    parts.push(plan.tasks.length
+      ? `<ol class="lead-tasks">${plan.tasks.map(x => `<li>${face(member(x.agent, a.project), 'still', 20)}<div><span class="name">${esc(agentName(x.agent, a.project))}</span><span class="hint">${esc(x.part)}</span></div></li>`).join('')}</ol>`
+      : `<div class="hint">${esc(t('No task planned.'))}</div>`);
+    if (plan.note) parts.push(`<div class="hint">${esc(plan.note)}</div>`);
+    if (plan.error) parts.push(`<div class="hint">${esc(t('Problem with the plan: {error}', { error: plan.error }))}</div>`);
+    if (plan.dropped?.length) parts.push(`<div class="hint">${esc(t('Left out: {list}', { list: plan.dropped.join('; ') }))}</div>`);
+  } else parts.push(`<div class="hint">${esc(planning ? t('Planning the request into tasks for the crew…') : t('The plan comes after the planning step.'))}</div>`);
+  if (a.lead?.opinion) parts.push(`<div class="label">${esc(t("{lead}'s opinion", { lead: who }))}</div><div class="hint lead-opinion">${esc(a.lead.opinion)}</div>`);
+  return `<div class="lead-plan">${parts.join('')}</div>`;
 }
 
 function drawOperations() {
@@ -814,11 +849,23 @@ function fillTaskAgents() {
   if (members.some(a => a.id === kept)) select.value = kept;
 }
 
+/** A project's team lead, above its crew: its base agent, its memory and what it is doing. */
+function teamLead(a) {
+  const facts = [
+    t('Team lead'),
+    a.base ? t('Based on {agent}', { agent: agentName(a.base) }) : '',
+    a.extra ? t('with instructions for this project') : '',
+    a.memory ? t('memory: {count} line(s), updated {when}', { count: a.memory.lines, when: relative(a.memory.updated) }) : t('no memory yet'),
+  ];
+  return `<div class="team-member team-lead"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 34)}<div><div class="name">${esc(t(a.name))}</div><div class="hint">${esc(facts.filter(Boolean).join(' · '))}</div></div>${stateHtml(agentStatus(a))}</div>`;
+}
+
 function drawTeams() {
   const teams = state.teams ?? [];
   const html = `<div class="teams">${teams.map(team => `
     <div class="team">
       <div class="team-top"><h3>${esc(team.name)}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>
+      ${team.lead ? teamLead(team.lead) : ''}
       ${team.members.map(a => `<div class="team-member"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 30)}<div><div class="name">${esc(t(a.name))}</div><div class="hint">${esc([a.base && a.base !== a.id ? t('Based on {agent}', { agent: agentName(a.base) }) : t(a.title ?? ''), a.extra ? t('with instructions for this project') : '', (a.mcp ?? []).length ? t('tools: {list}', { list: a.mcp.join(', ') }) : ''].filter(Boolean).join(' · '))}</div></div>${stateHtml(agentStatus(a))}</div>`).join('') || `<div class="hint">${esc(t('No members.'))}</div>`}
     </div>`).join('')}</div>`;
   draw('#teams', html, html);
@@ -853,7 +900,7 @@ function allRuns() {
 function drawLog() {
   const list = allRuns();
   const rows = list.map(r => {
-    const details = [r.kind === 'mission' ? t('Mission') : t('Task'), projectName(r.project), originLabel(r.origin), r.pullRequest ? t('pull request opened') : ''].filter(Boolean).join(' · ');
+    const details = [kindLabel(r.kind), projectName(r.project), originLabel(r.origin), r.pullRequest ? t('pull request opened') : ''].filter(Boolean).join(' · ');
     return `<tr class="clickable${r.id === selectedRun ? ' selected' : ''}" data-select="${esc(r.id)}">
       <td class="num">${shortDate(r.created)}</td>
       <td><span class="primary">${esc(r.title)}</span><span class="secondary">${esc(details)}</span></td>
@@ -892,7 +939,7 @@ async function refreshDetail(force = false) {
     if (!body) body = s.status === 'pending' ? t('Not started yet.') : s.status === 'running' ? t('Working…') : t('No report.');
     return `
       <div class="report">
-        <div class="report-top"><div class="report-who">${face(member(s.agent, r.project), stepFace(s), 26)}<strong>${i + 1}. ${esc(agentName(s.agent, r.project))}${s.review ? `, ${esc(t('review'))}` : ''}</strong></div>${stateHtml(runState(s.status))}</div>
+        <div class="report-top"><div class="report-who">${face(member(s.agent, r.project), stepFace(s), 26)}<strong>${i + 1}. ${esc(agentName(s.agent, r.project))}${stepRole(s) ? `, ${esc(stepRole(s))}` : ''}</strong></div>${stateHtml(runState(s.status))}</div>
         <div class="hint num">${facts.map(esc).join(' · ')}${s.status !== 'pending' ? ` · <button type="button" class="button secondary small" data-context="${esc(r.id)}" data-step="${i + 1}">${esc(t('Context received'))}</button>` : ''}</div>
         <div class="body">${md(body)}</div>
       </div>`;
