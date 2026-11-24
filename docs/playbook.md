@@ -11,7 +11,7 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
 | `src/server.mjs` | The app's web server and API. It listens on this computer only. |
 | `src/runs.mjs` | How a run goes: the working copy, the crew in sequence, the review, the checks and the pull request. |
 | `src/queue.mjs`, `src/schedule.mjs` | One run at a time; missions on their days and times. |
-| `src/manager.mjs` | The conversation with the manager, and its renewal with a summary when its context fills up. |
+| `src/manager.mjs` | The conversation with the manager: the queue of messages sent while it answers (delivered together when it ends), the interruption that keeps the session, and the renewal with a summary when its context fills up. |
 | `src/machine.mjs` | This computer: the projects' processes, their memory and stopping them (Windows). |
 | `src/plan.mjs` | The plan's free resets, the week's pace and the alerts (usage, memory, resets), which only warn. |
 | `src/usagepage.mjs` | The optional, read-only reading of the account's usage page on claude.ai, through Edge or Chrome. |
@@ -56,7 +56,7 @@ Pick one thing and finish it. Say in your report which issue it closes, if any.
 ## How to test
 
 - `npm run check`: the syntax of every script, and the translations.
-- `npm run smoke`: starts a temporary Chiefmate on a spare port and checks that the app and the API answer.
+- `npm run smoke`: starts a temporary Chiefmate on a spare port, with records of its own in a temporary folder, and checks that the app and the API answer. Never let it send a real message to the manager: that starts Claude Code.
 - For a change in the app's look, describe in your report what changed and where, so it can be checked without reading code.
 
 ## The pull request

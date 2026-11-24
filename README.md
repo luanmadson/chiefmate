@@ -16,7 +16,7 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
 
   | Section | What it is for |
   |---|---|
-  | **Manager** | Talk to Chiefmate. Ask how things are going, request a job, adjust the crew. It answers with the real situation: what is running, the queue, usage and your account's plan usage. Beside the conversation, how full its context is and the context of the agent at work (see "The conversation's context" below). |
+  | **Manager** | Talk to Chiefmate. Ask how things are going, request a job, adjust the crew. It answers with the real situation: what is running, the queue, usage and your account's plan usage. You can write at any time, even while it answers (see "Talking while the manager answers" below), and you see live what it is doing. Beside the conversation, how full its context is and the context of the agent at work (see "The conversation's context" below). |
   | **Operations** | What the crew is doing right now. The run going on is on top, with a discreet brass animation: the agent at work and their portrait, the step out of how many, the time counting live (for the run and for the step) and the agent's last action, updated as it happens. Below, the steps, the context of the agent at work, the logbook (every action of the agent at work, with the time) and the queue, numbered in the order it will run, with the next run marked. |
   | **Missions** | Complete jobs with their own schedule. "Run now" starts one at any time. |
   | **Crew** | Who is on board, what each one is doing and the model behind them. Give any of them a one-off task. |
@@ -200,6 +200,16 @@ Chiefmate measures what really counts on a subscription plan: your account's usa
 - **Alerts at 70% and 90%** of the 5-hour window and of the plan's week, once per threshold and window. They don't pause anything.
 - **The plan's free resets.** Claude Code doesn't report them, so you record them in the Usage section or with `reset-grant`. Chiefmate shows the ones available and the week's pace (the share used against the share of the week gone by, and whether there is slack). It warns you when the week passes 90% with one available, and 3 days and 1 day before one expires unused.
 
+### Talking while the manager answers
+
+The conversation never makes you wait.
+
+- **Write at any time.** While the manager answers (or renews the conversation), what you send goes to a queue shown under the conversation, marked "queued". Until it is delivered, you can edit or remove each message there.
+- **The queue goes together.** When the answer ends, the queued messages go as the next message, in the order you sent them and with the time of each. In the conversation they show when they were sent and when they were delivered. The queue survives a restart of Chiefmate.
+- **Interrupt.** The **Interrupt** button ends the current answer at once. The conversation goes on in the same session: whatever the manager had written so far stays, marked "interrupted", and your next message tells it the answer was interrupted, so it checks what it may have left half done. Then the queue goes.
+- **See what it is doing.** While it answers, the conversation shows the time it has been at it and its last action (the command it ran, the file it read), updated as it happens, as Operations does for the crew.
+- **The same from the command line:** `chat say`, `chat edit`, `chat remove`, `chat interrupt` and `chat` to read the conversation, the last action and the queue (see "Command line"). The manager itself can't write to its own conversation.
+
 ### The conversation's context
 
 Every turn of Claude Code reports how much of the model's context window it filled. Chiefmate shows it as a bar, in tokens and as a share, for the conversation with the manager and for the agent at work, with the number of times Claude Code compacted each one on its own.
@@ -246,7 +256,7 @@ The self-update only touches Chiefmate's own files. Your settings, the history a
 
 ## Command line
 
-The manager uses these commands, and so can you:
+The manager uses these commands (all but the `chat` ones, which are yours), and so can you:
 
 ```
 node src/cli.mjs server                       starts Chiefmate (the shortcut does this for you)
@@ -254,6 +264,10 @@ node src/cli.mjs status                       what is running, the queue, usage 
 node src/cli.mjs mission <id>                 queues a mission
 node src/cli.mjs task <project> <agent> "..." queues a one-off task (--review: the manager reviews it at the end;
                                               --modules A,B: optional blocks of the prompt builder)
+node src/cli.mjs chat [n]                     the conversation with the manager: the last n messages, what it is doing, the queue
+node src/cli.mjs chat say "..."               writes to the manager; while it answers, the message waits in the queue
+node src/cli.mjs chat edit <id> "..."         changes a message still in the queue (chat remove <id> takes it out)
+node src/cli.mjs chat interrupt               ends the current answer; the conversation goes on and the queue goes next
 node src/cli.mjs cancel <id>                  cancels a run
 node src/cli.mjs resume <id>                  resumes a run (--ignore-limits goes past the limits this one time)
 node src/cli.mjs history                      the latest runs
@@ -277,7 +291,7 @@ English is the source. The app, the notifications and the reports follow `langua
 ## Development
 
 - `npm run check` checks the syntax of every script and lists any text without a translation.
-- `npm run smoke` starts a temporary Chiefmate on a spare port, with no queue, schedule or updates, and checks that the app and the API answer.
+- `npm run smoke` starts a temporary Chiefmate on a spare port, with no queue, schedule or updates and with records of its own in a temporary folder (`CHIEFMATE_DATA`), and checks that the app and the API answer. It never starts a real answer of the manager.
 - [docs/playbook.md](docs/playbook.md) has the rules for changing Chiefmate, for the crew and for people alike.
 
 ## Folders
