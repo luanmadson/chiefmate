@@ -20,6 +20,7 @@
 // adaptation. The app's "Prompt builder" screen (#builder) works with the whole document through composeChoice.
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { t } from './i18n.mjs';
 import { DATA, now, readJson, ROOT, writeJson } from './util.mjs';
 
 export const SYNC_FILE = path.join(DATA, 'prompt-builder.json');
@@ -360,6 +361,33 @@ export function builderDocument(sections) {
 export function readBuilder(config) {
   const { file } = builderSettings(config);
   return file && existsSync(file) ? parseBlocks(readFileSync(file, 'utf8')) : null;
+}
+
+/**
+ * What the app's prompt builder shows for a project ("" for none): the copy's state, the document, the project's
+ * block, the choice it starts with when there is no last one (the project's block, the environment and its modules)
+ * and the last choice made for it.
+ */
+export function builderPage(config, projectId = '') {
+  const project = projectId ? config.projects?.[projectId] : null;
+  if (projectId && !project) throw new Error(t('Unknown project: {id}', { id: projectId }));
+  const sections = readBuilder(config);
+  const { environment } = builderSettings(config);
+  const defaults = project?.prompt_block ? [project.prompt_block, environment, ...(project.prompt_modules ?? [])].filter(Boolean) : [];
+  return {
+    status: builderStatus(config), document: sections ? builderDocument(sections) : null,
+    project: projectId, projectBlock: project?.prompt_block ?? null, defaults, last: lastChoice(projectId),
+  };
+}
+
+/** The app's choice put together, from the copy on this computer; remembered for the project. */
+export function composeFromApp(config, { project = '', chosen = [], off = [], remember = true } = {}) {
+  const sections = readBuilder(config);
+  if (!sections) throw new Error(t('There is no copy of the prompt builder on this computer ("prompt_builder.file").'));
+  const list = v => (Array.isArray(v) ? v.map(String) : []);
+  const result = composeChoice(sections, { chosen: list(chosen), off: list(off), language: config.language });
+  if (remember) rememberChoice(project, { chosen: list(chosen), off: list(off) });
+  return result;
 }
 
 /** The last choice made in the app's prompt builder for a project ("" when none was chosen), or null. */

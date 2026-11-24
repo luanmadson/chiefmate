@@ -150,6 +150,12 @@ try {
     expect((await post('/api/project/dev', { project: 'no-such-project', action: 'start', dryRun: true })).status === 400, 'starting the environment of a project that does not exist was not refused');
     expect((await post('/api/project/dev', { project: 'no-such-project', action: 'other' })).status === 400, 'an unknown action on the development environment was not refused');
     expect((await post('/api/session', { profile: 'no-such-profile', dryRun: true })).status === 400, 'a dry run of an unknown session profile was not refused');
+    // The app's prompt builder: the document (or none) and the copy's state; nothing opens (dry runs, or refused).
+    const builderPage = await (await fetch(`${base}/api/prompt-builder`)).json();
+    expect(builderPage.status && 'document' in builderPage && 'last' in builderPage && Array.isArray(builderPage.defaults), `/api/prompt-builder is incomplete: ${JSON.stringify(builderPage).slice(0, 200)}`);
+    expect((await fetch(`${base}/api/prompt-builder?project=no-such-project`)).status === 400, 'the prompt builder of a project that does not exist did not answer 400');
+    expect((await post('/api/prompt-builder/session', { project: 'no-such-project', tool: 'claude', prompt: 'Hello', dryRun: true })).status === 400, "a session from the prompt builder for a project that does not exist was not refused");
+    if (state.projects[0]) expect((await post('/api/prompt-builder/session', { project: state.projects[0].id, tool: 'claude', prompt: ' ', dryRun: true })).status === 400, 'a session from the prompt builder with an empty prompt was not refused');
     expect(state.projects.every(p => ['claude', 'codex'].every(tool => state.sessions.profiles.some(x => x.project === p.id && x.tool === tool))), 'a project has no live session profile (its own or automatic) for each tool');
     const first = state.projects[0];
     if (first) {
@@ -570,6 +576,15 @@ try {
       refused = true;
     }
     expect(refused, 'a session with an unknown tool was not refused');
+    // The app's prompt builder over a copy: the document, a choice put together and remembered (in the smoke's records).
+    const builderDoc = path.join(sessionTemp, 'builder-pt.md');
+    writeFileSync(builderDoc, docPt);
+    const { builderPage, composeFromApp, lastChoice } = await import(src('prompts.mjs'));
+    const appConfig = { ...sessionConfig, prompt_builder: { file: builderDoc }, projects: { alpha: { name: 'Alpha', prompt_block: 'Alpha', prompt_modules: ['Start'] } } };
+    const page = builderPage(appConfig, 'alpha');
+    expect(page.document.sections.map(s => s.name).join() === 'AMBIENTES,ACESSO,PROJETOS,REGRAS,MÓDULOS' && page.document.combinations.length === 2 && page.defaults.join() === 'Alpha,Start' && page.status.copied && !page.status.stale, `the prompt builder's page is wrong: ${JSON.stringify(page).slice(0, 300)}`);
+    const fromApp = composeFromApp(appConfig, { project: 'alpha', chosen: ['Alpha', 'Casa'], off: ['Library'] });
+    expect(fromApp.blocks.join() === 'Casa,Alpha,Code rules,Always' && lastChoice('alpha')?.off.join() === 'Library', `a choice in the app was not put together or remembered: ${fromApp.blocks.join()}`);
     const written = planSession(sessionConfig, 'review', { prompt: '  My own prompt.  ' });
     expect(written.prompt.text === 'My own prompt.' && written.prompt.written, "a prompt written in the prompt builder is not a session's first message as it is");
     expect(sessionIdOf('"C:\\nodejs\\node.exe" "C:\\chiefmate\\src\\cli.mjs" session-run 2026-01-02-0900-review') === '2026-01-02-0900-review' && sessionIdOf('node src/cli.mjs server') === null, "a session's window process is not recognized");

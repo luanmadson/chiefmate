@@ -36,6 +36,7 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
 - **One-off tasks** for any agent, at any time.
 - **A queue that runs one run per project at a time**, with runs of different projects going on side by side (three at most by default), so agents never set off other agents.
 - **Live sessions** with Claude Code or Codex, opened from the app or the command line, each in its own window and folder, started with the blocks of the prompt builder you choose (see "Live sessions" below).
+- **A prompt builder screen** for your document of blocks: choose the blocks, edit the prompt, then open a live session with it, send it with a task or copy it (see "The prompt builder in the app" below).
 - **It improves itself.** Chiefmate can be one of its own projects: the crew proposes improvements in pull requests and, when you merge one, your installation updates itself.
 - **English and Brazilian Portuguese.**
 
@@ -173,7 +174,18 @@ My project with the board = My project + Board + Start the system
 - Blocks that need you live (a browser, a board, a confirmation) are kept: the agent asks for you with `needs-you`. A sentence that conflicts with the crew's rules (pushing, other branches, pull requests) is replaced by a note saying Chiefmate's rules prevail, and the adaptation is recorded in the step's context.
 - Without the file, the project's `notes` are used as before.
 
-To copy the document from Google Docs, set `prompt_builder.doc_id` and `browser_cdp`, install the optional `playwright-core` (`npm install --no-save playwright-core` in the Chiefmate folder) and run `node src/cli.mjs prompts-sync`, or use the button in the Crew section. Chiefmate borrows your browser's session to download the document's Markdown export: it never changes the document and never touches your tabs.
+To copy the document from Google Docs, set `prompt_builder.doc_id` and `browser_cdp`, install the optional `playwright-core` (`npm install --no-save playwright-core` in the Chiefmate folder) and run `node src/cli.mjs prompts-sync`, or use the button in the Crew section or **Reload document** in the prompt builder screen. Chiefmate borrows your browser's session to download the document's Markdown export: it never changes the document and never touches your tabs.
+
+### The prompt builder in the app
+
+**Builder** in the menu (`#builder`), or **Prompt builder** on a project's page (`#builder/<id>`, with that project chosen), works with the whole document as you would by hand:
+
+- The ready combinations are buttons at the top (on a project's screen, the ones with its block; **All** shows the others). Each section lists its blocks: one per section for `one`, any number for `several`. A block whose `requires` is not met can't be marked. The automatic blocks come in by themselves, marked "automatic", and can be turned off or marked by hand.
+- The final prompt is shown as it is put together, variables filled in (the ones without a value are pointed out), and can be edited before it goes anywhere. Changing the blocks writes it again.
+- **Open live session** opens Claude Code or Codex in your clone of the project (with the project's profile for that tool), with this prompt as the first message, as it is.
+- **Send as a task** queues a task for a member of the project's crew, with the manager's review if you want it. The steps get this prompt as the project's instructions, instead of the one put together from the document (lines that conflict with the crew's rules are still adapted). The instruction is optional: without one, the agent does what the prompt asks.
+- **Copy** puts it on the clipboard, and **Reload document** copies the document from Google Docs again (when `doc_id` and `browser_cdp` are set) or reads the copy on this computer again.
+- The last choice made for each project is remembered (`data/prompt-builder-choices.json`); the first time, the screen starts with the project's block, the environment and its modules. The screen shows the copy's date, and warns when it is more than 7 days old.
 
 ## Project pages
 
@@ -188,6 +200,7 @@ Each project has a page of its own in the app (`#project/<id>`): pick it in the 
 
 And these buttons:
 
+- **Prompt builder** opens the prompt builder screen with the project chosen (when `prompt_builder` is set).
 - **New task** goes to the form at the bottom: a member of the project's crew (or, when the project has a team lead, a request for the lead to plan), the instruction and whether the manager reviews it.
 - **Live session: Claude Code** and **Live session: Codex** open a session in your clone of the project. They use the project's own profile for that tool when `sessions` has one; otherwise an automatic profile (`project-<id>-claude`, `project-<id>-codex`), never written to the settings, whose first message has the project's sentence `about` it, its block of the prompt builder (`prompt_block`) and the environment (`prompt_builder.environment`), when there is a copy of the prompt builder. A Claude Code session uses `default_model`.
 - **Open folder** opens your clone in File Explorer, and **Open in VS Code** in VS Code (shown when the `code` command is found).
@@ -457,7 +470,7 @@ English is the source. The app, the notifications and the reports follow `langua
 | `agents/` | The crew, one file per agent |
 | `config/` | `example.json`, and your `chiefmate.json` (not in git) |
 | `scripts/` | Installation on Windows, launchers and checks |
-| `data/` (not in git) | Runs, each step's log and context, the live sessions' first messages and records, the planning board (`plan.json`), the team leads' project memories (`projects/<id>/memory.md`), the conversation with the manager, your account's usage, the schedule's and the alerts' state and, if you use the claude.ai reading, its browser profile |
+| `data/` (not in git) | Runs, each step's log and context, the live sessions' first messages and records, the prompt builder's last choice per project, the planning board (`plan.json`), the team leads' project memories (`projects/<id>/memory.md`), the conversation with the manager, your account's usage, the schedule's and the alerts' state and, if you use the claude.ai reading, its browser profile |
 | `workspaces/` (not in git) | The projects' working copies |
 
 Chiefmate has no dependencies besides Node.js. It drives Claude Code (`claude -p`), which uses your account's login and plan. The only optional one is `playwright-core`, for copying the prompt builder from Google Docs (and, if present, for the browser that opens for sign-ins): Chiefmate loads it only when needed and says how to install it when it is missing.
