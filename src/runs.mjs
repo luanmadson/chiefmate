@@ -1,6 +1,6 @@
 // How a run (a mission or a one-off task) goes: working copy, the crew in sequence, the manager's review,
 // the project's checks and a pull request.
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { runClaude } from './claude.mjs';
 import { loadAgents, loadConfig } from './config.mjs';
@@ -9,7 +9,8 @@ import { notify } from './notify.mjs';
 import { readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { clip, languageName, now, slug, stamp } from './util.mjs';
 import {
-  changedFiles, checkoutBranch, commitPending, createBranch, newCommits, openPullRequest, prepareLibrary, prepareWorkspace, projectDir, runChecks,
+  baseBranch, changedFiles, checkoutBranch, commitPending, createBranch, deliverToClone, newCommits, openPullRequest, prepareLibrary,
+  prepareWorkspace, projectDir, runChecks,
 } from './workspace.mjs';
 
 /** What the app shows as happening right now. */
@@ -130,12 +131,13 @@ function logAction(event) {
   if (live.actions.length > 300) live.actions.splice(0, live.actions.length - 300);
 }
 
-function stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries }) {
+function stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries, base }) {
   const prLanguage = project.language || config.language || 'en';
+  const local = project.deliver === 'local';
   const lines = [
     finalReview ? `# Final review: ${run.title}` : `# ${run.title}`,
     `Project: ${project.name}${project.site ? ` (${project.site})` : ''}. ${project.about ?? ''}`.trim(),
-    `Today: ${formatDateTime(new Date())}. Run branch: ${run.branch}.`,
+    `Today: ${formatDateTime(new Date())}. Run branch: ${run.branch}, started from ${base}.${local ? ' Nothing from this run goes to GitHub: the branch is handed to the owner, who decides what to send.' : ''}`,
     '',
     finalReview ? '## What to do in this review' : '## Your part',
     step.part,
@@ -143,17 +145,17 @@ function stepPrompt({ run, step, project, previous, finalReview, changes, config
   if (project.playbook && run.kind === 'mission') {
     lines.push('', `This mission's playbook is \`${project.playbook}\`. Read it before you start and do only your part.`);
   }
-  const notes = project.agent_notes?.[step.agent];
+  const notes = [project.notes, project.agent_notes?.[step.agent]].filter(Boolean).join('\n\n');
   if (notes) lines.push('', '## Notes for this project', notes);
   lines.push(...libraryLines(project, libraries));
   if (finalReview) {
     lines.push(
       '',
-      'You are the manager. The crew finished the work below. Before it becomes a pull request for approval:',
-      `1. See what changed: \`git log --oneline origin/${project.main_branch}..HEAD\` and the diff of every file that matters.`,
+      `You are the manager. The crew finished the work below. Before it goes to the owner for approval${local ? ' (as a branch, not a pull request)' : ' as a pull request'}:`,
+      `1. See what changed: \`git log --oneline origin/${base}..HEAD\` and the diff of every file that matters.`,
       '2. Check it against the reports and the project\'s rules. Fix whatever is wrong or incomplete, committing as "Chiefmate: manager review".',
-      `3. Run the checks: ${(project.checks ?? []).map(c => `\`${c}\``).join(', ') || 'the ones the project lists'}.`,
-      `4. Your last message is the pull request text, in markdown and in ${languageName(prLanguage)}. End it with a section titled "${t("Manager's verdict", {}, prLanguage)}": what you fixed, the risks and your recommendation (approve, approve with caveats, or do not approve).`,
+      `3. Run the checks: ${(project.checks ?? []).map(c => `\`${c}\``).join(', ') || 'the ones the project and its documentation describe, as far as this machine allows'}.`,
+      `4. Your last message presents the work for approval${local ? ', as the note that goes with the branch' : ', as the pull request text'}, in markdown and in ${languageName(prLanguage)}. End it with a section titled "${t("Manager's verdict", {}, prLanguage)}": what you fixed, the risks and your recommendation (approve, approve with caveats, or do not approve).`,
       '',
       '## Changed files',
       '```',
@@ -169,11 +171,11 @@ function stepPrompt({ run, step, project, previous, finalReview, changes, config
   return lines.join('\n');
 }
 
-async function runStep({ run, step, index, dir, project, config, agents, libraries, finalReview = false }) {
+async function runStep({ run, step, index, dir, project, config, agents, libraries, base, finalReview = false }) {
   const agent = agents[step.agent];
   if (!agent) throw new Error(t('Unknown agent: {id}', { id: step.agent }));
   const previous = run.steps.filter(s => s !== step && s.status !== 'pending');
-  const changes = finalReview ? await changedFiles(dir, project.main_branch).catch(() => '') : '';
+  const changes = finalReview ? await changedFiles(dir, base).catch(() => '') : '';
   const model = agent.model ?? config.default_model;
 
   Object.assign(step, { status: 'running', started: now(), error: null, model });
@@ -182,7 +184,7 @@ async function runStep({ run, step, index, dir, project, config, agents, librari
 
   const { promise, cancel } = runClaude({
     dir,
-    prompt: stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries }),
+    prompt: stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries, base }),
     system: agent.instructions,
     model,
     effort: agent.effort,
@@ -251,7 +253,8 @@ export async function execute(run) {
     if (!project) throw new Error(t('Unknown project: {id}', { id: run.project }));
     let dir;
     if (!run.prepared) {
-      dir = await prepareWorkspace(run.project, project, text => logAction({ type: 'action', text }));
+      run.base = await baseBranch(project);
+      dir = await prepareWorkspace(run.project, project, run.base, text => logAction({ type: 'action', text }));
       await createBranch(dir, run.branch);
       run.prepared = true;
       saveRun(run);
@@ -260,6 +263,7 @@ export async function execute(run) {
       dir = projectDir(run.project);
       await checkoutBranch(dir, run.branch);
     }
+    const base = run.base ?? project.main_branch;
     const libraries = await prepareLibraries(config, libraryIds(project), text => logAction({ type: 'action', text }));
 
     const order =[...run.steps.map(step => ({ step, finalReview: false })), ...(run.review ? [{ step: run.review, finalReview: true }] : [])];
@@ -268,7 +272,7 @@ export async function execute(run) {
       if (cancelRequest) break;
       const limit = checkLimits(config, run);
       if (limit) return wait(limit.waitUntil, limit.note);
-      const { waitUntil } = await runStep({ run, step, index, dir, project, config, agents, libraries, finalReview });
+      const { waitUntil } = await runStep({ run, step, index, dir, project, config, agents, libraries, base, finalReview });
       if (waitUntil) return wait(waitUntil, t('Your account reached its limit in the middle of a step'));
     }
 
@@ -280,7 +284,7 @@ export async function execute(run) {
 
     logAction({ type: 'action', text: t("Running the project's checks") });
     run.checks = await runChecks(dir, project.checks);
-    const commits = await newCommits(dir, project.main_branch);
+    const commits = await newCommits(dir, base);
     run.commits = commits.length;
     if (!commits.length) {
       Object.assign(run, { status: 'done', ended: now(), result: t('Finished with no changes to review.') });
@@ -288,15 +292,32 @@ export async function execute(run) {
       notify(t('Chiefmate finished'), t('{title}: no changes to review.', { title: run.title }));
       return;
     }
+    const failed = run.checks.filter(c => !c.ok).length;
+    const body = pullRequestBody(run, run.checks, agents, project.language || config.language || 'en');
+    const bodyFile = path.join(runDir(run.id), 'pull-request.md');
+
+    if (project.deliver === 'local') {
+      // Local delivery: the branch goes to your own clone (or stays in the working copy). Nothing goes to GitHub.
+      writeFileSync(bodyFile, body);
+      let where = t('the branch {branch} of the working copy ({path})', { branch: run.branch, path: dir });
+      if (project.local_clone) {
+        logAction({ type: 'action', text: t('Handing the branch to your clone of {name}', { name: project.name }) });
+        await deliverToClone(dir, run.branch, project.local_clone);
+        where = t('the branch {branch} of your clone ({path})', { branch: run.branch, path: project.local_clone });
+      }
+      const result = failed
+        ? t('Ready on {where}, but {count} check(s) failed. Nothing was sent to GitHub.', { where, count: failed })
+        : t('Ready on {where}. Nothing was sent to GitHub.', { where });
+      Object.assign(run, { status: 'done', ended: now(), result, delivered: project.local_clone ?? dir });
+      saveRun(run);
+      notify(t('Ready for your review'), t('{title}: {result}', { title: run.title, result }), 'chiefmate:log');
+      return;
+    }
+
     logAction({ type: 'action', text: t('Pushing the branch and opening the pull request') });
     run.pullRequest = await openPullRequest(dir, {
-      base: project.main_branch,
-      branch: run.branch,
-      title: `${run.title} (${formatDate(run.created)})`,
-      body: pullRequestBody(run, run.checks, agents, project.language || config.language || 'en'),
-      bodyFile: path.join(runDir(run.id), 'pull-request.md'),
+      base, branch: run.branch, title: `${run.title} (${formatDate(run.created)})`, body, bodyFile,
     });
-    const failed = run.checks.filter(c => !c.ok).length;
     const result = failed ? t('Pull request opened, but {count} check(s) failed.', { count: failed }) : t('Pull request opened and verified.');
     Object.assign(run, { status: 'done', ended: now(), result });
     saveRun(run);

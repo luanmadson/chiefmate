@@ -72,7 +72,6 @@
   "Write a message.": "Escreva uma mensagem.",
   "The manager is still answering.": "O gerente ainda está respondendo.",
   "git {command} failed: {output}": "git {command} falhou: {output}",
-  "Downloading the project from GitHub (first time)": "Baixando o projeto do GitHub (primeira vez)",
   "Updating the working copy": "Atualizando a cópia de trabalho",
   "Installing dependencies ({command})": "Instalando as dependências ({command})",
   "\"{command}\" failed: {output}": "\"{command}\" falhou: {output}",
@@ -268,5 +267,13 @@
   "Downloading the library {name} (first time)": "Baixando a biblioteca {name} (primeira vez)",
   "Couldn't download the library {name}: {output}": "Não consegui baixar a biblioteca {name}: {output}",
   "Updating the library {name}": "Atualizando a biblioteca {name}",
-  "Unknown library: {id}": "Biblioteca desconhecida: {id}"
+  "Unknown library: {id}": "Biblioteca desconhecida: {id}",
+  "A project with \"main_branch\": \"current\" needs \"local_clone\".": "Um projeto com \"main_branch\": \"current\" precisa de \"local_clone\".",
+  "Couldn't read the current branch of {path}.": "Não consegui ler o branch atual de {path}.",
+  "Downloading the project (first time)": "Baixando o projeto (primeira vez)",
+  "the branch {branch} of the working copy ({path})": "branch {branch} da cópia de trabalho ({path})",
+  "Handing the branch to your clone of {name}": "Entregando o branch no seu clone de {name}",
+  "the branch {branch} of your clone ({path})": "branch {branch} do seu clone ({path})",
+  "Ready on {where}, but {count} check(s) failed. Nothing was sent to GitHub.": "Pronto no {where}, mas {count} verificação(ões) falharam. Nada foi enviado ao GitHub.",
+  "Ready on {where}. Nothing was sent to GitHub.": "Pronto no {where}. Nada foi enviado ao GitHub."
 }

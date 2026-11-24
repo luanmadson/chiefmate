@@ -34,19 +34,33 @@ async function git(dir, ...args) {
 
 export const projectDir = id => path.join(WORKSPACES, id);
 
-/** Makes the working copy match the main branch on GitHub, and installs dependencies when they change. */
-export async function prepareWorkspace(id, project, onStep = () => {}) {
+/**
+ * The branch a run starts from: the project's main_branch or, with "main_branch": "current", the branch
+ * checked out right now in your own clone (local_clone), so the crew starts where you are working.
+ */
+export async function baseBranch(project) {
+  if (project.main_branch && project.main_branch !== 'current') return project.main_branch;
+  if (!project.local_clone) throw new Error(t('A project with "main_branch": "current" needs "local_clone".'));
+  const r = await run('git', ['branch', '--show-current'], project.local_clone);
+  const branch = r.output.trim();
+  if (r.code !== 0 || !branch) throw new Error(t("Couldn't read the current branch of {path}.", { path: project.local_clone }));
+  return branch;
+}
+
+/** Makes the working copy match the base branch of its origin, and installs dependencies when they change. */
+export async function prepareWorkspace(id, project, base, onStep = () => {}) {
   ensureDir(WORKSPACES);
   const dir = projectDir(id);
   if (!existsSync(path.join(dir, '.git'))) {
-    onStep(t('Downloading the project from GitHub (first time)'));
-    const r = await run('git', ['clone', '-c', 'core.longpaths=true', project.repository, dir], WORKSPACES, { maxMinutes: 15 });
+    onStep(t('Downloading the project (first time)'));
+    const filter = project.clone_filter ? [`--filter=${project.clone_filter}`] : [];
+    const r = await run('git', ['clone', '-c', 'core.longpaths=true', ...filter, project.repository, dir], WORKSPACES, { maxMinutes: 30 });
     if (r.code !== 0) throw new Error(t("Couldn't download the project: {output}", { output: clip(r.output, 500) }));
   }
   onStep(t('Updating the working copy'));
   await git(dir, 'fetch', 'origin', '--prune');
-  await git(dir, 'checkout', '-f', project.main_branch);
-  await git(dir, 'reset', '--hard', `origin/${project.main_branch}`);
+  await git(dir, 'checkout', '-f', base);
+  await git(dir, 'reset', '--hard', `origin/${base}`);
   await git(dir, 'clean', '-fd');
   if (project.setup) {
     const locks = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock'].map(f => path.join(dir, f)).filter(existsSync);
@@ -111,6 +125,9 @@ export async function runChecks(dir, commands = []) {
   }
   return results;
 }
+
+/** Local delivery: copies the run's branch into your own clone of the project. Nothing goes to GitHub. */
+export const deliverToClone = (dir, branch, clone) => git(dir, 'push', clone, `refs/heads/${branch}:refs/heads/${branch}`);
 
 /** Pushes the branch and opens the pull request. Returns its address. */
 export async function openPullRequest(dir, { base, branch, title, body, bodyFile }) {
