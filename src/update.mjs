@@ -2,11 +2,11 @@
 // It waits until the crew and the manager are free, checks the new version first and, if anything fails,
 // stays on the current one.
 import { spawn } from 'node:child_process';
-import { existsSync, openSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { t } from './i18n.mjs';
 import { notify } from './notify.mjs';
-import { DATA, ensureDir, now, ROOT } from './util.mjs';
+import { now, ROOT } from './util.mjs';
 import { run } from './workspace.mjs';
 
 /** What the app shows about updates. */
@@ -43,21 +43,26 @@ async function check({ isBusy, beforeRestart }) {
     return;
   }
   notify(t('Chiefmate updated'), t('The improvements you approved are installed. Chiefmate restarts by itself.'));
-  await beforeRestart();
-  restart();
+  await restart(beforeRestart);
 }
 
-/** Starts a fresh Chiefmate in the background and ends this one. */
-function restart() {
-  const log = openSync(path.join(ensureDir(DATA), 'server.log'), 'a');
-  const child = spawn(process.execPath, [path.join('src', 'cli.mjs'), 'server'], {
+/**
+ * Starts a fresh Chiefmate in the background and ends this one.
+ * The new one is started first: if it can't start, this one carries on. It opens its own log ("--log") once this one
+ * is gone, because the command that started this one may keep the log locked while this one runs.
+ */
+async function restart(beforeRestart) {
+  const child = spawn(process.execPath, [path.join('src', 'cli.mjs'), 'server', '--log'], {
     cwd: ROOT,
     detached: true,
     windowsHide: true,
-    stdio: ['ignore', log, log],
+    stdio: 'ignore',
     env: { ...process.env, CHIEFMATE_RESTART_DELAY: '2000' },
   });
+  await new Promise((resolve, reject) => child.once('spawn', resolve).once('error', reject));
   child.unref();
+  // A connection slow to close must not keep this one alive: two Chiefmates would share the queue and the schedule.
+  await Promise.race([beforeRestart(), new Promise(resolve => setTimeout(resolve, 10_000))]);
   process.exit(0);
 }
 

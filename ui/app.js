@@ -6,6 +6,7 @@ const $ = selector => document.querySelector(selector);
 let state = null;
 let online = false;
 let started = false;
+let serverStarted = null; // when the Chiefmate that served this app started
 const signatures = {};
 let selectedRun = null;
 let detail = null;
@@ -1068,6 +1069,16 @@ function drawOffline() {
   }
 }
 
+/** Something is being written, or a dialog is open: loading the app again now would lose it. */
+function writing() {
+  const field = document.activeElement;
+  return (
+    !!document.querySelector('dialog[open]') ||
+    $('#message').value.trim() !== '' ||
+    (['INPUT', 'TEXTAREA'].includes(field?.tagName) && field.value.trim() !== '')
+  );
+}
+
 async function refresh() {
   let next;
   try {
@@ -1082,7 +1093,12 @@ async function refresh() {
     drawSuggestions();
     drawClock();
     started = true;
+    serverStarted = next.started;
   } else if ((next.language || 'en') !== language()) {
+    location.reload();
+    return;
+  } else if (next.started !== serverStarted && !writing()) {
+    // A new Chiefmate (after an update or a restart) brings its own app: load it.
     location.reload();
     return;
   }

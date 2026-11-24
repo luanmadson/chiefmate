@@ -149,6 +149,9 @@ function crew(agents, config, runs, going, queue, conversation) {
   });
 }
 
+// When this Chiefmate started. The app loads itself again when it changes, after an update or a restart.
+const STARTED = now();
+
 function buildState() {
   const config = loadConfig();
   const agents = loadAgents(config);
@@ -168,6 +171,7 @@ function buildState() {
   return {
     now: now(),
     version: VERSION,
+    started: STARTED,
     owner: config.owner,
     language: config.language || 'en',
     ai: { claude: { ...claudeInfo }, account: { status: usage.status ?? null, updated: usage.updated ?? null } },

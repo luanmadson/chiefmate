@@ -1,8 +1,12 @@
 // Chiefmate's command line. The manager uses these commands to queue work; you can use them too.
+import { openSync, writeSync } from 'node:fs';
+import path from 'node:path';
+import { format } from 'node:util';
 import { loadConfig, saveConfig } from './config.mjs';
 import { formatDateTime, formatDuration } from './i18n.mjs';
 import { notify } from './notify.mjs';
 import { listRuns, readRun, stepsOf } from './store.mjs';
+import { DATA, ensureDir } from './util.mjs';
 
 const [command, ...rest] = process.argv.slice(2);
 const option = name => {
@@ -24,9 +28,45 @@ async function api(route, body) {
   return data;
 }
 
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+/** Whether a Chiefmate answers on this port. */
+const answers = () => api('/api/health').then(() => true, () => false);
+
+/**
+ * "server --log": Chiefmate writes what it prints to data/server.log, opening the file itself. A log redirected by
+ * cmd (">>") stays locked while Chiefmate runs, and a Chiefmate restarted by the self-update could not write to it.
+ * If the file is locked anyway, it waits up to ten seconds and then carries on without a log.
+ */
+async function logToFile() {
+  const file = path.join(ensureDir(DATA), 'server.log');
+  for (let i = 0; i < 20; i++) {
+    let fd;
+    try {
+      fd = openSync(file, 'a');
+    } catch {
+      await sleep(500);
+      continue;
+    }
+    const write = (...args) => {
+      try {
+        writeSync(fd, `${format(...args)}\n`);
+      } catch {
+        // the log is a convenience: it never stops Chiefmate
+      }
+    };
+    console.log = console.info = console.warn = console.error = write;
+    process.on('uncaughtException', error => {
+      write('Uncaught:', error);
+      process.exit(1);
+    });
+    return;
+  }
+}
+
 const HELP = `Chiefmate: a command center for AI agents
 
-  node src/cli.mjs server                       starts the app, the queue, the schedule and the updates (http://localhost:${port()})
+  node src/cli.mjs server [--log]               starts the app, the queue, the schedule and the updates (http://localhost:${port()});
+                                                --log writes what it prints to data/server.log
   node src/cli.mjs status                       what is running, the queue, the account's usage and the crew
   node src/cli.mjs mission <id>                 queues a mission (the ids are in config/chiefmate.json)
   node src/cli.mjs task <project> <agent> "<what to do>" [--review] [--modules A,B]
@@ -212,14 +252,13 @@ const machineBytes = n => `${Math.round((n ?? 0) / 1024 ** 2)} MB`;
 async function main() {
   switch (command) {
     case 'server': {
-      // After a self-update, the new Chiefmate waits for the old one to leave.
-      if (process.env.CHIEFMATE_RESTART_DELAY) await new Promise(r => setTimeout(r, Number(process.env.CHIEFMATE_RESTART_DELAY)));
-      try {
-        await api('/api/health');
+      // After a self-update, the new Chiefmate waits for the old one to leave (up to half a minute).
+      if (process.env.CHIEFMATE_RESTART_DELAY) await sleep(Number(process.env.CHIEFMATE_RESTART_DELAY));
+      if (has('--log')) await logToFile();
+      for (let i = 0; process.env.CHIEFMATE_RESTART_DELAY && i < 28 && (await answers()); i++) await sleep(1000);
+      if (await answers()) {
         console.log(`Chiefmate is already running at http://localhost:${port()}`);
         return;
-      } catch {
-        // not running yet: start it
       }
       const { startServer } = await import('./server.mjs');
       const { server, port: p } = startServer();
