@@ -11,11 +11,11 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
 | `src/server.mjs` | The app's web server and API. It listens on this computer only. |
 | `src/runs.mjs` | How a run goes: the working copy, the crew in sequence, the review, the checks and the pull request. |
 | `src/queue.mjs`, `src/schedule.mjs` | One run at a time; missions on their days and times. |
-| `src/manager.mjs` | The conversation with the manager. |
+| `src/manager.mjs` | The conversation with the manager, and its renewal with a summary when its context fills up. |
 | `src/machine.mjs` | This computer: the projects' processes, their memory and stopping them (Windows). |
 | `src/plan.mjs` | The plan's free resets, the week's pace and the alerts (usage, memory, resets), which only warn. |
 | `src/usagepage.mjs` | The optional, read-only reading of the account's usage page on claude.ai, through Edge or Chrome. |
-| `src/claude.mjs` | Runs Claude Code headless (`claude -p`) and follows each action. |
+| `src/claude.mjs` | Runs Claude Code headless (`claude -p`) and follows each action and how full the context is. |
 | `src/workspace.mjs` | git and the projects' working copies. |
 | `src/update.mjs` | The self-update. |
 | `src/store.mjs`, `src/config.mjs`, `src/i18n.mjs`, `src/notify.mjs`, `src/util.mjs`, `src/cli.mjs` | Records, settings and the crew, translations, Windows notifications, helpers and the command line. |
