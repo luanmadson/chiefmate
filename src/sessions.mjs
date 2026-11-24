@@ -385,7 +385,7 @@ export function sessionsState(config = loadConfig(), machine = computer(config))
 export function sessionsLine(config) {
   const { open, profiles: all } = sessionsState(config);
   const profiles = all.filter(p => !p.auto);
-  const list =open.map(s => `${s.name} [${s.id}] (${s.tool}, ${s.project ? `project ${s.project}` : s.folder ? `library folder ${s.folder}` : s.cwd}, ${s.status === 'login' ? 'waiting for the owner to sign in to Codex' : `${s.alive ? 'open' : 'starting'} since ${formatDateTime(s.started)}${s.ram ? `, ${formatBytes(s.ram)}` : ''}`})`);
+  const list = open.map(s => `${s.name} [${s.id}] (${s.tool}, ${s.project ? `project ${s.project}` : s.folder ? `library folder ${s.folder}` : s.cwd}, ${s.status === 'login' ? 'waiting for the owner to sign in to Codex' : `${s.alive ? 'open' : 'starting'} since ${formatDateTime(s.started)}${s.ram ? `, ${formatBytes(s.ram)}` : ''}`})`);
   const available = profiles.map(p => p.id).join(', ');
   return `Live sessions (windows where ${config.owner || 'the owner'} works with an agent; not the crew, and not yours to end unless asked): ${list.join('; ') || 'none open'}.${available ? ` Profiles: ${available} (node src/cli.mjs session <profile> opens one).` : ''} Each project also has project-<id>-claude and project-<id>-codex, opened in the owner's own clone of the project.`;
 }
