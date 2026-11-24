@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0b0d10">
+  <title>Chiefmate</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon-32.png" sizes="32x32">
+  <link rel="icon" href="/icon-192.png" sizes="192x192">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="titlebar">
+      <div class="brand"><img src="/icon-32.png" alt="" width="18" height="18"><span>CHIEFMATE</span></div>
+      <div class="titlebar-right"><div id="presence" class="presence"></div><span id="clock" class="clock"></span></div>
+    </header>
+
+    <nav class="nav" aria-label="Sections" data-t-label="Sections">
+      <a href="#manager" data-view="manager"><span data-t="Manager">Manager</span><span class="counter" id="counter-manager"></span></a>
+      <a href="#operations" data-view="operations"><span data-t="Operations">Operations</span><span class="counter" id="counter-operations"></span></a>
+      <a href="#missions" data-view="missions"><span data-t="Missions">Missions</span></a>
+      <a href="#crew" data-view="crew"><span data-t="Crew">Crew</span></a>
+      <a href="#log" data-view="log"><span data-t="Log">Log</span></a>
+      <a href="#usage" data-view="usage"><span data-t="Usage">Usage</span></a>
+      <div class="nav-footer" id="version">Chiefmate</div>
+    </nav>
+
+    <main class="content">
+      <section class="view" id="view-manager">
+        <div class="view-header">
+          <div>
+            <h1 data-t="Manager">Manager</h1>
+            <p data-t="Talk to Chiefmate. It answers you, hands work to the crew and reports back.">Talk to Chiefmate. It answers you, hands work to the crew and reports back.</p>
+          </div>
+          <button type="button" class="button secondary" id="new-conversation" data-t="New conversation">New conversation</button>
+        </div>
+        <div class="manager-grid">
+          <div class="chat-column">
+            <div id="chat" class="chat" aria-live="polite"></div>
+            <form id="manager-form" class="compose">
+              <textarea id="message" rows="3" placeholder="Write to the manager. Enter sends; Shift+Enter starts a new line." data-t-placeholder="Write to the manager. Enter sends; Shift+Enter starts a new line."></textarea>
+              <div class="compose-footer">
+                <div id="suggestions" class="suggestions"></div>
+                <button type="submit" class="button" id="send" data-t="Send">Send</button>
+              </div>
+            </form>
+          </div>
+          <aside class="side">
+            <div id="bridge" class="panel bridge"></div>
+            <div id="situation" class="panel situation"></div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="view" id="view-operations">
+        <div class="view-header">
+          <div>
+            <h1 data-t="Operations">Operations</h1>
+            <p data-t="What the crew is doing right now, step by step, and what is in the queue.">What the crew is doing right now, step by step, and what is in the queue.</p>
+          </div>
+        </div>
+        <div id="operations"></div>
+      </section>
+
+      <section class="view" id="view-missions">
+        <div class="view-header">
+          <div>
+            <h1 data-t="Missions">Missions</h1>
+            <p data-t="Complete jobs for the crew, each with its own schedule. Every mission ends in a pull request for you to approve.">Complete jobs for the crew, each with its own schedule. Every mission ends in a pull request for you to approve.</p>
+          </div>
+        </div>
+        <div id="missions"></div>
+      </section>
+
+      <section class="view" id="view-crew">
+        <div class="view-header">
+          <div>
+            <h1 data-t="Crew">Crew</h1>
+            <p data-t="Who is on board, what each one is doing and the model behind them. Give any of them a one-off task.">Who is on board, what each one is doing and the model behind them. Give any of them a one-off task.</p>
+          </div>
+        </div>
+        <div id="crew"></div>
+        <form id="task-form" class="panel form">
+          <div class="label" data-t="Assign a task">Assign a task</div>
+          <div class="fields">
+            <label><span data-t="Agent">Agent</span><select name="agent" id="task-agent"></select></label>
+            <label><span data-t="Project">Project</span><select name="project" id="task-project"></select></label>
+          </div>
+          <label><span data-t="Instruction">Instruction</span><textarea name="instruction" rows="4" placeholder="Describe what to do, where and why, as you would ask a person." data-t-placeholder="Describe what to do, where and why, as you would ask a person."></textarea></label>
+          <label class="option"><input type="checkbox" name="review" checked> <span data-t="The manager reviews the work before the pull request (recommended)">The manager reviews the work before the pull request (recommended)</span></label>
+          <div class="actions"><button type="submit" class="button" data-t="Queue it">Queue it</button></div>
+        </form>
+      </section>
+
+      <section class="view" id="view-log">
+        <div class="view-header">
+          <div>
+            <h1 data-t="Log">Log</h1>
+            <p data-t="Every mission and task, with each step's report.">Every mission and task, with each step's report.</p>
+          </div>
+        </div>
+        <div class="log-grid">
+          <div id="log-list"></div>
+          <div id="log-detail" class="panel detail"></div>
+        </div>
+      </section>
+
+      <section class="view" id="view-usage">
+        <div class="view-header">
+          <div>
+            <h1 data-t="Usage">Usage</h1>
+            <p data-t="Your Claude account's usage and the limits Chiefmate respects before every step.">Your Claude account's usage and the limits Chiefmate respects before every step.</p>
+          </div>
+        </div>
+        <div id="usage"></div>
+        <form id="limits-form" class="panel form">
+          <div class="label" data-t="Limits">Limits</div>
+          <div class="fields">
+            <label><span data-t="Last 7 days (US$)">Last 7 days (US$)</span><input name="weekly_usd" type="number" min="0" step="1"></label>
+            <label><span data-t="Per run (US$)">Per run (US$)</span><input name="per_run_usd" type="number" min="0" step="1"></label>
+            <label><span data-t="Pause at this share of the 5-hour window (%)">Pause at this share of the 5-hour window (%)</span><input name="window" type="number" min="5" max="100" step="5"></label>
+            <label><span data-t="Pause at this share of the plan's week (%)">Pause at this share of the plan's week (%)</span><input name="week" type="number" min="5" max="100" step="5"></label>
+          </div>
+          <div class="actions"><button type="submit" class="button" data-t="Save limits">Save limits</button></div>
+        </form>
+      </section>
+    </main>
+
+    <footer class="statusbar" id="statusbar"></footer>
+  </div>
+
+  <dialog id="confirm" class="confirm">
+    <form method="dialog">
+      <div class="label" id="confirm-title"></div>
+      <p id="confirm-text"></p>
+      <div class="actions">
+        <button value="no" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="yes" class="button" id="confirm-yes"></button>
+      </div>
+    </form>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

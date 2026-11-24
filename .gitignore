@@ -1,0 +1,7 @@
+# What is yours and stays on your computer: your settings, the history, conversations, logs
+# and the projects' working copies.
+config/chiefmate.json
+data/
+workspaces/
+node_modules/
+*.tmp

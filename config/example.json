@@ -1,0 +1,45 @@
+{
+  "owner": "Captain",
+  "language": "en",
+  "port": 4747,
+  "default_model": "claude-opus-5-5",
+  "projects": {
+    "my-site": {
+      "name": "My site",
+      "site": "https://example.com",
+      "repository": "https://github.com/you/my-site.git",
+      "main_branch": "main",
+      "setup": "npm ci",
+      "checks": ["npm test"],
+      "playbook": "docs/playbook.md",
+      "about": "One or two sentences about the project, for the crew.",
+      "agent_notes": {
+        "writer": "Optional notes for one agent on this project, such as which documents to read first."
+      }
+    }
+  },
+  "missions": {
+    "weekly-routine": {
+      "name": "Weekly routine",
+      "project": "my-site",
+      "description": "New articles, more verified data and one site improvement, reviewed by the manager in a pull request.",
+      "steps": [
+        { "agent": "writer", "part": "Write up to two articles, following the playbook." },
+        { "agent": "curator", "part": "Add verified entries to the project's data, following the playbook." },
+        { "agent": "designer", "part": "Make one improvement to the site, following the playbook." }
+      ],
+      "review": {
+        "agent": "manager",
+        "part": "The final review: open the sources of the central claims, check every change, fix what is wrong and write the pull request text with your verdict."
+      },
+      "schedule": { "days": [], "time": "09:00" },
+      "eve_reminder": "18:00"
+    }
+  },
+  "limits": {
+    "weekly_usd": 100,
+    "per_run_usd": 40,
+    "pause_at_5h_window": 0.85,
+    "pause_at_plan_week": 0.9
+  }
+}
