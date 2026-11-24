@@ -16,9 +16,20 @@ export const runFile = id => path.join(RUNS, `${id}.json`);
 export const runDir = id => ensureDir(path.join(RUNS, id));
 export const readRun = id => readJson(runFile(id), null);
 
+// Called after every save of a run (the planning board follows the runs its items are linked to).
+const runListeners = [];
+export const onRunSaved = listener => runListeners.push(listener);
+
 export function saveRun(run) {
   run.updated = now();
   writeJson(runFile(run.id), run);
+  for (const listener of runListeners) {
+    try {
+      listener(run);
+    } catch (error) {
+      console.error('After saving a run:', error.message);
+    }
+  }
   return run;
 }
 

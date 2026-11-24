@@ -53,7 +53,7 @@ function crewRules(config, project) {
 - Your last message is the step's report, in ${owner}: short markdown with what you did (and the files), the sources you used, what you left out and why, and what the reviewer should check.`;
 }
 
-export function createRun({ kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [] }) {
+export function createRun({ kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [], plan = null }) {
   const config = loadConfig();
   let title, steps, finalReview, project;
   if (kind === 'mission') {
@@ -85,6 +85,8 @@ export function createRun({ kind, missionId, projectId, agent, instruction, revi
     id, kind, mission: missionId ?? null, project, title, instruction: instruction ?? null, origin,
     status: 'queued', created: now(), notBefore, branch: `chiefmate/${id}`, steps, review: finalReview,
     modules: (Array.isArray(modules) ? modules : String(modules ?? '').split(',')).map(m => String(m).trim()).filter(Boolean),
+    // The planning board's item this run was queued for: the item follows the run (src/planning.mjs).
+    ...(plan != null && plan !== '' ? { plan: Number(String(plan).replace(/^#/, '')) } : {}),
   });
 }
 

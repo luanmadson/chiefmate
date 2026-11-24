@@ -14,6 +14,11 @@ const base = `http://localhost:${port}`;
 const data = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-data-'));
 Object.assign(process.env, { CHIEFMATE_DATA: data, CHIEFMATE_CLAUDE: path.join(data, 'no-claude.exe') });
 mkdirSync(path.join(data, 'manager'), { recursive: true });
+// The manager's old Markdown board, imported once into the planning board (made-up items).
+writeFileSync(path.join(data, 'manager', 'plan.md'), [
+  '# Plan', '', '| # | Projeto | Item | Prioridade | Situação |', '|---|---|---|---|---|',
+  '| 3 | Sample | First thing | Alta | Em andamento |', '| 7 | Sample | Second thing | Baixa | Aguarda o dono decidir |', '| 8 | Other | Third thing | Média | Depende do item 3 |',
+].join('\n'));
 writeFileSync(path.join(data, 'manager', 'pending.json'), JSON.stringify([{ id: 'smoke1', text: 'Waiting', at: new Date().toISOString(), queued: true }]));
 const child = spawn(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'server'], {
   cwd: root,
@@ -47,7 +52,7 @@ try {
     failures.push('the server did not start');
   } else {
     const state = await (await fetch(`${base}/api/state`)).json();
-    for (const key of ['now', 'version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'teams', 'needs', 'prompts', 'focus', 'running', 'current', 'parallel', 'sessions', 'queue', 'history', 'usage', 'manager', 'computer', 'plan', 'alerts']) {
+    for (const key of ['now', 'version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'teams', 'needs', 'prompts', 'focus', 'running', 'current', 'parallel', 'sessions', 'queue', 'history', 'usage', 'manager', 'computer', 'plan', 'planning', 'alerts']) {
       expect(key in state, `/api/state has no "${key}"`);
     }
     // What the app shows live (the run going on, its clock, its last action, the queue's order) comes from these.
@@ -93,6 +98,21 @@ try {
     // Live sessions: an unknown profile or session is refused, and nothing opens.
     expect((await post('/api/session', { profile: 'no-such-profile' })).status === 400, 'opening a session of an unknown profile was not refused');
     expect((await post('/api/session/end', { id: 'no-such-session' })).status === 400, 'ending a session that does not exist was not refused');
+    // The planning board: imported from the old Markdown board, then changed through the API.
+    const items = state.planning?.items ?? [];
+    const imported = Object.fromEntries(items.map(i => [i.id, `${i.priority}/${i.status}`]));
+    expect(imported[3] === 'high/in_progress' && imported[7] === 'low/waiting_owner' && imported[8] === 'medium/future', `the old Markdown board was not imported right: ${JSON.stringify(imported)}`);
+    const added = await post('/api/planning', { action: 'add', project: 'Sample', title: 'Smoke item', priority: 'alta', status: 'a fazer' });
+    const item = added.ok ? (await added.json()).item : null;
+    expect(item?.id === 9 && item.priority === 'high' && item.status === 'todo', `an item was not added to the planning board: ${JSON.stringify(item)}`);
+    const set = await post('/api/planning', { action: 'set', id: 9, status: 'waiting_owner', description: 'Notes' });
+    expect(set.ok && (await set.json()).item?.status === 'waiting_owner', 'an item of the planning board was not changed');
+    expect((await post('/api/planning', { action: 'set', id: 9, status: 'nonsense' })).status === 400, 'an unknown status was not refused');
+    expect((await post('/api/planning', { action: 'set', id: 999, status: 'done' })).status === 400, 'changing an item that does not exist was not refused');
+    expect((await post('/api/planning', { action: 'add', project: 'Sample', title: ' ' })).status === 400, 'an item without a title was not refused');
+    expect((await post('/api/task', { project: 'none', agent: 'generalist', instruction: 'x', plan: 999 })).status === 400, 'a task linked to an item that does not exist was not refused');
+    const archived = await post('/api/planning', { action: 'archive', id: 9 });
+    expect(archived.ok && (await archived.json()).item?.archived, 'an item was not archived');
     const interrupt = await post('/api/manager/interrupt', {});
     expect(interrupt.ok && (await interrupt.json()).interrupted === false, 'interrupting a manager that is not answering did something');
   }
@@ -121,6 +141,25 @@ try {
   expect(!managerBusy(), 'the queue did not empty');
 } catch (error) {
   failures.push(`conversation checks: ${error.message}`);
+}
+
+// The planning board follows the runs linked to it (in this process, with the same records; no run starts).
+try {
+  const { planItem, planningLine } = await import(pathToFileURL(path.join(root, 'src', 'planning.mjs')).href);
+  const { saveRun } = await import(pathToFileURL(path.join(root, 'src', 'store.mjs')).href);
+  const run = { id: 'smoke-run', status: 'queued', plan: 3, steps: [] };
+  saveRun(run);
+  expect(planItem(3).run === 'smoke-run' && planItem(3).status === 'queued', `queuing a run for an item did not link it: ${JSON.stringify(planItem(3))}`);
+  saveRun(Object.assign(run, { status: 'running' }));
+  expect(planItem(3).status === 'in_progress', 'the item did not follow its run going on');
+  saveRun(Object.assign(run, { status: 'done', pullRequest: 'https://example.com/pull/1' }));
+  expect(planItem(3).status === 'waiting_owner' && planItem(3).pr === 'https://example.com/pull/1', 'a run done with a pull request did not leave its item waiting for the owner');
+  saveRun(Object.assign(run, { status: 'failed', pullRequest: null }));
+  expect(planItem(3).status === 'todo', 'the item of a failed run did not go back to "todo"');
+  const line = planningLine('Owner');
+  expect(line.includes('#3 Sample: First thing') && line.includes('waiting for Owner: #7'), `the manager's summary of the board is wrong: ${line}`);
+} catch (error) {
+  failures.push(`planning checks: ${error.message}`);
 }
 
 // Without the server: the crews by project, what a step may see, the command line and the prompt builder,

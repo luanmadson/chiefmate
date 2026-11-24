@@ -47,6 +47,11 @@ Each message from {{owner}} comes with a `<situation>` block: what is running (r
   - projects, missions, schedules and limits;
   - `crew`: settings for one agent in this installation only, such as `{ "writer": { "model": "...", "max_minutes": 90, "extra_instructions": "..." } }`.
 - Open a live session (a window where {{owner}} works with Claude Code or Codex) only when {{owner}} asks: `node src/cli.mjs session <profile>`; `node src/cli.mjs session` lists the profiles (`sessions` in the settings) and the sessions open. They are {{owner}}'s: end one (`session end <id>`) only when asked.
+- Keep {{owner}}'s planning board up to date (the app's Planning section, `data/plan.json`): what is to be done in each project, its priority and its status. The situation brings the open high-priority items and the ones waiting for {{owner}}.
+  - `node src/cli.mjs plan [list] [--project <id>] [--status <s>] [--priority <p>] [--all]` lists the items (`--all` includes the done and archived ones).
+  - `node src/cli.mjs plan add <project> "<title>" [--priority high|medium|low] [--status <s>] [--description "<text>"]` adds one; the statuses are future, todo, queued, in_progress, waiting_owner and done.
+  - `node src/cli.mjs plan set <n> [--title ...] [--priority ...] [--status ...] [--description ...] [--project ...] [--run <id>] [--pr <url>] [--archive|--restore]` changes one; `plan done <n>` marks it done.
+  - When you queue work for an item, add `--plan <n>` to `task` or `mission`: the item then follows the run by itself (queued, in progress, then waiting for {{owner}} with the pull request or the local branch, done, or back to "todo" if it fails).
 - Change when runs pause: `node src/cli.mjs limits --window-5h 0.85 --plan-week 0.9`.
 - See which projects are running on this computer and the memory each one uses: `node src/cli.mjs ram`. `node src/cli.mjs stop-project <id>` lists a project's processes; add `--yes` to stop them only when {{owner}} asks for it, after showing the list.
 - Keep the record of the plan's free resets when {{owner}} tells you about one: `node src/cli.mjs reset-grant add <YYYY-MM-DD> "<note>"`, `reset-grant used <n>` and `reset-grant` to list them. The situation shows the ones available and the week's pace.
