@@ -39,9 +39,14 @@ try {
     failures.push('the server did not start');
   } else {
     const state = await (await fetch(`${base}/api/state`)).json();
-    for (const key of ['version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'focus', 'queue', 'history', 'usage', 'manager', 'computer', 'plan', 'alerts']) {
+    for (const key of ['now', 'version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'focus', 'current', 'queue', 'history', 'usage', 'manager', 'computer', 'plan', 'alerts']) {
       expect(key in state, `/api/state has no "${key}"`);
     }
+    // What the app shows live (the run going on, its clock, its last action, the queue's order) comes from these.
+    expect(!Number.isNaN(new Date(state.now).getTime()), "/api/state's \"now\" is not a date");
+    expect(Array.isArray(state.queue) && state.queue.every(r => Array.isArray(r.steps) && r.created), 'a run in the queue has no steps or creation date');
+    const c = state.current;
+    expect(c === null || (Array.isArray(c.actions) && Array.isArray(c.steps) && 'step' in c && 'agent' in c && 'stepStarted' in c), 'the run going on has no step, agent, clock or actions');
     expect(state.crew?.some(a => a.id === 'manager'), 'the crew has no manager');
     const context = state.manager?.context;
     expect(typeof context?.renewAt === 'number' && typeof context.renewing === 'boolean', "/api/state has no context for the manager's conversation");

@@ -17,7 +17,7 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
   | Section | What it is for |
   |---|---|
   | **Manager** | Talk to Chiefmate. Ask how things are going, request a job, adjust the crew. It answers with the real situation: what is running, the queue, usage and your account's plan usage. Beside the conversation, how full its context is and the context of the agent at work (see "The conversation's context" below). |
-  | **Operations** | What the crew is doing right now: the steps, the context of the agent at work, the logbook (every action of the agent at work, with the time) and the queue. |
+  | **Operations** | What the crew is doing right now. The run going on is on top, with a discreet brass animation: the agent at work and their portrait, the step out of how many, the time counting live (for the run and for the step) and the agent's last action, updated as it happens. Below, the steps, the context of the agent at work, the logbook (every action of the agent at work, with the time) and the queue, numbered in the order it will run, with the next run marked. |
   | **Missions** | Complete jobs with their own schedule. "Run now" starts one at any time. |
   | **Crew** | Who is on board, what each one is doing and the model behind them. Give any of them a one-off task. |
   | **Projects** | Which of your projects are running on this computer (development servers, node, python, IDEs, started by you or by the crew) and the memory each one uses, with a button to stop them. |
@@ -25,6 +25,7 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
   | **Usage** | Your Claude account's usage, when Chiefmate pauses to look after it, the week's pace and the plan's free resets. |
 
 - **Crew portraits** that show at a glance who is standing by, working, thinking or waiting for a limit to reset. The title bar tells you whether Chiefmate is online and waiting for you, and which project is in focus: the one being worked on (the mission or task, the agent at work and for how long) or, when nothing is running, the next one in the queue.
+- **Running, seen from afar.** While a run goes on, a brass square pulses beside Operations in the sections and beside the project in focus, the window's title starts with ● (the agent, the step, how many are waiting: `● Writer 2/3 · 1 in the queue · Chiefmate`) and the icon gets a brass square. With runs only waiting in the queue, the title starts with ○ and the square in the icon is hollow. The animations stop when Windows is set to show fewer animations (reduced motion); the app reads the state every 2.5 seconds, as it always has.
 - **Scheduled missions**, for example every Monday at 9:00. They wake the computer from sleep.
 - **Windows notifications**: the evening before a mission, when a run starts, when it pauses for a limit and when it is ready for your review.
 - **Alerts that only warn**, as a band at the top of the app and a Windows notification, once each: when the account's 5-hour window or the plan's week passes 70% and 90%, when this computer has less than 15% of its memory free (naming the projects using the most), and about the plan's free resets.

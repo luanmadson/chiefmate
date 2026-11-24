@@ -152,7 +152,6 @@
   "Nothing running. The crew is standing by.": "Nada em andamento. A equipe está de prontidão.",
   "review": "revisão",
   "Project": "Projeto",
-  "Started": "Início",
   "Elapsed": "Decorrido",
   "Steps": "Etapas",
   "Cancel run": "Cancelar execução",
@@ -254,7 +253,6 @@
   "Update waiting: files were changed by hand here": "Atualização em espera: há arquivos mudados à mão aqui",
   "Update not installed: the new version failed its checks": "Atualização não instalada: a versão nova não passou nas verificações",
   "Update approved: it installs when the crew is free": "Atualização aprovada: instala quando a equipe estiver livre",
-  "Steps done": "Etapas concluídas",
   "{count} answer(s) · {steps} review(s)": "{count} resposta(s) · {steps} revisão(ões)",
   "{count} step(s) · {minutes} min": "{count} etapa(s) · {minutes} min",
   "Time limit": "Tempo máximo",
@@ -395,5 +393,13 @@
   "Context: Chiefmate": "Contexto: Chiefmate",
   "Context: {agent}": "Contexto: {agent}",
   "Writing a short summary to renew the conversation…": "Escrevendo um resumo curto para renovar a conversa…",
-  "renewing the conversation…": "renovando a conversa…"
+  "renewing the conversation…": "renovando a conversa…",
+  "Running now": "Em execução agora",
+  "started at {time}": "começou às {time}",
+  "Step {n} of {total}": "Etapa {n} de {total}",
+  "on this step": "nesta etapa",
+  "Chiefmate, preparing the working copy": "Chiefmate, preparando a cópia de trabalho",
+  "Last action": "Última ação",
+  "Next": "Próxima",
+  "after the runs ahead of it": "depois das execuções à frente"
 }

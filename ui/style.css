@@ -51,15 +51,17 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .presence .state { overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
 .focus { flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: 10px; margin: 0 20px; padding-left: 16px; border-left: 1px solid var(--line); font-size: 12px; white-space: nowrap; overflow: hidden; }
 .focus .label { margin: 0; flex: none; }
+.focus .live-dot { margin-right: -2px; }
 .focus-project { flex: none; color: var(--accent); font-weight: 600; }
 .focus-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
 .focus-none { color: var(--muted); }
 
 .nav { grid-area: nav; display: flex; flex-direction: column; padding: 14px 0; background: var(--panel); border-right: 1px solid var(--line); }
-.nav a { display: flex; justify-content: space-between; align-items: center; padding: 9px 18px; color: var(--muted); border-left: 2px solid transparent; font-size: 13px; }
+.nav a { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 9px 18px; color: var(--muted); border-left: 2px solid transparent; font-size: 13px; }
 .nav a:hover { color: var(--text); background: var(--hover); text-decoration: none; }
 .nav a.active { color: var(--strong); background: var(--raised); border-left-color: var(--accent); }
-.counter { font: 11px var(--mono); color: var(--accent); }
+.counter { display: inline-flex; align-items: center; gap: 6px; font: 11px var(--mono); color: var(--accent); }
+.nav a.running { color: var(--text); }
 .nav-footer { margin-top: auto; padding: 12px 18px; font-size: 11px; color: var(--faint); }
 
 /* The band of alerts: it warns, nothing is paused. */
@@ -199,9 +201,47 @@ textarea { resize: vertical; min-height: 64px; }
 .logbook div { display: grid; grid-template-columns: 52px 1fr; gap: 10px; }
 .logbook time { color: var(--faint); }
 .logbook .say { color: var(--muted); font-style: italic; }
-.summary-row { display: flex; flex-wrap: wrap; gap: 6px 24px; margin-bottom: 16px; }
-.summary-row div { font-size: 12px; color: var(--muted); }
-.summary-row strong { display: block; font-size: 14px; font-weight: 500; color: var(--strong); }
+.table.queue td:first-child { width: 36px; color: var(--muted); }
+.table.queue tr.next td { background: var(--raised); }
+.table.queue tr.next td:first-child { box-shadow: inset 2px 0 0 var(--accent); color: var(--accent); }
+.tag { display: inline-block; margin-right: 8px; padding: 0 6px; font: 10.5px/1.7 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); border: 1px solid rgba(201, 164, 93, 0.5); vertical-align: 1px; }
+
+/* Live: what is running now. Brass, discreet and continuous; still when the system asks for reduced motion. */
+.live-dot { display: inline-block; flex: none; width: 7px; height: 7px; background: var(--accent); animation: live-pulse 1.6s ease-in-out infinite; }
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(201, 164, 93, 0.5); }
+  50% { opacity: 0.4; box-shadow: 0 0 0 3px rgba(201, 164, 93, 0); }
+}
+.live { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 14px 16px; align-items: center; margin-bottom: 20px; box-shadow: inset 2px 0 0 var(--accent); animation: live-border 2.8s ease-in-out infinite; }
+@keyframes live-border { 50% { border-color: rgba(201, 164, 93, 0.4); } }
+.live.stalled { animation: none; box-shadow: inset 2px 0 0 var(--line-strong); }
+.live-label { display: flex; align-items: center; gap: 8px; }
+.live-label .label { margin: 0; color: var(--accent); }
+.live-title { margin-top: 2px; font-size: 15px; font-weight: 600; color: var(--strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-clock { text-align: right; }
+.live-clock .label { display: block; margin-bottom: 2px; }
+.live-clock strong { font-size: 20px; font-weight: 500; color: var(--strong); }
+.live-progress, .live-last { grid-column: 1 / -1; min-width: 0; }
+.live-step { font-size: 12.5px; color: var(--muted); }
+.live-step strong { color: var(--strong); font-weight: 500; }
+.live-steps { display: flex; gap: 3px; height: 6px; margin-top: 8px; }
+.live-steps span { position: relative; flex: 1; overflow: hidden; background: var(--raised); border: 1px solid var(--line); }
+.live-steps .done { background: var(--accent); border-color: var(--accent); }
+.live-steps .failed { background: var(--error); border-color: var(--error); }
+.live-steps .running { border-color: rgba(201, 164, 93, 0.6); }
+.live-steps .running::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 40%; background: linear-gradient(90deg, transparent, var(--accent), transparent); animation: live-sweep 1.9s ease-in-out infinite; }
+@keyframes live-sweep { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+.live-last { display: flex; align-items: baseline; gap: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.live-last .label { flex: none; margin: 0; }
+.live-last time, .live-last .text { font: 12px/1.6 var(--mono); }
+.live-last time { flex: none; color: var(--faint); }
+.live-last .text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); animation: live-in 0.5s ease-out; }
+.live-last .say { color: var(--muted); font-style: italic; }
+@keyframes live-in { from { opacity: 0; transform: translateY(3px); } }
+@media (prefers-reduced-motion: reduce) {
+  .live-dot, .live, .live-last .text { animation: none; }
+  .live-steps .running::after { animation: none; width: 100%; opacity: 0.45; background: var(--accent); }
+}
 
 /* Missions */
 .mission { margin-bottom: 16px; }
