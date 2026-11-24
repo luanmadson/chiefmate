@@ -11,7 +11,8 @@
 // A step gets the project's block (projects.<id>.prompt_block), the environment (prompt_builder.environment), the
 // optional modules of a "several" section (projects.<id>.prompt_modules, or --modules on a task) and the automatic
 // blocks that match their tags, accesses or names. Lines that conflict with the crew's rules are adapted, and the
-// adaptation is recorded: Chiefmate's rules prevail.
+// adaptation is recorded: Chiefmate's rules prevail. A live session (src/sessions.mjs) gets the blocks its profile
+// names ("prompt_blocks"), put together the same way, without the adaptation.
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { DATA, ROOT, readJson } from './util.mjs';
@@ -134,12 +135,7 @@ function adapt(block, text) {
  */
 export function assemble(sections, { blockName, environment, modules = [] }) {
   if (!blockName) return null;
-  const all = sections.flatMap(s => s.blocks);
-  const find = (name, prefer) => {
-    const n = norm(name);
-    const matches = all.filter(b => norm(b.name) === n);
-    return matches.find(b => !prefer || b.selection === prefer) ?? matches[0] ?? null;
-  };
+  const { all, find } = blockFinder(sections);
   const missing = [];
   const chosen = new Set();
   const pick = (name, prefer, what) => {
@@ -152,7 +148,24 @@ export function assemble(sections, { blockName, environment, modules = [] }) {
   if (!project) return { text: '', blocks: [], adaptations: [], missing };
   if (environment) pick(environment, 'one', 'environment');
   for (const m of modules) pick(m, 'several', 'module');
+  return { ...compose(all, project, chosen, true), missing };
+}
 
+function blockFinder(sections) {
+  const all = sections.flatMap(s => s.blocks);
+  const find = (name, prefer) => {
+    const n = norm(name);
+    const matches = all.filter(b => norm(b.name) === n);
+    return matches.find(b => !prefer || b.selection === prefer) ?? matches[0] ?? null;
+  };
+  return { all, find };
+}
+
+/**
+ * The blocks chosen, with the automatic and required ones they bring, their variables filled in (the first block's
+ * variables take precedence) and, with adaptToCrew, the lines that conflict with the crew's rules adapted.
+ */
+function compose(all, first, chosen, adaptToCrew) {
   // Automatic blocks: those that come with a chosen block, or share a tag or an access with them; with no condition, always.
   // Required blocks come along too, until nothing new comes in.
   for (let grew = true; grew; ) {
@@ -175,7 +188,7 @@ export function assemble(sections, { blockName, environment, modules = [] }) {
   }
 
   // Variables: the project's block first, then the environment, the modules and the rest; section variables last.
-  const ordered = [project, ...[...chosen].filter(b => b !== project)];
+  const ordered = [first, ...[...chosen].filter(b => b !== first)];
   const vars = {};
   for (const b of ordered) for (const [k, v] of Object.entries(b.vars)) vars[k] ??= v;
   for (const b of ordered) for (const [k, v] of Object.entries(b.sectionVars ?? {})) vars[k] ??= v;
@@ -184,11 +197,33 @@ export function assemble(sections, { blockName, environment, modules = [] }) {
   const adaptations = [];
   const parts = [];
   for (const b of all.filter(x => chosen.has(x))) {
-    const adapted = adapt(b, fill(b.text));
+    const adapted = adaptToCrew ? adapt(b, fill(b.text)) : { text: fill(b.text), adaptations: [] };
     adaptations.push(...adapted.adaptations);
     parts.push(`## ${b.name}\n\n${adapted.text}`.trim());
   }
-  return { text: parts.join('\n\n'), blocks: all.filter(x => chosen.has(x)).map(b => b.name), adaptations, missing };
+  return { text: parts.join('\n\n'), blocks: all.filter(x => chosen.has(x)).map(b => b.name), adaptations };
+}
+
+/**
+ * Blocks chosen by name, in any section (a live session's "prompt_blocks"), with the automatic and required blocks
+ * they bring and their variables filled in, as for a step. Nothing is adapted: in a session the owner is there.
+ * Returns { text, blocks, adaptations: [], missing }.
+ */
+export function assembleBlocks(sections, names = []) {
+  const { all, find } = blockFinder(sections);
+  const missing = [];
+  const chosen = new Set();
+  let first = null;
+  for (const name of names) {
+    const b = find(name);
+    if (!b) missing.push(`block: ${name}`);
+    else {
+      first ??= b;
+      chosen.add(b);
+    }
+  }
+  if (!first) return { text: '', blocks: [], adaptations: [], missing };
+  return { ...compose(all, first, chosen, false), missing };
 }
 
 /**

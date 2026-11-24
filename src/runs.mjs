@@ -15,14 +15,19 @@ import {
   prepareWorkspace, projectDir, runChecks,
 } from './workspace.mjs';
 
-/** What the app shows as happening right now. */
-export const live = { run: null, title: null, project: null, step: null, agent: null, started: null, pid: null, context: null, actions: [], heldUntil: 0 };
-
-let currentProcess = null;
-let cancelRequest = null;
-let running = null;
-/** The run going on, as it is in memory (its steps save it as they go). */
-export const activeRun = () => running;
+/**
+ * What the app shows as happening right now: one entry per run going on, by run id (runs of different projects go on
+ * at the same time). Each entry: { run, title, project, step, agent, started, pid, context, actions, heldUntil },
+ * plus, kept off the app, the run as it is in memory (its steps save it as they go), the agent's process and the
+ * cancellation asked for.
+ */
+export const live = new Map();
+export const liveRuns = () => [...live.values()].sort((a, b) => (a.since ?? '').localeCompare(b.since ?? ''));
+export const liveOf = id => live.get(id) ?? null;
+/** The run going on with this id, as it is in memory; null when it is not going on. */
+export const activeRun = id => live.get(id)?.memory ?? null;
+/** What the app and the manager see of a run going on (without the run object, its process or the cancellation). */
+export const livePublic = l => ({ run: l.run, title: l.title, project: l.project, step: l.step, agent: l.agent, started: l.started, since: l.since, pid: l.pid, context: l.context, actions: l.actions });
 
 // No agent pushes anything to GitHub or changes it: Chiefmate itself pushes the branch and opens the pull request.
 export const ALWAYS_DISALLOWED = ['Bash(git push:*)', 'Bash(gh pr:*)', 'Bash(gh repo:*)', 'Bash(git remote:*)'];
@@ -83,9 +88,13 @@ export function createRun({ kind, missionId, projectId, agent, instruction, revi
   });
 }
 
-export function cancelCurrent(reason) {
-  cancelRequest = reason;
-  currentProcess?.cancel(reason);
+/** Cancels a run going on: its agent stops now, and the run ends as canceled. Returns false when it is not going on. */
+export function cancelLive(id, reason) {
+  const l = live.get(id);
+  if (!l) return false;
+  l.cancelRequest = reason;
+  l.process?.cancel(reason);
+  return true;
 }
 
 /** Before every step: your account's usage, in the plan's 5-hour window and week. */
@@ -147,10 +156,10 @@ function libraryLines(project, libraries, access) {
   return lines;
 }
 
-function logAction(event) {
+function logAction(l, event) {
   if (event.type !== 'action' && event.type !== 'say') return;
-  live.actions.push({ at: now(), type: event.type, text: event.type === 'say' ? clip(event.text, 300) : event.text });
-  if (live.actions.length > 300) live.actions.splice(0, live.actions.length - 300);
+  l.actions.push({ at: now(), type: event.type, text: event.type === 'say' ? clip(event.text, 300) : event.text });
+  if (l.actions.length > 300) l.actions.splice(0, l.actions.length - 300);
 }
 
 function stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries, base, access, built }) {
@@ -199,13 +208,13 @@ function stepPrompt({ run, step, project, previous, finalReview, changes, config
  * The context of the step at work: the tokens of its last turn, against the model's window, and how many times
  * Claude Code compacted it. Every step starts with a new session, so nothing more is done than showing and logging it.
  */
-function followContext(event) {
-  if (event.type === 'start' && event.model) live.context = { ...live.context, window: contextWindow(event.model) };
-  if (event.type === 'context') live.context = { ...live.context, used: event.used, window: event.window };
+function followContext(l, event) {
+  if (event.type === 'start' && event.model) l.context = { ...l.context, window: contextWindow(event.model) };
+  if (event.type === 'context') l.context = { ...l.context, used: event.used, window: event.window };
   if (event.type === 'compact') {
-    live.context = { ...live.context, compactions: (live.context?.compactions ?? 0) + 1 };
+    l.context = { ...l.context, compactions: (l.context?.compactions ?? 0) + 1 };
     const before = event.before ? t('{tokens} tokens before', { tokens: formatNumber(event.before) }) : '';
-    logAction({ type: 'action', text: (event.trigger === 'manual' ? t('Context compacted') : t('Context compacted automatically')) + (before ? ` (${before})` : '') });
+    logAction(l, { type: 'action', text: (event.trigger === 'manual' ? t('Context compacted') : t('Context compacted automatically')) + (before ? ` (${before})` : '') });
   }
 }
 
@@ -285,7 +294,7 @@ function appendLoaded(file, init) {
   }
 }
 
-async function runStep({ run, step, index, dir, project, config, agents, libraries, base, finalReview = false }) {
+async function runStep({ l, run, step, index, dir, project, config, agents, libraries, base, finalReview = false }) {
   const agent = agents[step.agent];
   if (!agent) throw new Error(t('Unknown agent: {id}', { id: step.agent }));
   const previous = run.steps.filter(s => s !== step && s.status !== 'pending');
@@ -297,9 +306,9 @@ async function runStep({ run, step, index, dir, project, config, agents, librari
   try {
     built = projectInstructions(config, project, run.modules ?? []);
   } catch (error) {
-    logAction({ type: 'action', text: t("Couldn't read the prompt builder: {error}", { error: error.message }) });
+    logAction(l, { type: 'action', text: t("Couldn't read the prompt builder: {error}", { error: error.message }) });
   }
-  for (const a of built?.adaptations ?? []) logAction({ type: 'action', text: t('Prompt builder: a line of "{block}" was adapted to the crew\'s rules', { block: a.block }) });
+  for (const a of built?.adaptations ?? []) logAction(l, { type: 'action', text: t('Prompt builder: a line of "{block}" was adapted to the crew\'s rules', { block: a.block }) });
   const prompt = stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries, base, access, built });
   const tools = [...new Set([...(agent.tools ?? []), ...mcp.tools])];
   const disallowed = [...new Set([...ALWAYS_DISALLOWED, ...(agent.disallowed ?? []), ...access.denied])];
@@ -307,7 +316,7 @@ async function runStep({ run, step, index, dir, project, config, agents, librari
   const contextFile = path.join(runDir(run.id), `${name}.context.md`);
 
   Object.assign(step, { status: 'running', started: now(), error: null, model, promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
-  Object.assign(live, { step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0 });
+  Object.assign(l, { step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0 });
   saveRun(run);
 
   const { promise, cancel, pid, args } = runClaude({
@@ -324,33 +333,35 @@ async function runStep({ run, step, index, dir, project, config, agents, librari
     env: { CHIEFMATE_RUN: run.id, CHIEFMATE_STEP: String(index + 1), CHIEFMATE_PORT: String(Number(process.env.CHIEFMATE_PORT) || config.port || 4747) },
     attribution: config.attribution !== false,
     maxMinutes: agent.max_minutes ?? 60,
-    isHeld: () => Date.now() < live.heldUntil,
+    isHeld: () => Date.now() < l.heldUntil,
     log: path.join(runDir(run.id), `${name}.jsonl`),
     onEvent: event => {
-      followContext(event);
-      logAction(event);
+      followContext(l, event);
+      logAction(l, event);
       if (event.type === 'start' && event.init) appendLoaded(contextFile, event.init);
     },
   });
   try {
     writeFileSync(contextFile, contextReport({ run, step, index, agent, dir, model, prompt, tools, disallowed, access, mcp, built, args }));
   } catch (error) {
-    logAction({ type: 'action', text: t("Couldn't write the context report: {error}", { error: error.message }) });
+    logAction(l, { type: 'action', text: t("Couldn't write the context report: {error}", { error: error.message }) });
   }
-  currentProcess = { cancel };
-  live.pid = pid; // the agent's process: its memory counts for the project, and it is never stopped from the Projects section
+  l.process = { cancel };
+  l.pid = pid; // the agent's process: its memory counts for the project, and it is never stopped from the Projects section
+  // Canceled while the step was being prepared: stop the agent that just started.
+  if (l.cancelRequest) cancel(l.cancelRequest);
   const r = await promise;
-  currentProcess = null;
-  live.pid = null;
+  l.process = null;
+  l.pid = null;
 
   const waitUntil = limitHit(r);
   Object.assign(step, {
     status: waitUntil ? 'pending' : r.ok ? 'done' : 'failed', ended: waitUntil ? null : now(), tokens: r.tokens, turns: r.turns,
-    durationMs: r.durationMs, report: r.text, error: r.error ?? null, subagents: r.subagents, actions: live.actions.length,
-    context: r.context ? { ...r.context, compactions: live.context?.compactions ?? r.context.compactions } : null,
+    durationMs: r.durationMs, report: r.text, error: r.error ?? null, subagents: r.subagents, actions: l.actions.length,
+    context: r.context ? { ...r.context, compactions: l.context?.compactions ?? r.context.compactions } : null,
   });
   if (r.context?.used) {
-    logAction({ type: 'action', text: t('Context at the end of the step: {used} of {window} tokens ({percent}), {count} compaction(s)', {
+    logAction(l, { type: 'action', text: t('Context at the end of the step: {used} of {window} tokens ({percent}), {count} compaction(s)', {
       used: formatNumber(r.context.used), window: formatNumber(r.context.window), percent: formatPercent(r.context.used / r.context.window), count: step.context.compactions,
     }) });
   }
@@ -380,13 +391,16 @@ export async function execute(run) {
   const config = loadConfig();
   const agents = projectCrew(config, run.project);
   const project = config.projects?.[run.project];
-  cancelRequest = null;
-  running = run;
-  Object.assign(live, { run: run.id, title: run.title, project: run.project, step: null, agent: null, started: now(), pid: null, context: null, actions: [] });
+  if (live.has(run.id)) throw new Error(`Run ${run.id} is already going on.`);
+  const l = {
+    run: run.id, title: run.title, project: run.project, step: null, agent: null, started: now(), since: now(), pid: null, context: null, actions: [],
+    heldUntil: 0, memory: run, process: null, cancelRequest: null,
+  };
+  live.set(run.id, l);
+  const log = text => logAction(l, { type: 'action', text });
   const firstTime = !run.started;
   Object.assign(run, { status: 'running', started: run.started ?? now(), notBefore: null, note: null });
   saveRun(run);
-  if (firstTime) notify(t('Chiefmate started'), run.title);
 
   const wait = (waitUntil, note) => {
     Object.assign(run, { status: waitUntil ? 'waiting' : 'paused', notBefore: waitUntil ?? null, note });
@@ -401,10 +415,14 @@ export async function execute(run) {
 
   try {
     if (!project) throw new Error(t('Unknown project: {id}', { id: run.project }));
+    // Over the limits already: wait before touching the working copy.
+    const early = checkLimits(config, run);
+    if (early) return wait(early.waitUntil, early.note);
+    if (firstTime) notify(t('Chiefmate started'), run.title);
     let dir;
     if (!run.prepared) {
       run.base = await baseBranch(project);
-      dir = await prepareWorkspace(run.project, project, run.base, text => logAction({ type: 'action', text }));
+      dir = await prepareWorkspace(run.project, project, run.base, log);
       await createBranch(dir, run.branch);
       run.prepared = true;
       saveRun(run);
@@ -414,25 +432,25 @@ export async function execute(run) {
       await checkoutBranch(dir, run.branch);
     }
     const base = run.base ?? project.main_branch;
-    const libraries = await prepareLibraries(config, libraryIds(project), text => logAction({ type: 'action', text }));
+    const libraries = await prepareLibraries(config, libraryIds(project), log);
 
     const order =[...run.steps.map(step => ({ step, finalReview: false })), ...(run.review ? [{ step: run.review, finalReview: true }] : [])];
     for (const [index, { step, finalReview }] of order.entries()) {
       if (step.status === 'done' || step.status === 'failed') continue;
-      if (cancelRequest) break;
+      if (l.cancelRequest) break;
       const limit = checkLimits(config, run);
       if (limit) return wait(limit.waitUntil, limit.note);
-      const { waitUntil } = await runStep({ run, step, index, dir, project, config, agents, libraries, base, finalReview });
+      const { waitUntil } = await runStep({ l, run, step, index, dir, project, config, agents, libraries, base, finalReview });
       if (waitUntil) return wait(waitUntil, t('Your account reached its limit in the middle of a step'));
     }
 
-    if (cancelRequest) {
-      Object.assign(run, { status: 'canceled', ended: now(), note: cancelRequest });
+    if (l.cancelRequest) {
+      Object.assign(run, { status: 'canceled', ended: now(), note: l.cancelRequest });
       saveRun(run);
       return;
     }
 
-    logAction({ type: 'action', text: t("Running the project's checks") });
+    log(t("Running the project's checks"));
     run.checks = await runChecks(dir, project.checks);
     const commits = await newCommits(dir, base);
     run.commits = commits.length;
@@ -451,7 +469,7 @@ export async function execute(run) {
       writeFileSync(bodyFile, body);
       let where = t('the branch {branch} of the working copy ({path})', { branch: run.branch, path: dir });
       if (project.local_clone) {
-        logAction({ type: 'action', text: t('Handing the branch to your clone of {name}', { name: project.name }) });
+        log(t('Handing the branch to your clone of {name}', { name: project.name }));
         await deliverToClone(dir, run.branch, project.local_clone);
         where = t('the branch {branch} of your clone ({path})', { branch: run.branch, path: project.local_clone });
       }
@@ -464,7 +482,7 @@ export async function execute(run) {
       return;
     }
 
-    logAction({ type: 'action', text: t('Pushing the branch and opening the pull request') });
+    log(t('Pushing the branch and opening the pull request'));
     run.pullRequest = await openPullRequest(dir, {
       base, branch: run.branch, title: `${run.title} (${formatDate(run.created)})`, body, bodyFile,
     });
@@ -477,7 +495,6 @@ export async function execute(run) {
     saveRun(run);
     notify(t('Chiefmate hit an error'), t('{title}: {error}', { title: run.title, error: clip(error.message, 180) }));
   } finally {
-    running = null;
-    Object.assign(live, { run: null, title: null, project: null, step: null, agent: null, pid: null, context: null, heldUntil: 0 });
+    live.delete(run.id);
   }
 }

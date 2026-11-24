@@ -168,7 +168,7 @@ export function computerLine(config) {
   const c = computer(config);
   const memory = `free memory ${formatPercent(c.memory.free / c.memory.total)} (${formatBytes(c.memory.free)} of ${formatBytes(c.memory.total)})`;
   if (!c.supported) return `This computer: ${memory}; the projects' processes are read on Windows only.`;
-  const running = c.projects.filter(p => p.ram > 0).map(p => `${p.id} ${formatBytes(p.ram)}${p.agent ? ' (crew at work)' : ''}`);
+  const running = c.projects.filter(p => p.ram > 0).map(p => `${p.id} ${formatBytes(p.ram)}${[p.agent ? 'crew at work' : '', p.session ? 'live session' : ''].filter(Boolean).map(x => ` (${x})`).join('')}`);
   return `This computer: ${memory}; projects running here: ${running.join(', ') || 'none'}; Chiefmate itself ${formatBytes(c.chiefmate.ram)}.`;
 }
 

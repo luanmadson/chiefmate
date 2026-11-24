@@ -1,12 +1,16 @@
-// The queue: one run at a time, in the order requested. This is what keeps agents from setting off other agents.
+// The queue: runs of different projects go on at the same time, up to "max_parallel" (3 by default); within one
+// project, one run at a time, in the order requested. This is what keeps agents from setting off other agents.
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
-import { cancelCurrent, execute, live } from './runs.mjs';
+import { activeRun, cancelLive, execute, live, liveRuns } from './runs.mjs';
 import { listRuns, readRun, saveRun, stepsOf } from './store.mjs';
 import { now } from './util.mjs';
 
-let busy = null;
-export const currentRunId = () => busy;
+/** "max_parallel": how many runs (of different projects) may go on at once. 3 by default, at least 1. */
+export const maxParallel = (config = loadConfig()) => Math.max(1, Math.floor(Number(config.max_parallel) || 3));
+
+// Runs being started (between the queue's choice and execute() registering them), so a tick never picks one twice.
+const starting = new Set();
 
 /** If Chiefmate was shut down in the middle of a step, that step goes back to the queue and starts over. */
 function recoverInterrupted() {
@@ -24,39 +28,82 @@ export function queued() {
     .sort((a, b) => a.created.localeCompare(b.created));
 }
 
-const ready = run => !run.notBefore || new Date(run.notBefore).getTime() <= Date.now();
+const ready = (run, at = Date.now()) => !run.notBefore || new Date(run.notBefore).getTime() <= at;
 
 /**
- * The project in focus: the one of the run going on now or, when nothing runs, of the next run in the queue
- * (the first one ready to start, else the one that waits the least). Null when there is neither.
+ * Which runs of the queue start now: the oldest ready run of each project that has nothing going on, while there is
+ * room under the limit. queue: oldest first; busy: the projects with a run going on (or starting); free: the room left.
+ */
+export function pickNext(queue, busy, free, at = Date.now()) {
+  const taken = new Set(busy);
+  const chosen = [];
+  for (const run of queue) {
+    if (chosen.length >= free) break;
+    // One run per project at a time: the others wait in order. A run not ready yet (waiting for a limit or a start
+    // time) doesn't hold up the ones behind it, as before.
+    if (!ready(run, at) || taken.has(run.project)) continue;
+    taken.add(run.project);
+    chosen.push(run);
+  }
+  return chosen;
+}
+
+/** The projects with a run going on (or starting). */
+function busyProjects() {
+  const projects = liveRuns().map(l => l.project);
+  for (const id of starting) projects.push(readRun(id)?.project);
+  return projects.filter(Boolean);
+}
+
+/**
+ * The project in focus: the oldest run going on now (with the others in "others") or, when nothing runs, the next
+ * run in the queue (the first one ready to start, else the one that waits the least). Null when there is neither.
  */
 export function focus(config = loadConfig()) {
   const about = run => ({
     project: run.project, projectName: config.projects?.[run.project]?.name ?? run.project,
     run: run.id, title: run.title, kind: run.kind, mission: run.mission ?? null,
   });
-  const current = live.run ? readRun(live.run) : null;
-  if (current) return { state: 'running', ...about(current), agent: live.agent, step: live.step, since: current.started ?? live.started };
+  const running = liveRuns()
+    .map(l => {
+      const run = activeRun(l.run) ?? readRun(l.run);
+      return run ? { state: 'running', ...about(run), agent: l.agent, step: l.step, since: run.started ?? l.started } : null;
+    })
+    .filter(Boolean);
+  if (running.length) return { ...running[0], others: running.slice(1) };
   const queue = queued();
-  const next = queue.find(ready) ?? [...queue].sort((a, b) => a.notBefore.localeCompare(b.notBefore))[0];
+  const next = queue.find(r => ready(r)) ?? [...queue].sort((a, b) => a.notBefore.localeCompare(b.notBefore))[0];
   if (!next) return null;
   const agent = stepsOf(next).find(s => s.status === 'pending')?.agent ?? null;
-  return { state: 'next', ...about(next), agent, status: next.status, notBefore: next.notBefore ?? null };
+  return { state: 'next', ...about(next), agent, status: next.status, notBefore: next.notBefore ?? null, others: [] };
 }
 
-async function tick() {
-  if (busy) return;
-  const next = queued().find(ready);
-  if (!next) return;
-  busy = next.id;
-  try {
-    await execute(next);
-  } finally {
-    busy = null;
+function tick() {
+  const free = maxParallel() - live.size - starting.size;
+  if (free <= 0) return;
+  for (const next of pickNext(queued().filter(r => !live.has(r.id) && !starting.has(r.id)), busyProjects(), free)) {
+    starting.add(next.id);
+    // Each run goes on by itself; the queue looks again as soon as one ends.
+    Promise.resolve()
+      .then(() => {
+        starting.delete(next.id);
+        return execute(next);
+      })
+      .catch(error => console.error('Queue:', error))
+      .finally(() => {
+        starting.delete(next.id);
+        setImmediate(nudgeQueue);
+      });
   }
 }
 
-export const nudgeQueue = () => tick().catch(error => console.error('Queue:', error));
+export const nudgeQueue = () => {
+  try {
+    tick();
+  } catch (error) {
+    console.error('Queue:', error);
+  }
+};
 
 export function startQueue() {
   recoverInterrupted();
@@ -67,10 +114,7 @@ export function startQueue() {
 export function cancel(id) {
   const run = readRun(id);
   if (!run) throw new Error(t('Run not found.'));
-  if (busy === id) {
-    cancelCurrent(t('canceled by you'));
-    return 'canceling';
-  }
+  if (cancelLive(id, t('canceled by you'))) return 'canceling';
   if (['queued', 'waiting', 'paused'].includes(run.status)) {
     Object.assign(run, { status: 'canceled', ended: now(), note: t('canceled before it finished') });
     saveRun(run);
@@ -83,7 +127,7 @@ export function cancel(id) {
 export function resume(id, ignoreLimits = false) {
   const run = readRun(id);
   if (!run) throw new Error(t('Run not found.'));
-  if (!['paused', 'waiting', 'failed', 'canceled'].includes(run.status)) return run.status;
+  if (live.has(id) || !['paused', 'waiting', 'failed', 'canceled'].includes(run.status)) return run.status;
   for (const step of stepsOf(run)) if (step.status === 'failed' || step.status === 'running') step.status = 'pending';
   Object.assign(run, { status: 'queued', notBefore: null, note: null, ended: null, ignoreLimits: ignoreLimits || run.ignoreLimits || false });
   saveRun(run);

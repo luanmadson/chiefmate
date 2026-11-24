@@ -11,9 +11,10 @@ import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs'
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { builderStatus } from './prompts.mjs';
 import { isSyncing, syncPrompts } from './promptsync.mjs';
-import { cancel, focus, nudgeQueue, queued, resume } from './queue.mjs';
-import { createRun, live } from './runs.mjs';
+import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
+import { activeRun, createRun, liveRuns } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
+import { endSession, finishSessionRequest, openSession, sessionRequests, sessionsState } from './sessions.mjs';
 import { listRuns, readConversation, readNotifications, readPending, readRun, readUsage, runDir, stepsOf } from './store.mjs';
 import { updateInfo } from './update.mjs';
 import { isReading, readerSettings, readerStatus, readUsagePage, signedIn } from './usagepage.mjs';
@@ -81,12 +82,12 @@ const summary = run => ({
  * The crews by project: a project with "crew" in its settings has its own members (with their presence counted on
  * that project's runs only); the others use the general crew. The manager is global and is not repeated here.
  */
-function teams(config, agents, general, runs, current, queue, conversation) {
+function teams(config, agents, general, runs, going, queue, conversation) {
   return Object.entries(config.projects ?? {}).map(([id, p]) => {
     if (!p.crew) return { project: id, name: p.name ?? id, own: false, members: general.filter(a => a.id !== 'manager') };
     const team = Object.fromEntries(Object.entries(projectCrew(config, id, agents)).filter(([key]) => key !== 'manager'));
     const mine = r => r.project === id;
-    const members = crew(team, config, runs.filter(mine), current && mine(current) ? current : null, queue.filter(mine), []).map(m => ({
+    const members = crew(team, config, runs.filter(mine), going.filter(mine), queue.filter(mine), []).map(m => ({
       ...m, base: team[m.id].base, extra: !!p.crew?.[m.id]?.extra_instructions, mcp: team[m.id].mcp ?? [],
     }));
     return { project: id, name: p.name ?? id, own: true, members };
@@ -102,18 +103,25 @@ function contextFile(id, n) {
   return name ? path.join(dir, name) : null;
 }
 
-/** Each crew member's presence: what they are doing now, their last work and their work this week. */
-function crew(agents, config, runs, current, queue, conversation) {
+/**
+ * Each crew member's presence: what they are doing now, their last work and their work this week.
+ * going: the runs going on now (runs of different projects go on at once, so one agent may be at work on two).
+ */
+function crew(agents, config, runs, going, queue, conversation) {
   const since = Date.now() - 7 * 86400_000;
-  const running = current ? stepsOf(current).find(s => s.status === 'running') : null;
   const pendingFor = id => r => stepsOf(r).some(s => s.status === 'pending' && s.agent === id);
+  const titles = list => list.map(r => r.title).join(' · ');
   return Object.values(agents).map(agent => {
     let status = 'idle';
     let run = null;
+    const working = going.filter(r => stepsOf(r).some(s => s.status === 'running' && s.agent === agent.id));
+    const waitingIn = going.filter(pendingFor(agent.id));
     if (claudeInfo.found === false) status = 'offline';
-    else if (running?.agent === agent.id) [status, run] = [running === current.review ? 'reviewing' : 'working', current.title];
-    else if (agent.id === 'manager' && chat.responding) status = 'thinking';
-    else if (current && pendingFor(agent.id)(current)) [status, run] = ['queued', current.title];
+    else if (working.length) {
+      const reviewing = working.every(r => r.review?.status === 'running' && r.review.agent === agent.id);
+      [status, run] = [reviewing ? 'reviewing' : 'working', titles(working)];
+    } else if (agent.id === 'manager' && chat.responding) status = 'thinking';
+    else if (waitingIn.length) [status, run] = ['queued', titles(waitingIn)];
     else {
       const next = queue.find(pendingFor(agent.id));
       if (next) [status, run] = [next.status === 'waiting' ? 'waiting' : 'queued', next.title];
@@ -146,7 +154,12 @@ function buildState() {
   const agents = loadAgents(config);
   let general;
   const runs = listRuns();
-  const current = live.run ? runs.find(r => r.id === live.run) ?? null : null;
+  // The runs going on, as they are in memory, oldest first.
+  const going = liveRuns().map(l => ({ l, run: activeRun(l.run) ?? runs.find(r => r.id === l.run) })).filter(x => x.run);
+  const goingIds = new Set(going.map(x => x.run.id));
+  const running = going.map(({ l, run }) => ({
+    ...summary(run), step: l.step, agent: l.agent, stepStarted: l.started, context: l.context, actions: l.actions.slice(-80),
+  }));
   const queue = queued();
   const conversation = readConversation();
   const usage = readUsage();
@@ -166,16 +179,20 @@ function buildState() {
       schedule: describeSchedule(m.schedule), next: nextRun(m.schedule)?.toISOString() ?? null,
       last: lastOf(id) ? summary(lastOf(id)) : null,
     })),
-    crew: (general = crew(agents, config, runs, current, queue, conversation)),
-    teams: teams(config, agents, general, runs, current, queue, conversation),
-    needs: openRequests(runs),
+    crew: (general = crew(agents, config, runs, going.map(x => x.run), queue, conversation)),
+    teams: teams(config, agents, general, runs, going.map(x => x.run), queue, conversation),
+    needs: [...openRequests(runs), ...sessionRequests()].sort((a, b) => b.at.localeCompare(a.at)),
     prompts: { ...builderStatus(config), syncing: isSyncing(), cdp: !!config.browser_cdp },
     focus: focus(config),
-    current: current ? { ...summary(current), step: live.step, agent: live.agent, stepStarted: live.started, context: live.context, actions: live.actions.slice(-80) } : null,
+    // Every run going on (one per project, up to "max_parallel"); "current" is the oldest, for older readers of the API.
+    running,
+    current: running[0] ?? null,
+    parallel: { max: maxParallel(config) },
     queue: queue.map(summary),
-    history: runs.filter(r => !['queued', 'waiting'].includes(r.status) && r.id !== live.run).slice(0, 30).map(summary),
+    history: runs.filter(r => !['queued', 'waiting'].includes(r.status) && !goingIds.has(r.id)).slice(0, 30).map(summary),
     usage: { limits: config.limits ?? {}, account: usage },
     computer: machine,
+    sessions: sessionsState(config, machine),
     plan: {
       resets: planResets(config),
       pace: weekPace(usage),
@@ -250,7 +267,12 @@ export function startServer() {
         case '/api/needs-you/poll':
           return reply(res, 200, pollRequest(body.run, body.id));
         case '/api/needs-you/done':
+          if (body.session) return reply(res, 200, finishSessionRequest(String(body.session), String(body.id ?? '')));
           return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner'));
+        case '/api/session':
+          return reply(res, 200, await openSession(String(body.profile ?? ''), { origin: body.origin ?? 'app' }));
+        case '/api/session/end':
+          return reply(res, 200, await endSession(String(body.id ?? '')));
         case '/api/prompts-sync':
           return reply(res, 200, await syncPrompts());
         case '/api/cancel':

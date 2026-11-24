@@ -82,7 +82,16 @@ export async function prepareWorkspace(id, project, base, onStep = () => {}) {
  * A reference library: a git repository the crew and the manager read, such as your personal documentation.
  * It is cloned into workspaces/.library/<id> and reset to GitHub before use, so anything changed there is discarded.
  */
-export async function prepareLibrary(id, source, onStep = () => {}) {
+export function prepareLibrary(id, source, onStep = () => {}) {
+  // Runs of different projects (and the manager) share the libraries: one update at a time per library, and whoever
+  // asks while it goes on gets that same update instead of a second git command in the same folder.
+  if (!libraryJobs.has(id)) libraryJobs.set(id, updateLibrary(id, source, onStep).finally(() => libraryJobs.delete(id)));
+  return libraryJobs.get(id);
+}
+
+const libraryJobs = new Map();
+
+async function updateLibrary(id, source, onStep) {
   const dir = path.join(WORKSPACES, '.library', id);
   const name = source.name ?? id;
   if (!existsSync(path.join(dir, '.git'))) {

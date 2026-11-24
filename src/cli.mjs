@@ -38,6 +38,12 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 and goes with the others, in order, when the answer ends
   node src/cli.mjs chat edit <id> "<message>"   changes a message still in the queue (chat remove <id> takes it out)
   node src/cli.mjs chat interrupt               ends the current answer (the conversation goes on); the queue goes next
+  node src/cli.mjs session [<profile>] [--dry-run]
+                                                opens a live session (the profiles are in "sessions" in the settings):
+                                                a window with Claude Code or Codex, started with the prompt builder's
+                                                blocks; with no profile, lists the profiles and the sessions open;
+                                                --dry-run shows the folder, the command and the first message only
+  node src/cli.mjs session end <id>             ends a live session (its window closes)
   node src/cli.mjs cancel <id>                  cancels a run
   node src/cli.mjs resume <id> [--ignore-limits]
                                                 resumes a paused, failed or canceled run
@@ -160,6 +166,49 @@ async function chatCommand() {
   }
 }
 
+/** "session": opens, lists or ends the live sessions. */
+async function sessionCommand() {
+  const sessions = await import('./sessions.mjs');
+  const [first, second] = rest.filter(x => !x.startsWith('--'));
+  if (first === 'end') {
+    if (!second) throw new Error('Which session? node src/cli.mjs session end <id>');
+    const s = await apiOr('/api/session/end', { id: second }, () => sessions.endSession(second));
+    console.log(`Session ${s.id} ended.`);
+    return;
+  }
+  if (!first) {
+    // Through the running Chiefmate, which knows the processes (alive, memory); else from the records alone.
+    const { profiles, open } = (await apiOr('/api/state', null, () => ({ sessions: sessions.sessionsState(loadConfig()) }))).sessions;
+    for (const p of profiles) console.log(`Profile ${p.id}: ${p.name} (${p.tool}, ${p.project ? `project ${p.project}` : p.folder ? `library folder ${p.folder}` : 'its own folder'})${p.blocks.length ? `, blocks: ${p.blocks.join(', ')}` : ''}`);
+    if (!profiles.length) console.log('No session profiles. Add them under "sessions" in config/chiefmate.json (see the README).');
+    for (const x of open) console.log(`Open: ${x.name} [${x.id}] (${x.tool}), ${x.status}${x.alive ? `, ${machineBytes(x.ram)}` : ''}, since ${formatDateTime(x.started)}`);
+    return;
+  }
+  if (has('--dry-run')) {
+    const config = loadConfig();
+    const { profile, folder, prompt } = sessions.planSession(config, first);
+    let command;
+    try {
+      const tool = sessions.toolCommand(profile.tool);
+      command = [tool.command, ...tool.prefix].join(' ');
+    } catch (error) {
+      command = `(not found: ${error.message})`;
+    }
+    const args = sessions.sessionArgs({ ...profile, cwd: folder.dir }, config, prompt.blocksGiven ? '<first message>' : null);
+    console.log(`Folder: ${folder.dir}${folder.copy ? " (Chiefmate's read-only copy of the library)" : ''}`);
+    console.log(`Command: ${command} ${args.map(a => (/[\s"{}]/.test(a) ? JSON.stringify(a) : a)).join(' ')}`);
+    if (prompt.missing.length) console.log(`Not found in the prompt builder: ${prompt.missing.join(', ')}`);
+    console.log(prompt.blocksGiven ? `\nFirst message (${prompt.text.length} characters):\n\n${prompt.text}` : '\nNo first message: the profile has no "prompt_blocks".');
+    return;
+  }
+  const s = await apiOr('/api/session', { profile: first, origin: 'cli' }, () => sessions.openSession(first, { origin: 'cli' }));
+  if (s.status === 'login') console.log(`Codex is not signed in: run "codex login" in a terminal. The session ${s.id} opens by itself once you are signed in (with Chiefmate running).`);
+  else console.log(`Session ${s.id} opened (${s.window === 'terminal' ? 'Windows Terminal' : 'PowerShell'}), in ${s.cwd}. First message: data/sessions/${s.id}.md`);
+  if (s.missing?.length) console.log(`Not found in the prompt builder: ${s.missing.join(', ')}`);
+}
+
+const machineBytes = n => `${Math.round((n ?? 0) / 1024 ** 2)} MB`;
+
 async function main() {
   switch (command) {
     case 'server': {
@@ -181,12 +230,15 @@ async function main() {
         const { startSchedule } = await import('./schedule.mjs');
         const { startUpdates } = await import('./update.mjs');
         const { live } = await import('./runs.mjs');
+        const { startSessions } = await import('./sessions.mjs');
         const { deliverPending, managerBusy } = await import('./manager.mjs');
         const { startWatch } = await import('./plan.mjs');
         startQueue();
         startSchedule();
         startWatch();
-        startUpdates({ isBusy: () => !!live.run || managerBusy(), beforeRestart: () => new Promise(resolve => server.close(() => resolve())) });
+        startSessions();
+        // The update waits for every run going on to end (and for the manager); the sessions' windows stay open.
+        startUpdates({ isBusy: () => live.size > 0 || managerBusy(), beforeRestart: () => new Promise(resolve => server.close(() => resolve())) });
         deliverPending(); // messages left in the queue when Chiefmate stopped
       }
       console.log(`Chiefmate running at http://localhost:${p} (${new Date().toISOString()})`);
@@ -196,7 +248,10 @@ async function main() {
       const s = await api('/api/state');
       const account = s.usage.account;
       const percent = v => `${Math.round((v ?? 0) * 100)}%`;
-      console.log(s.current ? `Running: ${s.current.title} [${s.current.id}], step ${s.current.step}: ${s.current.agent}` : 'Running: nothing');
+      const going = s.running ?? (s.current ? [s.current] : []);
+      if (!going.length) console.log('Running: nothing');
+      for (const r of going) console.log(`Running: ${r.title} [${r.id}] (${r.project}), step ${r.step ?? '-'}: ${r.agent ?? 'preparing'}`);
+      for (const x of s.sessions?.open ?? []) console.log(`Session: ${x.name} [${x.id}] (${x.tool}${x.project ? `, ${x.project}` : ''}), ${x.alive ? 'open' : x.status} since ${formatDateTime(x.started)}`);
       console.log(`Queue: ${s.queue.map(r => `${r.title} [${r.id}]`).join('; ') || 'empty'}`);
       console.log(`Account: 5-hour window ${percent(account.five_hour?.used)}, plan week ${percent(account.seven_day?.used)}`);
       console.log(`Claude Code: ${s.ai.claude.found ? s.ai.claude.version : 'not found'}`);
@@ -254,6 +309,15 @@ async function main() {
     case 'needs-you':
       await needsYou();
       return;
+    case 'session':
+      await sessionCommand();
+      return;
+    case 'session-run': {
+      // Inside the session's window (see src/sessions.mjs).
+      const { runSession } = await import('./sessions.mjs');
+      await runSession(rest[0]);
+      return;
+    }
     case 'prompts-sync': {
       const { syncPrompts } = await import('./promptsync.mjs');
       const status = await apiOr('/api/prompts-sync', {}, () => syncPrompts());
@@ -280,14 +344,14 @@ async function main() {
       const machine = await import('./machine.mjs');
       const c = await apiOr('/api/computer', null, async () => (await machine.processes(0), machine.computer()));
       const { formatBytes } = machine;
-      const state = { agent: 'crew at work', running: 'running on this computer', queued: 'in the queue', stopped: 'stopped' };
+      const state = { agent: 'crew at work', running: 'running on this computer', session: 'live session', queued: 'in the queue', stopped: 'stopped' };
       console.log(`Free memory: ${Math.round((c.memory.free / c.memory.total) * 100)}% (${formatBytes(c.memory.free)} of ${formatBytes(c.memory.total)})`);
       console.log(`Chiefmate itself: ${formatBytes(c.chiefmate.ram)}`);
       if (!c.supported) console.log("The projects' processes are read on Windows only.");
       if (c.error) console.log(`Couldn't read the processes: ${c.error}`);
       for (const p of c.projects) {
         console.log(`${p.id.padEnd(16)} ${state[p.state].padEnd(25)} ${formatBytes(p.ram).padStart(8)}  ${p.processes.length} process(es)`);
-        for (const x of p.processes) console.log(`    ${String(x.pid).padStart(6)} ${formatBytes(x.ram).padStart(8)}  ${x.name}${x.crew ? ' (crew)' : ''}${x.guarded ? ' (kept)' : ''}  ${x.command}`);
+        for (const x of p.processes) console.log(`    ${String(x.pid).padStart(6)} ${formatBytes(x.ram).padStart(8)}  ${x.name}${x.crew ? ' (crew)' : ''}${x.session ? ' (session)' : ''}${x.guarded ? ' (kept)' : ''}  ${x.command}`);
       }
       return;
     }

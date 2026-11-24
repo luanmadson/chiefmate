@@ -208,6 +208,13 @@ textarea { resize: vertical; min-height: 64px; }
 
 /* Operations */
 .operations-grid { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 20px; }
+.run-block + .run-block { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--line); }
+.run-count { margin-bottom: 12px; }
+.runs.several .logbook { height: 260px; min-height: 0; }
+.sessions .table { margin-top: 6px; }
+.session-profiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; margin-top: 14px; }
+.session-profile { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); background: var(--raised); }
+.session-profile .name { color: var(--strong); font-weight: 500; }
 .steps { list-style: none; margin: 0; padding: 0; }
 .steps li { display: grid; grid-template-columns: 30px 1fr; gap: 12px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line); }
 .steps li:last-child { border-bottom: 0; }

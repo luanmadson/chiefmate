@@ -3,7 +3,8 @@
 A command center for AI agents that runs on your own computer. On a merchant ship, the chief mate answers directly to the captain and runs the crew. Here, you are the captain.
 
 - **The manager answers to you.** You talk to Chiefmate in plain language; it hands out the work, reviews it and reports back.
-- **The crew works on your projects**, one agent at a time. Each one has a face, a role and a model you can see.
+- **The crew works on your projects**, several projects at once and one agent at a time on each. Each one has a face, a role and a model you can see.
+- **Live sessions** open a conversation with Claude Code or Codex in a window of its own, for work you do together while the crew works in the background.
 - **Your plan stays under control**: Chiefmate watches your account's usage and pauses before it runs out.
 
 Everything the crew produces reaches you as a **pull request**. Nothing goes live without your approval.
@@ -17,20 +18,21 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
   | Section | What it is for |
   |---|---|
   | **Manager** | Talk to Chiefmate. Ask how things are going, request a job, adjust the crew. It answers with the real situation: what is running, the queue, usage and your account's plan usage. You can write at any time, even while it answers (see "Talking while the manager answers" below), and you see live what it is doing. Beside the conversation, how full its context is and the context of the agent at work (see "The conversation's context" below). |
-  | **Operations** | What the crew is doing right now. The run going on is on top, with a discreet brass animation: the agent at work and their portrait, the step out of how many, the time counting live (for the run and for the step) and the agent's last action, updated as it happens. Below, the steps, the context of the agent at work, the logbook (every action of the agent at work, with the time) and the queue, numbered in the order it will run, with the next run marked. |
+  | **Operations** | What the crew is doing right now. Each run going on (up to three at once by default, one per project) has its own block, with a discreet brass animation: the agent at work and their portrait, the step out of how many, the time counting live (for the run and for the step) and the agent's last action, updated as it happens; then the steps, the context of the agent at work and the logbook (every action of the agent, with the time). Below, the queue, numbered in the order it will run, with the next run marked and when each one is expected to start, and the live sessions: those open (alive or not, memory, for how long, a button to end them) and a button to open each profile. |
   | **Missions** | Complete jobs with their own schedule. "Run now" starts one at any time. |
   | **Crew** | Who is on board, what each one is doing and the model behind them. Give any of them a one-off task. |
   | **Projects** | Which of your projects are running on this computer (development servers, node, python, IDEs, started by you or by the crew) and the memory each one uses, with a button to stop them. |
   | **Log** | Every run, with each step's report, the checks and the pull request link. |
   | **Usage** | Your Claude account's usage, when Chiefmate pauses to look after it, the week's pace and the plan's free resets. |
 
-- **Crew portraits** that show at a glance who is standing by, working, thinking or waiting for a limit to reset. The title bar tells you whether Chiefmate is online and waiting for you, and which project is in focus: the one being worked on (the mission or task, the agent at work and for how long) or, when nothing is running, the next one in the queue.
-- **Running, seen from afar.** While a run goes on, a brass square pulses beside Operations in the sections and beside the project in focus, the window's title starts with ● (the agent, the step, how many are waiting: `● Writer 2/3 · 1 in the queue · Chiefmate`) and the icon gets a brass square. With runs only waiting in the queue, the title starts with ○ and the square in the icon is hollow. The animations stop when Windows is set to show fewer animations (reduced motion); the app reads the state every 2.5 seconds, as it always has.
+- **Crew portraits** that show at a glance who is standing by, working, thinking or waiting for a limit to reset. The title bar tells you whether Chiefmate is online and waiting for you, and which project is in focus: the one being worked on the longest (the mission or task, the agent at work and for how long, and the other projects being worked on at the same time) or, when nothing is running, the next one in the queue.
+- **Running, seen from afar.** While a run goes on, a brass square pulses beside Operations in the sections and beside the project in focus, the window's title starts with ● (the agent, the step, how many are waiting: `● Writer 2/3 · 1 in the queue · Chiefmate`; with several runs at once, how many: `● 2 running · Chiefmate`) and the icon gets a brass square. With runs only waiting in the queue, the title starts with ○ and the square in the icon is hollow. The animations stop when Windows is set to show fewer animations (reduced motion); the app reads the state every 2.5 seconds, as it always has.
 - **Scheduled missions**, for example every Monday at 9:00. They wake the computer from sleep.
 - **Windows notifications**: the evening before a mission, when a run starts, when it pauses for a limit and when it is ready for your review.
 - **Alerts that only warn**, as a band at the top of the app and a Windows notification, once each: when the account's 5-hour window or the plan's week passes 70% and 90%, when this computer has less than 15% of its memory free (naming the projects using the most), and about the plan's free resets.
 - **One-off tasks** for any agent, at any time.
-- **A queue that runs one thing at a time**, so agents never set off other agents.
+- **A queue that runs one run per project at a time**, with runs of different projects going on side by side (three at most by default), so agents never set off other agents.
+- **Live sessions** with Claude Code or Codex, opened from the app or the command line, each in its own window and folder, started with the blocks of the prompt builder you choose (see "Live sessions" below).
 - **It improves itself.** Chiefmate can be one of its own projects: the crew proposes improvements in pull requests and, when you merge one, your installation updates itself.
 - **English and Brazilian Portuguese.**
 
@@ -66,7 +68,7 @@ A plain list (`["generalist", "designer"]`) works too. Without `crew`, a project
 queue ─► fresh working copy ─► the crew, one after another ─► manager's review ─► checks ─► pull request
 ```
 
-1. **One at a time.** The queue runs one run at a time, so no agent sets off others in a chain.
+1. **One per project.** The queue runs one run per project at a time, in the order they were asked for. Runs of different projects go on side by side, up to `max_parallel` at once (3 by default; 1 brings back one run at a time). No agent sets off others in a chain.
 2. **A working copy.** Each project has a copy of its own for the crew, in `workspaces/<project>`, refreshed from GitHub at the start of every run. Nobody touches the folder you work in.
 3. **The crew in sequence.** Each agent does its part on the run's branch and leaves a report. The next one reads what came before.
 4. **The review.** The manager checks the work, fixes what is needed and writes the pull request text with its verdict.
@@ -74,6 +76,8 @@ queue ─► fresh working copy ─► the crew, one after another ─► manage
 6. **Your approval.** You review and merge on GitHub. From there, your project's own deployment does the rest.
 
 A one-off task follows the same path, with a single agent and, if you tick the box, the manager's review.
+
+Runs going on at the same time never share a working copy: each project has its own. The reference libraries are shared, so Chiefmate runs only one update of each library at a time, and a run that asks for a library while it is being updated gets that same update. The self-update waits until every run has ended.
 
 ### What each step sees
 
@@ -128,11 +132,48 @@ Keep the existing comments.
 
 To copy the document from Google Docs, set `prompt_builder.doc_id` and `browser_cdp`, install the optional `playwright-core` (`npm install --no-save playwright-core` in the Chiefmate folder) and run `node src/cli.mjs prompts-sync`, or use the button in the Crew section. Chiefmate borrows your browser's session to download the document's Markdown export: it never changes the document and never touches your tabs.
 
+## Live sessions
+
+Besides the work the crew does in the background, you can open a conversation with an agent to work together, live: review a text with Claude Code while Codex helps you with something else in another window, for example. Each session is a profile in `sessions`:
+
+```json
+"sessions": {
+  "book-review": {
+    "name": "Book review",
+    "tool": "claude",
+    "library_folder": "notes/My book",
+    "prompt_blocks": ["Book (review)", "Home", "Another AI reading the book"],
+    "model": "claude-opus-5-5"
+  },
+  "vocabulary": {
+    "name": "Vocabulary",
+    "tool": "codex",
+    "project": "my-site",
+    "prompt_blocks": ["Vocabulary"],
+    "cwd": "C:\\Users\\you\\Documents\\GitHub\\my-site"
+  }
+}
+```
+
+- `tool`: `claude` (Claude Code) or `codex` (Codex CLI).
+- Where it opens: `cwd` when you give it; for a `project`, your own clone of it (`local_clone`, or `Documents/GitHub/<repository name>`), never the crew's working copy, which is reset before every run; for a `library_folder` (`<library>/<folder>`), that folder in your own clone of the library or, failing that, in Chiefmate's read-only copy (anything changed there is lost, and the first message says so).
+- `prompt_blocks`: blocks of the prompt builder, by name, in any section. They are put together as for a step: the automatic and required blocks they bring come along and the variables are filled in. Nothing is adapted to the crew's rules: you are there. Without `prompt_blocks`, the session starts with no first message.
+- `model`: optional.
+
+Open one with its **Open** button in Operations, or `node src/cli.mjs session <profile>` (`--dry-run` shows the folder, the command and the first message without opening anything). Chiefmate writes the first message to `data/sessions/<id>.md`, records the session in `data/sessions/<id>.json` and opens a Windows Terminal window (or PowerShell, when there is no Windows Terminal) in the session's folder, running the tool with that first message.
+
+- **Claude Code** starts without your own configuration, as the crew's steps do: no user settings, hooks, plugins, skills, MCP servers or `~/.claude/CLAUDE.md` (`--setting-sources project,local`, `claudeMdExcludes`, `--strict-mcp-config`). The project's own instruction files still apply. It asks before acting, as usual.
+- **Codex** gets the folder (`-C`) and the model (`-m`). It has no option to leave out its own configuration (`~/.codex`), so that still applies. When it is not signed in, the session asks for you as a step does with `needs-you`: a band at the top of the app and a Windows notification tell you to run `codex login`; the window opens by itself once you are signed in (or when you click Done).
+- A first message longer than the command line allows (about 24,000 characters) is replaced by a request to read the file.
+
+Operations lists the sessions open: whether the window's process is alive, its memory, since when, and an **End** button that closes the window and stops what the agent is doing (the conversation stays in the tool's own history). A window you close yourself is noticed within a minute or so. The sessions also count in the Projects section (in their project's memory, or in a row of their own for a library folder), where they are never offered for stopping, and the manager sees them in its situation. They are yours: the manager doesn't end them unless you ask, and the self-update doesn't wait for them.
+
 ## Requirements
 
 - Windows 10 or 11. Scheduling, notifications and shortcuts are Windows-only. The server and the command line should run wherever Node.js does, but that is untested.
 - Node.js 22 or newer.
 - Claude Code, installed and signed in.
+- For Codex sessions only: the Codex CLI. Windows Terminal is used for the sessions' windows when it is installed.
 - git and the GitHub CLI (`gh`), signed in.
 
 ## Installation
@@ -166,7 +207,9 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. Optional: `crew` (its own crew), `mcp` (external tools it releases), `prompt_block` and `prompt_modules` (the prompt builder). See also "Local delivery" below |
 | `missions` | For each mission: the `project`, the `steps` (an agent and its part, in order), the final `review`, the `schedule` (`days` such as `["mon"]` and a `time` such as `"09:00"`) and the `eve_reminder` time |
 | `crew` | Settings for one agent in this installation only, such as `{ "writer": { "model": "claude-opus-5-5", "max_minutes": 90, "extra_instructions": "..." } }` |
-| `library` | Reference libraries: git repositories the manager and the crew may read, such as your personal documentation. Each has a `name`, a `repository`, a `main_branch` and a sentence `about` it. A project uses one with `"library": ["<id>"]`, or with `"docs": "<id>/<folder>"` for its personal documentation, which then takes precedence over the instructions inside the project's own repository |
+| `library` | Reference libraries: git repositories the manager and the crew may read, such as your personal documentation. Each has a `name`, a `repository`, a `main_branch` and a sentence `about` it, and optionally `local_clone`, your own clone of it, where the live sessions of its folders open. A project uses one with `"library": ["<id>"]`, or with `"docs": "<id>/<folder>"` for its personal documentation, which then takes precedence over the instructions inside the project's own repository |
+| `max_parallel` | How many runs of different projects may go on at once (3 by default). Within a project, one at a time |
+| `sessions` | The live sessions' profiles: `name`, `tool` (`claude` or `codex`), `project`, `library_folder` or `cwd`, `prompt_blocks` and an optional `model` (see "Live sessions") |
 | `limits` | When runs pause: `pause_at_5h_window` and `pause_at_plan_week`, as shares of your account's usage (0.85 is 85%) |
 | `plan_resets` | The plan's free resets, which Claude Code doesn't report: `[{ "kind": "full", "expires": "<ISO date>", "used": false, "note": "..." }]`. Easier from the Usage section or `node src/cli.mjs reset-grant` |
 | `mcp_servers` | External tools (MCP servers) the crew may use, in Claude Code's format: `{ "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] } }`. Nothing is released until a project or an agent lists it in `mcp` |
@@ -194,7 +237,7 @@ The libraries are read from a copy that Chiefmate refreshes from GitHub before u
 
 Chiefmate measures what really counts on a subscription plan: your account's usage in the 5-hour window and in the plan's week, which Claude Code reports on every run. There are no spending caps in dollars.
 
-- **Before every step**, Chiefmate checks your account. If the 5-hour window or the plan's week is above the share you set in the Usage section (85% and 90% by default), the run waits for the reset and then carries on by itself.
+- **Before a run starts and before every step**, Chiefmate checks your account (the same account for every run going on). If the 5-hour window or the plan's week is above the share you set in the Usage section (85% and 90% by default), the run waits for the reset and then carries on by itself.
 - **If the account runs out in the middle of a step**, that step starts over after the reset.
 - **Each step has a time limit** (in the agent's header), in case an agent gets stuck.
 - **Alerts at 70% and 90%** of the 5-hour window and of the plan's week, once per threshold and window. They don't pause anything.
@@ -251,7 +294,8 @@ The self-update only touches Chiefmate's own files. Your settings, the history a
 - **None of your own configuration.** Agents run without your Claude Code settings, hooks, plugins, skills, `~/.claude/CLAUDE.md` and MCP servers, and without the variables of your own Claude session. The only external tools are those in `mcp_servers`, released by project or agent.
 - **Sign-ins are yours.** Agents never type passwords: they ask for you with `needs-you`, and the address opens in your browser. The address comes from the agent (only `http` and `https`), so look at it before you act on it. With `browser_cdp`, remote debugging leaves that browser open to any local program: use a profile of its own.
 - **Your data stays home.** Your settings, the history and the working copies (`config/chiefmate.json`, `data/`, `workspaces/`) never go to git.
-- **Stopping processes asks first.** The Projects section and `stop-project` show what will stop and end only those processes. They never stop Chiefmate, what started it or the crew at work (cancel the run for that).
+- **Stopping processes asks first.** The Projects section and `stop-project` show what will stop and end only those processes. They never stop Chiefmate, what started it, the crew at work (cancel the run for that) or a live session (end it in Operations).
+- **Live sessions** run Claude Code without your own configuration, like the steps; Codex keeps its own (`~/.codex`), which it has no option to leave out. A session works in your own folders, with you present and the tool asking before it acts: the crew's rules (no push, no pull requests) are not imposed on it.
 - **The optional claude.ai reading** keeps a signed-in browser profile in `data/browser-profile`. See its risks above.
 
 ## Command line
@@ -268,6 +312,9 @@ node src/cli.mjs chat [n]                     the conversation with the manager:
 node src/cli.mjs chat say "..."               writes to the manager; while it answers, the message waits in the queue
 node src/cli.mjs chat edit <id> "..."         changes a message still in the queue (chat remove <id> takes it out)
 node src/cli.mjs chat interrupt               ends the current answer; the conversation goes on and the queue goes next
+node src/cli.mjs session [<profile>]          opens a live session (--dry-run shows what it would open); with no profile,
+                                              lists the profiles and the sessions open
+node src/cli.mjs session end <id>             ends a live session
 node src/cli.mjs cancel <id>                  cancels a run
 node src/cli.mjs resume <id>                  resumes a run (--ignore-limits goes past the limits this one time)
 node src/cli.mjs history                      the latest runs
@@ -304,7 +351,7 @@ English is the source. The app, the notifications and the reports follow `langua
 | `agents/` | The crew, one file per agent |
 | `config/` | `example.json`, and your `chiefmate.json` (not in git) |
 | `scripts/` | Installation on Windows, launchers and checks |
-| `data/` (not in git) | Runs, each step's log and context, the conversation with the manager, your account's usage, the schedule's and the alerts' state and, if you use the claude.ai reading, its browser profile |
+| `data/` (not in git) | Runs, each step's log and context, the live sessions' first messages and records, the conversation with the manager, your account's usage, the schedule's and the alerts' state and, if you use the claude.ai reading, its browser profile |
 | `workspaces/` (not in git) | The projects' working copies |
 
 Chiefmate has no dependencies besides Node.js. It drives Claude Code (`claude -p`), which uses your account's login and plan. The only optional one is `playwright-core`, for copying the prompt builder from Google Docs (and, if present, for the browser that opens for sign-ins): Chiefmate loads it only when needed and says how to install it when it is missing.

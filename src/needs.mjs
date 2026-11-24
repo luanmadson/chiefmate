@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { notify } from './notify.mjs';
-import { activeRun, live } from './runs.mjs';
+import { activeRun, liveOf } from './runs.mjs';
 import { listRuns, readRun, saveRun, stepsOf } from './store.mjs';
 import { browserPath, PROFILE_DIR } from './usagepage.mjs';
 import { clip, ensureDir, now } from './util.mjs';
@@ -17,11 +17,8 @@ import { clip, ensureDir, now } from './util.mjs';
 /** "needs_you": { "max_wait_minutes": 120 }: the longest a step waits for you before it goes on without you. */
 export const needsSettings = (config = loadConfig()) => ({ maxWaitMinutes: Math.max(1, Number(config.needs_you?.max_wait_minutes) || 120) });
 
-// The run going on lives in memory (its steps save it as they go): requests are written to that same object.
-const runFor = id => {
-  const active = activeRun();
-  return active?.id === id ? active : readRun(id);
-};
+// A run going on lives in memory (its steps save it as they go): requests are written to that same object.
+const runFor = id => activeRun(id) ?? readRun(id);
 
 let ownerBrowser = null;
 
@@ -69,7 +66,7 @@ export async function askOwner({ run: runId, step, what, url, wait = false, chec
   if (!run) throw new Error(t('Only a step of a run can ask for you: no run was given.'));
   const n = Number(step) || null;
   const request = {
-    id: randomUUID().slice(0, 8), step: n, agent: (n && stepsOf(run)[n - 1]?.agent) || live.agent || null, what: clip(text, 500),
+    id: randomUUID().slice(0, 8), step: n, agent: (n && stepsOf(run)[n - 1]?.agent) || liveOf(run.id)?.agent || null, what: clip(text, 500),
     url: url ? String(url) : null, wait: !!wait, check: check ? clip(check, 300) : null, status: 'open', at: now(),
   };
   (run.requests ??= []).push(request);
@@ -98,7 +95,8 @@ export function pollRequest(runId, id) {
   const { run, request } = findRequest(runId, id);
   const waited = Date.now() - Date.parse(request.at);
   const max = needsSettings().maxWaitMinutes * 60_000;
-  if (request.status === 'open' && waited < max && live.run === run.id) live.heldUntil = Date.now() + 20_000;
+  const going = liveOf(run.id);
+  if (request.status === 'open' && waited < max && going) going.heldUntil = Date.now() + 20_000;
   return { status: request.status, by: request.by ?? null, waitedMinutes: Math.floor(waited / 60_000), maxWaitMinutes: max / 60_000, timedOut: waited >= max };
 }
 
@@ -112,10 +110,9 @@ export function finishRequest(runId, id, by = 'owner') {
 
 /** The open requests of every run, newest first, for the app. */
 export function openRequests(runs = listRuns()) {
-  const active = activeRun();
   const list = [];
   for (const stored of runs) {
-    const run = active?.id === stored.id ? active : stored;
+    const run = activeRun(stored.id) ?? stored;
     for (const r of run.requests ?? []) {
       if (r.status === 'open') list.push({ ...r, run: run.id, title: run.title, project: run.project, runStatus: run.status });
     }

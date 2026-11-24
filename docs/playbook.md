@@ -9,8 +9,9 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
 | Place | What it holds |
 |---|---|
 | `src/server.mjs` | The app's web server and API. It listens on this computer only. |
-| `src/runs.mjs` | How a run goes: the working copy, the crew in sequence, the review, the checks and the pull request. |
-| `src/queue.mjs`, `src/schedule.mjs` | One run at a time; missions on their days and times. |
+| `src/runs.mjs` | How a run goes: the working copy, the crew in sequence, the review, the checks and the pull request. Several runs (of different projects) go on at once: what the app shows of each is in `live`, by run id. |
+| `src/queue.mjs`, `src/schedule.mjs` | One run per project at a time, runs of different projects side by side up to `max_parallel`; missions on their days and times. |
+| `src/sessions.mjs` | The live sessions: the profiles, the first message from the prompt builder, the window (Windows Terminal or PowerShell) that runs Claude Code or Codex, and finding, measuring and ending their processes. |
 | `src/manager.mjs` | The conversation with the manager: the queue of messages sent while it answers (delivered together when it ends), the interruption that keeps the session, and the renewal with a summary when its context fills up. |
 | `src/machine.mjs` | This computer: the projects' processes, their memory and stopping them (Windows). |
 | `src/plan.mjs` | The plan's free resets, the week's pace and the alerts (usage, memory, resets), which only warn. |
@@ -37,7 +38,7 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
    - the server listens on 127.0.0.1 only;
    - the Host, Origin and `x-chiefmate` checks on every command;
    - the tools agents may never use (`ALWAYS_DISALLOWED` in `src/runs.mjs`, and the conversation's list in `src/manager.mjs`);
-   - the removal of the Claude session's variables in `src/claude.mjs`, and the flags that keep the user's own Claude Code configuration out of every step (`--setting-sources project,local`, `claudeMdExcludes`, `--strict-mcp-config`);
+   - the removal of the Claude session's variables in `src/claude.mjs`, and the flags that keep the user's own Claude Code configuration out of every step and every live Claude Code session (`--setting-sources project,local`, `claudeMdExcludes`, `--strict-mcp-config`; `sessionArgs` in `src/sessions.mjs`);
    - what each step may see (`src/access.mjs`): only its project, its own documentation folder and the libraries it lists;
    - the rule that only Chiefmate pushes branches and opens pull requests.
 
