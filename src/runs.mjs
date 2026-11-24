@@ -2,9 +2,9 @@
 // the project's checks and a pull request.
 import { existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { runClaude } from './claude.mjs';
+import { contextWindow, runClaude } from './claude.mjs';
 import { loadAgents, loadConfig } from './config.mjs';
-import { formatDate, formatDateTime, formatDuration, formatPercent, t } from './i18n.mjs';
+import { formatDate, formatDateTime, formatDuration, formatNumber, formatPercent, t } from './i18n.mjs';
 import { notify } from './notify.mjs';
 import { readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { clip, languageName, now, slug, stamp } from './util.mjs';
@@ -14,7 +14,7 @@ import {
 } from './workspace.mjs';
 
 /** What the app shows as happening right now. */
-export const live = { run: null, title: null, project: null, step: null, agent: null, started: null, pid: null, actions: [] };
+export const live = { run: null, title: null, project: null, step: null, agent: null, started: null, pid: null, context: null, actions: [] };
 
 let currentProcess = null;
 let cancelRequest = null;
@@ -172,6 +172,20 @@ function stepPrompt({ run, step, project, previous, finalReview, changes, config
   return lines.join('\n');
 }
 
+/**
+ * The context of the step at work: the tokens of its last turn, against the model's window, and how many times
+ * Claude Code compacted it. Every step starts with a new session, so nothing more is done than showing and logging it.
+ */
+function followContext(event) {
+  if (event.type === 'start' && event.model) live.context = { ...live.context, window: contextWindow(event.model) };
+  if (event.type === 'context') live.context = { ...live.context, used: event.used, window: event.window };
+  if (event.type === 'compact') {
+    live.context = { ...live.context, compactions: (live.context?.compactions ?? 0) + 1 };
+    const before = event.before ? t('{tokens} tokens before', { tokens: formatNumber(event.before) }) : '';
+    logAction({ type: 'action', text: (event.trigger === 'manual' ? t('Context compacted') : t('Context compacted automatically')) + (before ? ` (${before})` : '') });
+  }
+}
+
 async function runStep({ run, step, index, dir, project, config, agents, libraries, base, finalReview = false }) {
   const agent = agents[step.agent];
   if (!agent) throw new Error(t('Unknown agent: {id}', { id: step.agent }));
@@ -180,7 +194,7 @@ async function runStep({ run, step, index, dir, project, config, agents, librari
   const model = agent.model ?? config.default_model;
 
   Object.assign(step, { status: 'running', started: now(), error: null, model });
-  Object.assign(live, { step: index + 1, agent: step.agent, started: now(), actions: [] });
+  Object.assign(live, { step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [] });
   saveRun(run);
 
   const { promise, cancel, pid } = runClaude({
@@ -195,7 +209,10 @@ async function runStep({ run, step, index, dir, project, config, agents, librari
     attribution: config.attribution !== false,
     maxMinutes: agent.max_minutes ?? 60,
     log: path.join(runDir(run.id), `${String(index + 1).padStart(2, '0')}-${step.agent}.jsonl`),
-    onEvent: logAction,
+    onEvent: event => {
+      followContext(event);
+      logAction(event);
+    },
   });
   currentProcess = { cancel };
   live.pid = pid; // the agent's process: its memory counts for the project, and it is never stopped from the Projects section
@@ -207,7 +224,13 @@ async function runStep({ run, step, index, dir, project, config, agents, librari
   Object.assign(step, {
     status: waitUntil ? 'pending' : r.ok ? 'done' : 'failed', ended: waitUntil ? null : now(), tokens: r.tokens, turns: r.turns,
     durationMs: r.durationMs, report: r.text, error: r.error ?? null, subagents: r.subagents, actions: live.actions.length,
+    context: r.context ? { ...r.context, compactions: live.context?.compactions ?? r.context.compactions } : null,
   });
+  if (r.context?.used) {
+    logAction({ type: 'action', text: t('Context at the end of the step: {used} of {window} tokens ({percent}), {count} compaction(s)', {
+      used: formatNumber(r.context.used), window: formatNumber(r.context.window), percent: formatPercent(r.context.used / r.context.window), count: step.context.compactions,
+    }) });
+  }
   await commitPending(dir, `Chiefmate: ${t(agent.name)} (${run.title})`).catch(e => (step.error = `${step.error ?? ''} Commit: ${e.message}`.trim()));
   saveRun(run);
   return { waitUntil };
@@ -235,7 +258,7 @@ export async function execute(run) {
   const agents = loadAgents(config);
   const project = config.projects?.[run.project];
   cancelRequest = null;
-  Object.assign(live, { run: run.id, title: run.title, project: run.project, step: null, agent: null, started: now(), pid: null, actions: [] });
+  Object.assign(live, { run: run.id, title: run.title, project: run.project, step: null, agent: null, started: now(), pid: null, context: null, actions: [] });
   const firstTime = !run.started;
   Object.assign(run, { status: 'running', started: run.started ?? now(), notBefore: null, note: null });
   saveRun(run);
@@ -330,6 +353,6 @@ export async function execute(run) {
     saveRun(run);
     notify(t('Chiefmate hit an error'), t('{title}: {error}', { title: run.title, error: clip(error.message, 180) }));
   } finally {
-    Object.assign(live, { run: null, title: null, project: null, step: null, agent: null, pid: null });
+    Object.assign(live, { run: null, title: null, project: null, step: null, agent: null, pid: null, context: null });
   }
 }

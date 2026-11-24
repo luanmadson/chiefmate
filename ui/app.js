@@ -189,6 +189,28 @@ function meter(label, value, text, extra = '') {
   return `<div class="meter"><div class="meter-top"><span>${esc(label)}</span><span class="num">${esc(text)}</span></div><div class="track"><span class="${level}" style="width:${Math.round(v * 100)}%"></span></div>${extra ? `<div class="hint">${extra}</div>` : ''}</div>`;
 }
 
+/** How full a conversation's context is: a bar with the share, then the tokens and the compactions. */
+function contextMeter(label, c, more = []) {
+  const measured = c?.used > 0 && c.window > 0;
+  const tokens = n => Number(n ?? 0).toLocaleString(locale());
+  const hint = [
+    measured ? t('{used} of {window} tokens', { used: tokens(c.used), window: tokens(c.window) }) : t('not measured yet'),
+    t('{count} compaction(s)', { count: c?.compactions ?? 0 }),
+    ...more,
+  ];
+  return meter(label, measured ? c.used / c.window : 0, measured ? percent(c.used / c.window) : '—', esc(hint.join(' · ')));
+}
+
+function managerContextMeter() {
+  const c = state.manager.context ?? {};
+  let renewal = t('renews above {percent}', { percent: percent(c.renewAt) });
+  if (c.renewing) renewal = t('writing the summary to renew it…');
+  else if (c.renewed && !c.used) renewal = t('renewed {when}, with a summary', { when: relative(c.renewed) });
+  return contextMeter(t('Context: Chiefmate'), c, [renewal]);
+}
+
+const agentContextMeter = a => contextMeter(t('Context: {agent}', { agent: agentName(a.agent) }), a.context);
+
 // ---------- The crew ----------
 
 const FALLBACK_MANAGER = { id: 'manager', name: 'Chiefmate', title: 'Manager', color: '#c9a45d', face: 'cap', status: 'idle' };
@@ -337,10 +359,12 @@ function drawChat() {
     const meta = [clockTime(m.at), m.model ? shortModel(m.model) : ''].filter(Boolean).join(' · ');
     html += `<div class="msg ${you ? 'you' : 'manager'}${m.error ? ' error' : ''}"><div class="msg-head">${you ? '' : face(manager, m.error ? 'failed' : 'still', 20)}<span class="msg-author">${esc(you ? t('You') : t(manager.name))}</span><span class="msg-meta">${esc(meta)}</span></div><div class="msg-body">${md(m.text)}</div></div>`;
   }
+  const renewing = !!g.context?.renewing;
   if (g.responding) {
-    html += `<div class="msg manager typing"><div class="msg-head">${face(manager, 'thinking', 20)}<span class="msg-author">${esc(t(manager.name))}</span><span class="msg-meta">${esc(t('answering…'))}</span></div><div class="msg-body">${g.partial ? md(g.partial) : `<span class="hint">${esc(t('Looking at the situation…'))}</span>`}</div>${g.actions.length ? `<div class="manager-actions">${g.actions.slice(-4).map(esc).join('<br>')}</div>` : ''}</div>`;
+    const waiting = renewing ? t('Writing a short summary to renew the conversation…') : t('Looking at the situation…');
+    html += `<div class="msg manager typing"><div class="msg-head">${face(manager, 'thinking', 20)}<span class="msg-author">${esc(t(manager.name))}</span><span class="msg-meta">${esc(renewing ? t('renewing the conversation…') : t('answering…'))}</span></div><div class="msg-body">${g.partial && !renewing ? md(g.partial) : `<span class="hint">${esc(waiting)}</span>`}</div>${g.actions.length ? `<div class="manager-actions">${g.actions.slice(-4).map(esc).join('<br>')}</div>` : ''}</div>`;
   }
-  const signature = JSON.stringify([g.messages.length, g.messages.at(-1)?.at, g.responding, g.partial, g.actions.length]);
+  const signature = JSON.stringify([g.messages.length, g.messages.at(-1)?.at, g.responding, renewing, g.partial, g.actions.length]);
   if (draw('#chat', signature, html) && (atBottom || !chatScrolled)) {
     box.scrollTop = box.scrollHeight;
     chatScrolled = true;
@@ -401,8 +425,9 @@ function drawSituation() {
     <div class="block"><div class="hint">${esc(t('Operations'))}</div><div class="value">${a ? `${esc(a.title)}<br><span class="hint">${esc(a.agent ? agentName(a.agent) : t('preparing'))}, ${esc(t('step {n} of {total}', { n: a.step ?? 1, total: a.steps.length }))}</span>` : esc(t('Nothing running'))}</div></div>
     <div class="block"><div class="hint">${esc(t('Queue'))}</div><div class="value">${state.queue.length ? esc(t('{count} run(s)', { count: state.queue.length })) : esc(t('Empty'))}</div></div>
     <div class="block"><div class="hint">${esc(t('Next scheduled mission'))}</div><div class="value">${next ? `${esc(next.name)}<br><span class="num hint">${shortDate(next.next)} (${esc(relative(next.next))})</span>` : esc(t('None'))}</div></div>
-    <div class="block">${meter(t('Account, 5-hour window'), account.five_hour?.used, percent(account.five_hour?.used))}${meter(t("Plan's week"), account.seven_day?.used, percent(account.seven_day?.used))}</div>`;
-  draw('#situation', JSON.stringify([a?.id, a?.step, state.queue.length, next?.next, account.updated, Math.floor(Date.now() / 60000)]), html);
+    <div class="block">${meter(t('Account, 5-hour window'), account.five_hour?.used, percent(account.five_hour?.used))}${meter(t("Plan's week"), account.seven_day?.used, percent(account.seven_day?.used))}</div>
+    <div class="block">${managerContextMeter()}${a?.agent ? agentContextMeter(a) : ''}</div>`;
+  draw('#situation', JSON.stringify([a?.id, a?.step, a?.context, state.manager.context, state.queue.length, next?.next, account.updated, Math.floor(Date.now() / 60000)]), html);
 }
 
 // ---------- Operations ----------
@@ -443,6 +468,7 @@ function drawOperations() {
       <div class="panel">
         <div class="label">${esc(t('Steps'))}</div>
         <ol class="steps">${steps.join('')}</ol>
+        ${a.agent ? `<div class="step-context">${agentContextMeter(a)}</div>` : ''}
         <div class="actions"><button type="button" class="button danger small" data-cancel="${esc(a.id)}">${esc(t('Cancel run'))}</button></div>
       </div>
       <div>
@@ -450,7 +476,7 @@ function drawOperations() {
         <div class="logbook" id="logbook">${lines.join('') || `<div><time></time><span>${esc(t('Preparing…'))}</span></div>`}</div>
       </div>
     </div>${queueTable()}`;
-  const changed = draw('#operations', JSON.stringify([online, a.id, a.step, a.agent, a.actions.length, a.steps.map(s => s.status), state.queue.map(r => [r.id, r.status]), minute]), html);
+  const changed = draw('#operations', JSON.stringify([online, a.id, a.step, a.agent, a.context, a.actions.length, a.steps.map(s => s.status), state.queue.map(r => [r.id, r.status]), minute]), html);
   const logbook = $('#logbook');
   if (changed && logbook && atBottom) logbook.scrollTop = logbook.scrollHeight;
 }

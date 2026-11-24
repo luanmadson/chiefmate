@@ -6,7 +6,7 @@ import { checkClaude, claudeInfo } from './claude.mjs';
 import { loadAgents, loadConfig, saveConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { computer, processes, stoppable, stopProject } from './machine.mjs';
-import { chat, newConversation, talkToManager } from './manager.mjs';
+import { chat, managerContext, newConversation, talkToManager } from './manager.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { cancel, focus, nudgeQueue, queued, resume } from './queue.mjs';
 import { createRun, live } from './runs.mjs';
@@ -139,7 +139,7 @@ function buildState() {
     })),
     crew: crew(agents, config, runs, current, queue, conversation),
     focus: focus(config),
-    current: current ? { ...summary(current), step: live.step, agent: live.agent, stepStarted: live.started, actions: live.actions.slice(-80) } : null,
+    current: current ? { ...summary(current), step: live.step, agent: live.agent, stepStarted: live.started, context: live.context, actions: live.actions.slice(-80) } : null,
     queue: queue.map(summary),
     history: runs.filter(r => !['queued', 'waiting'].includes(r.status) && r.id !== live.run).slice(0, 30).map(summary),
     usage: { limits: config.limits ?? {}, account: usage },
@@ -150,7 +150,9 @@ function buildState() {
       reader: { ...readerSettings(config), signedIn: signedIn(), reading: isReading(), status: readerStatus() },
     },
     alerts: alerts(config, usage, machine),
-    manager: { messages: conversation.slice(-80), responding: chat.responding, partial: chat.partial, actions: chat.actions.slice(-12) },
+    manager: {
+      messages: conversation.slice(-80), responding: chat.responding, partial: chat.partial, actions: chat.actions.slice(-12), context: managerContext(),
+    },
     notifications: readNotifications().slice(-8).reverse(),
   };
 }
@@ -211,6 +213,7 @@ export function startServer() {
         case '/api/manager': {
           const message = String(body.message ?? '').trim();
           if (!message) return reply(res, 400, { error: t('Write a message.') });
+          if (chat.renewing) return reply(res, 409, { error: t('The manager is renewing the conversation. Try again in a moment.') });
           if (chat.responding) return reply(res, 409, { error: t('The manager is still answering.') });
           talkToManager(message).catch(error => addMessage('manager', t("I couldn't answer: {error}", { error: error.message }), { error: error.message }));
           return reply(res, 202, { ok: true });

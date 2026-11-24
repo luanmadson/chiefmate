@@ -192,6 +192,7 @@ textarea { resize: vertical; min-height: 64px; }
 .steps li { display: grid; grid-template-columns: 30px 1fr; gap: 12px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line); }
 .steps li:last-child { border-bottom: 0; }
 .steps .name { color: var(--strong); }
+.step-context { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
 .logbook-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
 .logbook-head .label { margin: 0; }
 .logbook { height: calc(100vh - 300px); min-height: 280px; overflow-y: auto; font: 12px/1.65 var(--mono); background: var(--bg); border: 1px solid var(--line); padding: 10px 12px; }

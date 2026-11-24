@@ -70,6 +70,14 @@ function describeAction(name, input = {}, dir) {
   }
 }
 
+// The context window of each model, as Claude Code reports it at the end of every call ("contextWindow").
+// Until a model has been seen: 1 million tokens for the "[1m]" variants, 200,000 for the others.
+const windows = {};
+export const contextWindow = model => windows[model] ?? (/\[1m\]/i.test(model ?? '') ? 1_000_000 : 200_000);
+
+/** The context a turn filled: the input it read, fresh or from the cache. */
+const contextOf = usage => (usage?.input_tokens ?? 0) + (usage?.cache_read_input_tokens ?? 0) + (usage?.cache_creation_input_tokens ?? 0);
+
 /** Ends the process and everything it started (on Windows, the whole tree). */
 function stop(child) {
   if (!child?.pid || child.exitCode !== null) return;
@@ -82,6 +90,8 @@ function stop(child) {
  * options: dir, prompt, system (the agent's instructions), model, effort, tools, disallowed, addDirs (more folders
  * the agent may read), attribution (false: commits and pull requests don't credit Claude), maxMinutes,
  * session ({ id, resume }), log (a .jsonl file), onEvent(event).
+ * Besides "start", "say", "action" and "usage", onEvent gets "context" ({ used, window }: the tokens the last turn
+ * filled) and "compact" (Claude Code compacted the conversation: { trigger, before }).
  */
 export function runClaude(options) {
   const {
@@ -109,6 +119,8 @@ export function runClaude(options) {
   let cancelReason = null;
   let final = null;
   let stderr = '';
+  let mainModel = model;
+  const context = { used: 0, window: contextWindow(model), compactions: 0 };
 
   const timer = setTimeout(() => cancel(t('went over the time limit ({minutes} min)', { minutes: maxMinutes })), maxMinutes * 60_000);
   function cancel(reason = t('canceled')) {
@@ -127,17 +139,30 @@ export function runClaude(options) {
       return;
     }
     if (event.type === 'system' && event.subtype === 'init') {
+      if (event.model) [mainModel, context.window] = [event.model, contextWindow(event.model)];
       onEvent({ type: 'start', model: event.model, session: event.session_id });
+    } else if (event.type === 'system' && event.subtype === 'compact_boundary') {
+      context.compactions++;
+      onEvent({ type: 'compact', trigger: event.compact_metadata?.trigger ?? 'auto', before: event.compact_metadata?.pre_tokens ?? null });
     } else if (event.type === 'assistant') {
       for (const block of event.message?.content ?? []) {
         if (block.type === 'text' && block.text.trim()) onEvent({ type: 'say', text: block.text });
         if (block.type === 'tool_use') onEvent({ type: 'action', tool: block.name, text: describeAction(block.name, block.input, dir) });
+      }
+      // A subagent's turns fill its own context, not this one.
+      const used = event.parent_tool_use_id ? 0 : contextOf(event.message?.usage);
+      if (used && used !== context.used) {
+        context.used = used;
+        onEvent({ type: 'context', used, window: context.window });
       }
     } else if (event.type === 'rate_limit_event') {
       recordUsage(event.rate_limit_info);
       onEvent({ type: 'usage', info: event.rate_limit_info });
     } else if (event.type === 'result') {
       final = event;
+      const models = event.modelUsage ?? {};
+      const reported = models[mainModel]?.contextWindow ?? Math.max(0, ...Object.values(models).map(m => m?.contextWindow || 0));
+      if (reported > 0) context.window = windows[mainModel] = reported;
     }
   });
 
@@ -163,6 +188,7 @@ export function runClaude(options) {
           cacheRead: usage.cache_read_input_tokens ?? 0,
           cacheWrite: usage.cache_creation_input_tokens ?? 0,
         },
+        context: { ...context },
         subagents: final?.subagent_stats?.spawned ?? 0,
         end: final?.subtype ?? null,
       };

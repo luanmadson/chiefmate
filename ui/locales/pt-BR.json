@@ -378,5 +378,22 @@
   "Record a free reset": "Registrar uma redefinição gratuita",
   "Expires on": "Vence em",
   "Note (optional)": "Nota (opcional)",
-  "Record": "Registrar"
+  "Record": "Registrar",
+  "Claude Code compacted this conversation on its own to make room ({count} time(s) so far).": "O Claude Code compactou esta conversa sozinho para abrir espaço ({count} vez(es) até agora).",
+  "This conversation filled {percent} of its context. The manager wrote a short summary, and your next message starts a new conversation with it and the notes.": "Esta conversa ocupou {percent} do contexto. O gerente escreveu um resumo curto, e a sua próxima mensagem começa uma conversa nova com ele e as anotações.",
+  "{tokens} tokens before": "{tokens} tokens antes",
+  "Context compacted": "Contexto compactado",
+  "Context compacted automatically": "Contexto compactado automaticamente",
+  "Context at the end of the step: {used} of {window} tokens ({percent}), {count} compaction(s)": "Contexto no fim da etapa: {used} de {window} tokens ({percent}), {count} compactação(ões)",
+  "The manager is renewing the conversation. Try again in a moment.": "O gerente está renovando a conversa. Tente de novo em instantes.",
+  "{used} of {window} tokens": "{used} de {window} tokens",
+  "not measured yet": "ainda não medido",
+  "{count} compaction(s)": "{count} compactação(ões)",
+  "renews above {percent}": "renova acima de {percent}",
+  "writing the summary to renew it…": "escrevendo o resumo para renovar…",
+  "renewed {when}, with a summary": "renovada {when}, com um resumo",
+  "Context: Chiefmate": "Contexto: Chiefmate",
+  "Context: {agent}": "Contexto: {agent}",
+  "Writing a short summary to renew the conversation…": "Escrevendo um resumo curto para renovar a conversa…",
+  "renewing the conversation…": "renovando a conversa…"
 }

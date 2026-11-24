@@ -16,8 +16,8 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
 
   | Section | What it is for |
   |---|---|
-  | **Manager** | Talk to Chiefmate. Ask how things are going, request a job, adjust the crew. It answers with the real situation: what is running, the queue, usage and your account's plan usage. |
-  | **Operations** | What the crew is doing right now: the steps, the logbook (every action of the agent at work, with the time) and the queue. |
+  | **Manager** | Talk to Chiefmate. Ask how things are going, request a job, adjust the crew. It answers with the real situation: what is running, the queue, usage and your account's plan usage. Beside the conversation, how full its context is and the context of the agent at work (see "The conversation's context" below). |
+  | **Operations** | What the crew is doing right now: the steps, the context of the agent at work, the logbook (every action of the agent at work, with the time) and the queue. |
   | **Missions** | Complete jobs with their own schedule. "Run now" starts one at any time. |
   | **Crew** | Who is on board, what each one is doing and the model behind them. Give any of them a one-off task. |
   | **Projects** | Which of your projects are running on this computer (development servers, node, python, IDEs, started by you or by the crew) and the memory each one uses, with a button to stop them. |
@@ -130,6 +130,14 @@ Chiefmate measures what really counts on a subscription plan: your account's usa
 - **Each step has a time limit** (in the agent's header), in case an agent gets stuck.
 - **Alerts at 70% and 90%** of the 5-hour window and of the plan's week, once per threshold and window. They don't pause anything.
 - **The plan's free resets.** Claude Code doesn't report them, so you record them in the Usage section or with `reset-grant`. Chiefmate shows the ones available and the week's pace (the share used against the share of the week gone by, and whether there is slack). It warns you when the week passes 90% with one available, and 3 days and 1 day before one expires unused.
+
+### The conversation's context
+
+Every turn of Claude Code reports how much of the model's context window it filled. Chiefmate shows it as a bar, in tokens and as a share, for the conversation with the manager and for the agent at work, with the number of times Claude Code compacted each one on its own.
+
+- **The manager's conversation** carries on from message to message, so it grows. Below 75% of the window, Claude Code's own compaction takes care of it, and the conversation notes each compaction. Above 75%, as soon as the manager is free, it writes a short summary of the conversation (`data/manager/handoff.md`); your next message then starts a new conversation that opens with that summary and the manager's notes (`data/manager/notes.md`). The conversation says when this happens. The **New conversation** button starts over at any time, keeping only the notes.
+- **Each agent's step** starts with a new session, so nothing is renewed: the context is shown, compactions go to the logbook, and the step's record keeps the context it ended with.
+- The manager also gets both in the situation it receives with each of your messages.
 
 ### Reading claude.ai (optional, off by default)
 
