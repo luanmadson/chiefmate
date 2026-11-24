@@ -14,7 +14,7 @@ import {
 } from './workspace.mjs';
 
 /** What the app shows as happening right now. */
-export const live = { run: null, title: null, step: null, agent: null, started: null, actions: [] };
+export const live = { run: null, title: null, project: null, step: null, agent: null, started: null, pid: null, actions: [] };
 
 let currentProcess = null;
 let cancelRequest = null;
@@ -32,6 +32,7 @@ function crewRules(config, project) {
 - The project's documentation outranks your own preferences. Read what you need before changing anything.
 - Write project content in the language the project already uses.
 - If you get stuck, undo whatever is half-done and explain it in your report.
+- Never read, list or copy \`data/browser-profile\` (the browser profile Chiefmate uses to read the account's usage page) or anything else in Chiefmate's \`data/\` folder.
 - Your last message is the step's report, in ${owner}: short markdown with what you did (and the files), the sources you used, what you left out and why, and what the reviewer should check.`;
 }
 
@@ -182,7 +183,7 @@ async function runStep({ run, step, index, dir, project, config, agents, librari
   Object.assign(live, { step: index + 1, agent: step.agent, started: now(), actions: [] });
   saveRun(run);
 
-  const { promise, cancel } = runClaude({
+  const { promise, cancel, pid } = runClaude({
     dir,
     prompt: stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries, base }),
     system: agent.instructions,
@@ -197,8 +198,10 @@ async function runStep({ run, step, index, dir, project, config, agents, librari
     onEvent: logAction,
   });
   currentProcess = { cancel };
+  live.pid = pid; // the agent's process: its memory counts for the project, and it is never stopped from the Projects section
   const r = await promise;
   currentProcess = null;
+  live.pid = null;
 
   const waitUntil = limitHit(r);
   Object.assign(step, {
@@ -232,7 +235,7 @@ export async function execute(run) {
   const agents = loadAgents(config);
   const project = config.projects?.[run.project];
   cancelRequest = null;
-  Object.assign(live, { run: run.id, title: run.title, step: null, agent: null, started: now(), actions: [] });
+  Object.assign(live, { run: run.id, title: run.title, project: run.project, step: null, agent: null, started: now(), pid: null, actions: [] });
   const firstTime = !run.started;
   Object.assign(run, { status: 'running', started: run.started ?? now(), notBefore: null, note: null });
   saveRun(run);
@@ -327,6 +330,6 @@ export async function execute(run) {
     saveRun(run);
     notify(t('Chiefmate hit an error'), t('{title}: {error}', { title: run.title, error: clip(error.message, 180) }));
   } finally {
-    Object.assign(live, { run: null, title: null, step: null, agent: null });
+    Object.assign(live, { run: null, title: null, project: null, step: null, agent: null, pid: null });
   }
 }

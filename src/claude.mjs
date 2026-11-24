@@ -173,5 +173,5 @@ export function runClaude(options) {
     });
   });
 
-  return { promise, cancel };
+  return { promise, cancel, pid: child.pid };
 }

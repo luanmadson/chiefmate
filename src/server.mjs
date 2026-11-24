@@ -5,12 +5,15 @@ import path from 'node:path';
 import { checkClaude, claudeInfo } from './claude.mjs';
 import { loadAgents, loadConfig, saveConfig } from './config.mjs';
 import { t } from './i18n.mjs';
+import { computer, processes, stoppable, stopProject } from './machine.mjs';
 import { chat, newConversation, talkToManager } from './manager.mjs';
+import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { cancel, focus, nudgeQueue, queued, resume } from './queue.mjs';
 import { createRun, live } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { addMessage, listRuns, readConversation, readNotifications, readRun, readUsage, stepsOf } from './store.mjs';
 import { updateInfo } from './update.mjs';
+import { isReading, readerSettings, readerStatus, readUsagePage, signedIn } from './usagepage.mjs';
 import { now, ROOT, VERSION } from './util.mjs';
 
 const UI = path.join(ROOT, 'ui');
@@ -118,6 +121,7 @@ function buildState() {
   const queue = queued();
   const conversation = readConversation();
   const usage = readUsage();
+  const machine = computer(config, queue);
   const lastOf = id => runs.find(r => r.mission === id && !['queued', 'waiting'].includes(r.status));
   return {
     now: now(),
@@ -139,6 +143,13 @@ function buildState() {
     queue: queue.map(summary),
     history: runs.filter(r => !['queued', 'waiting'].includes(r.status) && r.id !== live.run).slice(0, 30).map(summary),
     usage: { limits: config.limits ?? {}, account: usage },
+    computer: machine,
+    plan: {
+      resets: planResets(config),
+      pace: weekPace(usage),
+      reader: { ...readerSettings(config), signedIn: signedIn(), reading: isReading(), status: readerStatus() },
+    },
+    alerts: alerts(config, usage, machine),
     manager: { messages: conversation.slice(-80), responding: chat.responding, partial: chat.partial, actions: chat.actions.slice(-12) },
     notifications: readNotifications().slice(-8).reverse(),
   };
@@ -163,6 +174,10 @@ export function startServer() {
       if (req.method === 'GET') {
         if (url.pathname === '/api/health') return reply(res, 200, { ok: true, version: VERSION });
         if (url.pathname === '/api/state') return reply(res, 200, buildState());
+        if (url.pathname === '/api/computer') {
+          await processes(5000);
+          return reply(res, 200, computer());
+        }
         if (url.pathname.startsWith('/api/run/')) {
           const run = readRun(decodeURIComponent(url.pathname.slice('/api/run/'.length)));
           return run ? reply(res, 200, run) : reply(res, 404, { error: t('Run not found.') });
@@ -209,6 +224,26 @@ export function startServer() {
           config.limits = { ...kept, ...validLimits(body) };
           saveConfig(config);
           return reply(res, 200, config.limits);
+        }
+        case '/api/stop-project': {
+          // With "preview", only lists what would stop. Otherwise stops the processes you confirmed, never Chiefmate or the crew.
+          if (body.preview) return reply(res, 200, { processes: await stoppable(String(body.project ?? '')) });
+          if (!Array.isArray(body.pids) || !body.pids.length) return reply(res, 400, { error: t('Confirm which processes to stop.') });
+          return reply(res, 200, { stopped: await stopProject(String(body.project ?? ''), body.pids) });
+        }
+        case '/api/reset-grants':
+          return reply(res, 200, { resets: changeResets(body) });
+        case '/api/usage-reader': {
+          if (body.enabled !== undefined) {
+            const config = loadConfig();
+            config.usage_reader = { ...config.usage_reader, enabled: !!body.enabled };
+            saveConfig(config);
+          }
+          if (body.read) {
+            if (!signedIn()) return reply(res, 400, { error: t('Not signed in yet. Run: node src/cli.mjs claude-login') });
+            readUsagePage().catch(() => {});
+          }
+          return reply(res, 200, { ...readerSettings(), reading: isReading() });
         }
         default:
           return reply(res, 404, { error: 'not found' });

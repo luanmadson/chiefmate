@@ -4,6 +4,8 @@ import path from 'node:path';
 import { runClaude } from './claude.mjs';
 import { loadAgents, loadConfig } from './config.mjs';
 import { formatDateTime, formatDuration, formatPercent, t } from './i18n.mjs';
+import { processes } from './machine.mjs';
+import { computerLine, planLine } from './plan.mjs';
 import { focus, queued } from './queue.mjs';
 import { ALWAYS_DISALLOWED, live, prepareLibraries } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
@@ -73,6 +75,8 @@ export function situation(libraries = []) {
   const window = (w, name) => `${name} ${formatPercent(w?.used)}${w?.resets ? ` (resets ${formatDateTime(w.resets)})` : ''}`;
   const limits = config.limits ?? {};
   lines.push(`${config.owner}'s account: ${window(usage.five_hour, '5-hour window')}; ${window(usage.seven_day, 'plan week')}. Measured ${usage.updated ? formatDateTime(usage.updated) : 'never'}. Runs pause at ${formatPercent(limits.pause_at_5h_window)} of the 5-hour window and ${formatPercent(limits.pause_at_plan_week)} of the plan week.`);
+  lines.push(planLine(config, usage));
+  lines.push(computerLine(config));
   const delivery = p => (p.deliver === 'local' ? `, local delivery: the result is a branch in ${p.local_clone ?? 'the working copy'}, nothing goes to GitHub` : ', delivered as a pull request');
   lines.push(`Projects: ${Object.entries(config.projects ?? {}).map(([id, p]) => `${id} (${p.name}, ${p.repository}${delivery(p)}${p.docs ? `, personal docs in ${p.docs}` : ''})`).join('; ') || 'none'}.`);
   for (const l of libraries) lines.push(`Reference library ${l.id} (${l.name}), read only, a copy refreshed from GitHub: ${l.dir}. ${l.about}`.trim());
@@ -97,6 +101,7 @@ export async function talkToManager(message) {
   state.manager ??= {};
   const model = manager.model ?? config.default_model;
   const libraries = await chatLibraries(config);
+  await processes(60_000).catch(() => {}); // the projects running on this computer, for the situation
   const prompt = `<situation>\n${situation(libraries)}\n</situation>\n\nMessage from ${config.owner}:\n${message}`;
   const attempt = session =>
     runClaude({

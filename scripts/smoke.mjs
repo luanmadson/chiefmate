@@ -39,7 +39,7 @@ try {
     failures.push('the server did not start');
   } else {
     const state = await (await fetch(`${base}/api/state`)).json();
-    for (const key of ['version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'focus', 'queue', 'history', 'usage', 'manager']) {
+    for (const key of ['version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'focus', 'queue', 'history', 'usage', 'manager', 'computer', 'plan', 'alerts']) {
       expect(key in state, `/api/state has no "${key}"`);
     }
     expect(state.crew?.some(a => a.id === 'manager'), 'the crew has no manager');
@@ -49,6 +49,12 @@ try {
     }
     const unsigned = await fetch(`${base}/api/limits`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     expect(unsigned.status === 403, `a command without the x-chiefmate header answered ${unsigned.status} instead of 403`);
+    const machine = await (await fetch(`${base}/api/computer`)).json();
+    expect(machine.memory?.total > 0 && Array.isArray(machine.projects), '/api/computer has no memory or projects');
+    // Commands that must refuse without changing anything (the settings are the installation's own).
+    const post = (route, body) => fetch(base + route, { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1' }, body: JSON.stringify(body) });
+    expect((await post('/api/stop-project', { project: 'none' })).status === 400, 'stopping a project without a confirmed list was not refused');
+    expect((await post('/api/reset-grants', { action: 'used', index: 9999 })).status === 400, 'marking a free reset that does not exist was not refused');
     const outside = await fetch(`${base}/../package.json`);
     expect(!outside.ok || !(await outside.text()).includes('"name": "chiefmate"'), 'a file outside ui/ was served');
   }

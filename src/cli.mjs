@@ -38,7 +38,25 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs report <id>                  the report of each step of a run
   node src/cli.mjs limits [--window-5h 0.85] [--plan-week 0.9]
                                                 when runs pause, as a share of the account's 5-hour window and plan week
+  node src/cli.mjs ram                          the projects running on this computer and the memory each one uses
+  node src/cli.mjs stop-project <id> [--yes]    lists, then (with --yes) stops a project's processes on this computer
+  node src/cli.mjs reset-grant [list]           the plan's free resets you recorded
+  node src/cli.mjs reset-grant add <expires> ["<note>"]
+                                                records a free reset (expires: YYYY-MM-DD)
+  node src/cli.mjs reset-grant used <n>         marks free reset number n as used (remove <n> deletes it)
+  node src/cli.mjs claude-login                 opens a browser window to sign in to claude.ai, for the optional usage reading
+  node src/cli.mjs usage-reader on|off|now      turns the reading of claude.ai's usage page on or off, or reads it now
   node src/cli.mjs notify "<title>" "<text>"    tests a Windows notification`;
+
+/** The API when Chiefmate is running, else the same work done here. */
+async function apiOr(route, body, local) {
+  try {
+    return await api(route, body);
+  } catch (error) {
+    if (error.cause?.code !== 'ECONNREFUSED' && !/fetch failed/.test(error.message)) throw error;
+    return local();
+  }
+}
 
 async function main() {
   switch (command) {
@@ -62,8 +80,10 @@ async function main() {
         const { startUpdates } = await import('./update.mjs');
         const { live } = await import('./runs.mjs');
         const { chat } = await import('./manager.mjs');
+        const { startWatch } = await import('./plan.mjs');
         startQueue();
         startSchedule();
+        startWatch();
         startUpdates({ isBusy: () => !!live.run || chat.responding, beforeRestart: () => new Promise(resolve => server.close(() => resolve())) });
       }
       console.log(`Chiefmate running at http://localhost:${p} (${new Date().toISOString()})`);
@@ -126,6 +146,82 @@ async function main() {
         }
       }
       console.log(JSON.stringify(loadConfig().limits, null, 2));
+      return;
+    }
+    case 'ram': {
+      const machine = await import('./machine.mjs');
+      const c = await apiOr('/api/computer', null, async () => (await machine.processes(0), machine.computer()));
+      const { formatBytes } = machine;
+      const state = { agent: 'crew at work', running: 'running on this computer', queued: 'in the queue', stopped: 'stopped' };
+      console.log(`Free memory: ${Math.round((c.memory.free / c.memory.total) * 100)}% (${formatBytes(c.memory.free)} of ${formatBytes(c.memory.total)})`);
+      console.log(`Chiefmate itself: ${formatBytes(c.chiefmate.ram)}`);
+      if (!c.supported) console.log("The projects' processes are read on Windows only.");
+      if (c.error) console.log(`Couldn't read the processes: ${c.error}`);
+      for (const p of c.projects) {
+        console.log(`${p.id.padEnd(16)} ${state[p.state].padEnd(25)} ${formatBytes(p.ram).padStart(8)}  ${p.processes.length} process(es)`);
+        for (const x of p.processes) console.log(`    ${String(x.pid).padStart(6)} ${formatBytes(x.ram).padStart(8)}  ${x.name}${x.crew ? ' (crew)' : ''}${x.guarded ? ' (kept)' : ''}  ${x.command}`);
+      }
+      return;
+    }
+    case 'stop-project': {
+      const id = rest[0];
+      if (!id) throw new Error('Which project? node src/cli.mjs stop-project <id> [--yes]');
+      const machine = await import('./machine.mjs');
+      const { processes } = await apiOr('/api/stop-project', { project: id, preview: true }, async () => ({ processes: await machine.stoppable(id) }));
+      if (!processes.length) {
+        console.log(`Nothing of ${id} to stop on this computer.`);
+        return;
+      }
+      console.log(`${has('--yes') ? 'Stopping' : 'These would stop'}:`);
+      for (const x of processes) console.log(`  ${String(x.pid).padStart(6)} ${machine.formatBytes(x.ram).padStart(8)}  ${x.name}  ${x.command}`);
+      if (!has('--yes')) {
+        console.log('Nothing was stopped. Add --yes to stop them.');
+        return;
+      }
+      const pids = processes.map(x => x.pid);
+      const { stopped } = await apiOr('/api/stop-project', { project: id, pids }, async () => ({ stopped: await machine.stopProject(id, pids) }));
+      console.log(`Stopped ${stopped.length} process(es).`);
+      return;
+    }
+    case 'reset-grant': {
+      const { changeResets, planResets } = await import('./plan.mjs');
+      const [action = 'list', ...args] = rest;
+      let list;
+      if (action === 'list') list = planResets();
+      else if (action === 'add') list = changeResets({ action, expires: args[0], note: args.slice(1).join(' ') });
+      else if (action === 'used' || action === 'remove') list = changeResets({ action, index: args[0] });
+      else throw new Error('Use: reset-grant [list] | add <expires> ["<note>"] | used <n> | remove <n>');
+      for (const g of list) {
+        const status = g.used ? 'used' : g.available ? 'available' : 'expired';
+        console.log(`${String(g.index).padStart(2)}. ${status.padEnd(9)} ${g.expires ? `expires ${formatDateTime(g.expires)}` : 'expiry unknown'}${g.note ? `  ${g.note}` : ''}${g.source === 'claude.ai' ? '  (read on claude.ai)' : ''}`);
+      }
+      if (!list.length) console.log('No free resets recorded.');
+      return;
+    }
+    case 'claude-login': {
+      const { openLogin, PROFILE_DIR } = await import('./usagepage.mjs');
+      openLogin();
+      console.log(`A browser window opened with Chiefmate's own profile (${PROFILE_DIR}).
+Sign in to claude.ai there, then close the window.
+The reading is off until you turn it on: node src/cli.mjs usage-reader on`);
+      return;
+    }
+    case 'usage-reader': {
+      const reader = await import('./usagepage.mjs');
+      const action = rest[0];
+      if (action === 'on' || action === 'off') {
+        const config = loadConfig();
+        config.usage_reader = { ...config.usage_reader, enabled: action === 'on' };
+        saveConfig(config);
+      } else if (action === 'now') {
+        const start = Date.now() - 1000;
+        await apiOr('/api/usage-reader', { read: true }, () => reader.readUsagePage());
+        // Through the server, the reading goes on there: its result is written when it ends (wait up to two minutes).
+        for (let i = 0; i < 120 && !(Date.parse(reader.readerStatus().attempted ?? '') >= start); i++) await new Promise(r => setTimeout(r, 1000));
+      }
+      const { enabled, everyHours } = reader.readerSettings();
+      console.log(`Reading of claude.ai: ${enabled ? `on, every ${everyHours} h` : 'off'}${reader.signedIn() ? '' : ' (not signed in: node src/cli.mjs claude-login)'}`);
+      console.log(JSON.stringify(reader.readerStatus(), null, 2));
       return;
     }
     case 'notify':

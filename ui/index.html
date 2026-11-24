@@ -24,10 +24,13 @@
       <a href="#operations" data-view="operations"><span data-t="Operations">Operations</span><span class="counter" id="counter-operations"></span></a>
       <a href="#missions" data-view="missions"><span data-t="Missions">Missions</span></a>
       <a href="#crew" data-view="crew"><span data-t="Crew">Crew</span></a>
+      <a href="#projects" data-view="projects"><span data-t="Projects">Projects</span><span class="counter" id="counter-projects"></span></a>
       <a href="#log" data-view="log"><span data-t="Log">Log</span></a>
       <a href="#usage" data-view="usage"><span data-t="Usage">Usage</span></a>
       <div class="nav-footer" id="version">Chiefmate</div>
     </nav>
+
+    <div id="alerts" class="alerts" aria-live="polite"></div>
 
     <main class="content">
       <section class="view" id="view-manager">
@@ -96,6 +99,16 @@
         </form>
       </section>
 
+      <section class="view" id="view-projects">
+        <div class="view-header">
+          <div>
+            <h1 data-t="Projects">Projects</h1>
+            <p data-t="Which projects are running on this computer, started by you or by the crew, and how much memory each one uses.">Which projects are running on this computer, started by you or by the crew, and how much memory each one uses.</p>
+          </div>
+        </div>
+        <div id="computer"></div>
+      </section>
+
       <section class="view" id="view-log">
         <div class="view-header">
           <div>
@@ -124,6 +137,15 @@
             <label><span data-t="Pause at this share of the plan's week (%)">Pause at this share of the plan's week (%)</span><input name="week" type="number" min="5" max="100" step="5"></label>
           </div>
           <div class="actions"><button type="submit" class="button" data-t="Save limits">Save limits</button></div>
+        </form>
+        <div id="plan"></div>
+        <form id="reset-form" class="panel form">
+          <div class="label" data-t="Record a free reset">Record a free reset</div>
+          <div class="fields">
+            <label><span data-t="Expires on">Expires on</span><input name="expires" type="date" required></label>
+            <label><span data-t="Note (optional)">Note (optional)</span><input name="note" type="text" maxlength="120"></label>
+          </div>
+          <div class="actions"><button type="submit" class="button" data-t="Record">Record</button></div>
         </form>
       </section>
     </main>

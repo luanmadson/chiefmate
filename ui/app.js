@@ -125,6 +125,10 @@ const clockTime = iso => (iso ? new Date(iso).toLocaleTimeString(locale(), { hou
 const shortDate = iso =>
   iso ? new Date(iso).toLocaleString(locale(), { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }).replace(',', '') : '—';
 const percent = v => (typeof v === 'number' ? `${Math.round(v * 100)}%` : '—');
+function bytes(n) {
+  const mb = (n ?? 0) / 1024 ** 2;
+  return mb >= 1024 ? `${(mb / 1024).toLocaleString(locale(), { minimumFractionDigits: 1, maximumFractionDigits: 1 })} GB` : `${Math.round(mb)} MB`;
+}
 const shortModel = m =>
   String(m ?? '').replace(/^claude-/, '').replace(/-(\d+)-(\d+)$/, ' $1.$2').replace(/-(\d+)$/, ' $1').replace(/^\w/, c => c.toUpperCase());
 
@@ -225,7 +229,7 @@ const nextMission = () => state.missions.filter(m => m.next).sort((x, y) => x.ne
 
 // ---------- Navigation ----------
 
-const VIEWS = ['manager', 'operations', 'missions', 'crew', 'log', 'usage'];
+const VIEWS = ['manager', 'operations', 'missions', 'crew', 'projects', 'log', 'usage'];
 const currentView = () => (VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
 function showView() {
   const view = currentView();
@@ -277,6 +281,15 @@ function drawCounters() {
   const a = state.current;
   draw('#counter-operations', `${!!a}-${state.queue.length}`, a ? '●' : state.queue.length ? String(state.queue.length) : '');
   draw('#counter-manager', String(state.manager.responding), state.manager.responding ? '…' : '');
+  const running = state.computer.projects.filter(p => p.running || p.agent).length;
+  draw('#counter-projects', String(running), running ? String(running) : '');
+}
+
+/** The band of alerts at the top: low memory, the account's usage, free resets. They warn; nothing is paused. */
+function drawAlerts() {
+  const list = online ? state.alerts ?? [] : [];
+  const html = list.map(a => `<a class="alert" href="#${esc(a.view ?? 'manager')}">${stateHtml([a.text, a.level === 'critical' ? 'error' : 'warn'])}</a>`).join('');
+  draw('#alerts', html, html);
 }
 
 function drawStatusbar() {
@@ -296,6 +309,7 @@ function drawStatusbar() {
     claude.found ? `Claude Code <span class="num">${esc(claude.version ?? '')}</span>` : esc(claude.found === false ? t('Claude Code not found') : t('Checking Claude Code…')),
     `${esc(t('5-hour window'))} <span class="num">${percent(account.five_hour?.used)}</span>`,
     `${esc(t("Plan's week"))} <span class="num">${percent(account.seven_day?.used)}</span>`,
+    `${esc(t('Free memory'))} <span class="num">${percent(state.computer.memory.free / state.computer.memory.total)}</span>`,
   ].map(s => `<span>${s}</span>`).join('');
   const html = `<div class="group">${left}</div><div class="group">${right}</div>`;
   draw('#statusbar', html, html);
@@ -597,12 +611,123 @@ function drawUsage() {
   }
 }
 
+// ---------- Projects on this computer ----------
+
+const expanded = new Set();
+
+function projectState(p) {
+  if (p.agent) return [p.running ? t('Crew at work, and running on this computer') : t('Crew at work'), 'info'];
+  if (p.running) return [t('Running on this computer'), 'ok'];
+  if (p.queued) return [t('In the queue'), 'neutral'];
+  return [t('Stopped'), 'neutral'];
+}
+
+function processRows(p) {
+  const flag = x => (x.crew ? t('crew') : x.guarded ? t('kept') : '');
+  const rows = p.processes.map(x =>
+    `<tr><td>${esc(x.name)}${flag(x) ? ` <span class="hint">· ${esc(flag(x))}</span>` : ''}</td><td class="num">${x.pid}</td><td class="num">${bytes(x.ram)}</td><td class="command">${esc(x.command)}</td></tr>`);
+  return `<tr class="processes"><td colspan="4"><table class="table inner"><thead><tr><th>${esc(t('Process'))}</th><th>PID</th><th>${esc(t('Memory'))}</th><th>${esc(t('Command line'))}</th></tr></thead><tbody>${rows.join('')}</tbody></table></td></tr>`;
+}
+
+function drawComputer() {
+  const c = state.computer;
+  const notes = [
+    c.supported ? '' : t("The projects' processes are read on Windows only."),
+    c.error ? t("Couldn't read the processes: {error}", { error: c.error }) : '',
+  ].filter(Boolean);
+  const rows = c.projects.map(p => {
+    const has = p.processes.length > 0;
+    const open = has && expanded.has(p.id);
+    const canStop = p.processes.some(x => !x.crew && !x.guarded);
+    return `<tr class="${has ? 'clickable' : ''}${open ? ' selected' : ''}"${has ? ` data-expand="${esc(p.id)}"` : ''}>
+      <td><span class="primary">${has ? (open ? '▾ ' : '▸ ') : ''}${esc(p.name)}</span><span class="secondary">${esc(t('{count} process(es)', { count: p.processes.length }))}</span></td>
+      <td>${stateHtml(projectState(p))}</td>
+      <td class="num">${p.ram ? bytes(p.ram) : '—'}</td>
+      <td class="row-actions">${canStop ? `<button type="button" class="button danger small" data-stop="${esc(p.id)}">${esc(t('Stop'))}</button>` : ''}</td>
+    </tr>${open ? processRows(p) : ''}`;
+  });
+  const html = `<div class="usage-grid">
+      <div class="panel">
+        <div class="label">${esc(t('This computer'))}</div>
+        ${meter(t('Memory in use'), 1 - c.memory.free / c.memory.total, t('{free} free of {total}', { free: bytes(c.memory.free), total: bytes(c.memory.total) }))}
+        <dl class="facts">
+          <dt>${esc(t('Chiefmate itself'))}</dt><dd class="num">${bytes(c.chiefmate.ram)}</dd>
+          <dt>${esc(t('Processes read'))}</dt><dd class="num">${c.measured ? clockTime(c.measured) : '—'}</dd>
+        </dl>
+        ${notes.map(n => `<div class="hint">${esc(n)}</div>`).join('')}
+      </div>
+      <div class="panel">
+        <div class="label">${esc(t('How it works'))}</div>
+        <p class="hint">${esc(t("A project is running when a process's command line or program is in one of its folders: your clone, Documents/GitHub/<repository> or its working copy in workspaces. What that process started counts too. Read every 15 seconds while the app is open."))}</p>
+        <p class="hint">${esc(t('Stop ends the processes of a project after you confirm the list. Chiefmate and the crew at work are never stopped: to stop the crew, cancel the run.'))}</p>
+      </div>
+    </div>
+    <table class="table" style="margin-top:20px"><thead><tr><th>${esc(t('Project'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Memory'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+  draw('#computer', html, html);
+}
+
+// ---------- The plan's free resets and the claude.ai reading ----------
+
+function paceText(p) {
+  if (!p) return t("No pace yet: the plan's week is measured on the next agent run.");
+  const values = { used: percent(p.used), elapsed: percent(p.elapsed), points: Math.round(Math.abs(p.margin) * 100) };
+  if (p.status === 'slack') return t('{used} of the week used with {elapsed} of it gone: {points} points of slack.', values);
+  if (p.status === 'even') return t('{used} of the week used with {elapsed} of it gone: right on pace.', values);
+  return t('{used} of the week used with only {elapsed} of it gone: {points} points ahead of pace.', values);
+}
+
+function readerPanel(reader) {
+  const status = reader.status ?? {};
+  let line = reader.enabled ? t('On, every {hours} h.', { hours: reader.everyHours }) : t('Off.');
+  if (!reader.signedIn) line += ` ${t('Not signed in yet: run node src/cli.mjs claude-login.')}`;
+  if (reader.reading) line += ` ${t('Reading now…')}`;
+  const read = [];
+  if (status.read_at) read.push(t('Last read {when}: session {session}, week {week}.', { when: shortDate(status.read_at), session: percent(status.five_hour), week: percent(status.seven_day) }));
+  if (status.error) read.push(t('The last attempt failed ({when}): {error}', { when: shortDate(status.attempted), error: status.error }));
+  else if (status.warning) read.push(status.warning);
+  return `<div class="panel">
+      <div class="label">${esc(t('Reading claude.ai (optional)'))}</div>
+      <p>${esc(line)}</p>
+      ${read.map(r => `<p class="hint">${esc(r)}</p>`).join('')}
+      ${status.excerpt?.length ? `<details><summary class="hint">${esc(t('What was read'))}</summary><pre>${esc(status.excerpt.join('\n'))}</pre></details>` : ''}
+      <p class="hint">${esc(t("When on, Chiefmate itself (never an agent) opens your account's usage page every few hours, with no window, in a browser profile of its own, and only reads it: it never clicks anything on your account. It updates the free resets when the page shows them. See the risks in the README."))}</p>
+      <div class="actions left">
+        <button type="button" class="button secondary small" data-reader="${reader.enabled ? 'off' : 'on'}">${esc(reader.enabled ? t('Turn off') : t('Turn on'))}</button>
+        ${reader.signedIn ? `<button type="button" class="button secondary small" data-reader="now"${reader.reading ? ' disabled' : ''}>${esc(t('Read now'))}</button>` : ''}
+      </div>
+    </div>`;
+}
+
+function drawPlan() {
+  const { resets, pace, reader } = state.plan;
+  const resetState = g => (g.used ? [t('Used'), 'neutral'] : g.available ? [t('Available'), 'ok'] : [t('Expired'), 'neutral']);
+  const rows = resets.map(g => `<tr>
+      <td class="num">${g.index}</td>
+      <td class="num">${g.expires ? `${shortDate(g.expires)}${g.available ? ` (${esc(relative(g.expires))})` : ''}` : esc(t('unknown'))}</td>
+      <td>${stateHtml(resetState(g))}</td>
+      <td>${esc(g.note ?? '')}${g.source === 'claude.ai' ? `<span class="secondary">${esc(t('read on claude.ai'))}</span>` : ''}</td>
+      <td class="row-actions">${g.available ? `<button type="button" class="button secondary small" data-reset-used="${g.index}">${esc(t('Mark used'))}</button>` : ''}<button type="button" class="button danger small" data-reset-remove="${g.index}">${esc(t('Remove'))}</button></td>
+    </tr>`);
+  const html = `<div class="usage-grid" style="margin-top:20px">
+      <div class="panel">
+        <div class="label">${esc(t("The plan's free resets"))}</div>
+        ${meter(t("The week's pace"), pace?.used, pace ? t('{used} used · {elapsed} of the week gone', { used: percent(pace.used), elapsed: percent(pace.elapsed) }) : '—')}
+        <p class="hint">${esc(paceText(pace))}</p>
+        ${resets.length ? `<table class="table"><thead><tr><th>#</th><th>${esc(t('Expires'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Note'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>` : `<div class="empty">${esc(t('No free resets recorded.'))}</div>`}
+        <p class="hint">${esc(t("Claude Code doesn't report them: record them below or with node src/cli.mjs reset-grant. You get an alert when the week passes 90% with one available, and 3 days and 1 day before one expires unused."))}</p>
+      </div>
+      ${readerPanel(reader)}
+    </div>`;
+  draw('#plan', html, html);
+}
+
 // ---------- Cycle ----------
 
 function drawOffline() {
   online = false;
   drawPresence();
   drawFocus();
+  drawAlerts();
   drawStatusbar();
   if (state) {
     drawBridge();
@@ -633,6 +758,7 @@ async function refresh() {
   $('#version').textContent = `Chiefmate ${state.version}`;
   drawPresence();
   drawFocus();
+  drawAlerts();
   drawCounters();
   drawStatusbar();
   drawChat();
@@ -643,6 +769,8 @@ async function refresh() {
   drawCrew();
   drawLog();
   drawUsage();
+  drawComputer();
+  drawPlan();
   if (currentView() === 'log') refreshDetail();
 }
 
@@ -692,6 +820,35 @@ $('#task-form').addEventListener('submit', async event => {
   }
 });
 
+$('#reset-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.target;
+  try {
+    await api('/api/reset-grants', { action: 'add', expires: form.expires.value, note: form.note.value });
+    form.reset();
+    toast(t('Free reset recorded.'));
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+/** Shows what would stop, asks, and stops only what you saw. */
+async function stopProject(id) {
+  const { processes } = await api('/api/stop-project', { project: id, preview: true });
+  if (!processes.length) return toast(t('Nothing of this project to stop.'));
+  const shown = processes.slice(0, 12).map(x => `${x.name} (PID ${x.pid}, ${bytes(x.ram)})`);
+  if (processes.length > shown.length) shown.push(t('and {count} more', { count: processes.length - shown.length }));
+  const ok = await confirmDialog(
+    t('Stop {project}', { project: projectName(id) }),
+    `${t('These {count} process(es) will be ended, and anything unsaved in them is lost. Chiefmate and the crew at work are never stopped.', { count: processes.length })}\n\n${shown.join('\n')}`,
+    t('Stop them'),
+  );
+  if (!ok) return;
+  const { stopped } = await api('/api/stop-project', { project: id, pids: processes.map(x => x.pid) });
+  toast(t('{count} process(es) stopped.', { count: stopped.length }));
+}
+
 $('#limits-form').addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.target;
@@ -708,7 +865,7 @@ $('#limits-form').addEventListener('submit', async event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-suggestion]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader]');
   if (!target) return;
   try {
     if (target.dataset.run) {
@@ -740,6 +897,24 @@ document.addEventListener('click', async event => {
       toast(t('Back in the queue.'));
     } else if (target.dataset.suggestion) {
       sendMessage(target.dataset.suggestion);
+    } else if (target.dataset.stop) {
+      await stopProject(target.dataset.stop);
+    } else if (target.dataset.expand) {
+      const id = target.dataset.expand;
+      if (!expanded.delete(id)) expanded.add(id);
+      drawComputer();
+      return;
+    } else if (target.dataset.resetUsed) {
+      await api('/api/reset-grants', { action: 'used', index: Number(target.dataset.resetUsed) });
+      toast(t('Marked as used.'));
+    } else if (target.dataset.resetRemove) {
+      const ok = await confirmDialog(t('Remove free reset'), t('Remove free reset number {index} from the record?', { index: target.dataset.resetRemove }), t('Remove'));
+      if (!ok) return;
+      await api('/api/reset-grants', { action: 'remove', index: Number(target.dataset.resetRemove) });
+    } else if (target.dataset.reader) {
+      const action = target.dataset.reader;
+      await api('/api/usage-reader', action === 'now' ? { read: true } : { enabled: action === 'on' });
+      toast(action === 'now' ? t('Reading claude.ai…') : action === 'on' ? t('Reading of claude.ai turned on.') : t('Reading of claude.ai turned off.'));
     }
     refresh();
   } catch (error) {
