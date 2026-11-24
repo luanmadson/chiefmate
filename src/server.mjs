@@ -9,7 +9,8 @@ import { chat, newConversation, talkToManager } from './manager.mjs';
 import { cancel, nudgeQueue, queued, resume } from './queue.mjs';
 import { createRun, live } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
-import { addMessage, listRuns, readConversation, readNotifications, readRun, readUsage, runCost, stepsOf, weekCost } from './store.mjs';
+import { addMessage, listRuns, readConversation, readNotifications, readRun, readUsage, stepsOf } from './store.mjs';
+import { updateInfo } from './update.mjs';
 import { now, ROOT, VERSION } from './util.mjs';
 
 const UI = path.join(ROOT, 'ui');
@@ -66,11 +67,11 @@ function readBody(req) {
 const summary = run => ({
   id: run.id, title: run.title, kind: run.kind, mission: run.mission, project: run.project, origin: run.origin, status: run.status,
   created: run.created, started: run.started, ended: run.ended, notBefore: run.notBefore, note: run.note, result: run.result,
-  pullRequest: run.pullRequest, cost: runCost(run),
+  pullRequest: run.pullRequest,
   steps: stepsOf(run).map(s => ({ agent: s.agent, status: s.status, review: s === run.review })),
 });
 
-/** Each crew member's presence: what they are doing now, their last work and their usage this week. */
+/** Each crew member's presence: what they are doing now, their last work and their work this week. */
 function crew(agents, config, runs, current, queue, conversation) {
   const since = Date.now() - 7 * 86400_000;
   const running = current ? stepsOf(current).find(s => s.status === 'running') : null;
@@ -87,23 +88,23 @@ function crew(agents, config, runs, current, queue, conversation) {
       if (next) [status, run] = [next.status === 'waiting' ? 'waiting' : 'queued', next.title];
     }
     let last = null;
-    const week = { cost: 0, steps: 0 };
+    const week = { steps: 0, minutes: 0, answers: 0 };
     for (const r of runs) {
       for (const s of stepsOf(r)) {
         if (s.agent !== agent.id || !s.ended) continue;
-        if (!last || s.ended > last.at) last = { at: s.ended, status: s.status, cost: s.cost ?? 0, title: r.title, run: r.id };
-        if (new Date(s.ended).getTime() >= since) Object.assign(week, { cost: week.cost + (s.cost ?? 0), steps: week.steps + 1 });
+        if (!last || s.ended > last.at) last = { at: s.ended, status: s.status, title: r.title, run: r.id };
+        if (new Date(s.ended).getTime() >= since) Object.assign(week, { steps: week.steps + 1, minutes: week.minutes + Math.round((s.durationMs ?? 0) / 60000) });
       }
     }
     if (agent.id === 'manager') {
       for (const m of conversation.filter(x => x.who === 'manager')) {
-        if (!last || m.at > last.at) last = { at: m.at, status: m.error ? 'failed' : 'done', cost: m.cost ?? 0, chat: true };
-        if (m.cost && new Date(m.at).getTime() >= since) Object.assign(week, { cost: week.cost + m.cost, steps: week.steps + 1 });
+        if (!last || m.at > last.at) last = { at: m.at, status: m.error ? 'failed' : 'done', chat: true };
+        if (new Date(m.at).getTime() >= since) week.answers++;
       }
     }
     return {
       id: agent.id, name: agent.name, title: agent.title, role: agent.role, model: agent.model ?? config.default_model,
-      effort: agent.effort ?? null, budget: agent.budget_usd ?? null, maxMinutes: agent.max_minutes ?? null,
+      effort: agent.effort ?? null, maxMinutes: agent.max_minutes ?? null,
       color: agent.color ?? null, face: agent.face ?? null, status, run, last, week,
     };
   });
@@ -124,6 +125,7 @@ function buildState() {
     owner: config.owner,
     language: config.language || 'en',
     ai: { claude: { ...claudeInfo }, account: { status: usage.status ?? null, updated: usage.updated ?? null } },
+    update: { ...updateInfo },
     projects: Object.entries(config.projects ?? {}).map(([id, p]) => ({ id, name: p.name, site: p.site })),
     missions: Object.entries(config.missions ?? {}).map(([id, m]) => ({
       id, name: m.name, description: m.description, project: m.project,
@@ -135,7 +137,7 @@ function buildState() {
     current: current ? { ...summary(current), step: live.step, agent: live.agent, stepStarted: live.started, actions: live.actions.slice(-80) } : null,
     queue: queue.map(summary),
     history: runs.filter(r => !['queued', 'waiting'].includes(r.status) && r.id !== live.run).slice(0, 30).map(summary),
-    usage: { week: weekCost(runs), limits: config.limits ?? {}, account: usage },
+    usage: { limits: config.limits ?? {}, account: usage },
     manager: { messages: conversation.slice(-80), responding: chat.responding, partial: chat.partial, actions: chat.actions.slice(-12) },
     notifications: readNotifications().slice(-8).reverse(),
   };
@@ -143,13 +145,12 @@ function buildState() {
 
 function validLimits(body) {
   const limits = {};
-  for (const key of ['weekly_usd', 'per_run_usd']) if (body[key] !== undefined) limits[key] = Math.max(0, Number(body[key]) || 0);
   for (const key of ['pause_at_5h_window', 'pause_at_plan_week']) if (body[key] !== undefined) limits[key] = Math.min(1, Math.max(0.05, Number(body[key]) || 0.9));
   return limits;
 }
 
 export function startServer() {
-  const port = loadConfig().port ?? 4747;
+  const port = Number(process.env.CHIEFMATE_PORT) || loadConfig().port || 4747;
   const allowed = new Set([`localhost:${port}`, `127.0.0.1:${port}`]);
   checkClaude();
   setInterval(checkClaude, 10 * 60_000);
@@ -163,7 +164,7 @@ export function startServer() {
         if (url.pathname === '/api/state') return reply(res, 200, buildState());
         if (url.pathname.startsWith('/api/run/')) {
           const run = readRun(decodeURIComponent(url.pathname.slice('/api/run/'.length)));
-          return run ? reply(res, 200, { ...run, cost: runCost(run) }) : reply(res, 404, { error: t('Run not found.') });
+          return run ? reply(res, 200, run) : reply(res, 404, { error: t('Run not found.') });
         }
         if (!url.pathname.startsWith('/api/')) return serveFile(res, url.pathname);
         return reply(res, 404, { error: 'not found' });
@@ -203,7 +204,8 @@ export function startServer() {
           return reply(res, 200, { ok: true });
         case '/api/limits': {
           const config = loadConfig();
-          config.limits = { ...config.limits, ...validLimits(body) };
+          const { weekly_usd, per_run_usd, ...kept } = config.limits ?? {}; // dollar limits from older versions
+          config.limits = { ...kept, ...validLimits(body) };
           saveConfig(config);
           return reply(res, 200, config.limits);
         }

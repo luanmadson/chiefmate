@@ -4,7 +4,7 @@ A command center for AI agents that runs on your own computer. On a merchant shi
 
 - **The manager answers to you.** You talk to Chiefmate in plain language; it hands out the work, reviews it and reports back.
 - **The crew works on your projects**, one agent at a time. Each one has a face, a role and a model you can see.
-- **Usage stays under control**, with limits that Chiefmate enforces by itself.
+- **Your plan stays under control**: Chiefmate watches your account's usage and pauses before it runs out.
 
 Everything the crew produces reaches you as a **pull request**. Nothing goes live without your approval.
 
@@ -21,13 +21,14 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
   | **Missions** | Complete jobs with their own schedule. "Run now" starts one at any time. |
   | **Crew** | Who is on board, what each one is doing and the model behind them. Give any of them a one-off task. |
   | **Log** | Every run, with each step's report, the checks and the pull request link. |
-  | **Usage** | Your Claude account's usage and the limits Chiefmate respects. |
+  | **Usage** | Your Claude account's usage, and when Chiefmate pauses to look after it. |
 
 - **Crew portraits** that show at a glance who is standing by, working, thinking or waiting for a limit to reset. The title bar tells you whether Chiefmate is online and waiting for you.
 - **Scheduled missions**, for example every Monday at 9:00. They wake the computer from sleep.
 - **Windows notifications**: the evening before a mission, when a run starts, when it pauses for a limit and when it is ready for your review.
 - **One-off tasks** for any agent, at any time.
 - **A queue that runs one thing at a time**, so agents never set off other agents.
+- **It improves itself.** Chiefmate can be one of its own projects: the crew proposes improvements in pull requests and, when you merge one, your installation updates itself.
 - **English and Brazilian Portuguese.**
 
 ## The crew
@@ -41,7 +42,7 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
 | Designer | Improves the site for its readers: look, navigation, pages and accessibility |
 | Promoter | How the pages look on Google, ready-to-post social media posts and promotion ideas |
 
-Each agent is a Markdown file in `agents/`. Its header sets the name, model, budget per step, time limit, tools, color and face; the instructions come after it. Edit the file, or ask the manager to. Changes apply from the next run.
+Each agent is a Markdown file in `agents/`. Its header sets the name, model, time limit per step, tools, color and face; the instructions come after it. To adjust an agent for your installation only, use `crew` in your settings (see below): the files in `agents/` are the defaults that everyone shares and that the self-update keeps current.
 
 Every agent runs on **Claude Opus 5.5** by default.
 
@@ -93,9 +94,10 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `owner` | Your name, so the manager knows who it answers to |
 | `language` | `en` or `pt-BR`: the app, the notifications, the manager's answers and the reports |
 | `default_model` | The model for agents that don't set one |
-| `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it and optional `agent_notes` for specific agents |
+| `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `agent_notes` for specific agents and an optional `language` for its pull requests and commits |
 | `missions` | For each mission: the `project`, the `steps` (an agent and its part, in order), the final `review`, the `schedule` (`days` such as `["mon"]` and a `time` such as `"09:00"`) and the `eve_reminder` time |
-| `limits` | The limits in the Usage section |
+| `crew` | Settings for one agent in this installation only, such as `{ "writer": { "model": "claude-opus-5-5", "max_minutes": 90, "extra_instructions": "..." } }` |
+| `limits` | When runs pause: `pause_at_5h_window` and `pause_at_plan_week`, as shares of your account's usage (0.85 is 85%) |
 
 **To put a project under Chiefmate:**
 1. add it to `projects`;
@@ -105,16 +107,22 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 
 ## Usage and limits
 
-Before every step, Chiefmate checks four limits, which you can change in the Usage section:
+Chiefmate measures what really counts on a subscription plan: your account's usage in the 5-hour window and in the plan's week, which Claude Code reports on every run. There are no spending caps in dollars.
 
-| Limit | What happens when it is reached |
-|---|---|
-| Usage over the last 7 days | The run pauses and waits for you to decide |
-| Usage per run | The run pauses and waits for you to decide |
-| Your account's 5-hour window | The run waits for the window to reset and carries on by itself |
-| Your plan's week | The run waits for the week to reset and carries on by itself |
+- **Before every step**, Chiefmate checks your account. If the 5-hour window or the plan's week is above the share you set in the Usage section (85% and 90% by default), the run waits for the reset and then carries on by itself.
+- **If the account runs out in the middle of a step**, that step starts over after the reset.
+- **Each step has a time limit** (in the agent's header), in case an agent gets stuck.
 
-The dollar values are **equivalents**. On a subscription plan, what counts is your account's usage in the 5-hour and 7-day windows, which Claude Code reports on every run. Each step also has its own budget and time limit.
+## Chiefmate improves itself
+
+Chiefmate can be one of its own projects. Its crew then works on Chiefmate the same way it works on any project, and you stay in charge of what goes in.
+
+1. **Add Chiefmate as a project** in your settings, pointing at your copy of this repository, with `"language": "en"`, `"checks": ["npm run check", "npm run smoke"]` and `"playbook": "docs/playbook.md"`. The [playbook](docs/playbook.md) tells the crew how Chiefmate is built and which rules a change must keep.
+2. **Ask for improvements**, in the Manager section or as a task on that project. Ideas for later go to the repository's issues: the manager can open them for you.
+3. **Or give it a routine**: a mission on that project, for example once a week, that works through the open issues.
+4. **Approve.** Every improvement arrives as a pull request. When you merge it, your installation updates itself within ten minutes, once the crew is free. It checks the new version first: if the checks fail, it stays on the current one and tells you.
+
+The self-update only touches Chiefmate's own files. Your settings, the history and the working copies are never in git, so they are never overwritten. If Chiefmate's files were changed by hand in your installation, it does not update, and the app says so.
 
 ## Security
 
@@ -136,18 +144,25 @@ node src/cli.mjs cancel <id>                  cancels a run
 node src/cli.mjs resume <id>                  resumes a run (--ignore-limits goes past the limits this one time)
 node src/cli.mjs history                      the latest runs
 node src/cli.mjs report <id>                  the reports of a run
-node src/cli.mjs limits --weekly 100 --per-run 40
+node src/cli.mjs limits --window-5h 0.85 --plan-week 0.9
 ```
 
 ## Languages
 
-English is the source. The app, the notifications and the pull request texts follow `language` in your settings, and the manager answers in it. The translations live in `ui/locales/<language>.json`. `npm run check` checks the scripts and lists any text without a translation.
+English is the source. The app, the notifications and the reports follow `language` in your settings, and the manager answers in it. A project's pull requests and commits follow the project's own `language`, if it has one. The translations live in `ui/locales/<language>.json`.
+
+## Development
+
+- `npm run check` checks the syntax of every script and lists any text without a translation.
+- `npm run smoke` starts a temporary Chiefmate on a spare port, with no queue, schedule or updates, and checks that the app and the API answer.
+- [docs/playbook.md](docs/playbook.md) has the rules for changing Chiefmate, for the crew and for people alike.
 
 ## Folders
 
 | Folder | What it holds |
 |---|---|
-| `src/` | Chiefmate itself: the server, queue, schedule, runs, manager, notifications and command line |
+| `src/` | Chiefmate itself: the server, queue, schedule, runs, manager, notifications, self-update and command line |
+| `docs/` | The playbook for changing Chiefmate |
 | `ui/` | The app (HTML, CSS and JavaScript, no dependencies), the crew's faces, the translations and the icons |
 | `agents/` | The crew, one file per agent |
 | `config/` | `example.json`, and your `chiefmate.json` (not in git) |

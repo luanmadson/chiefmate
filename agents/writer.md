@@ -4,7 +4,6 @@ title: Stories and research
 role: Picks the topics and writes articles from research, with a source for every claim.
 model: claude-opus-5-5
 effort: high
-budget_usd: 14
 max_minutes: 75
 order: 2
 color: "#e0a25e"

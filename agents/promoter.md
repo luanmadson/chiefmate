@@ -4,7 +4,6 @@ title: Search and social media
 role: Brings in readers: how the pages look on Google, ready-to-post social media posts and promotion ideas.
 model: claude-opus-5-5
 effort: medium
-budget_usd: 8
 max_minutes: 45
 order: 5
 color: "#5fa8e8"

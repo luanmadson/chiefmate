@@ -121,7 +121,6 @@ function md(text) {
   return parts.join('');
 }
 
-const money = v => new Intl.NumberFormat(locale(), { style: 'currency', currency: 'USD' }).format(v ?? 0);
 const clockTime = iso => (iso ? new Date(iso).toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' }) : '');
 const shortDate = iso =>
   iso ? new Date(iso).toLocaleString(locale(), { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }).replace(',', '') : '—';
@@ -263,7 +262,7 @@ function drawStatusbar() {
     return;
   }
   const a = state.current;
-  const { account, week, limits } = state.usage;
+  const { account } = state.usage;
   let left;
   if (a) left = stateHtml([t('{title}: {agent} (step {n} of {total})', { title: a.title, agent: a.agent ? agentName(a.agent) : t('preparing'), n: a.step ?? 1, total: a.steps.length }), 'info']);
   else if (state.queue.some(r => r.status === 'waiting')) left = stateHtml([t("Waiting for the account's limit to reset"), 'warn']);
@@ -274,7 +273,6 @@ function drawStatusbar() {
     claude.found ? `Claude Code <span class="num">${esc(claude.version ?? '')}</span>` : esc(claude.found === false ? t('Claude Code not found') : t('Checking Claude Code…')),
     `${esc(t('5-hour window'))} <span class="num">${percent(account.five_hour?.used)}</span>`,
     `${esc(t("Plan's week"))} <span class="num">${percent(account.seven_day?.used)}</span>`,
-    `${esc(t('7 days'))} <span class="num">${esc(money(week))} / ${esc(money(limits.weekly_usd))}</span>`,
   ].map(s => `<span>${s}</span>`).join('');
   const html = `<div class="group">${left}</div><div class="group">${right}</div>`;
   draw('#statusbar', html, html);
@@ -299,7 +297,7 @@ function drawChat() {
       continue;
     }
     const you = m.who === 'you';
-    const meta = [clockTime(m.at), m.cost ? money(m.cost) : '', m.model ? shortModel(m.model) : ''].filter(Boolean).join(' · ');
+    const meta = [clockTime(m.at), m.model ? shortModel(m.model) : ''].filter(Boolean).join(' · ');
     html += `<div class="msg ${you ? 'you' : 'manager'}${m.error ? ' error' : ''}"><div class="msg-head">${you ? '' : face(manager, m.error ? 'failed' : 'still', 20)}<span class="msg-author">${esc(you ? t('You') : t(manager.name))}</span><span class="msg-meta">${esc(meta)}</span></div><div class="msg-body">${md(m.text)}</div></div>`;
   }
   if (g.responding) {
@@ -336,6 +334,11 @@ function drawBridge() {
   if (!account.status) accountLine = t('Account: not measured yet');
   else if (account.status === 'allowed') accountLine = t('Account: OK');
   else if (account.status === 'allowed_warning') accountLine = t('Account: close to the limit');
+  const update = state?.update ?? {};
+  let updateLine = online ? t('Chiefmate {version}, up to date', { version: state.version }) : '';
+  if (online && update.waiting && update.blocked === 'changes') updateLine = t('Update waiting: files were changed by hand here');
+  else if (online && update.waiting && update.blocked === 'checks') updateLine = t('Update not installed: the new version failed its checks');
+  else if (online && update.waiting) updateLine = t('Update approved: it installs when the crew is free');
   const roster = others.map(a => {
     const s = agentStatus(a);
     return `<li>${face(a, faceState(a), 30, `${t(a.name)}: ${s[0]}`)}<div><div class="roster-name"><span>${esc(t(a.name))}</span>${stateHtml(s)}</div><div class="hint">${esc(agentDetail(a))} · ${esc(shortModel(a.model))}</div></div></li>`;
@@ -347,22 +350,22 @@ function drawBridge() {
         ${stateHtml(status)}</div></div>
     <div class="label">${esc(t('Crew on board'))}</div>
     <ul class="roster">${roster.join('')}</ul>
-    <div class="connection hint">${esc(claudeLine)}<br>${esc(accountLine)}${online && account.updated ? ` · ${esc(t('measured {when}', { when: relative(account.updated) }))}` : ''}</div>`;
-  const signature = JSON.stringify([online, (state?.crew ?? []).map(a => [a.id, a.status, a.run, a.last?.at, a.model]), claude, account, Math.floor(Date.now() / 60000)]);
+    <div class="connection hint">${esc(claudeLine)}<br>${esc(accountLine)}${online && account.updated ? ` · ${esc(t('measured {when}', { when: relative(account.updated) }))}` : ''}${updateLine ? `<br>${esc(updateLine)}` : ''}</div>`;
+  const signature = JSON.stringify([online, (state?.crew ?? []).map(a => [a.id, a.status, a.run, a.last?.at, a.model]), claude, account, update, Math.floor(Date.now() / 60000)]);
   draw('#bridge', signature, html);
 }
 
 function drawSituation() {
   const a = state.current;
-  const { account, week, limits } = state.usage;
+  const { account } = state.usage;
   const next = nextMission();
   const html = `
     <div class="label">${esc(t('Situation'))}</div>
     <div class="block"><div class="hint">${esc(t('Operations'))}</div><div class="value">${a ? `${esc(a.title)}<br><span class="hint">${esc(a.agent ? agentName(a.agent) : t('preparing'))}, ${esc(t('step {n} of {total}', { n: a.step ?? 1, total: a.steps.length }))}</span>` : esc(t('Nothing running'))}</div></div>
     <div class="block"><div class="hint">${esc(t('Queue'))}</div><div class="value">${state.queue.length ? esc(t('{count} run(s)', { count: state.queue.length })) : esc(t('Empty'))}</div></div>
     <div class="block"><div class="hint">${esc(t('Next scheduled mission'))}</div><div class="value">${next ? `${esc(next.name)}<br><span class="num hint">${shortDate(next.next)} (${esc(relative(next.next))})</span>` : esc(t('None'))}</div></div>
-    <div class="block">${meter(t('Account, 5-hour window'), account.five_hour?.used, percent(account.five_hour?.used))}${meter(t("Plan's week"), account.seven_day?.used, percent(account.seven_day?.used))}${meter(t('Usage over 7 days'), limits.weekly_usd ? week / limits.weekly_usd : 0, money(week))}</div>`;
-  draw('#situation', JSON.stringify([a?.id, a?.step, state.queue.length, next?.next, account.updated, week, Math.floor(Date.now() / 60000)]), html);
+    <div class="block">${meter(t('Account, 5-hour window'), account.five_hour?.used, percent(account.five_hour?.used))}${meter(t("Plan's week"), account.seven_day?.used, percent(account.seven_day?.used))}</div>`;
+  draw('#situation', JSON.stringify([a?.id, a?.step, state.queue.length, next?.next, account.updated, Math.floor(Date.now() / 60000)]), html);
 }
 
 // ---------- Operations ----------
@@ -397,7 +400,7 @@ function drawOperations() {
       <div>${esc(t('Project'))}<strong>${esc(projectName(a.project))}</strong></div>
       <div>${esc(t('Started'))}<strong class="num">${shortDate(a.started)}</strong></div>
       <div>${esc(t('Elapsed'))}<strong class="num">${esc(elapsed(a.started))}</strong></div>
-      <div>${esc(t('Usage of finished steps'))}<strong class="num">${esc(money(a.cost))}</strong></div>
+      <div>${esc(t('Steps done'))}<strong class="num">${a.steps.filter(s => s.status === 'done').length} / ${a.steps.length}</strong></div>
     </div>
     <div class="operations-grid">
       <div class="panel">
@@ -410,7 +413,7 @@ function drawOperations() {
         <div class="logbook" id="logbook">${lines.join('') || `<div><time></time><span>${esc(t('Preparing…'))}</span></div>`}</div>
       </div>
     </div>${queueTable()}`;
-  const changed = draw('#operations', JSON.stringify([online, a.id, a.step, a.agent, a.actions.length, a.cost, a.steps.map(s => s.status), state.queue.map(r => [r.id, r.status]), minute]), html);
+  const changed = draw('#operations', JSON.stringify([online, a.id, a.step, a.agent, a.actions.length, a.steps.map(s => s.status), state.queue.map(r => [r.id, r.status]), minute]), html);
   const logbook = $('#logbook');
   if (changed && logbook && atBottom) logbook.scrollTop = logbook.scrollHeight;
 }
@@ -452,8 +455,8 @@ function drawCrew() {
         <p class="crew-role">${esc(t(a.role ?? ''))}</p>
         <dl class="facts">
           <dt>${esc(t('Last work'))}</dt><dd>${esc(last)}</dd>
-          <dt>${esc(t('This week'))}</dt><dd class="num">${esc(t('{count} step(s) · {cost}', { count: a.week.steps, cost: money(a.week.cost) }))}</dd>
-          <dt>${esc(t('Per step'))}</dt><dd class="num">${a.budget ? esc(t('up to {cost} · {minutes} min', { cost: money(a.budget), minutes: a.maxMinutes ?? '—' })) : '—'}</dd>
+          <dt>${esc(t('This week'))}</dt><dd>${esc(a.id === 'manager' ? t('{count} answer(s) · {steps} review(s)', { count: a.week.answers, steps: a.week.steps }) : t('{count} step(s) · {minutes} min', { count: a.week.steps, minutes: a.week.minutes }))}</dd>
+          <dt>${esc(t('Time limit'))}</dt><dd class="num">${a.maxMinutes ? esc(t('{minutes} min per step', { minutes: a.maxMinutes })) : '—'}</dd>
         </dl>
         <div class="actions left">${a.id === 'manager' ? `<a href="#manager" class="button secondary small">${esc(t('Talk'))}</a>` : `<button type="button" class="button secondary small" data-assign="${esc(a.id)}">${esc(t('Assign a task'))}</button>`}</div>
       </div>
@@ -479,18 +482,18 @@ function allRuns() {
 function drawLog() {
   const list = allRuns();
   const rows = list.map(r => {
-    const details = [r.kind === 'mission' ? t('Mission') : t('Task'), originLabel(r.origin), r.started ? elapsed(r.started, r.ended ?? Date.now()) : '', r.pullRequest ? t('pull request opened') : ''].filter(Boolean).join(' · ');
+    const details = [r.kind === 'mission' ? t('Mission') : t('Task'), projectName(r.project), originLabel(r.origin), r.pullRequest ? t('pull request opened') : ''].filter(Boolean).join(' · ');
     return `<tr class="clickable${r.id === selectedRun ? ' selected' : ''}" data-select="${esc(r.id)}">
       <td class="num">${shortDate(r.created)}</td>
       <td><span class="primary">${esc(r.title)}</span><span class="secondary">${esc(details)}</span></td>
       <td>${stateHtml(runState(r.status))}</td>
-      <td class="num">${esc(money(r.cost))}</td>
+      <td class="num">${r.started ? esc(elapsed(r.started, r.ended ?? Date.now())) : '—'}</td>
     </tr>`;
   });
   const html = list.length
-    ? `<table class="table"><thead><tr><th>${esc(t('Date'))}</th><th>${esc(t('Run'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Usage'))}</th></tr></thead><tbody>${rows.join('')}</tbody></table>`
+    ? `<table class="table"><thead><tr><th>${esc(t('Date'))}</th><th>${esc(t('Run'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Time'))}</th></tr></thead><tbody>${rows.join('')}</tbody></table>`
     : `<div class="empty">${esc(t('No runs yet.'))}</div>`;
-  draw('#log-list', JSON.stringify([selectedRun, list.map(r => [r.id, r.status, r.cost, r.pullRequest])]), html);
+  draw('#log-list', JSON.stringify([selectedRun, list.map(r => [r.id, r.status, r.ended, r.pullRequest]), Math.floor(Date.now() / 60000)]), html);
 }
 
 async function refreshDetail(force = false) {
@@ -513,7 +516,7 @@ async function refreshDetail(force = false) {
   const canResume = ['paused', 'waiting', 'failed', 'canceled'].includes(r.status);
   const canCancel = ['running', 'queued', 'waiting', 'paused'].includes(r.status);
   const reports = steps.map((s, i) => {
-    const facts = [s.model ? shortModel(s.model) : '', s.durationMs ? t('{minutes} min', { minutes: Math.round(s.durationMs / 60000) }) : '', money(s.cost), s.turns ? t('{count} turns', { count: s.turns }) : '', s.subagents ? t('{count} subagent(s)', { count: s.subagents }) : ''].filter(Boolean);
+    const facts = [s.model ? shortModel(s.model) : '', s.durationMs ? t('{minutes} min', { minutes: Math.round(s.durationMs / 60000) }) : '', s.turns ? t('{count} turns', { count: s.turns }) : '', s.subagents ? t('{count} subagent(s)', { count: s.subagents }) : ''].filter(Boolean);
     let body = s.report || s.error;
     if (!body) body = s.status === 'pending' ? t('Not started yet.') : s.status === 'running' ? t('Working…') : t('No report.');
     return `
@@ -528,7 +531,7 @@ async function refreshDetail(force = false) {
     : '';
   const html = `
     <h2>${esc(r.title)}</h2>
-    <div class="hint">${stateHtml(runState(r.status))} · <span class="num">${shortDate(r.created)}</span> · ${esc(originLabel(r.origin))} · <span class="num">${esc(money(r.cost))}</span></div>
+    <div class="hint">${stateHtml(runState(r.status))} · <span class="num">${shortDate(r.created)}</span> · ${esc(projectName(r.project))} · ${esc(originLabel(r.origin))}${r.started ? ` · <span class="num">${esc(elapsed(r.started, r.ended ?? Date.now()))}</span>` : ''}</div>
     ${r.result ? `<p>${esc(r.result)}</p>` : ''}${r.note ? `<p class="hint">${esc(r.note)}</p>` : ''}
     ${r.instruction ? `<p class="hint">${esc(t('Instruction: {text}', { text: r.instruction }))}</p>` : ''}
     <div class="actions left">
@@ -544,11 +547,11 @@ async function refreshDetail(force = false) {
 // ---------- Usage ----------
 
 function drawUsage() {
-  const { week, limits: l, account: u } = state.usage;
+  const { limits: l, account: u } = state.usage;
   const resets = w => (w?.resets ? t('Resets {when} ({relative}).', { when: shortDate(w.resets), relative: relative(w.resets) }) : '');
   const measured = u.updated
-    ? t('Measured {when}. This is the limit that really counts on your plan.', { when: shortDate(u.updated) })
-    : t('Measured on the next agent run. This is the limit that really counts on your plan.');
+    ? t('Measured {when}, from what Claude Code reports on every run.', { when: shortDate(u.updated) })
+    : t('Measured on the next agent run, from what Claude Code reports.');
   const html = `<div class="usage-grid">
     <div class="panel">
       <div class="label">${esc(t('Your Claude account'))}</div>
@@ -557,16 +560,14 @@ function drawUsage() {
       <div class="hint">${esc(measured)}</div>
     </div>
     <div class="panel">
-      <div class="label">${esc(t("Chiefmate's usage"))}</div>
-      ${meter(t('Last 7 days'), l.weekly_usd ? week / l.weekly_usd : 0, t('{used} of {limit}', { used: money(week), limit: money(l.weekly_usd) }))}
-      <div class="hint">${esc(t("US dollar equivalents, adding up missions, tasks and conversations with the manager. Before every step, Chiefmate pauses the run if it goes over {perRun}, if the 5-hour window goes over {window} or if the plan's week goes over {week}; when the limit resets, it carries on by itself.", { perRun: money(l.per_run_usd), window: percent(l.pause_at_5h_window), week: percent(l.pause_at_plan_week) }))}</div>
+      <div class="label">${esc(t('How Chiefmate looks after your plan'))}</div>
+      <p class="hint">${esc(t("Before every step, Chiefmate checks your account. If the 5-hour window is above {window} or the plan's week above {week}, the run waits for the reset and then carries on by itself.", { window: percent(l.pause_at_5h_window), week: percent(l.pause_at_plan_week) }))}</p>
+      <p class="hint">${esc(t('If the account runs out in the middle of a step, that step starts over after the reset. Each step also has a time limit, in case an agent gets stuck.'))}</p>
     </div>
   </div>`;
   draw('#usage', html, html);
   const form = $('#limits-form');
   if (!form.contains(document.activeElement) && !form.dataset.filled) {
-    form.weekly_usd.value = l.weekly_usd ?? 100;
-    form.per_run_usd.value = l.per_run_usd ?? 40;
     form.window.value = Math.round((l.pause_at_5h_window ?? 0.85) * 100);
     form.week.value = Math.round((l.pause_at_plan_week ?? 0.9) * 100);
     form.dataset.filled = '1';
@@ -671,8 +672,6 @@ $('#limits-form').addEventListener('submit', async event => {
   const form = event.target;
   try {
     await api('/api/limits', {
-      weekly_usd: Number(form.weekly_usd.value),
-      per_run_usd: Number(form.per_run_usd.value),
       pause_at_5h_window: Number(form.window.value) / 100,
       pause_at_plan_week: Number(form.week.value) / 100,
     });

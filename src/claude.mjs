@@ -78,17 +78,14 @@ function stop(child) {
 }
 
 /**
- * Runs one step. Returns { promise, cancel }.
- * options: dir, prompt, system (the agent's instructions), model, effort, tools, disallowed, budgetUsd,
+ * Runs one step. Returns { promise, cancel }. The time limit is the only cap: there is no spending cap.
+ * options: dir, prompt, system (the agent's instructions), model, effort, tools, disallowed,
  * maxMinutes, session ({ id, resume }), log (a .jsonl file), onEvent(event).
  */
 export function runClaude(options) {
-  const {
-    dir, prompt, system, model, effort, tools = [], disallowed = [], budgetUsd, maxMinutes = 60, session, log, onEvent = () => {},
-  } = options;
+  const { dir, prompt, system, model, effort, tools = [], disallowed = [], maxMinutes = 60, session, log, onEvent = () => {} } = options;
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--permission-mode', 'dontAsk', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'];
   if (effort) args.push('--effort', String(effort));
-  if (budgetUsd) args.push('--max-budget-usd', String(budgetUsd));
   if (system) {
     const systemFile = `${log}.instructions.md`;
     writeFileSync(systemFile, system);
@@ -149,8 +146,8 @@ export function runClaude(options) {
       const usage = final?.usage ?? {};
       const result = {
         ok: !!final && !final.is_error && !cancelReason,
+        canceled: !!cancelReason,
         text: typeof final?.result === 'string' ? final.result : '',
-        cost: final?.total_cost_usd ?? 0,
         turns: final?.num_turns ?? 0,
         durationMs: final?.duration_ms ?? 0,
         session: final?.session_id,

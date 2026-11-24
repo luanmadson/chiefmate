@@ -31,17 +31,6 @@ export function listRuns() {
 
 /** The steps of a run, with the final review last. */
 export const stepsOf = run => [...(run.steps ?? []), ...(run.review ? [run.review] : [])];
-export const runCost = run => stepsOf(run).reduce((sum, step) => sum + (step.cost ?? 0), 0);
-
-/** Usage over the last 7 days, in US dollar equivalent: runs plus conversations with the manager. */
-export function weekCost(runs = listRuns()) {
-  const since = Date.now() - 7 * 86400_000;
-  const fromRuns = runs.filter(r => new Date(r.created).getTime() >= since).reduce((sum, r) => sum + runCost(r), 0);
-  const fromChat = readConversation()
-    .filter(m => m.cost && new Date(m.at).getTime() >= since)
-    .reduce((sum, m) => sum + m.cost, 0);
-  return fromRuns + fromChat;
-}
 
 // ---------- Account usage (the plan's 5-hour and 7-day windows) ----------
 

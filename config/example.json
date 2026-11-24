@@ -36,9 +36,8 @@
       "eve_reminder": "18:00"
     }
   },
+  "crew": {},
   "limits": {
-    "weekly_usd": 100,
-    "per_run_usd": 40,
     "pause_at_5h_window": 0.85,
     "pause_at_plan_week": 0.9
   }

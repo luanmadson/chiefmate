@@ -1,6 +1,6 @@
 {
   "name": "chiefmate",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "A command center for AI agents on your own computer: a manager who answers to you, a crew of agents, scheduled missions and usage limits. Powered by Claude Code.",
   "license": "PolyForm-Noncommercial-1.0.0",
@@ -11,6 +11,7 @@
   "scripts": {
     "start": "node src/cli.mjs server",
     "status": "node src/cli.mjs status",
-    "check": "node scripts/check.mjs"
+    "check": "node scripts/check.mjs",
+    "smoke": "node scripts/smoke.mjs"
   }
 }

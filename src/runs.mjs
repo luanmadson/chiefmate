@@ -4,9 +4,9 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { runClaude } from './claude.mjs';
 import { loadAgents, loadConfig } from './config.mjs';
-import { formatDate, formatDateTime, formatDuration, formatMoney, formatPercent, t } from './i18n.mjs';
+import { formatDate, formatDateTime, formatDuration, formatPercent, t } from './i18n.mjs';
 import { notify } from './notify.mjs';
-import { readUsage, runCost, runDir, runFile, saveRun, stepsOf, weekCost } from './store.mjs';
+import { readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { clip, languageName, now, slug, stamp } from './util.mjs';
 import {
   changedFiles, checkoutBranch, commitPending, createBranch, newCommits, openPullRequest, prepareWorkspace, projectDir, runChecks,
@@ -18,19 +18,20 @@ export const live = { run: null, title: null, step: null, agent: null, started: 
 let currentProcess = null;
 let cancelRequest = null;
 
-// No agent pushes anything to GitHub: Chiefmate itself pushes the branch and opens the pull request.
-const ALWAYS_DISALLOWED = ['Bash(git push:*)', 'Bash(gh pr:*)', 'Bash(gh repo:*)', 'Bash(git remote:*)'];
+// No agent pushes anything to GitHub or changes it: Chiefmate itself pushes the branch and opens the pull request.
+export const ALWAYS_DISALLOWED = ['Bash(git push:*)', 'Bash(gh pr:*)', 'Bash(gh repo:*)', 'Bash(git remote:*)'];
 
-function crewRules(config) {
-  const language = languageName(config.language || 'en');
+function crewRules(config, project) {
+  const owner = languageName(config.language || 'en');
+  const content = languageName(project.language || config.language || 'en');
   return `## Chiefmate rules (for the whole crew)
 - You are part of the Chiefmate crew, working on one step of a run. Work alone, step by step. Avoid subagents: start one only when it is truly necessary, and never several at once.
-- The current folder is a working copy of the project, already on the run's branch. Commit your work with clear messages that follow the project's convention (see \`git log\`); if there is none, write them in ${language}. Never push, switch branches or open pull requests: Chiefmate does that at the end.
+- The current folder is a working copy of the project, already on the run's branch. Commit your work with clear messages that follow the project's convention (see \`git log\`); if there is none, write them in ${content}. Never push, switch branches or open pull requests: Chiefmate does that at the end.
 - If the project's playbook says to create a branch, push or open a pull request, skip that part.
 - The project's documentation outranks your own preferences. Read what you need before changing anything.
 - Write project content in the language the project already uses.
 - If you get stuck, undo whatever is half-done and explain it in your report.
-- Your last message is the step's report, in ${language}: short markdown with what you did (and the files), the sources you used, what you left out and why, and what the reviewer should check.`;
+- Your last message is the step's report, in ${owner}: short markdown with what you did (and the files), the sources you used, what you left out and why, and what the reviewer should check.`;
 }
 
 export function createRun({ kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null }) {
@@ -67,24 +68,26 @@ export function cancelCurrent(reason) {
   currentProcess?.cancel(reason);
 }
 
-/** Before every step: the weekly budget, the run's budget and your account's usage. */
+/** Before every step: your account's usage, in the plan's 5-hour window and week. */
 function checkLimits(config, run) {
   if (run.ignoreLimits) return null;
   const limits = config.limits ?? {};
-  const week = weekCost();
-  if (limits.weekly_usd && week >= limits.weekly_usd) {
-    return { note: t('usage over the last 7 days ({used}) reached the weekly limit ({limit})', { used: formatMoney(week), limit: formatMoney(limits.weekly_usd) }) };
-  }
-  const spent = runCost(run);
-  if (limits.per_run_usd && spent >= limits.per_run_usd) {
-    return { note: t('this run has already used {used}, the per-run limit', { used: formatMoney(spent) }) };
-  }
   const usage = readUsage();
   const window = (w, ceiling, name) =>
     w && ceiling && w.used >= ceiling && w.resets && new Date(w.resets).getTime() > Date.now()
       ? { note: t('{window} of your account is at {percent}', { window: name, percent: formatPercent(w.used) }), waitUntil: w.resets }
       : null;
-  return window(usage.five_hour, limits.pause_at_5h_window, t('the 5-hour window')) ?? window(usage.seven_day, limits.pause_at_plan_week, t("the plan's weekly limit"));
+  return window(usage.five_hour, limits.pause_at_5h_window, t('the 5-hour window')) ?? window(usage.seven_day, limits.pause_at_plan_week, t("the plan's week"));
+}
+
+/** If the account ran out in the middle of a step, the step starts over once the limit resets. */
+function limitHit(result) {
+  if (result.ok || result.canceled) return null;
+  const usage = readUsage();
+  const rejected = usage.status === 'rejected' || /usage limit|rate limit|limit reached/i.test(result.error ?? '');
+  if (!rejected) return null;
+  const resets = [usage.five_hour, usage.seven_day].filter(w => w?.status === 'rejected' && w.resets).map(w => w.resets);
+  return resets[0] ?? usage.five_hour?.resets ?? new Date(Date.now() + 60 * 60000).toISOString();
 }
 
 function logAction(event) {
@@ -94,7 +97,7 @@ function logAction(event) {
 }
 
 function stepPrompt({ run, step, project, previous, finalReview, changes, config }) {
-  const language = languageName(config.language || 'en');
+  const prLanguage = project.language || config.language || 'en';
   const lines = [
     finalReview ? `# Final review: ${run.title}` : `# ${run.title}`,
     `Project: ${project.name}${project.site ? ` (${project.site})` : ''}. ${project.about ?? ''}`.trim(),
@@ -115,7 +118,7 @@ function stepPrompt({ run, step, project, previous, finalReview, changes, config
       `1. See what changed: \`git log --oneline origin/${project.main_branch}..HEAD\` and the diff of every file that matters.`,
       '2. Check it against the reports and the project\'s rules. Fix whatever is wrong or incomplete, committing as "Chiefmate: manager review".',
       `3. Run the checks: ${(project.checks ?? []).map(c => `\`${c}\``).join(', ') || 'the ones the project lists'}.`,
-      `4. Your last message is the pull request text, in markdown and in ${language}. End it with a section titled "${t("Manager's verdict")}": what you fixed, the risks and your recommendation (approve, approve with caveats, or do not approve).`,
+      `4. Your last message is the pull request text, in markdown and in ${languageName(prLanguage)}. End it with a section titled "${t("Manager's verdict", {}, prLanguage)}": what you fixed, the risks and your recommendation (approve, approve with caveats, or do not approve).`,
       '',
       '## Changed files',
       '```',
@@ -127,15 +130,13 @@ function stepPrompt({ run, step, project, previous, finalReview, changes, config
     lines.push('', finalReview ? '## Crew reports' : '## What the previous steps did');
     for (const p of previous) lines.push('', `### ${p.agent} (${p.status})`, p.report || p.error || '(no report)');
   }
-  lines.push('', crewRules(config));
+  lines.push('', crewRules(config, project));
   return lines.join('\n');
 }
 
 async function runStep({ run, step, index, dir, project, config, agents, finalReview = false }) {
   const agent = agents[step.agent];
   if (!agent) throw new Error(t('Unknown agent: {id}', { id: step.agent }));
-  const left = (config.limits?.per_run_usd ?? 999) - runCost(run);
-  const budget = Math.max(0.5, Math.min(agent.budget_usd ?? 10, left));
   const previous = run.steps.filter(s => s !== step && s.status !== 'pending');
   const changes = finalReview ? await changedFiles(dir, project.main_branch).catch(() => '') : '';
   const model = agent.model ?? config.default_model;
@@ -152,7 +153,6 @@ async function runStep({ run, step, index, dir, project, config, agents, finalRe
     effort: agent.effort,
     tools: agent.tools ?? [],
     disallowed: [...ALWAYS_DISALLOWED, ...(agent.disallowed ?? [])],
-    budgetUsd: budget,
     maxMinutes: agent.max_minutes ?? 60,
     log: path.join(runDir(run.id), `${String(index + 1).padStart(2, '0')}-${step.agent}.jsonl`),
     onEvent: logAction,
@@ -161,26 +161,29 @@ async function runStep({ run, step, index, dir, project, config, agents, finalRe
   const r = await promise;
   currentProcess = null;
 
+  const waitUntil = limitHit(r);
   Object.assign(step, {
-    status: r.ok ? 'done' : 'failed', ended: now(), cost: r.cost, tokens: r.tokens, turns: r.turns, durationMs: r.durationMs,
-    report: r.text, error: r.error ?? null, subagents: r.subagents, actions: live.actions.length,
+    status: waitUntil ? 'pending' : r.ok ? 'done' : 'failed', ended: waitUntil ? null : now(), tokens: r.tokens, turns: r.turns,
+    durationMs: r.durationMs, report: r.text, error: r.error ?? null, subagents: r.subagents, actions: live.actions.length,
   });
   await commitPending(dir, `Chiefmate: ${t(agent.name)} (${run.title})`).catch(e => (step.error = `${step.error ?? ''} Commit: ${e.message}`.trim()));
   saveRun(run);
+  return { waitUntil };
 }
 
-function pullRequestBody(run, checks, agents) {
-  const labels = { pending: t('Pending'), running: t('Running'), done: t('Done'), failed: t('Failed') };
-  const name = id => t(agents[id]?.name ?? id);
-  const main = run.review?.report || run.steps.map(s => `## ${name(s.agent)}\n\n${s.report || s.error || t('(no report)')}`).join('\n\n');
-  const table = stepsOf(run).map(s => `| ${name(s.agent)} | ${labels[s.status] ?? s.status} | ${formatDuration(s.durationMs)} | ${formatMoney(s.cost)} |`);
+/** The pull request's text, in the project's language (lang). */
+function pullRequestBody(run, checks, agents, lang) {
+  const labels = { pending: t('Pending', {}, lang), running: t('Running', {}, lang), done: t('Done', {}, lang), failed: t('Failed', {}, lang) };
+  const name = id => t(agents[id]?.name ?? id, {}, lang);
+  const main = run.review?.report || run.steps.map(s => `## ${name(s.agent)}\n\n${s.report || s.error || t('(no report)', {}, lang)}`).join('\n\n');
+  const table = stepsOf(run).map(s => `| ${name(s.agent)} | ${labels[s.status] ?? s.status} | ${formatDuration(s.durationMs)} | ${s.turns ?? ''} |`);
   const checkList = checks.map(c => `- ${c.ok ? '✅' : '❌'} \`${c.command}\``);
   return [
     main, '', '---', '',
-    `### ${t('Done by Chiefmate')}`, '',
-    `| ${t('Step')} | ${t('Status')} | ${t('Time')} | ${t('Usage')} |`, '|---|---|---|---|', ...table, '',
-    `**${t('Checks after the review:')}**`, ...(checkList.length ? checkList : [`- ${t('(none)')}`]), '',
-    t('Total usage: {total} (US dollar equivalent). Run `{id}`.', { total: formatMoney(runCost(run)), id: run.id }),
+    `### ${t('Done by Chiefmate', {}, lang)}`, '',
+    `| ${t('Step', {}, lang)} | ${t('Status', {}, lang)} | ${t('Time', {}, lang)} | ${t('Turns', {}, lang)} |`, '|---|---|---|---|', ...table, '',
+    `**${t('Checks after the review:', {}, lang)}**`, ...(checkList.length ? checkList : [`- ${t('(none)', {}, lang)}`]), '',
+    t('Run `{id}`.', { id: run.id }, lang),
   ].join('\n');
 }
 
@@ -195,6 +198,17 @@ export async function execute(run) {
   Object.assign(run, { status: 'running', started: run.started ?? now(), notBefore: null, note: null });
   saveRun(run);
   if (firstTime) notify(t('Chiefmate started'), run.title);
+
+  const wait = (waitUntil, note) => {
+    Object.assign(run, { status: waitUntil ? 'waiting' : 'paused', notBefore: waitUntil ?? null, note });
+    saveRun(run);
+    notify(
+      t('Chiefmate paused the run'),
+      waitUntil
+        ? t('{note}. I will resume on my own at {when}.', { note, when: formatDateTime(waitUntil) })
+        : t('{note}. Open the app to decide.', { note }),
+    );
+  };
 
   try {
     if (!project) throw new Error(t('Unknown project: {id}', { id: run.project }));
@@ -215,18 +229,9 @@ export async function execute(run) {
       if (step.status === 'done' || step.status === 'failed') continue;
       if (cancelRequest) break;
       const limit = checkLimits(config, run);
-      if (limit) {
-        Object.assign(run, { status: limit.waitUntil ? 'waiting' : 'paused', notBefore: limit.waitUntil ?? null, note: limit.note });
-        saveRun(run);
-        notify(
-          t('Chiefmate paused the run'),
-          limit.waitUntil
-            ? t('{note}. I will resume on my own at {when}.', { note: limit.note, when: formatDateTime(limit.waitUntil) })
-            : t('{note}. Open the app to decide.', { note: limit.note }),
-        );
-        return;
-      }
-      await runStep({ run, step, index, dir, project, config, agents, finalReview });
+      if (limit) return wait(limit.waitUntil, limit.note);
+      const { waitUntil } = await runStep({ run, step, index, dir, project, config, agents, finalReview });
+      if (waitUntil) return wait(waitUntil, t('Your account reached its limit in the middle of a step'));
     }
 
     if (cancelRequest) {
@@ -250,7 +255,7 @@ export async function execute(run) {
       base: project.main_branch,
       branch: run.branch,
       title: `${run.title} (${formatDate(run.created)})`,
-      body: pullRequestBody(run, run.checks, agents),
+      body: pullRequestBody(run, run.checks, agents, project.language || config.language || 'en'),
       bodyFile: path.join(runDir(run.id), 'pull-request.md'),
     });
     const failed = run.checks.filter(c => !c.ok).length;

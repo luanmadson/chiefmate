@@ -4,7 +4,6 @@ title: Archive and data
 role: Grows the project's database with new names, dates and links, always with a source.
 model: claude-opus-5-5
 effort: high
-budget_usd: 12
 max_minutes: 75
 order: 3
 color: "#4fb8a8"

@@ -4,7 +4,6 @@ title: General agent
 role: Takes any task in a project: fixing, adjusting, researching, organizing.
 model: claude-opus-5-5
 effort: high
-budget_usd: 12
 max_minutes: 60
 order: 1
 color: "#9aa5b4"

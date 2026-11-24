@@ -20,9 +20,9 @@ function dictionary(code) {
   return dictionaries[code];
 }
 
-/** t('Ready for your review'), or with values: t('{title}: {result}', { title, result }). */
-export function t(text, values = {}) {
-  const template = dictionary(language())[text] ?? text;
+/** t('Ready for your review'), with values t('{title}: {result}', { title, result }), or in a given language. */
+export function t(text, values = {}, lang = language()) {
+  const template = dictionary(lang)[text] ?? text;
   return template.replace(/\{(\w+)\}/g, (match, key) => (key in values ? String(values[key]) : match));
 }
 

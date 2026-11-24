@@ -53,7 +53,8 @@ function parseValue(raw) {
 
 /**
  * The crew: one agent per file in agents/, sorted by "order".
- * {{owner}} and {{language}} in the instructions are filled in from the settings.
+ * {{owner}} and {{language}} in the instructions are filled in from the settings, and "crew" in the settings
+ * adjusts an agent for this installation only: { "writer": { "model": "...", "max_minutes": 90, "extra_instructions": "..." } }.
  */
 export function loadAgents(config = loadConfig()) {
   const fill = text =>
@@ -64,7 +65,9 @@ export function loadAgents(config = loadConfig()) {
     const parts = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
     if (!parts) continue;
     const id = file.replace(/\.md$/, '');
-    agents[id] = { id, ...parseHeader(parts[1]), instructions: fill(parts[2].trim()), file: `agents/${file}` };
+    const { extra_instructions: extra, ...settings } = config.crew?.[id] ?? {};
+    const instructions = fill(parts[2].trim()) + (extra ? `\n\n## Notes for this installation\n\n${fill(extra)}` : '');
+    agents[id] = { id, ...parseHeader(parts[1]), ...settings, instructions, file: `agents/${file}` };
   }
   return Object.fromEntries(Object.entries(agents).sort(([, a], [, b]) => (a.order ?? 99) - (b.order ?? 99)));
 }
