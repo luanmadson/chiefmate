@@ -79,11 +79,13 @@ function stop(child) {
 
 /**
  * Runs one step. Returns { promise, cancel }. The time limit is the only cap: there is no spending cap.
- * options: dir, prompt, system (the agent's instructions), model, effort, tools, disallowed,
- * maxMinutes, session ({ id, resume }), log (a .jsonl file), onEvent(event).
+ * options: dir, prompt, system (the agent's instructions), model, effort, tools, disallowed, addDirs (more folders
+ * the agent may read), maxMinutes, session ({ id, resume }), log (a .jsonl file), onEvent(event).
  */
 export function runClaude(options) {
-  const { dir, prompt, system, model, effort, tools = [], disallowed = [], maxMinutes = 60, session, log, onEvent = () => {} } = options;
+  const {
+    dir, prompt, system, model, effort, tools = [], disallowed = [], addDirs = [], maxMinutes = 60, session, log, onEvent = () => {},
+  } = options;
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--permission-mode', 'dontAsk', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'];
   if (effort) args.push('--effort', String(effort));
   if (system) {
@@ -94,6 +96,7 @@ export function runClaude(options) {
   if (session?.resume) args.push('--resume', session.id);
   else if (session?.id) args.push('--session-id', session.id);
   else args.push('--no-session-persistence');
+  for (const extra of addDirs) args.push('--add-dir', extra);
   // The lists go last: each one runs until the next "--", and the prompt goes through standard input.
   if (disallowed.length) args.push('--disallowedTools', ...disallowed);
   if (tools.length) args.push('--allowedTools', ...tools);

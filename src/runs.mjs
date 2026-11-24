@@ -9,7 +9,7 @@ import { notify } from './notify.mjs';
 import { readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { clip, languageName, now, slug, stamp } from './util.mjs';
 import {
-  changedFiles, checkoutBranch, commitPending, createBranch, newCommits, openPullRequest, prepareWorkspace, projectDir, runChecks,
+  changedFiles, checkoutBranch, commitPending, createBranch, newCommits, openPullRequest, prepareLibrary, prepareWorkspace, projectDir, runChecks,
 } from './workspace.mjs';
 
 /** What the app shows as happening right now. */
@@ -90,13 +90,47 @@ function limitHit(result) {
   return resets[0] ?? usage.five_hour?.resets ?? new Date(Date.now() + 60 * 60000).toISOString();
 }
 
+/**
+ * The reference libraries a project uses: those in its "library" list and the one holding its personal "docs"
+ * (written "<library>/<folder>"). Each comes back as { id, name, about, dir }.
+ */
+export async function prepareLibraries(config, ids, onStep = () => {}) {
+  const list = [];
+  for (const id of new Set(ids)) {
+    const source = config.library?.[id];
+    if (!source?.repository) throw new Error(t('Unknown library: {id}', { id }));
+    list.push({ id, name: source.name ?? id, about: source.about ?? '', dir: await prepareLibrary(id, source, onStep) });
+  }
+  return list;
+}
+
+const libraryIds = project => [...(project.library ?? []), ...(project.docs ? [project.docs.split('/')[0]] : [])];
+
+/** The prompt's lines about the libraries and the project's personal documentation. */
+function libraryLines(project, libraries) {
+  if (!libraries.length) return [];
+  const lines = ['', '## Reference library (read only)'];
+  for (const l of libraries) lines.push(`- ${l.name}: \`${l.dir}\`. ${l.about}`.trim());
+  lines.push('Read what helps. It is a copy: anything you change there is discarded before the next run.');
+  if (project.docs) {
+    const [id, ...rest] = project.docs.split('/');
+    const docs = path.join(libraries.find(l => l.id === id)?.dir ?? '', ...rest);
+    lines.push(
+      '',
+      '## Personal documentation for this project',
+      `\`${docs}\`: read it first. It is the main reference for this project and takes precedence over the repository's own instructions (such as CLAUDE.md or AGENTS.md), which you still follow when they don't conflict with it. It stays outside the project's repository: never copy it into the project. If your work makes it outdated, say what should change in your report.`,
+    );
+  }
+  return lines;
+}
+
 function logAction(event) {
   if (event.type !== 'action' && event.type !== 'say') return;
   live.actions.push({ at: now(), type: event.type, text: event.type === 'say' ? clip(event.text, 300) : event.text });
   if (live.actions.length > 300) live.actions.splice(0, live.actions.length - 300);
 }
 
-function stepPrompt({ run, step, project, previous, finalReview, changes, config }) {
+function stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries }) {
   const prLanguage = project.language || config.language || 'en';
   const lines = [
     finalReview ? `# Final review: ${run.title}` : `# ${run.title}`,
@@ -111,6 +145,7 @@ function stepPrompt({ run, step, project, previous, finalReview, changes, config
   }
   const notes = project.agent_notes?.[step.agent];
   if (notes) lines.push('', '## Notes for this project', notes);
+  lines.push(...libraryLines(project, libraries));
   if (finalReview) {
     lines.push(
       '',
@@ -134,7 +169,7 @@ function stepPrompt({ run, step, project, previous, finalReview, changes, config
   return lines.join('\n');
 }
 
-async function runStep({ run, step, index, dir, project, config, agents, finalReview = false }) {
+async function runStep({ run, step, index, dir, project, config, agents, libraries, finalReview = false }) {
   const agent = agents[step.agent];
   if (!agent) throw new Error(t('Unknown agent: {id}', { id: step.agent }));
   const previous = run.steps.filter(s => s !== step && s.status !== 'pending');
@@ -147,12 +182,13 @@ async function runStep({ run, step, index, dir, project, config, agents, finalRe
 
   const { promise, cancel } = runClaude({
     dir,
-    prompt: stepPrompt({ run, step, project, previous, finalReview, changes, config }),
+    prompt: stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries }),
     system: agent.instructions,
     model,
     effort: agent.effort,
     tools: agent.tools ?? [],
     disallowed: [...ALWAYS_DISALLOWED, ...(agent.disallowed ?? [])],
+    addDirs: libraries.map(l => l.dir),
     maxMinutes: agent.max_minutes ?? 60,
     log: path.join(runDir(run.id), `${String(index + 1).padStart(2, '0')}-${step.agent}.jsonl`),
     onEvent: logAction,
@@ -223,14 +259,15 @@ export async function execute(run) {
       dir = projectDir(run.project);
       await checkoutBranch(dir, run.branch);
     }
+    const libraries = await prepareLibraries(config, libraryIds(project), text => logAction({ type: 'action', text }));
 
-    const order = [...run.steps.map(step => ({ step, finalReview: false })), ...(run.review ? [{ step: run.review, finalReview: true }] : [])];
+    const order =[...run.steps.map(step => ({ step, finalReview: false })), ...(run.review ? [{ step: run.review, finalReview: true }] : [])];
     for (const [index, { step, finalReview }] of order.entries()) {
       if (step.status === 'done' || step.status === 'failed') continue;
       if (cancelRequest) break;
       const limit = checkLimits(config, run);
       if (limit) return wait(limit.waitUntil, limit.note);
-      const { waitUntil } = await runStep({ run, step, index, dir, project, config, agents, finalReview });
+      const { waitUntil } = await runStep({ run, step, index, dir, project, config, agents, libraries, finalReview });
       if (waitUntil) return wait(waitUntil, t('Your account reached its limit in the middle of a step'));
     }
 

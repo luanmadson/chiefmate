@@ -5,7 +5,7 @@ import { runClaude } from './claude.mjs';
 import { loadAgents, loadConfig } from './config.mjs';
 import { formatDateTime, formatDuration, formatPercent, t } from './i18n.mjs';
 import { queued } from './queue.mjs';
-import { ALWAYS_DISALLOWED, live } from './runs.mjs';
+import { ALWAYS_DISALLOWED, live, prepareLibraries } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { addMessage, listRuns, readState, readUsage, saveState, stepsOf } from './store.mjs';
 import { updateInfo } from './update.mjs';
@@ -17,8 +17,25 @@ export const chat = { responding: false, partial: '', actions: [] };
 // In the conversation the manager works in Chiefmate's own folder: it never commits there, and never pushes.
 const CHAT_DISALLOWED = ['Agent', 'WebSearch', 'WebFetch', 'Bash(git commit:*)', ...ALWAYS_DISALLOWED];
 
+// The manager reads every reference library; the copies are refreshed at most every 10 minutes.
+let libraryCopies = [];
+let librariesRefreshed = 0;
+async function chatLibraries(config) {
+  const ids = Object.keys(config.library ?? {});
+  if (!ids.length) return [];
+  if (Date.now() - librariesRefreshed > 10 * 60_000) {
+    try {
+      libraryCopies = await prepareLibraries(config, ids);
+      librariesRefreshed = Date.now();
+    } catch (error) {
+      console.error('Library:', error.message); // keep the last copies
+    }
+  }
+  return libraryCopies;
+}
+
 /** A snapshot of the moment, sent along with each of your messages. */
-export function situation() {
+export function situation(libraries = []) {
   const config = loadConfig();
   const agents = loadAgents(config);
   const usage = readUsage();
@@ -42,7 +59,8 @@ export function situation() {
   const window = (w, name) => `${name} ${formatPercent(w?.used)}${w?.resets ? ` (resets ${formatDateTime(w.resets)})` : ''}`;
   const limits = config.limits ?? {};
   lines.push(`${config.owner}'s account: ${window(usage.five_hour, '5-hour window')}; ${window(usage.seven_day, 'plan week')}. Measured ${usage.updated ? formatDateTime(usage.updated) : 'never'}. Runs pause at ${formatPercent(limits.pause_at_5h_window)} of the 5-hour window and ${formatPercent(limits.pause_at_plan_week)} of the plan week.`);
-  lines.push(`Projects: ${Object.entries(config.projects ?? {}).map(([id, p]) => `${id} (${p.name}, ${p.repository})`).join('; ') || 'none'}.`);
+  lines.push(`Projects: ${Object.entries(config.projects ?? {}).map(([id, p]) => `${id} (${p.name}, ${p.repository}${p.docs ? `, personal docs in ${p.docs}` : ''})`).join('; ') || 'none'}.`);
+  for (const l of libraries) lines.push(`Reference library ${l.id} (${l.name}), read only, a copy refreshed from GitHub: ${l.dir}. ${l.about}`.trim());
   lines.push(`Crew: ${Object.values(agents).map(a => `${a.id} (${a.name}, ${a.model ?? config.default_model})`).join(', ')}.`);
   for (const [id, m] of Object.entries(config.missions ?? {})) {
     const next = nextRun(m.schedule);
@@ -63,7 +81,8 @@ export async function talkToManager(message) {
   const state = readState();
   state.manager ??= {};
   const model = manager.model ?? config.default_model;
-  const prompt = `<situation>\n${situation()}\n</situation>\n\nMessage from ${config.owner}:\n${message}`;
+  const libraries = await chatLibraries(config);
+  const prompt = `<situation>\n${situation(libraries)}\n</situation>\n\nMessage from ${config.owner}:\n${message}`;
   const attempt = session =>
     runClaude({
       dir: ROOT,
@@ -73,6 +92,7 @@ export async function talkToManager(message) {
       effort: manager.chat_effort ?? manager.effort,
       tools: manager.tools ?? [],
       disallowed: CHAT_DISALLOWED,
+      addDirs: libraries.map(l => l.dir),
       maxMinutes: 15,
       session,
       log: path.join(ensureDir(path.join(DATA, 'manager')), 'conversation.jsonl'),

@@ -47,6 +47,7 @@ Each message from {{owner}} comes with a `<situation>` block: what is running, t
   - projects, missions, schedules and limits;
   - `crew`: settings for one agent in this installation only, such as `{ "writer": { "model": "...", "max_minutes": 90, "extra_instructions": "..." } }`.
 - Change when runs pause: `node src/cli.mjs limits --window-5h 0.85 --plan-week 0.9`.
+- Consult the reference libraries listed in the situation, such as {{owner}}'s personal documentation, to answer questions and to write good instructions for the crew. They are read-only copies: changes to a library go through a task on the project that holds it, if there is one.
 
 **Improving Chiefmate itself**
 Chiefmate can be one of the projects in the settings (usually with the id `chiefmate`). Improvements to it follow the same path as any project: the crew works on a copy and opens a pull request; when {{owner}} merges it, this installation updates itself.

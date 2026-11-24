@@ -264,5 +264,9 @@
   "Design and experience": "Design e experiência",
   "Improves the site or app for the people who use it: look, navigation, pages and accessibility, without breaking what works.": "Melhora o site ou o app para quem usa: visual, navegação, páginas e acessibilidade, sem quebrar o que funciona.",
   "Turns": "Turnos",
-  "Run `{id}`.": "Execução `{id}`."
+  "Run `{id}`.": "Execução `{id}`.",
+  "Downloading the library {name} (first time)": "Baixando a biblioteca {name} (primeira vez)",
+  "Couldn't download the library {name}: {output}": "Não consegui baixar a biblioteca {name}: {output}",
+  "Updating the library {name}": "Atualizando a biblioteca {name}",
+  "Unknown library: {id}": "Biblioteca desconhecida: {id}"
 }

@@ -40,7 +40,7 @@ export async function prepareWorkspace(id, project, onStep = () => {}) {
   const dir = projectDir(id);
   if (!existsSync(path.join(dir, '.git'))) {
     onStep(t('Downloading the project from GitHub (first time)'));
-    const r = await run('git', ['clone', project.repository, dir], WORKSPACES, { maxMinutes: 15 });
+    const r = await run('git', ['clone', '-c', 'core.longpaths=true', project.repository, dir], WORKSPACES, { maxMinutes: 15 });
     if (r.code !== 0) throw new Error(t("Couldn't download the project: {output}", { output: clip(r.output, 500) }));
   }
   onStep(t('Updating the working copy'));
@@ -61,6 +61,27 @@ export async function prepareWorkspace(id, project, onStep = () => {}) {
       if (existsSync(path.join(dir, 'node_modules'))) writeFileSync(marker, signature);
     }
   }
+  return dir;
+}
+
+/**
+ * A reference library: a git repository the crew and the manager read, such as your personal documentation.
+ * It is cloned into workspaces/.library/<id> and reset to GitHub before use, so anything changed there is discarded.
+ */
+export async function prepareLibrary(id, source, onStep = () => {}) {
+  const dir = path.join(WORKSPACES, '.library', id);
+  const name = source.name ?? id;
+  if (!existsSync(path.join(dir, '.git'))) {
+    onStep(t('Downloading the library {name} (first time)', { name }));
+    ensureDir(path.dirname(dir));
+    const r = await run('git', ['clone', '--depth', '1', '-c', 'core.longpaths=true', source.repository, dir], path.dirname(dir), { maxMinutes: 15 });
+    if (r.code !== 0) throw new Error(t("Couldn't download the library {name}: {output}", { name, output: clip(r.output, 500) }));
+    return dir;
+  }
+  onStep(t('Updating the library {name}', { name }));
+  await git(dir, 'fetch', '--depth', '1', 'origin', source.main_branch ?? 'main');
+  await git(dir, 'reset', '--hard', 'FETCH_HEAD');
+  await git(dir, 'clean', '-fd');
   return dir;
 }
 
