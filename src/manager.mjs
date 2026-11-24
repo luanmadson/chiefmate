@@ -119,7 +119,8 @@ export function situation(libraries = []) {
   }
   if (!latest.length) lines.push('- none yet');
   // What the owner told the crew directly, from the agent's panel (src/talk.mjs): the runs going on and the latest.
-  const talked = [...going.map(l => activeRun(l.run)).filter(Boolean), ...latest];
+  // A run going on is also among the latest: each run once, the live copy first.
+  const talked = [...going.map(l => activeRun(l.run)).filter(Boolean), ...latest].filter((r, i, all) => all.findIndex(x => x.id === r.id) === i);
   lines.push(talkSituation(talked, config.owner || 'the owner'));
   const window = (w, name) => `${name} ${formatPercent(w?.used)}${w?.resets ? ` (resets ${formatDateTime(w.resets)})` : ''}`;
   const limits = config.limits ?? {};
