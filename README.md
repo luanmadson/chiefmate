@@ -12,7 +12,7 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
 
 ## What you get
 
-- **An app window**, with no browser bar, and six sections:
+- **An app window**, with no browser bar, and seven sections:
 
   | Section | What it is for |
   |---|---|
@@ -20,12 +20,14 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
   | **Operations** | What the crew is doing right now: the steps, the logbook (every action of the agent at work, with the time) and the queue. |
   | **Missions** | Complete jobs with their own schedule. "Run now" starts one at any time. |
   | **Crew** | Who is on board, what each one is doing and the model behind them. Give any of them a one-off task. |
+  | **Projects** | Which of your projects are running on this computer (development servers, node, python, IDEs, started by you or by the crew) and the memory each one uses, with a button to stop them. |
   | **Log** | Every run, with each step's report, the checks and the pull request link. |
-  | **Usage** | Your Claude account's usage, and when Chiefmate pauses to look after it. |
+  | **Usage** | Your Claude account's usage, when Chiefmate pauses to look after it, the week's pace and the plan's free resets. |
 
 - **Crew portraits** that show at a glance who is standing by, working, thinking or waiting for a limit to reset. The title bar tells you whether Chiefmate is online and waiting for you, and which project is in focus: the one being worked on (the mission or task, the agent at work and for how long) or, when nothing is running, the next one in the queue.
 - **Scheduled missions**, for example every Monday at 9:00. They wake the computer from sleep.
 - **Windows notifications**: the evening before a mission, when a run starts, when it pauses for a limit and when it is ready for your review.
+- **Alerts that only warn**, as a band at the top of the app and a Windows notification, once each: when the account's 5-hour window or the plan's week passes 70% and 90%, when this computer has less than 15% of its memory free (naming the projects using the most), and about the plan's free resets.
 - **One-off tasks** for any agent, at any time.
 - **A queue that runs one thing at a time**, so agents never set off other agents.
 - **It improves itself.** Chiefmate can be one of its own projects: the crew proposes improvements in pull requests and, when you merge one, your installation updates itself.
@@ -101,6 +103,8 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `crew` | Settings for one agent in this installation only, such as `{ "writer": { "model": "claude-opus-5-5", "max_minutes": 90, "extra_instructions": "..." } }` |
 | `library` | Reference libraries: git repositories the manager and the crew may read, such as your personal documentation. Each has a `name`, a `repository`, a `main_branch` and a sentence `about` it. A project uses one with `"library": ["<id>"]`, or with `"docs": "<id>/<folder>"` for its personal documentation, which then takes precedence over the instructions inside the project's own repository |
 | `limits` | When runs pause: `pause_at_5h_window` and `pause_at_plan_week`, as shares of your account's usage (0.85 is 85%) |
+| `plan_resets` | The plan's free resets, which Claude Code doesn't report: `[{ "kind": "full", "expires": "<ISO date>", "used": false, "note": "..." }]`. Easier from the Usage section or `node src/cli.mjs reset-grant` |
+| `usage_reader` | The optional reading of your usage page on claude.ai (see below): `{ "enabled": false, "every_hours": 4 }`, and `browser` with the path to Edge or Chrome if it isn't found |
 
 The libraries are read from a copy that Chiefmate refreshes from GitHub before use, in `workspaces/.library/`, so the crew can read them but never change the original. To have the crew change a library, add its repository as a project too: the changes then arrive as pull requests, like everything else.
 
@@ -108,6 +112,8 @@ The libraries are read from a copy that Chiefmate refreshes from GitHub before u
 - `"main_branch": "current"` starts every run from the branch checked out in your clone, so the crew starts where you are working;
 - `repository` may be your clone's folder itself, which makes copying instant and includes commits you haven't pushed;
 - `clone_filter` (such as `"blob:none"`) makes a partial copy of a very large repository.
+
+**Projects on this computer.** The Projects section finds a project's processes by its folders: `local_clone`, `repository` when it is a folder, `Documents/GitHub/<repository name>` in your user folder when it exists, the working copy in `workspaces/` and any extra folders in the project's `local_dirs`.
 
 **To put a project under Chiefmate:**
 1. add it to `projects`;
@@ -122,6 +128,22 @@ Chiefmate measures what really counts on a subscription plan: your account's usa
 - **Before every step**, Chiefmate checks your account. If the 5-hour window or the plan's week is above the share you set in the Usage section (85% and 90% by default), the run waits for the reset and then carries on by itself.
 - **If the account runs out in the middle of a step**, that step starts over after the reset.
 - **Each step has a time limit** (in the agent's header), in case an agent gets stuck.
+- **Alerts at 70% and 90%** of the 5-hour window and of the plan's week, once per threshold and window. They don't pause anything.
+- **The plan's free resets.** Claude Code doesn't report them, so you record them in the Usage section or with `reset-grant`. Chiefmate shows the ones available and the week's pace (the share used against the share of the week gone by, and whether there is slack). It warns you when the week passes 90% with one available, and 3 days and 1 day before one expires unused.
+
+### Reading claude.ai (optional, off by default)
+
+Chiefmate can read your account's usage page on claude.ai, to keep the limits and the free resets up to date without you.
+
+1. `node src/cli.mjs claude-login` opens a browser window (Microsoft Edge or Google Chrome) with a profile of Chiefmate's own, in `data/browser-profile`. Sign in to claude.ai there and close the window.
+2. Turn the reading on in the Usage section, or with `node src/cli.mjs usage-reader on`.
+
+From then on, the server (never an agent) opens only the usage page, with no window, at most once every few hours (`every_hours`, 4 by default, never less than 2). It only reads the page: it never clicks anything on your account and never applies a reset. When the page shows free resets, it updates `plan_resets` and notes the source and the time. When it can't read the page, or the page doesn't have what it looks for, your own record stays and the Usage section says so. It drives the browser through its DevTools protocol, the way Playwright does, so Chiefmate keeps having no dependencies.
+
+**The risks, before you turn it on:**
+- `data/browser-profile` holds a signed-in claude.ai session. Anyone, or any program, that can read your user folder can use it. It never goes to git, and the crew is told never to read it, but it is a real credential on disk. To revoke it, sign out of that session on claude.ai and delete the folder.
+- Automated access to claude.ai may go against its terms of use, and the site may block it, ask you to sign in again or change the page. The reading is kept to one page and a few times a day, but the choice is yours.
+- The page has no fixed format: the values are found by their words, in English and Portuguese, and may be missed or misread. The Usage section shows the lines it relied on.
 
 ## Chiefmate improves itself
 
@@ -140,6 +162,8 @@ The self-update only touches Chiefmate's own files. Your settings, the history a
 - **Agents have limits.** They cannot push to GitHub, open or merge pull requests, or change the repository's address.
 - **No connectors.** Agents run without MCP connectors and without the variables of your own Claude session.
 - **Your data stays home.** Your settings, the history and the working copies (`config/chiefmate.json`, `data/`, `workspaces/`) never go to git.
+- **Stopping processes asks first.** The Projects section and `stop-project` show what will stop and end only those processes. They never stop Chiefmate, what started it or the crew at work (cancel the run for that).
+- **The optional claude.ai reading** keeps a signed-in browser profile in `data/browser-profile`. See its risks above.
 
 ## Command line
 
@@ -155,6 +179,11 @@ node src/cli.mjs resume <id>                  resumes a run (--ignore-limits goe
 node src/cli.mjs history                      the latest runs
 node src/cli.mjs report <id>                  the reports of a run
 node src/cli.mjs limits --window-5h 0.85 --plan-week 0.9
+node src/cli.mjs ram                          the projects running on this computer and their memory
+node src/cli.mjs stop-project <id> [--yes]    lists a project's processes; with --yes, stops them
+node src/cli.mjs reset-grant [list]           the plan's free resets (add <YYYY-MM-DD> "<note>", used <n>, remove <n>)
+node src/cli.mjs claude-login                 signs in to claude.ai, for the optional usage reading
+node src/cli.mjs usage-reader on|off|now      turns the reading on or off, or reads now
 ```
 
 ## Languages
@@ -177,7 +206,7 @@ English is the source. The app, the notifications and the reports follow `langua
 | `agents/` | The crew, one file per agent |
 | `config/` | `example.json`, and your `chiefmate.json` (not in git) |
 | `scripts/` | Installation on Windows, launchers and checks |
-| `data/` (not in git) | Runs, each step's log, the conversation with the manager, your account's usage and the schedule's state |
+| `data/` (not in git) | Runs, each step's log, the conversation with the manager, your account's usage, the schedule's and the alerts' state and, if you use the claude.ai reading, its browser profile |
 | `workspaces/` (not in git) | The projects' working copies |
 
 Chiefmate has no dependencies besides Node.js. It drives Claude Code (`claude -p`), which uses your account's login and plan.

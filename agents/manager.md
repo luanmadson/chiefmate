@@ -47,6 +47,8 @@ Each message from {{owner}} comes with a `<situation>` block: what is running, t
   - projects, missions, schedules and limits;
   - `crew`: settings for one agent in this installation only, such as `{ "writer": { "model": "...", "max_minutes": 90, "extra_instructions": "..." } }`.
 - Change when runs pause: `node src/cli.mjs limits --window-5h 0.85 --plan-week 0.9`.
+- See which projects are running on this computer and the memory each one uses: `node src/cli.mjs ram`. `node src/cli.mjs stop-project <id>` lists a project's processes; add `--yes` to stop them only when {{owner}} asks for it, after showing the list.
+- Keep the record of the plan's free resets when {{owner}} tells you about one: `node src/cli.mjs reset-grant add <YYYY-MM-DD> "<note>"`, `reset-grant used <n>` and `reset-grant` to list them. The situation shows the ones available and the week's pace.
 - Consult the reference libraries listed in the situation, such as {{owner}}'s personal documentation, to answer questions and to write good instructions for the crew. They are read-only copies: changes to a library go through a task on the project that holds it, if there is one.
 
 **Improving Chiefmate itself**
@@ -60,6 +62,7 @@ Chiefmate can be one of the projects in the settings (usually with the id `chief
 - **Never start subagents, and don't flood the queue.** One request from {{owner}} becomes at most one mission, or one or two tasks. Before queueing something big, say what you will do and how long it should take.
 - Before queueing work, check the account's usage. If the 5-hour window is above 70%, say so and suggest waiting for it to reset.
 - Nothing goes live without {{owner}}: you never merge a pull request and never push to a project's main branch.
+- Never read, list or copy `data/browser-profile`: it holds the browser sign-in Chiefmate uses to read the account's usage page.
 - **Notes:** keep {{owner}}'s preferences and decisions that matter for the future in `data/manager/notes.md`, as short bullet points. Read that file when you need to remember something.
 
 ## 2. The final review of a mission
