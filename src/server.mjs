@@ -9,6 +9,7 @@ import { computer, processes, stoppable, stopProject } from './machine.mjs';
 import { chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
 import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
+import { changePlan, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
 import { builderStatus } from './prompts.mjs';
 import { isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
@@ -199,6 +200,8 @@ function buildState() {
       reader: { ...readerSettings(config), signedIn: signedIn(), reading: isReading(), status: readerStatus() },
     },
     alerts: alerts(config, usage, machine),
+    // The owner's planning board (data/plan.json): every item, archived ones included, in the board's order.
+    planning: { items: planItems(), priorities: PRIORITIES, statuses: STATUSES },
     manager: {
       messages: conversation.slice(-80), responding: chat.responding, interrupting: chat.interrupting, since: chat.since, partial: chat.partial,
       actions: chat.actions.slice(-12), lastAction: chat.actions.at(-1) ?? null, pending: readPending(), context: managerContext(),
@@ -250,14 +253,16 @@ export function startServer() {
       const body = await readBody(req);
       switch (url.pathname) {
         case '/api/mission': {
-          const run = createRun({ kind: 'mission', missionId: body.mission, origin: body.origin ?? 'app' });
+          if (body.plan) planItem(body.plan); // the board's item to link must exist
+          const run = createRun({ kind: 'mission', missionId: body.mission, origin: body.origin ?? 'app', plan: body.plan ?? null });
           nudgeQueue();
           return reply(res, 200, summary(run));
         }
         case '/api/task': {
+          if (body.plan) planItem(body.plan);
           const run = createRun({
             kind: 'task', projectId: body.project, agent: body.agent, instruction: body.instruction, review: !!body.review, origin: body.origin ?? 'app',
-            modules: body.modules ?? [],
+            modules: body.modules ?? [], plan: body.plan ?? null,
           });
           nudgeQueue();
           return reply(res, 200, summary(run));
@@ -306,6 +311,8 @@ export function startServer() {
           if (!Array.isArray(body.pids) || !body.pids.length) return reply(res, 400, { error: t('Confirm which processes to stop.') });
           return reply(res, 200, { stopped: await stopProject(String(body.project ?? ''), body.pids) });
         }
+        case '/api/planning':
+          return reply(res, 200, { item: changePlan(body) });
         case '/api/reset-grants':
           return reply(res, 200, { resets: changeResets(body) });
         case '/api/usage-reader': {

@@ -286,7 +286,7 @@ const toolName = tool => (tool === 'codex' ? 'Codex' : 'Claude Code');
 
 // ---------- Navigation ----------
 
-const VIEWS = ['manager', 'operations', 'missions', 'crew', 'projects', 'log', 'usage'];
+const VIEWS = ['manager', 'operations', 'planning', 'missions', 'crew', 'projects', 'log', 'usage'];
 const currentView = () => (VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
 function showView() {
   const view = currentView();
@@ -1050,6 +1050,202 @@ function drawPlan() {
   draw('#plan', html, html);
 }
 
+// ---------- Planning ----------
+
+const priorityLabel = p => ({ high: t('High'), medium: t('Medium'), low: t('Low') })[p] ?? p;
+function planState(status) {
+  switch (status) {
+    case 'future': return [t('Future'), 'neutral'];
+    case 'todo': return [t('To do'), 'neutral'];
+    case 'queued': return [t('Queued'), 'info'];
+    case 'in_progress': return [t('In progress'), 'info'];
+    case 'waiting_owner': return [t('Waiting for your action'), 'warn'];
+    case 'done': return [t('Completed'), 'ok'];
+    default: return [status ?? '', 'neutral'];
+  }
+}
+const planFilter = { project: '', priority: '', status: 'open', sort: 'priority' };
+let editingItem = null; // the item being edited in place: the list is not redrawn meanwhile
+const planOptions = (list, selected) => list.map(([value, label]) => `<option value="${esc(value)}"${value === selected ? ' selected' : ''}>${esc(label)}</option>`).join('');
+const planItemsNow = () => state?.planning?.items ?? [];
+const waitingItems = () => planItemsNow().filter(i => !i.archived && i.status === 'waiting_owner');
+
+/** The projects in the settings, then any other name the items use (from the board the manager kept before). */
+function planProjects() {
+  const list = state.projects.map(p => [p.id, p.name ?? p.id]);
+  for (const i of planItemsNow()) if (i.project && !list.some(([id]) => id === i.project)) list.push([i.project, i.project]);
+  return list;
+}
+
+function prLink(pr) {
+  if (!pr) return '';
+  const number = /\/pull\/(\d+)/.exec(pr)?.[1];
+  const text = number ? `PR #${number}` : pr;
+  return /^https?:\/\//.test(pr) ? `<a href="${esc(pr)}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text);
+}
+
+function planLinks(i) {
+  const parts = [];
+  if (i.run) parts.push(`<a href="#log" data-select="${esc(i.run)}" class="num">${esc(i.run)}</a>${i.run_status ? ` ${stateHtml(runState(i.run_status))}` : ''}`);
+  if (i.pr) parts.push(prLink(i.pr));
+  return parts.map(p => `<div>${p}</div>`).join('') || '<span class="hint">—</span>';
+}
+
+function planRow(i) {
+  if (editingItem === i.id) {
+    return `<tr class="plan-row editing" data-item="${i.id}"><td class="num">#${i.id}</td><td colspan="6">
+      <div class="fields">
+        <label><span>${esc(t('Title'))}</span><input data-edit="title" type="text" maxlength="200" value="${esc(i.title)}"></label>
+        <label><span>${esc(t('Project'))}</span><select data-edit="project">${planOptions(planProjects(), i.project)}</select></label>
+      </div>
+      <label><span>${esc(t('Description (optional)'))}</span><textarea data-edit="description" rows="3" maxlength="4000">${esc(i.description ?? '')}</textarea></label>
+      <div class="fields">
+        <label><span>${esc(t('Run (optional)'))}</span><input data-edit="run" type="text" maxlength="80" value="${esc(i.run ?? '')}"></label>
+        <label><span>${esc(t('Pull request (optional)'))}</span><input data-edit="pr" type="text" maxlength="300" value="${esc(i.pr ?? '')}"></label>
+      </div>
+      <div class="actions left"><button type="button" class="button small" data-plan-save="${i.id}">${esc(t('Save'))}</button><button type="button" class="button secondary small" data-plan-cancel>${esc(t('Cancel'))}</button></div>
+    </td></tr>`;
+  }
+  const dates = t('Created {created} · updated {updated}', { created: shortDate(i.created), updated: shortDate(i.updated) });
+  const priorities = state.planning.priorities.map(p => [p, priorityLabel(p)]);
+  const statuses = state.planning.statuses.map(s => [s, planState(s)[0]]);
+  return `<tr class="plan-row plan-${esc(i.status)}${i.archived ? ' archived' : ''}" data-item="${i.id}">
+    <td class="num">#${i.id}</td>
+    <td><span class="primary">${esc(i.title)}</span>${i.description ? `<span class="secondary plan-description">${esc(i.description)}</span>` : ''}<span class="secondary">${esc(dates)}${i.archived ? ` · ${esc(t('archived {when}', { when: shortDate(i.archived) }))}` : ''}</span></td>
+    <td>${esc(projectName(i.project))}</td>
+    <td><select class="inline-select priority-${esc(i.priority)}" data-plan-field="priority" aria-label="${esc(t('Priority'))}">${planOptions(priorities, i.priority)}</select></td>
+    <td><select class="inline-select state-${planState(i.status)[1]}" data-plan-field="status" aria-label="${esc(t('Status'))}">${planOptions(statuses, i.status)}</select></td>
+    <td>${planLinks(i)}</td>
+    <td class="row-actions"><div class="plan-actions">${i.archived
+      ? `<button type="button" class="button secondary small" data-plan-restore="${i.id}">${esc(t('Restore'))}</button>`
+      : `<button type="button" class="button secondary small" data-plan-edit="${i.id}">${esc(t('Edit'))}</button><button type="button" class="button secondary small" data-plan-archive="${i.id}">${esc(t('Archive'))}</button>`}</div></td>
+  </tr>`;
+}
+
+function visibleItems() {
+  const f = planFilter;
+  const list = planItemsNow().filter(i =>
+    (f.status === 'archived' ? !!i.archived : !i.archived)
+    && (f.status === 'open' ? i.status !== 'done' : ['all', 'archived'].includes(f.status) || i.status === f.status)
+    && (!f.project || i.project === f.project) && (!f.priority || i.priority === f.priority));
+  if (f.sort === 'updated') list.sort((a, b) => (b.updated ?? '').localeCompare(a.updated ?? ''));
+  else if (f.sort === 'number') list.sort((a, b) => a.id - b.id);
+  return list; // "priority": the server's order (priority, then what needs you, then the number)
+}
+
+function drawPlanning(force = false) {
+  if (!state?.planning) return;
+  const items = planItemsNow();
+  const waiting = waitingItems();
+  draw('#counter-planning', String(waiting.length), waiting.length ? String(waiting.length) : '');
+  $('#counter-planning').parentElement.title = waiting.length ? t('{count} item(s) waiting for you', { count: waiting.length }) : '';
+
+  const highlight = waiting.length
+    ? `<div class="panel plan-waiting"><div class="label">${esc(t('Waiting for you ({count})', { count: waiting.length }))}</div><ul>${waiting.map(i =>
+      `<li><span class="num">#${i.id}</span> <span class="hint">${esc(projectName(i.project))}</span> <span class="primary">${esc(i.title)}</span>${i.pr ? ` · ${prLink(i.pr)}` : ''}</li>`).join('')}</ul></div>`
+    : '';
+  draw('#planning-waiting', highlight, highlight);
+
+  const projects = planProjects();
+  const filters = `<label><span>${esc(t('Project'))}</span><select data-plan-filter="project">${planOptions([['', t('All projects')], ...projects], planFilter.project)}</select></label>
+    <label><span>${esc(t('Priority'))}</span><select data-plan-filter="priority">${planOptions([['', t('All priorities')], ...state.planning.priorities.map(p => [p, priorityLabel(p)])], planFilter.priority)}</select></label>
+    <label><span>${esc(t('Status'))}</span><select data-plan-filter="status">${planOptions([['open', t('Open (not completed)')], ['all', t('All')], ...state.planning.statuses.map(s => [s, planState(s)[0]]), ['archived', t('Archived')]], planFilter.status)}</select></label>
+    <label><span>${esc(t('Order'))}</span><select data-plan-filter="sort">${planOptions([['priority', t('By priority')], ['updated', t('Recently updated')], ['number', t('By number')]], planFilter.sort)}</select></label>`;
+  if (!$('#planning-filters').contains(document.activeElement)) draw('#planning-filters', filters, filters);
+
+  // The form's lists: filled again only when the projects change, so what you chose stays.
+  const formProjects = projects.map(([id]) => id).join('|');
+  if ($('#plan-project').dataset.list !== formProjects) {
+    const chosen = $('#plan-project').value;
+    $('#plan-project').innerHTML = planOptions(projects, chosen || projects[0]?.[0]);
+    $('#plan-project').dataset.list = formProjects;
+  }
+  if (!$('#plan-priority').options.length) $('#plan-priority').innerHTML = planOptions(state.planning.priorities.map(p => [p, priorityLabel(p)]), 'medium');
+  if (!$('#plan-status').options.length) $('#plan-status').innerHTML = planOptions(state.planning.statuses.map(s => [s, planState(s)[0]]), 'todo');
+
+  // Not while you edit an item or have one of its lists open.
+  if (!force && (editingItem !== null || $('#planning-list').contains(document.activeElement))) return;
+  const list = visibleItems();
+  const empty = items.length ? t('No item matches these filters.') : t('The board is empty. Add the first item below, or ask the manager.');
+  const html = list.length
+    ? `<table class="table plan-table"><thead><tr><th>#</th><th>${esc(t('Item'))}</th><th>${esc(t('Project'))}</th><th>${esc(t('Priority'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Run or PR'))}</th><th></th></tr></thead><tbody>${list.map(planRow).join('')}</tbody></table>`
+    : `<div class="empty">${esc(empty)}</div>`;
+  if (force) delete signatures['#planning-list'];
+  draw('#planning-list', html, html);
+}
+
+$('#planning-filters').addEventListener('change', event => {
+  const key = event.target.dataset.planFilter;
+  if (!key) return;
+  planFilter[key] = event.target.value;
+  event.target.blur();
+  drawPlanning(true);
+});
+
+async function changeItem(body, done) {
+  try {
+    await api('/api/planning', body);
+    if (done) toast(done);
+  } catch (error) {
+    toast(error.message);
+  }
+  if (document.activeElement && $('#planning-list').contains(document.activeElement)) document.activeElement.blur();
+  await refresh();
+  drawPlanning(true);
+}
+
+$('#planning-list').addEventListener('change', event => {
+  const field = event.target.dataset.planField;
+  const row = event.target.closest('[data-item]');
+  if (!field || !row) return;
+  changeItem({ action: 'set', id: Number(row.dataset.item), [field]: event.target.value });
+});
+
+$('#planning-list').addEventListener('click', event => {
+  const button = event.target.closest('[data-plan-edit],[data-plan-save],[data-plan-cancel],[data-plan-archive],[data-plan-restore]');
+  if (!button) return;
+  const { planEdit, planSave, planArchive, planRestore } = button.dataset;
+  if (planEdit) {
+    editingItem = Number(planEdit);
+    drawPlanning(true);
+    $('#planning-list [data-edit="title"]')?.focus();
+  } else if (planSave) {
+    const row = button.closest('[data-item]');
+    const body = { action: 'set', id: Number(planSave) };
+    for (const input of row.querySelectorAll('[data-edit]')) body[input.dataset.edit] = input.value;
+    api('/api/planning', body).then(
+      () => {
+        editingItem = null;
+        toast(t('Item saved.'));
+        return refresh().then(() => drawPlanning(true));
+      },
+      error => toast(error.message),
+    );
+  } else if (planArchive) changeItem({ action: 'archive', id: Number(planArchive) }, t('Archived. It is under the "Archived" filter.'));
+  else if (planRestore) changeItem({ action: 'restore', id: Number(planRestore) }, t('Back on the board.'));
+  else {
+    editingItem = null;
+    drawPlanning(true);
+  }
+});
+
+$('#plan-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.target.elements; // "elements": a form's own "title" would hide the field's
+  const body = { action: 'add', project: form.project.value, title: form.title.value, description: form.description.value, priority: form.priority.value, status: form.status.value };
+  if (form.run.value.trim()) body.run = form.run.value;
+  if (form.pr.value.trim()) body.pr = form.pr.value;
+  try {
+    const { item } = await api('/api/planning', body);
+    for (const name of ['title', 'description', 'run', 'pr']) form[name].value = '';
+    toast(t('Item #{id} added.', { id: item.id }));
+    await refresh();
+    drawPlanning(true);
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
 // ---------- Cycle ----------
 
 function drawOffline() {
@@ -1106,6 +1302,7 @@ async function refresh() {
   drawUsage();
   drawComputer();
   drawPlan();
+  drawPlanning();
   tickClocks();
   if (currentView() === 'log') refreshDetail();
 }
