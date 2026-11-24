@@ -583,6 +583,7 @@
   "The team lead planned no task: {note}": "O chefe de equipe não planejou nenhuma tarefa: {note}",
   "Couldn't save the project memory: {error}": "Não foi possível salvar a memória do projeto: {error}",
   "The team lead's planning failed: {error}": "O planejamento do chefe de equipe falhou: {error}",
+  "The team lead changed files, which it may not do: the changes were dropped": "O chefe de equipe mexeu em arquivos, o que ele não pode fazer: as mudanças foram descartadas",
   "planning": "planejamento",
   "first review": "primeira revisão",
   "Request": "Pedido",

@@ -119,6 +119,21 @@ export async function commitPending(dir, message) {
   return true;
 }
 
+/** The commit the working copy is on. */
+export const headCommit = dir => git(dir, 'rev-parse', 'HEAD');
+
+/**
+ * Takes the working copy back to a commit, dropping what a step that may not change files (a team lead) left behind:
+ * its commits, its changes and its new files (ignored ones, such as installed packages, stay). Whether anything was dropped.
+ */
+export async function discardSince(dir, commit) {
+  const changed = (await headCommit(dir)) !== commit || !!(await git(dir, 'status', '--porcelain'));
+  if (!changed) return false;
+  await git(dir, 'reset', '--hard', '-q', commit);
+  await git(dir, 'clean', '-fdq');
+  return true;
+}
+
 export async function newCommits(dir, base) {
   const list = await git(dir, 'log', '--oneline', `origin/${base}..HEAD`);
   return list ? list.split('\n') : [];

@@ -1,7 +1,7 @@
 // Starts a temporary Chiefmate on a spare port (only the app and the API: no queue, no schedule, no updates)
 // and checks that everything answers. Usage: npm run smoke
-import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -330,6 +330,24 @@ try {
   const empty = { id: 'smoke-ask-2', kind: 'ask', project: 'gamma', steps: [{ ...leads.leadPlanStep('x'), status: 'done', report: '~~~chiefmate-plan\n{"tasks": [], "note": "Already done"}\n~~~' }], review: { agent: 'manager', status: 'pending' } };
   leads.applyPlan(empty, empty.steps[0], gamma);
   expect(empty.review.status === 'skipped' && empty.steps.length === 1 && empty.lead.plan.note === 'Already done', 'a plan with no task did not skip the rest of the run');
+  // What a lead changes through the shell (a file, a commit) is dropped after its step: the working copy goes back.
+  const { discardSince, headCommit } = await import(src('workspace.mjs'));
+  const repo = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-git-'));
+  try {
+    const g = (...a) => execFileSync('git', ['-C', repo, '-c', 'user.name=smoke', '-c', 'user.email=smoke@example.com', ...a], { stdio: 'pipe' });
+    g('init', '-q');
+    writeFileSync(path.join(repo, 'a.txt'), 'one\n');
+    g('add', '-A');
+    g('commit', '-qm', 'one');
+    const before = await headCommit(repo);
+    expect(!(await discardSince(repo, before)), 'a lead step that changed nothing was said to have changed files');
+    writeFileSync(path.join(repo, 'a.txt'), 'two\n');
+    g('commit', '-qam', 'two');
+    writeFileSync(path.join(repo, 'new.txt'), 'x\n');
+    expect(await discardSince(repo, before) && (await headCommit(repo)) === before && !existsSync(path.join(repo, 'new.txt')), "a lead's changes were not dropped");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 
   const mcp = stepMcp(config, config.projects.alpha, alpha.builder);
   expect(mcp.names.join() === 'browser' && mcp.tools.join() === 'mcp__browser', "the project's MCP server was not released");
