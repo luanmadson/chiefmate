@@ -431,6 +431,7 @@ details summary { cursor: pointer; }
 .builder-combos { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px; }
 .builder-combos .label { margin: 0 6px 0 0; }
 .builder-grid { display: grid; grid-template-columns: minmax(300px, 1fr) minmax(360px, 1.3fr); gap: 20px; align-items: start; }
+.builder-grid[hidden] { display: none; }
 @media (max-width: 1000px) { .builder-grid { grid-template-columns: 1fr; } }
 .builder-section { margin-bottom: 14px; }
 .builder-section .label { display: flex; justify-content: space-between; gap: 10px; }
