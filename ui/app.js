@@ -494,6 +494,13 @@ function drawClock() {
 
 // ---------- Manager ----------
 
+// The events Chiefmate tells the manager about (src/news.mjs), as the app names them.
+const newsEvent = kind => ({
+  run_finished: t('run finished'), run_failed: t('run failed'), run_paused: t('run paused'), pr_ready: t('pull request ready'),
+  needs_you: t('needs you'), update_installed: t('update installed'), update_blocked: t('update blocked'),
+  memory_alert: t('memory alert'), usage_alert: t('usage alert'), session_ended: t('live session ended'),
+}[kind] ?? kind);
+
 let chatScrolled = false;
 function drawChat() {
   const g = state.manager;
@@ -514,7 +521,9 @@ function drawChat() {
       m.model ? shortModel(m.model) : '',
     ].filter(Boolean).join(' · ');
     const tag = m.interrupted ? `<span class="tag">${esc(t('interrupted'))}</span>` : '';
-    html += `<div class="msg ${you ? 'you' : 'manager'}${m.error ? ' error' : ''}"><div class="msg-head">${you ? '' : face(manager, m.error ? 'failed' : 'still', 20)}<span class="msg-author">${esc(you ? t('You') : t(manager.name))}</span><span class="msg-meta">${esc(meta)}</span>${tag}</div><div class="msg-body">${md(m.text)}</div></div>`;
+    // A notice: the manager's own news to you, after something happened (it was not an answer to a message of yours).
+    const news = !you && m.news ? `<span class="tag news">${esc(t('notice'))}</span><span class="msg-events">${esc(m.news.map(newsEvent).join(' · '))}</span>` : '';
+    html += `<div class="msg ${you ? 'you' : 'manager'}${news ? ' news' : ''}${m.error ? ' error' : ''}"><div class="msg-head">${you ? '' : face(manager, m.error ? 'failed' : 'still', 20)}<span class="msg-author">${esc(you ? t('You') : t(manager.name))}</span><span class="msg-meta">${esc(meta)}</span>${news}${tag}</div><div class="msg-body">${md(m.text)}</div></div>`;
   }
   const renewing = !!g.context?.renewing;
   if (g.responding) {
@@ -557,11 +566,18 @@ function drawChatQueue() {
   }
   $('#chat-queue').hidden = !list.length;
   const head = `<div class="chat-queue-head"><span class="label">${esc(t('In the queue'))}</span><span class="hint">${esc(g.responding ? t('They go together, in order, when the manager finishes this answer.') : t('Being delivered…'))}</span></div>`;
-  const items = list.map(m => `<div class="queued-msg" data-pending="${esc(m.id)}">
+  const items = list.map(m => (m.from === 'chiefmate'
+    // Chiefmate's news for the manager: not a message of yours, so it can't be edited (only removed).
+    ? `<div class="queued-msg news" data-pending="${esc(m.id)}">
+      <div class="msg-head"><span class="tag news">${esc(t('news for the manager'))}</span><span class="msg-meta">${esc(clockTime(m.at))}</span>
+        <span class="queued-actions"><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
+      <div class="msg-body">${(m.events ?? []).map(e => `<div class="news-event"><time>${esc(clockTime(e.at))}</time> ${esc(newsEvent(e.kind))}</div>`).join('')}</div>
+    </div>`
+    : `<div class="queued-msg" data-pending="${esc(m.id)}">
       <div class="msg-head"><span class="tag">${esc(t('queued'))}</span><span class="msg-meta">${esc([clockTime(m.at), m.edited ? t('edited') : ''].filter(Boolean).join(' · '))}</span>
         <span class="queued-actions"><button type="button" class="button secondary small" data-pending-edit="${esc(m.id)}">${esc(t('Edit'))}</button><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
       <div class="msg-body">${md(m.text)}</div>
-    </div>`);
+    </div>`));
   draw('#chat-queue', JSON.stringify([list, g.responding, language()]), list.length ? head + items.join('') : '');
 }
 

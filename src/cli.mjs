@@ -212,13 +212,13 @@ async function chatCommand() {
       const g = (await api('/api/state')).manager;
       const who = { you: 'You', manager: 'Manager', system: 'Chiefmate' };
       for (const m of g.messages.slice(-(Number(action) || 10))) {
-        const extra = [m.queued ? `delivered ${time(m.delivered)}` : '', m.interrupted ? 'interrupted' : ''].filter(Boolean).join(', ');
+        const extra = [m.news ? `notice: ${m.news.join(', ')}` : '', m.queued ? `delivered ${time(m.delivered)}` : '', m.interrupted ? 'interrupted' : ''].filter(Boolean).join(', ');
         console.log(`[${time(m.at)}] ${who[m.who] ?? m.who}${extra ? ` (${extra})` : ''}:\n${m.text}\n`);
       }
       if (g.responding) {
         console.log(`Now: ${g.context?.renewing ? 'renewing the conversation' : 'answering'} since ${time(g.since)}.${g.lastAction ? ` Last action, ${time(g.lastAction.at)}: ${g.lastAction.text}` : ''}`);
       } else console.log('Now: waiting for you.');
-      for (const m of g.pending) console.log(`In the queue [${m.id}], sent ${time(m.at)}${m.edited ? ', edited' : ''}: ${m.text}`);
+      for (const m of g.pending) console.log(m.from === 'chiefmate' ? `In the queue [${m.id}], Chiefmate's news for the manager since ${time(m.at)}: ${m.text}` : `In the queue [${m.id}], sent ${time(m.at)}${m.edited ? ', edited' : ''}: ${m.text}`);
     }
   }
 }
@@ -337,6 +337,7 @@ async function main() {
         // The update waits for every run going on to end (and for the manager); the sessions' windows stay open.
         startUpdates({ isBusy: () => live.size > 0 || managerBusy(), beforeRestart: () => new Promise(resolve => server.close(() => resolve())) });
         deliverPending(); // messages left in the queue when Chiefmate stopped
+        (await import('./news.mjs')).startNews(); // and the news for the manager, such as "update installed"
       }
       console.log(`Chiefmate running at http://localhost:${p} (${new Date().toISOString()})`);
       return;

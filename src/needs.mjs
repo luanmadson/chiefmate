@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
+import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { activeRun, liveOf } from './runs.mjs';
 import { listRuns, readRun, saveRun, stepsOf } from './store.mjs';
@@ -76,6 +77,7 @@ export async function askOwner({ run: runId, step, what, url, wait = false, chec
   agentSays(run, { step: n, agent: request.agent, text: request.what, kind: 'request', request: request.id });
   saveRun(run);
   notify(t('Needs you: {title}', { title: run.title }), request.what, 'chiefmate:operations');
+  reportEvent('needs_you', `${request.agent ?? 'A step'} in run ${run.id} "${run.title}" (project ${run.project}) needs the owner: ${request.what}${request.url ? ` (address: ${request.url}, opened in the owner's browser)` : ''}${request.wait ? '. The step waits until the owner clicks Done in the app.' : '. The step goes on meanwhile.'}`);
   if (request.url) {
     try {
       request.opened = await openForOwner(request.url);

@@ -10,6 +10,7 @@ import { formatDate, formatDateTime, formatDuration, formatNumber, formatPercent
 import {
   applyPlan, finalReviewLines, LEAD, leadLines, leadPlanStep, leadReviewStep, memberLines, readMemory, saveMemory, takeMemory,
 } from './leads.mjs';
+import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { projectInstructions } from './prompts.mjs';
 import { readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
@@ -521,6 +522,7 @@ export async function execute(run) {
         ? t('{note}. I will resume on my own at {when}.', { note, when: formatDateTime(waitUntil) })
         : t('{note}. Open the app to decide.', { note }),
     );
+    reportEvent('run_paused', `Run ${run.id} "${run.title}" (project ${run.project}) paused: ${note}. ${waitUntil ? `It resumes on its own at ${formatDateTime(waitUntil)}.` : 'It waits for the owner to decide (resume or cancel).'}`);
   };
 
   try {
@@ -580,6 +582,7 @@ export async function execute(run) {
       Object.assign(run, { status: 'done', ended: now(), result });
       saveRun(run);
       notify(t('Chiefmate finished'), t('{title}: no changes to review.', { title: run.title }));
+      reportEvent('run_finished', `Run ${run.id} "${run.title}" (project ${run.project}) finished with no changes to review: ${result}`);
       return;
     }
     const failed = run.checks.filter(c => !c.ok).length;
@@ -601,6 +604,7 @@ export async function execute(run) {
       Object.assign(run, { status: 'done', ended: now(), result, delivered: project.local_clone ?? dir });
       saveRun(run);
       notify(t('Ready for your review'), t('{title}: {result}', { title: run.title, result }), 'chiefmate:log');
+      reportEvent('run_finished', `Run ${run.id} "${run.title}" (project ${run.project}) finished and was delivered locally, waiting for the owner's review: ${result}`);
       return;
     }
 
@@ -612,10 +616,12 @@ export async function execute(run) {
     Object.assign(run, { status: 'done', ended: now(), result });
     saveRun(run);
     notify(t('Ready for your review'), t('{title}: {result}', { title: run.title, result }), run.pullRequest);
+    reportEvent('pr_ready', `Run ${run.id} "${run.title}" (project ${run.project}) finished: pull request ${run.pullRequest} waits for the owner's approval (only the owner merges). ${result}`);
   } catch (error) {
     Object.assign(run, { status: 'failed', ended: now(), result: error.message });
     saveRun(run);
     notify(t('Chiefmate hit an error'), t('{title}: {error}', { title: run.title, error: clip(error.message, 180) }));
+    reportEvent('run_failed', `Run ${run.id} "${run.title}" (project ${run.project}) failed: ${clip(error.message, 400)}`);
   } finally {
     live.delete(run.id);
   }

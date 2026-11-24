@@ -14,6 +14,7 @@ import { environment, executable as claudeExecutable } from './claude.mjs';
 import { loadConfig } from './config.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { computer, formatBytes, processes, refreshProcesses } from './machine.mjs';
+import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { assembleBlocks, builderSettings, parseBlocks } from './prompts.mjs';
 import { DATA, ensureDir, languageName, now, readJson, ROOT, slug, stamp, WORKSPACES, writeJson } from './util.mjs';
@@ -262,6 +263,7 @@ export async function openSession(profileId, { origin = 'app' } = {}) {
     session.requests.push({ id: id.slice(-8), what, check: 'codex login status', status: 'open', at: now() });
     saveSession(session);
     notify(t('Needs you: {title}', { title: profile.name }), what, 'chiefmate:operations');
+    reportEvent('needs_you', `The live session "${profile.name}" (Codex) waits for the owner to sign in to Codex ("codex login" in a terminal); it opens by itself afterwards.`);
     return session;
   }
   return launch(session);
@@ -349,8 +351,29 @@ async function checkLogins() {
   }
 }
 
+// The sessions seen open, so the manager hears when one ends: its window closed, or the tool exited (recorded by the
+// window itself, or by sessionsState once its process is gone). Not when the owner ended it from Chiefmate.
+let seenOpen = null;
+export function watchEnded(records = listSessions()) {
+  const ended = seenOpen ? records.filter(s => seenOpen.has(s.id) && s.status === 'ended' && s.endedBy !== 'owner') : [];
+  for (const s of ended) {
+    const exit = s.exitCode != null && s.exitCode !== 0 ? `, the tool exited with code ${s.exitCode}` : '';
+    reportEvent('session_ended', `The live session "${s.name}" (${s.tool}${s.project ? `, project ${s.project}` : ''}, session ${s.id}) ended at ${formatDateTime(s.ended ?? now())}${exit}.`);
+  }
+  seenOpen = new Set(records.filter(s => OPEN.includes(s.status)).map(s => s.id));
+  return ended;
+}
+
 export function startSessions() {
-  setInterval(() => checkLogins().catch(error => console.error('Sessions:', error.message)), 15_000);
+  setInterval(() => {
+    checkLogins().catch(error => console.error('Sessions:', error.message));
+    try {
+      watchEnded();
+    } catch (error) {
+      console.error('Sessions:', error.message);
+    }
+  }, 15_000);
+  watchEnded();
 }
 
 /**

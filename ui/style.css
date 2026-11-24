@@ -175,6 +175,13 @@ textarea { resize: vertical; min-height: 64px; }
 .msg.error .msg-body { color: var(--error); }
 .typing .live-last { margin-top: 10px; }
 .msg-head .tag { margin: 0; }
+/* The manager's notices (news it gives on its own): a brass rule on the left and a faint brass wash. */
+.msg.news { border-left: 2px solid var(--accent); background: rgba(201, 164, 93, 0.05); }
+.tag.news { color: var(--strong); background: rgba(201, 164, 93, 0.16); border-color: var(--accent); }
+.msg-events { font: 11px var(--mono); color: var(--muted); }
+.queued-msg.news { border-left-color: var(--accent); }
+.news-event { font: 11.5px var(--mono); }
+.news-event time { color: var(--faint); }
 .chat-queue { max-height: 32vh; overflow-y: auto; border-top: 1px solid var(--line); background: var(--raised); }
 .chat-queue[hidden] { display: none; }
 .chat-queue-head { display: flex; gap: 10px; align-items: baseline; padding: 8px 18px 0; }

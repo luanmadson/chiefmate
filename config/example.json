@@ -51,5 +51,6 @@
   "mcp_servers": {},
   "needs_you": {
     "max_wait_minutes": 120
-  }
+  },
+  "manager_updates": true
 }

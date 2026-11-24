@@ -179,6 +179,43 @@ try {
   expect(composeMessage('Owner', [{ text: 'Hi', at: first.at, queued: false }]) === 'Message from Owner:\nHi', 'a message sent to a free manager changed its form');
   removePending(first.id);
   removePending(second.id);
+
+  // The manager's news: events gathered and handed over as one system message, marked as not the owner's; into the
+  // queue while the manager answers (still made up: nothing runs), joined to news already waiting; the settings pick
+  // the events. Never delivered for real.
+  const news = await import(pathToFileURL(path.join(root, 'src', 'news.mjs')).href);
+  const { editPending } = await import(pathToFileURL(path.join(root, 'src', 'manager.mjs')).href);
+  const picked = news.newsSettings({ manager_updates: ['run_failed', 'nonsense'] });
+  expect(news.newsSettings({}).events.size === news.NEWS_EVENTS.length && !news.newsSettings({ manager_updates: false }).enabled && !news.newsSettings({ manager_updates: { enabled: false } }).enabled, '"manager_updates" does not default to every event, or false does not turn the news off');
+  expect(picked.enabled && picked.events.size === 1 && picked.events.has('run_failed'), `a list in "manager_updates" did not pick its events: ${[...picked.events]}`);
+  const only = { manager_updates: ['run_failed', 'pr_ready'] };
+  expect(news.reportEvent('run_paused', 'Paused', { config: only }) === null, 'an event left out by the settings was kept');
+  news.reportEvent('run_failed', 'Run a failed', { config: only });
+  news.reportEvent('pr_ready', 'Run b has a pull request', { config: only });
+  const item = await news.flushNews();
+  expect(item?.from === 'chiefmate' && item.queued && item.events.map(e => e.kind).join() === 'run_failed,pr_ready', `the events were not handed over together, in the queue of a busy manager: ${JSON.stringify(item)}`);
+  news.reportEvent('run_failed', 'Run c failed', { config: only });
+  const joined = await news.flushNews();
+  expect(joined?.id === item.id && joined.events.length === 3 && (await news.flushNews()) === null, 'news for a manager still busy was not joined to the news already in the queue');
+  const told = composeMessage('Owner', [joined]);
+  expect(told.startsWith('[System message from Chiefmate, not from Owner]') && told.includes('pr_ready: Run b has a pull request') && !told.includes('Message from Owner'), `the news is not marked as a system message, apart from the owner's: ${told}`);
+  const both = composeMessage('Owner', [{ text: 'Hi', at: first.at, queued: false }, joined]);
+  expect(both.startsWith('Message from Owner:\nHi') && both.includes("Answer Owner's message(s)"), "the news did not go along with the owner's message");
+  let locked = false;
+  try {
+    editPending(joined.id, 'Changed');
+  } catch {
+    locked = true;
+  }
+  expect(locked, "Chiefmate's news could be edited as if the owner had written it");
+  removePending(joined.id);
+  const { watchEnded } = await import(pathToFileURL(path.join(root, 'src', 'sessions.mjs')).href);
+  watchEnded([{ id: 's1', status: 'open' }, { id: 's2', status: 'open' }]);
+  const ended = watchEnded([{ id: 's1', status: 'ended', name: 'X', tool: 'claude' }, { id: 's2', status: 'ended', endedBy: 'owner' }]);
+  expect(ended.map(s => s.id).join() === 's1', 'a live session that ended was not noticed, or one ended by the owner was');
+  const left = await news.flushNews(); // the installation's own settings decide whether that one was kept
+  if (left) removePending(left.id);
+
   Object.assign(chat, { responding: false, interrupting: false, cancel: null });
   expect(!managerBusy(), 'the queue did not empty');
 } catch (error) {

@@ -3,6 +3,7 @@
 import { loadConfig, saveConfig } from './config.mjs';
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
 import { computer, formatBytes, freeShare, processes } from './machine.mjs';
+import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { readState, readUsage, saveState } from './store.mjs';
 import { readerSettings, readerStatus, readWhenDue } from './usagepage.mjs';
@@ -128,13 +129,13 @@ async function watch() {
     const step = USAGE_STEPS.find(s => w.used >= s);
     if (!step) continue;
     const keys = USAGE_STEPS.filter(s => s <= step).map(s => `usage:${key}:${w.resets}:${s}`);
-    if (keys.map(fresh)[0]) send.push({ title: t('Account usage at {percent}', { percent: formatPercent(w.used) }), text: usageText(name(), w), target: 'chiefmate:usage' });
+    if (keys.map(fresh)[0]) send.push({ title: t('Account usage at {percent}', { percent: formatPercent(w.used) }), text: usageText(name(), w), target: 'chiefmate:usage', event: 'usage_alert' });
   }
 
   const available = availableResets(config);
   const week = usage.seven_day;
   if (available.length && current(week) && week.used >= 0.9 && fresh(`reset-suggest:${week.resets}`)) {
-    send.push({ title: t('Free reset available'), text: suggestText(week, available[0]), target: 'chiefmate:usage' });
+    send.push({ title: t('Free reset available'), text: suggestText(week, available[0]), target: 'chiefmate:usage', event: 'usage_alert' });
   }
   for (const g of available.filter(x => x.expires)) {
     const left = Date.parse(g.expires) - Date.now();
@@ -142,7 +143,7 @@ async function watch() {
     const step = left <= DAY ? '1d' : left <= 3 * DAY ? '3d' : null;
     if (!step) continue;
     const keys = step === '1d' ? [`${id}:1d`, `${id}:3d`] : [`${id}:3d`];
-    if (keys.map(fresh)[0]) send.push({ title: t('Free reset expiring'), text: expiryText(g), target: 'chiefmate:usage' });
+    if (keys.map(fresh)[0]) send.push({ title: t('Free reset expiring'), text: expiryText(g), target: 'chiefmate:usage', event: 'usage_alert' });
   }
 
   for (const [key, at] of Object.entries(a.sent)) if (Date.now() - Date.parse(at) > 30 * DAY) delete a.sent[key];
@@ -151,9 +152,13 @@ async function watch() {
 
   if (lowMemory) {
     await processes(60_000).catch(() => {});
-    send.unshift({ title: t('Low memory on this computer'), text: ramText(computer(config)), target: 'chiefmate:projects' });
+    send.unshift({ title: t('Low memory on this computer'), text: ramText(computer(config)), target: 'chiefmate:projects', event: 'memory_alert' });
   }
-  for (const n of send) notify(n.title, n.text, n.target);
+  for (const n of send) {
+    notify(n.title, n.text, n.target);
+    // The manager gets the alert as the owner does (in the owner's language): it only warns, nothing pauses.
+    reportEvent(n.event, `Alert sent to the owner: ${n.title}. ${n.text}`, { config });
+  }
 }
 
 export function startWatch() {

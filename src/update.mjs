@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { t } from './i18n.mjs';
+import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { now, ROOT } from './util.mjs';
 import { run } from './workspace.mjs';
@@ -27,22 +28,27 @@ async function check({ isBusy, beforeRestart }) {
     if (updateInfo.blocked !== 'changes') {
       updateInfo.blocked = 'changes';
       notify(t('Update waiting'), t("Chiefmate's files were changed by hand in this installation, so the new version was not installed."));
+      reportEvent('update_blocked', `An approved update of Chiefmate (${behind} change(s)) was not installed: Chiefmate's tracked files were changed by hand in this installation. Someone has to undo or commit those changes.`);
     }
     return;
   }
   const before = (await git('rev-parse', 'HEAD')).output.trim();
   if ((await git('merge', '--ff-only', `origin/${branch}`)).code !== 0) {
+    if (updateInfo.blocked !== 'merge') reportEvent('update_blocked', `An approved update of Chiefmate (${behind} change(s)) could not be installed: the installation's branch has commits of its own, so git could not fast-forward it.`);
     updateInfo.blocked = 'merge';
     return;
   }
   const checked = await run(process.execPath, [path.join('scripts', 'check.mjs')], ROOT, { maxMinutes: 5 });
   if (checked.code !== 0) {
     await git('reset', '--hard', before);
+    if (updateInfo.blocked !== 'checks') reportEvent('update_blocked', `An approved update of Chiefmate (${behind} change(s)) failed its checks (scripts/check.mjs), so Chiefmate stayed on the current version.`);
     updateInfo.blocked = 'checks';
     notify(t('Update not installed'), t('The new version failed its checks, so Chiefmate stayed on the current one.'));
     return;
   }
   notify(t('Chiefmate updated'), t('The improvements you approved are installed. Chiefmate restarts by itself.'));
+  const changes = (await git('log', '--format=%s', '--no-merges', `${before}..HEAD`)).output.trim().split(/\r?\n/).filter(Boolean).slice(0, 5);
+  reportEvent('update_installed', `Chiefmate installed an approved update (${behind} change(s)${changes.length ? `: ${changes.join('; ')}` : ''}) and restarts by itself.`);
   await restart(beforeRestart);
 }
 
