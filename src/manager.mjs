@@ -7,9 +7,10 @@ import { loadAgents, loadConfig, projectCrew } from './config.mjs';
 import { formatDateTime, formatDuration, formatNumber, formatPercent, t } from './i18n.mjs';
 import { processes } from './machine.mjs';
 import { computerLine, planLine } from './plan.mjs';
-import { focus, queued } from './queue.mjs';
-import { ALWAYS_DISALLOWED, live, prepareLibraries } from './runs.mjs';
+import { focus, maxParallel, queued } from './queue.mjs';
+import { ALWAYS_DISALLOWED, liveRuns, prepareLibraries } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
+import { sessionsLine } from './sessions.mjs';
 import { addMessage, listRuns, readPending, readState, readUsage, savePending, saveState, stepsOf } from './store.mjs';
 import { updateInfo } from './update.mjs';
 import { DATA, ensureDir, languageName, now, ROOT, VERSION } from './util.mjs';
@@ -48,14 +49,15 @@ async function chatLibraries(config) {
   return libraryCopies;
 }
 
-/** The project in focus, in one line: the run going on now, else the next one in the queue. */
+/** The projects in focus, in one line: the runs going on now (oldest first), else the next one in the queue. */
 function focusLine(config) {
   const f = focus(config);
   if (!f) return 'Focus: no project in focus (nothing running, queue empty).';
-  const what = `project ${f.project} (${f.projectName}), ${f.kind} "${f.title}" [${f.run}]`;
+  const describe = x => `project ${x.project} (${x.projectName}), ${x.kind} "${x.title}" [${x.run}]`;
+  const what = describe(f);
   if (f.state === 'running') {
-    const who = f.agent ? `${f.agent} at work (step ${f.step ?? '-'})` : 'preparing the working copy';
-    return `Focus: ${what}, ${who}, running for ${formatDuration(Date.now() - new Date(f.since).getTime())}.`;
+    const one = x => `${describe(x)}, ${x.agent ? `${x.agent} at work (step ${x.step ?? '-'})` : 'preparing the working copy'}, running for ${formatDuration(Date.now() - new Date(x.since).getTime())}`;
+    return `Focus: ${[f, ...f.others].map(one).join('; ')}.`;
   }
   const when = f.notBefore && new Date(f.notBefore).getTime() > Date.now() ? `, not before ${formatDateTime(f.notBefore)}` : '';
   return `Focus: nothing running; next in the queue is ${what}${f.agent ? `, starting with ${f.agent}` : ''}${when}.`;
@@ -70,13 +72,13 @@ function contextLine() {
   const mine = c?.used
     ? `this conversation fills ${share(c)}, ${c.compactions ?? 0} automatic compaction(s)`
     : m.handoff ? 'this conversation was just renewed, with your summary of the previous one' : 'this conversation is new';
-  let agent = '';
-  if (live.run && live.agent) {
-    agent = live.context?.used
-      ? `; ${live.agent} at work fills ${share(live.context)}, ${live.context.compactions ?? 0} compaction(s)`
-      : `; ${live.agent} at work: not measured yet`;
-  }
-  return `Context: ${mine}${agent}. Above ${formatPercent(RENEW_AT)}, Chiefmate renews this conversation with a short summary you write; below that, Claude Code compacts it on its own.`;
+  const agents = liveRuns()
+    .filter(l => l.agent)
+    .map(l => (l.context?.used
+      ? `; ${l.agent} at work on ${l.project} fills ${share(l.context)}, ${l.context.compactions ?? 0} compaction(s)`
+      : `; ${l.agent} at work on ${l.project}: not measured yet`))
+    .join('');
+  return `Context: ${mine}${agents}. Above ${formatPercent(RENEW_AT)}, Chiefmate renews this conversation with a short summary you write; below that, Claude Code compacts it on its own.`;
 }
 
 /** The conversation's context, for the app. */
@@ -95,7 +97,12 @@ export function situation(libraries = []) {
   const lines = [`Now: ${formatDateTime(new Date())} (${zone}). Reply in ${languageName(config.language || 'en')}.`];
   lines.push(`Chiefmate ${VERSION}${updateInfo.waiting ? `; an approved update with ${updateInfo.waiting} change(s) is waiting to be installed${updateInfo.blocked ? ` (blocked: ${updateInfo.blocked})` : ''}` : ''}.`);
   lines.push(focusLine(config));
-  lines.push(live.run ? `Running: ${live.title} (step ${live.step ?? '-'}: ${live.agent ?? 'preparing'}), run ${live.run}.` : 'Running: nothing.');
+  const going = liveRuns();
+  lines.push(
+    going.length
+      ? `Running (${going.length} of at most ${maxParallel(config)} at once, one per project): ${going.map(l => `${l.title} (project ${l.project}, step ${l.step ?? '-'}: ${l.agent ?? 'preparing'}), run ${l.run}`).join('; ')}.`
+      : `Running: nothing (up to ${maxParallel(config)} runs of different projects go on at once).`,
+  );
   const queue = queued();
   lines.push(
     queue.length
@@ -114,6 +121,7 @@ export function situation(libraries = []) {
   lines.push(`${config.owner}'s account: ${window(usage.five_hour, '5-hour window')}; ${window(usage.seven_day, 'plan week')}. Measured ${usage.updated ? formatDateTime(usage.updated) : 'never'}. Runs pause at ${formatPercent(limits.pause_at_5h_window)} of the 5-hour window and ${formatPercent(limits.pause_at_plan_week)} of the plan week.`);
   lines.push(planLine(config, usage));
   lines.push(computerLine(config));
+  lines.push(sessionsLine(config));
   lines.push(contextLine());
   const delivery = p => (p.deliver === 'local' ? `, local delivery: the result is a branch in ${p.local_clone ?? 'the working copy'}, nothing goes to GitHub` : ', delivered as a pull request');
   lines.push(`Projects: ${Object.entries(config.projects ?? {}).map(([id, p]) => `${id} (${p.name}, ${p.repository}${delivery(p)}${p.docs ? `, personal docs in ${p.docs}` : ''})`).join('; ') || 'none'}.`);

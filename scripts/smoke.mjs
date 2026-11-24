@@ -47,7 +47,7 @@ try {
     failures.push('the server did not start');
   } else {
     const state = await (await fetch(`${base}/api/state`)).json();
-    for (const key of ['now', 'version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'teams', 'needs', 'prompts', 'focus', 'current', 'queue', 'history', 'usage', 'manager', 'computer', 'plan', 'alerts']) {
+    for (const key of ['now', 'version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'teams', 'needs', 'prompts', 'focus', 'running', 'current', 'parallel', 'sessions', 'queue', 'history', 'usage', 'manager', 'computer', 'plan', 'alerts']) {
       expect(key in state, `/api/state has no "${key}"`);
     }
     // What the app shows live (the run going on, its clock, its last action, the queue's order) comes from these.
@@ -55,6 +55,8 @@ try {
     expect(Array.isArray(state.queue) && state.queue.every(r => Array.isArray(r.steps) && r.created), 'a run in the queue has no steps or creation date');
     const c = state.current;
     expect(c === null || (Array.isArray(c.actions) && Array.isArray(c.steps) && 'step' in c && 'agent' in c && 'stepStarted' in c), 'the run going on has no step, agent, clock or actions');
+    expect(Array.isArray(state.running) && state.parallel?.max >= 1, '/api/state has no list of the runs going on, or no limit of runs at once');
+    expect(Array.isArray(state.sessions?.profiles) && Array.isArray(state.sessions?.open) && Array.isArray(state.computer?.sessions), '/api/state has no live sessions');
     expect(state.crew?.some(a => a.id === 'manager'), 'the crew has no manager');
     const context = state.manager?.context;
     expect(typeof context?.renewAt === 'number' && typeof context.renewing === 'boolean', "/api/state has no context for the manager's conversation");
@@ -88,6 +90,9 @@ try {
     const removed = await post('/api/manager/remove', { id: 'smoke1' });
     expect(removed.ok && (await removed.json()).pending?.length === 0, 'a message was not taken out of the queue');
     expect((await post('/api/manager/remove', { id: 'smoke1' })).status === 404, 'removing a message twice did not answer 404');
+    // Live sessions: an unknown profile or session is refused, and nothing opens.
+    expect((await post('/api/session', { profile: 'no-such-profile' })).status === 400, 'opening a session of an unknown profile was not refused');
+    expect((await post('/api/session/end', { id: 'no-such-session' })).status === 400, 'ending a session that does not exist was not refused');
     const interrupt = await post('/api/manager/interrupt', {});
     expect(interrupt.ok && (await interrupt.json()).interrupted === false, 'interrupting a manager that is not answering did something');
   }
@@ -125,7 +130,19 @@ try {
   const { projectCrew } = await import(src('config.mjs'));
   const { stepAccess, stepMcp } = await import(src('access.mjs'));
   const { claudeArgs } = await import(src('claude.mjs'));
-  const { assemble, parseBlocks } = await import(src('prompts.mjs'));
+  const { assemble, assembleBlocks, parseBlocks } = await import(src('prompts.mjs'));
+  const { pickNext } = await import(src('queue.mjs'));
+  const { planSession, sessionArgs, sessionIdOf } = await import(src('sessions.mjs'));
+
+  // The queue: runs of different projects at once, up to the limit; one per project, in order; not before their time.
+  const later = new Date(Date.now() + 3600_000).toISOString();
+  const waiting = [
+    { id: 'a1', project: 'a' }, { id: 'a2', project: 'a' }, { id: 'b1', project: 'b', notBefore: later }, { id: 'b2', project: 'b' },
+    { id: 'c1', project: 'c' }, { id: 'd1', project: 'd' },
+  ];
+  expect(pickNext(waiting, [], 3).map(r => r.id).join() === 'a1,b2,c1', `the queue picked the wrong runs to go on at once: ${pickNext(waiting, [], 3).map(r => r.id).join()}`);
+  expect(pickNext(waiting, ['a', 'c'], 5).map(r => r.id).join() === 'b2,d1', "the queue started a second run of a project that has one going on");
+  expect(pickNext(waiting, [], 0).length === 0, 'the queue went past the limit of runs at once');
 
   const agents = {
     manager: { id: 'manager', name: 'Chiefmate', instructions: 'm' },
@@ -182,6 +199,37 @@ try {
   expect(built.blocks.join() === 'Office,Sample project,Board,Code rules,Browser access,Confirmation', `the prompt builder chose the wrong blocks: ${built.blocks.join()}`);
   expect(built.text.includes('## Sample project') && built.text.includes('Work on SAMPLE.') && built.text.includes('Work from the office.'), "the prompt builder's variables or headings are wrong");
   expect(built.adaptations.length === 1 && built.text.includes('Never push without review.'), "the prompt builder's adaptation to the crew's rules is wrong");
+
+  // A live session: the blocks its profile names, by name in any section, with what they bring; nothing adapted.
+  const session = assembleBlocks(parseBlocks(doc), ['Sample project', 'Office', 'Nowhere']);
+  expect(session.blocks.join() === 'Office,Sample project,Code rules,Browser access', `a session got the wrong blocks: ${session.blocks.join()}`);
+  expect(session.text.includes('Work on SAMPLE. When you finish, push to GitHub.') && !session.adaptations.length && session.missing.join() === 'block: Nowhere', "a session's blocks were adapted, or a missing block was not reported");
+  const sessionTemp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-session-'));
+  try {
+    const builder = path.join(sessionTemp, 'builder.md');
+    writeFileSync(builder, doc);
+    const sessionConfig = {
+      owner: 'Owner', language: 'en', projects: {}, prompt_builder: { file: builder },
+      sessions: { review: { name: 'Review', tool: 'claude', cwd: sessionTemp, prompt_blocks: ['Sample project'], model: 'some-model' } },
+    };
+    const plan = planSession(sessionConfig, 'review');
+    expect(plan.folder.dir === path.resolve(sessionTemp) && plan.prompt.text.includes('Work on SAMPLE.') && plan.prompt.text.startsWith('# Review'), "a session's folder or first message is wrong");
+    const claude = sessionArgs({ tool: 'claude', cwd: sessionTemp, model: 'some-model' }, sessionConfig, 'Hello');
+    expect(claude.at(-1) === 'Hello' && claude[claude.indexOf('--setting-sources') + 1] === 'project,local' && claude.includes('--strict-mcp-config'), "a Claude Code session would load the user's own configuration, or lose its first message");
+    expect(JSON.parse(claude[claude.indexOf('--settings') + 1]).claudeMdExcludes?.includes(userFolder), "a Claude Code session would read the user's ~/.claude/CLAUDE.md");
+    const codex = sessionArgs({ tool: 'codex', cwd: sessionTemp, model: null }, sessionConfig, 'Hello');
+    expect(codex.join() === `-C,${sessionTemp},Hello`, `a Codex session's command line is wrong: ${codex.join(' ')}`);
+    let refused = false;
+    try {
+      planSession({ ...sessionConfig, sessions: { x: { tool: 'other', cwd: sessionTemp } } }, 'x');
+    } catch {
+      refused = true;
+    }
+    expect(refused, 'a session with an unknown tool was not refused');
+    expect(sessionIdOf('"C:\\nodejs\\node.exe" "C:\\chiefmate\\src\\cli.mjs" session-run 2026-01-02-0900-review') === '2026-01-02-0900-review' && sessionIdOf('node src/cli.mjs server') === null, "a session's window process is not recognized");
+  } finally {
+    rmSync(sessionTemp, { recursive: true, force: true });
+  }
 } catch (error) {
   failures.push(`unit checks: ${error.message}`);
 }

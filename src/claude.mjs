@@ -9,7 +9,7 @@ import { recordUsage } from './store.mjs';
 import { clip, now } from './util.mjs';
 
 /** The Claude Code executable: CHIEFMATE_CLAUDE, the one from the official installer, or whatever is on the PATH. */
-function executable() {
+export function executable() {
   if (process.env.CHIEFMATE_CLAUDE) return process.env.CHIEFMATE_CLAUDE;
   const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
   const installed = path.join(home, '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude');
@@ -20,7 +20,7 @@ function executable() {
  * The agent's environment: this computer's, minus the variables of any Claude session that started Chiefmate
  * (with them, Claude Code thinks it is running inside another session).
  */
-function environment(extra = {}) {
+export function environment(extra = {}) {
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (/^CLAUDE/i.test(key)) delete env[key];
   env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1';
