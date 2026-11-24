@@ -36,6 +36,7 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
 - **One-off tasks** for any agent, at any time.
 - **A queue that runs one run per project at a time**, with runs of different projects going on side by side (three at most by default), so agents never set off other agents.
 - **Live sessions** with Claude Code or Codex, opened from the app or the command line, each in its own window and folder, started with the blocks of the prompt builder you choose (see "Live sessions" below).
+- **A prompt builder screen** for your document of blocks: choose the blocks, edit the prompt, then open a live session with it, send it with a task or copy it (see "The prompt builder in the app" below).
 - **It improves itself.** Chiefmate can be one of its own projects: the crew proposes improvements in pull requests and, when you merge one, your installation updates itself.
 - **English and Brazilian Portuguese.**
 
@@ -134,30 +135,57 @@ If you keep your project instructions in a document of blocks, Chiefmate can put
 ```markdown
 # Projects
 // selection: one
+// label: Project
+// DOCS = folder Docs{CODE}
 ## My project
 // tags: code
-// access: browser
-CODE = MYPROJ
-Work on {CODE}, following its documentation.
+// CODE = MYPROJ
+Work on {CODE}, following its documentation ({DOCS}).
 
 # Modules
 // selection: several
 ## Board
+// access: Trello
 Update the card on the board when you finish.
+## Start the system
+// requires: code
+Start it in development mode.
 
 # Rules
 // selection: automatic
 ## Code rules
-// tags: code
+// include with: code
 Keep the existing comments.
+## Browser sign-in
+// include with: access
+Open the browser and wait for me to sign in ({ACCESS}).
+
+# Ready choices
+// selection: combinations
+My project with the board = My project + Board + Start the system
 ```
 
-- A first-level heading opens a section and a second-level heading a block. Lines starting with `//` set options: `selection` (`one`, `several` or `automatic`; in Portuguese `seleção: uma | várias | automática`), `tags`, `access` (`acessos`), `requires` (`requer`: blocks it brings along) and `include with` (`incluir com`). `NAME = value` sets a variable, and `{NAME}` in the text takes its value.
-- A step gets the project's block (`projects.<id>.prompt_block`), the environment (`prompt_builder.environment`), the optional modules (`projects.<id>.prompt_modules`, or `--modules A,B` on a task) and the automatic blocks that match their tags, accesses or names, each under a `## <block>` heading.
+- A first-level heading opens a section and a second-level heading a block; the document's order is the prompt's order. Lines starting with `//` set options (each also in Portuguese):
+  - on a section: `selection` (`seleção`): `one` (`uma`), `several` (`várias`), `automatic` (`automática`), `combinations` (`combinações`: ready choices, one per line, `Name = Block + Block`) or `ignore` (`ignorar`); `label` (`rótulo`): the prefix of its blocks' headings, as in `## Project: My project`.
+  - on a block: `tags`; `access` (`acessos`): services it needs signed in, joined into `{ACCESS}` (`{ACESSOS}`); `requires` (`requer`): the block can only be chosen when these blocks or tags are chosen; `include with` (`incluir com`): when an automatic block comes in.
+  - In `requires` and `include with`, a comma asks for every item and a vertical bar for any of them (`home | work`); `always` (`sempre`) holds for any choice and `access` (`acessos`) when a chosen block needs a sign-in. An automatic block without `include with` comes in when it shares a tag or an access with the blocks chosen, or always when it has neither.
+  - `NAME = value` sets a variable (on a section, it serves all its blocks), and `{NAME}` in the text takes its value. A value can hold other variables, of the block, its section or the other blocks chosen; a variable left with no value stays as `{NAME}` and is reported (in the step's context, in a session's dry run and in the app's prompt builder).
+- A step gets the project's block (`projects.<id>.prompt_block`), the environment (`prompt_builder.environment`), the optional modules (`projects.<id>.prompt_modules`, or `--modules A,B` on a task) and the automatic blocks their choice brings, each under its heading. A requirement not met is reported in the step's context.
 - Blocks that need you live (a browser, a board, a confirmation) are kept: the agent asks for you with `needs-you`. A sentence that conflicts with the crew's rules (pushing, other branches, pull requests) is replaced by a note saying Chiefmate's rules prevail, and the adaptation is recorded in the step's context.
 - Without the file, the project's `notes` are used as before.
 
-To copy the document from Google Docs, set `prompt_builder.doc_id` and `browser_cdp`, install the optional `playwright-core` (`npm install --no-save playwright-core` in the Chiefmate folder) and run `node src/cli.mjs prompts-sync`, or use the button in the Crew section. Chiefmate borrows your browser's session to download the document's Markdown export: it never changes the document and never touches your tabs.
+To copy the document from Google Docs, set `prompt_builder.doc_id` and `browser_cdp`, install the optional `playwright-core` (`npm install --no-save playwright-core` in the Chiefmate folder) and run `node src/cli.mjs prompts-sync`, or use the button in the Crew section or **Reload document** in the prompt builder screen. Chiefmate borrows your browser's session to download the document's Markdown export: it never changes the document and never touches your tabs.
+
+### The prompt builder in the app
+
+**Builder** in the menu (`#builder`), or **Prompt builder** on a project's page (`#builder/<id>`, with that project chosen), works with the whole document as you would by hand:
+
+- The ready combinations are buttons at the top (on a project's screen, the ones with its block; **All** shows the others). Each section lists its blocks: one per section for `one`, any number for `several`. A block whose `requires` is not met can't be marked. The automatic blocks come in by themselves, marked "automatic", and can be turned off or marked by hand.
+- The final prompt is shown as it is put together, variables filled in (the ones without a value are pointed out), and can be edited before it goes anywhere. Changing the blocks writes it again.
+- **Open live session** opens Claude Code or Codex in your clone of the project (with the project's profile for that tool), with this prompt as the first message, as it is.
+- **Send as a task** queues a task for a member of the project's crew, with the manager's review if you want it. The steps get this prompt as the project's instructions, instead of the one put together from the document (lines that conflict with the crew's rules are still adapted). The instruction is optional: without one, the agent does what the prompt asks.
+- **Copy** puts it on the clipboard, and **Reload document** copies the document from Google Docs again (when `doc_id` and `browser_cdp` are set) or reads the copy on this computer again.
+- The last choice made for each project is remembered (`data/prompt-builder-choices.json`); the first time, the screen starts with the project's block, the environment and its modules. The screen shows the copy's date, and warns when it is more than 7 days old.
 
 ## Project pages
 
@@ -172,6 +200,7 @@ Each project has a page of its own in the app (`#project/<id>`): pick it in the 
 
 And these buttons:
 
+- **Prompt builder** opens the prompt builder screen with the project chosen (when `prompt_builder` is set).
 - **New task** goes to the form at the bottom: a member of the project's crew (or, when the project has a team lead, a request for the lead to plan), the instruction and whether the manager reviews it.
 - **Live session: Claude Code** and **Live session: Codex** open a session in your clone of the project. They use the project's own profile for that tool when `sessions` has one; otherwise an automatic profile (`project-<id>-claude`, `project-<id>-codex`), never written to the settings, whose first message has the project's sentence `about` it, its block of the prompt builder (`prompt_block`) and the environment (`prompt_builder.environment`), when there is a copy of the prompt builder. A Claude Code session uses `default_model`.
 - **Open folder** opens your clone in File Explorer, and **Open in VS Code** in VS Code (shown when the `code` command is found).
@@ -204,7 +233,7 @@ Besides the work the crew does in the background, you can open a conversation wi
 
 - `tool`: `claude` (Claude Code) or `codex` (Codex CLI).
 - Where it opens: `cwd` when you give it; for a `project`, your own clone of it (`local_clone`, or `Documents/GitHub/<repository name>`), never the crew's working copy, which is reset before every run; for a `library_folder` (`<library>/<folder>`), that folder in your own clone of the library or, failing that, in Chiefmate's read-only copy (anything changed there is lost, and the first message says so).
-- `prompt_blocks`: blocks of the prompt builder, by name, in any section. They are put together as for a step: the automatic and required blocks they bring come along and the variables are filled in. Nothing is adapted to the crew's rules: you are there. Without `prompt_blocks`, the session starts with no first message.
+- `prompt_blocks`: blocks of the prompt builder, by name, in any section. They are put together as for a step: the automatic blocks they bring come along and the variables are filled in. Nothing is adapted to the crew's rules: you are there. Without `prompt_blocks`, the session starts with no first message.
 - `model`: optional.
 - Each project also gets an automatic profile per tool it has no profile of, opened from its page (see "Project pages"). Operations lists only the profiles in your settings.
 
@@ -441,7 +470,7 @@ English is the source. The app, the notifications and the reports follow `langua
 | `agents/` | The crew, one file per agent |
 | `config/` | `example.json`, and your `chiefmate.json` (not in git) |
 | `scripts/` | Installation on Windows, launchers and checks |
-| `data/` (not in git) | Runs, each step's log and context, the live sessions' first messages and records, the planning board (`plan.json`), the team leads' project memories (`projects/<id>/memory.md`), the conversation with the manager, your account's usage, the schedule's and the alerts' state and, if you use the claude.ai reading, its browser profile |
+| `data/` (not in git) | Runs, each step's log and context, the live sessions' first messages and records, the prompt builder's last choice per project, the planning board (`plan.json`), the team leads' project memories (`projects/<id>/memory.md`), the conversation with the manager, your account's usage, the schedule's and the alerts' state and, if you use the claude.ai reading, its browser profile |
 | `workspaces/` (not in git) | The projects' working copies |
 
 Chiefmate has no dependencies besides Node.js. It drives Claude Code (`claude -p`), which uses your account's login and plan. The only optional one is `playwright-core`, for copying the prompt builder from Google Docs (and, if present, for the browser that opens for sign-ins): Chiefmate loads it only when needed and says how to install it when it is missing.
