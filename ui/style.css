@@ -173,7 +173,19 @@ textarea { resize: vertical; min-height: 64px; }
 .msg-body ul, .msg-body ol { margin: 4px 0 8px; padding-left: 20px; }
 .msg-body h4 { margin: 10px 0 4px; font-size: 13px; color: var(--strong); }
 .msg.error .msg-body { color: var(--error); }
-.typing .manager-actions { margin-top: 8px; font: 11.5px/1.6 var(--mono); color: var(--faint); }
+.typing .live-last { margin-top: 10px; }
+.msg-head .tag { margin: 0; }
+.chat-queue { max-height: 32vh; overflow-y: auto; border-top: 1px solid var(--line); background: var(--raised); }
+.chat-queue[hidden] { display: none; }
+.chat-queue-head { display: flex; gap: 10px; align-items: baseline; padding: 8px 18px 0; }
+.chat-queue-head .label { margin: 0; }
+.queued-msg { padding: 8px 18px 10px; border-bottom: 1px solid var(--line); border-left: 2px solid rgba(201, 164, 93, 0.5); }
+.queued-msg:last-child { border-bottom: 0; }
+.queued-msg .msg-body { color: var(--muted); }
+.queued-msg textarea { margin: 0 0 8px; background: var(--bg); }
+.queued-actions { display: flex; gap: 6px; margin-left: auto; }
+.compose-buttons { display: flex; gap: 8px; flex: none; }
+.compose-buttons .button[hidden] { display: none; }
 .compose { border-top: 1px solid var(--line); padding: 12px; background: var(--panel); }
 .compose textarea { margin: 0; background: var(--bg); }
 .compose-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 10px; }

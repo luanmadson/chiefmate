@@ -44,11 +44,15 @@
         <div class="manager-grid">
           <div class="chat-column">
             <div id="chat" class="chat" aria-live="polite"></div>
+            <div id="chat-queue" class="chat-queue" hidden></div>
             <form id="manager-form" class="compose">
               <textarea id="message" rows="3" placeholder="Write to the manager. Enter sends; Shift+Enter starts a new line." data-t-placeholder="Write to the manager. Enter sends; Shift+Enter starts a new line."></textarea>
               <div class="compose-footer">
                 <div id="suggestions" class="suggestions"></div>
-                <button type="submit" class="button" id="send" data-t="Send">Send</button>
+                <div class="compose-buttons">
+                  <button type="button" class="button danger" id="interrupt" data-t="Interrupt" hidden>Interrupt</button>
+                  <button type="submit" class="button" id="send" data-t="Send">Send</button>
+                </div>
               </div>
             </form>
           </div>

@@ -7,6 +7,7 @@ ensureDir(RUNS);
 const USAGE_FILE = path.join(DATA, 'usage.json');
 const STATE_FILE = path.join(DATA, 'state.json');
 const CONVERSATION_FILE = path.join(DATA, 'manager', 'conversation.json');
+const PENDING_FILE = path.join(DATA, 'manager', 'pending.json');
 const NOTIFICATIONS_FILE = path.join(DATA, 'notifications.json');
 
 // ---------- Runs (missions and tasks) ----------
@@ -64,6 +65,10 @@ export function addMessage(who, text, extra = {}) {
   conversation.push({ who, text, at: now(), ...extra });
   writeJson(CONVERSATION_FILE, conversation.slice(-400));
 }
+
+/** The messages waiting for the manager to finish its answer: [{ id, text, at, queued, edited }], oldest first. */
+export const readPending = () => readJson(PENDING_FILE, []);
+export const savePending = list => writeJson(PENDING_FILE, list);
 
 // ---------- Notifications sent to Windows ----------
 

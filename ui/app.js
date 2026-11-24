@@ -453,20 +453,62 @@ function drawChat() {
       continue;
     }
     const you = m.who === 'you';
-    const meta = [clockTime(m.at), m.model ? shortModel(m.model) : ''].filter(Boolean).join(' · ');
-    html += `<div class="msg ${you ? 'you' : 'manager'}${m.error ? ' error' : ''}"><div class="msg-head">${you ? '' : face(manager, m.error ? 'failed' : 'still', 20)}<span class="msg-author">${esc(you ? t('You') : t(manager.name))}</span><span class="msg-meta">${esc(meta)}</span></div><div class="msg-body">${md(m.text)}</div></div>`;
+    const meta = [
+      clockTime(m.at),
+      m.queued ? t('delivered {time}', { time: clockTime(m.delivered) }) : '',
+      m.edited ? t('edited') : '',
+      m.model ? shortModel(m.model) : '',
+    ].filter(Boolean).join(' · ');
+    const tag = m.interrupted ? `<span class="tag">${esc(t('interrupted'))}</span>` : '';
+    html += `<div class="msg ${you ? 'you' : 'manager'}${m.error ? ' error' : ''}"><div class="msg-head">${you ? '' : face(manager, m.error ? 'failed' : 'still', 20)}<span class="msg-author">${esc(you ? t('You') : t(manager.name))}</span><span class="msg-meta">${esc(meta)}</span>${tag}</div><div class="msg-body">${md(m.text)}</div></div>`;
   }
   const renewing = !!g.context?.renewing;
   if (g.responding) {
     const waiting = renewing ? t('Writing a short summary to renew the conversation…') : t('Looking at the situation…');
-    html += `<div class="msg manager typing"><div class="msg-head">${face(manager, 'thinking', 20)}<span class="msg-author">${esc(t(manager.name))}</span><span class="msg-meta">${esc(renewing ? t('renewing the conversation…') : t('answering…'))}</span></div><div class="msg-body">${g.partial && !renewing ? md(g.partial) : `<span class="hint">${esc(waiting)}</span>`}</div>${g.actions.length ? `<div class="manager-actions">${g.actions.slice(-4).map(esc).join('<br>')}</div>` : ''}</div>`;
+    const doing = g.interrupting ? t('interrupting…') : renewing ? t('renewing the conversation…') : t('answering…');
+    html += `<div class="msg manager typing"><div class="msg-head">${face(manager, 'thinking', 20)}<span class="msg-author">${esc(t(manager.name))}</span><span class="msg-meta">${esc(doing)}${g.since ? ` · ${ticking(g.since)}` : ''}</span></div><div class="msg-body">${g.partial && !renewing ? md(g.partial) : `<span class="hint">${esc(waiting)}</span>`}</div><div class="live-last" id="manager-last"></div></div>`;
   }
-  const signature = JSON.stringify([g.messages.length, g.messages.at(-1)?.at, g.responding, renewing, g.partial, g.actions.length]);
-  if (draw('#chat', signature, html) && (atBottom || !chatScrolled)) {
-    box.scrollTop = box.scrollHeight;
-    chatScrolled = true;
+  const signature = JSON.stringify([g.messages.length, g.messages.at(-1)?.at, g.responding, renewing, g.interrupting, g.since, g.partial]);
+  if (draw('#chat', signature, html)) {
+    delete signatures['#manager-last'];
+    if (atBottom || !chatScrolled) {
+      box.scrollTop = box.scrollHeight;
+      chatScrolled = true;
+    }
   }
-  $('#send').disabled = g.responding || !online;
+  // What the manager is doing now, redrawn alone, like the last action of the crew at work.
+  if (g.responding) draw('#manager-last', JSON.stringify([g.lastAction?.at, g.lastAction?.text]), managerLastAction(g));
+  drawChatQueue();
+  $('#send').disabled = !online;
+  $('#send').textContent = g.responding || g.pending?.length ? t('Add to the queue') : t('Send');
+  $('#interrupt').hidden = !online || !g.responding;
+  $('#interrupt').disabled = !!g.interrupting;
+}
+
+function managerLastAction(g) {
+  const p = g.lastAction;
+  const text = p ? p.text : t('No action yet: reading your message and the situation.');
+  return `<span class="label">${esc(t('Last action'))}</span><time>${p ? clockTime(p.at) : ''}</time><span class="text" title="${esc(text)}">${esc(text)}</span>`;
+}
+
+// The messages waiting for the manager. While you edit one, the list is not redrawn under you.
+let editingPending = null;
+function drawChatQueue() {
+  const g = state.manager;
+  const list = g.pending ?? [];
+  if (editingPending) {
+    if (list.some(m => m.id === editingPending)) return;
+    editingPending = null;
+    toast(t('The message you were editing is no longer in the queue: it was delivered or removed.'));
+  }
+  $('#chat-queue').hidden = !list.length;
+  const head = `<div class="chat-queue-head"><span class="label">${esc(t('In the queue'))}</span><span class="hint">${esc(g.responding ? t('They go together, in order, when the manager finishes this answer.') : t('Being delivered…'))}</span></div>`;
+  const items = list.map(m => `<div class="queued-msg" data-pending="${esc(m.id)}">
+      <div class="msg-head"><span class="tag">${esc(t('queued'))}</span><span class="msg-meta">${esc([clockTime(m.at), m.edited ? t('edited') : ''].filter(Boolean).join(' · '))}</span>
+        <span class="queued-actions"><button type="button" class="button secondary small" data-pending-edit="${esc(m.id)}">${esc(t('Edit'))}</button><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
+      <div class="msg-body">${md(m.text)}</div>
+    </div>`);
+  draw('#chat-queue', JSON.stringify([list, g.responding, language()]), list.length ? head + items.join('') : '');
 }
 
 function drawSuggestions() {
@@ -948,6 +990,7 @@ function drawOffline() {
     drawBridge();
     drawOperations();
     $('#send').disabled = true;
+    $('#interrupt').hidden = true;
   }
 }
 
@@ -999,13 +1042,67 @@ async function sendMessage(text) {
   const message = text.trim();
   if (!message) return;
   try {
-    await api('/api/manager', { message });
+    const sent = await api('/api/manager', { message });
     $('#message').value = '';
+    if (sent.queued) toast(t('In the queue: it goes when the manager finishes this answer.'));
     setTimeout(refresh, 300);
   } catch (error) {
     toast(error.message);
   }
 }
+
+$('#interrupt').addEventListener('click', async () => {
+  const waiting = state?.manager.pending?.length ?? 0;
+  const text = `${t('The manager stops what it is doing now. The conversation goes on in the same session, and your next message tells it the answer was interrupted.')}${waiting ? ` ${t('The {count} message(s) in the queue go right after.', { count: waiting })}` : ''}`;
+  if (!(await confirmDialog(t('Interrupt the answer'), text, t('Interrupt')))) return;
+  try {
+    const r = await api('/api/manager/interrupt', {});
+    if (!r.interrupted) toast(t('The manager had already finished.'));
+  } catch (error) {
+    toast(error.message);
+  }
+  refresh();
+});
+
+// The queue: edit a message in place, or take it out.
+$('#chat-queue').addEventListener('click', async event => {
+  const button = event.target.closest('[data-pending-edit],[data-pending-remove],[data-pending-save],[data-pending-cancel]');
+  if (!button) return;
+  const { pendingEdit, pendingRemove, pendingSave } = button.dataset;
+  const stopEditing = () => {
+    editingPending = null;
+    delete signatures['#chat-queue'];
+    drawChatQueue();
+  };
+  try {
+    if (pendingEdit) {
+      if (editingPending) stopEditing();
+      const item = state.manager.pending.find(m => m.id === pendingEdit);
+      const box = $(`#chat-queue [data-pending="${CSS.escape(pendingEdit)}"]`);
+      if (!item || !box) return;
+      editingPending = pendingEdit;
+      box.querySelector('.msg-body').innerHTML = `<textarea rows="3"></textarea><div class="actions left"><button type="button" class="button small" data-pending-save="${esc(item.id)}">${esc(t('Save'))}</button><button type="button" class="button secondary small" data-pending-cancel>${esc(t('Cancel'))}</button></div>`;
+      const area = box.querySelector('textarea');
+      area.value = item.text;
+      area.focus();
+    } else if (pendingSave) {
+      const text = $(`#chat-queue [data-pending="${CSS.escape(pendingSave)}"] textarea`)?.value ?? '';
+      await api('/api/manager/edit', { id: pendingSave, message: text });
+      editingPending = null;
+      await refresh();
+    } else if (pendingRemove) {
+      if (editingPending === pendingRemove) editingPending = null;
+      await api('/api/manager/remove', { id: pendingRemove });
+      await refresh();
+    } else stopEditing();
+  } catch (error) {
+    toast(error.message);
+    if (pendingSave || pendingRemove) {
+      editingPending = null;
+      await refresh();
+    }
+  }
+});
 
 $('#manager-form').addEventListener('submit', event => {
   event.preventDefault();

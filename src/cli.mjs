@@ -32,6 +32,12 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs task <project> <agent> "<what to do>" [--review] [--modules A,B]
                                                 queues a one-off task; --review has the manager review it at the end;
                                                 --modules adds optional blocks of the prompt builder
+  node src/cli.mjs chat [n]                     the conversation with the manager: the last n messages (10), what it is
+                                                doing now and the messages waiting in the queue
+  node src/cli.mjs chat say "<message>"         writes to the manager; while it answers, the message waits in the queue
+                                                and goes with the others, in order, when the answer ends
+  node src/cli.mjs chat edit <id> "<message>"   changes a message still in the queue (chat remove <id> takes it out)
+  node src/cli.mjs chat interrupt               ends the current answer (the conversation goes on); the queue goes next
   node src/cli.mjs cancel <id>                  cancels a run
   node src/cli.mjs resume <id> [--ignore-limits]
                                                 resumes a paused, failed or canceled run
@@ -114,6 +120,46 @@ async function needsYou() {
   }
 }
 
+/** "chat": the conversation with the manager, through the running Chiefmate. */
+async function chatCommand() {
+  const [action, ...args] = rest;
+  const time = iso => (iso ? formatDateTime(iso) : '');
+  if (['say', 'edit', 'remove', 'interrupt'].includes(action) && process.env.CHIEFMATE_MANAGER) {
+    throw new Error("The manager can't write to its own conversation.");
+  }
+  switch (action) {
+    case 'say': {
+      const m = await api('/api/manager', { message: args.join(' ') });
+      console.log(m.queued ? `Queued (${m.position} waiting, id ${m.id}): it goes when the manager finishes its answer.` : 'Sent. The manager is answering: node src/cli.mjs chat');
+      return;
+    }
+    case 'edit':
+      await api('/api/manager/edit', { id: args[0], message: args.slice(1).join(' ') });
+      console.log(`Message ${args[0]} changed.`);
+      return;
+    case 'remove':
+      await api('/api/manager/remove', { id: args[0] });
+      console.log(`Message ${args[0]} taken out of the queue.`);
+      return;
+    case 'interrupt':
+      console.log((await api('/api/manager/interrupt', {})).interrupted ? 'Interrupted. The messages in the queue go next.' : 'The manager was not answering.');
+      return;
+    default: {
+      if (action && !/^\d+$/.test(action)) throw new Error('Use: chat [n] | say "<message>" | edit <id> "<message>" | remove <id> | interrupt');
+      const g = (await api('/api/state')).manager;
+      const who = { you: 'You', manager: 'Manager', system: 'Chiefmate' };
+      for (const m of g.messages.slice(-(Number(action) || 10))) {
+        const extra = [m.queued ? `delivered ${time(m.delivered)}` : '', m.interrupted ? 'interrupted' : ''].filter(Boolean).join(', ');
+        console.log(`[${time(m.at)}] ${who[m.who] ?? m.who}${extra ? ` (${extra})` : ''}:\n${m.text}\n`);
+      }
+      if (g.responding) {
+        console.log(`Now: ${g.context?.renewing ? 'renewing the conversation' : 'answering'} since ${time(g.since)}.${g.lastAction ? ` Last action, ${time(g.lastAction.at)}: ${g.lastAction.text}` : ''}`);
+      } else console.log('Now: waiting for you.');
+      for (const m of g.pending) console.log(`In the queue [${m.id}], sent ${time(m.at)}${m.edited ? ', edited' : ''}: ${m.text}`);
+    }
+  }
+}
+
 async function main() {
   switch (command) {
     case 'server': {
@@ -135,12 +181,13 @@ async function main() {
         const { startSchedule } = await import('./schedule.mjs');
         const { startUpdates } = await import('./update.mjs');
         const { live } = await import('./runs.mjs');
-        const { chat } = await import('./manager.mjs');
+        const { deliverPending, managerBusy } = await import('./manager.mjs');
         const { startWatch } = await import('./plan.mjs');
         startQueue();
         startSchedule();
         startWatch();
-        startUpdates({ isBusy: () => !!live.run || chat.responding, beforeRestart: () => new Promise(resolve => server.close(() => resolve())) });
+        startUpdates({ isBusy: () => !!live.run || managerBusy(), beforeRestart: () => new Promise(resolve => server.close(() => resolve())) });
+        deliverPending(); // messages left in the queue when Chiefmate stopped
       }
       console.log(`Chiefmate running at http://localhost:${p} (${new Date().toISOString()})`);
       return;
@@ -170,6 +217,9 @@ async function main() {
       console.log(`Queued: ${run.title} [${run.id}]`);
       return;
     }
+    case 'chat':
+      await chatCommand();
+      return;
     case 'cancel':
       console.log((await api('/api/cancel', { id: rest[0] })).status);
       return;

@@ -6,7 +6,7 @@ import { checkClaude, claudeInfo } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, saveConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { computer, processes, stoppable, stopProject } from './machine.mjs';
-import { chat, managerContext, newConversation, talkToManager } from './manager.mjs';
+import { chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
 import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { builderStatus } from './prompts.mjs';
@@ -14,7 +14,7 @@ import { isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, focus, nudgeQueue, queued, resume } from './queue.mjs';
 import { createRun, live } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
-import { addMessage, listRuns, readConversation, readNotifications, readRun, readUsage, runDir, stepsOf } from './store.mjs';
+import { listRuns, readConversation, readNotifications, readPending, readRun, readUsage, runDir, stepsOf } from './store.mjs';
 import { updateInfo } from './update.mjs';
 import { isReading, readerSettings, readerStatus, readUsagePage, signedIn } from './usagepage.mjs';
 import { now, ROOT, VERSION } from './util.mjs';
@@ -183,7 +183,8 @@ function buildState() {
     },
     alerts: alerts(config, usage, machine),
     manager: {
-      messages: conversation.slice(-80), responding: chat.responding, partial: chat.partial, actions: chat.actions.slice(-12), context: managerContext(),
+      messages: conversation.slice(-80), responding: chat.responding, interrupting: chat.interrupting, since: chat.since, partial: chat.partial,
+      actions: chat.actions.slice(-12), lastAction: chat.actions.at(-1) ?? null, pending: readPending(), context: managerContext(),
     },
     notifications: readNotifications().slice(-8).reverse(),
   };
@@ -256,14 +257,17 @@ export function startServer() {
           return reply(res, 200, { status: cancel(body.id) });
         case '/api/resume':
           return reply(res, 200, { status: resume(body.id, !!body.ignoreLimits) });
-        case '/api/manager': {
-          const message = String(body.message ?? '').trim();
-          if (!message) return reply(res, 400, { error: t('Write a message.') });
-          if (chat.renewing) return reply(res, 409, { error: t('The manager is renewing the conversation. Try again in a moment.') });
-          if (chat.responding) return reply(res, 409, { error: t('The manager is still answering.') });
-          talkToManager(message).catch(error => addMessage('manager', t("I couldn't answer: {error}", { error: error.message }), { error: error.message }));
-          return reply(res, 202, { ok: true });
+        case '/api/manager':
+          // Accepted at any time: while the manager answers, the message waits in the queue.
+          return reply(res, 202, { ok: true, ...sendToManager(body.message) });
+        case '/api/manager/edit':
+        case '/api/manager/remove': {
+          const id = String(body.id ?? '');
+          const pending = url.pathname.endsWith('/edit') ? editPending(id, body.message) : removePending(id);
+          return pending ? reply(res, 200, { pending }) : reply(res, 404, { error: t('This message is no longer in the queue: it was delivered or removed.') });
         }
+        case '/api/manager/interrupt':
+          return reply(res, 200, { interrupted: interruptManager() });
         case '/api/new-conversation':
           newConversation();
           return reply(res, 200, { ok: true });

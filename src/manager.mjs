@@ -10,12 +10,15 @@ import { computerLine, planLine } from './plan.mjs';
 import { focus, queued } from './queue.mjs';
 import { ALWAYS_DISALLOWED, live, prepareLibraries } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
-import { addMessage, listRuns, readState, readUsage, saveState, stepsOf } from './store.mjs';
+import { addMessage, listRuns, readPending, readState, readUsage, savePending, saveState, stepsOf } from './store.mjs';
 import { updateInfo } from './update.mjs';
 import { DATA, ensureDir, languageName, now, ROOT, VERSION } from './util.mjs';
 
-/** What the app shows while the manager thinks (or writes the summary that renews the conversation). */
-export const chat = { responding: false, renewing: false, partial: '', actions: [], context: null };
+/**
+ * What the app shows while the manager thinks (or writes the summary that renews the conversation): since when, the
+ * text so far, its actions ({ at, text }) and how full the context is. "cancel" stops the answer going on.
+ */
+export const chat = { responding: false, renewing: false, interrupting: false, since: null, partial: '', actions: [], context: null, cancel: null };
 
 // Above this share of the context window, the conversation is renewed with a summary as soon as the manager is free.
 // Below it, Claude Code compacts the conversation on its own when it needs to.
@@ -128,61 +131,160 @@ export function situation(libraries = []) {
   return lines.join('\n');
 }
 
-export async function talkToManager(message) {
-  if (!message) throw new Error(t('Empty message.'));
-  if (chat.responding) throw new Error(t('The manager is still answering the previous message.'));
-  const config = loadConfig();
-  const manager = loadAgents(config).manager;
-  if (!manager) throw new Error(t('agents/manager.md is missing.'));
-  addMessage('you', message);
-  const state = readState();
-  state.manager ??= {};
-  Object.assign(chat, { responding: true, partial: '', actions: [], context: state.manager.context ?? null });
+// ---------- Messages: sent at any time, queued while the manager is busy ----------
 
-  const model = manager.model ?? config.default_model;
-  const libraries = await chatLibraries(config);
-  await processes(60_000).catch(() => {}); // the projects running on this computer, for the situation
-  const prompt = `<situation>\n${situation(libraries)}\n</situation>\n\nMessage from ${config.owner}:\n${message}`;
-  const attempt = session =>
-    runClaude({
-      dir: ROOT,
-      // A conversation renewed for its size starts with the summary of the previous one and the manager's notes.
-      prompt: !session.resume && state.manager.handoff ? `${handoff()}${prompt}` : prompt,
-      system: manager.instructions,
-      model,
-      effort: manager.chat_effort ?? manager.effort,
-      tools: manager.tools ?? [],
-      disallowed: CHAT_DISALLOWED,
-      addDirs: libraries.map(l => l.dir),
-      attribution: config.attribution !== false,
-      maxMinutes: 15,
-      session,
-      log: conversationLog(),
-      onEvent: event => {
-        if (event.type === 'say') chat.partial = event.text;
-        if (event.type === 'action') chat.actions.push(event.text);
-        if (event.type === 'context') chat.context = { ...chat.context, used: event.used, window: event.window };
-      },
-    }).promise;
+const MAX_PENDING = 50;
 
+/**
+ * Sends a message to the manager. When it is free, the message goes at once; while it answers (or renews the
+ * conversation), the message waits in the queue (data/manager/pending.json), where it can still be edited or removed,
+ * and the whole queue goes together, in order, as the next message. Returns the message, with "queued" and "position".
+ */
+export function sendToManager(text) {
+  const message = String(text ?? '').trim();
+  if (!message) throw new Error(t('Write a message.'));
+  const list = readPending();
+  if (list.length >= MAX_PENDING) throw new Error(t('The queue already has {count} messages. Wait for the manager, or remove some.', { count: list.length }));
+  const queued = chat.responding || list.length > 0;
+  const item = { id: randomUUID().slice(0, 8), text: message, at: now(), queued };
+  list.push(item);
+  savePending(list);
+  deliverPending();
+  return { ...item, position: queued ? list.length : 0 };
+}
+
+/** Changes a message still in the queue. Returns the queue, or null when the message is no longer there. */
+export function editPending(id, text) {
+  const message = String(text ?? '').trim();
+  if (!message) throw new Error(t('Write a message.'));
+  const list = readPending();
+  const item = list.find(m => m.id === id);
+  if (!item) return null;
+  Object.assign(item, { text: message, edited: now() });
+  savePending(list);
+  return list;
+}
+
+/** Takes a message out of the queue. Returns the queue, or null when the message is no longer there. */
+export function removePending(id) {
+  const list = readPending();
+  if (!list.some(m => m.id === id)) return null;
+  const rest = list.filter(m => m.id !== id);
+  savePending(rest);
+  return rest;
+}
+
+/** Whether the manager is answering, or has messages waiting (the self-update waits for both). */
+export const managerBusy = () => chat.responding || readPending().length > 0;
+
+/** When the manager is free, hands it the whole queue as one message. Returns whether an answer started. */
+export function deliverPending() {
+  if (chat.responding) return false;
+  const items = readPending();
+  if (!items.length) return false;
+  savePending([]);
+  answer(items).catch(error => addMessage('manager', t("I couldn't answer: {error}", { error: error.message }), { error: error.message }));
+  return true;
+}
+
+/**
+ * Ends the current answer (or the renewal) at once. The conversation goes on in the same session: the next message
+ * says it was interrupted, and the queue goes right after. Returns false when the manager was not answering.
+ */
+export function interruptManager() {
+  if (!chat.responding) return false;
+  chat.interrupting = true;
+  chat.cancel?.(t('interrupted by you'));
+  return true;
+}
+
+/** The text the manager receives: your message, or the queue in order with the time of each one. */
+export function composeMessage(owner, items, interrupted = null) {
+  const parts = [];
+  if (interrupted) {
+    parts.push(`${owner} interrupted your previous answer at ${formatDateTime(interrupted)}. What you were doing then may be half done: check it before you carry on.`);
+  }
+  if (items.length === 1 && !items[0].queued) parts.push(`Message from ${owner}:\n${items[0].text}`);
+  else {
+    const head = items.length === 1 ? `A message from ${owner}, sent while you were busy` : `${items.length} messages from ${owner}, sent while you were busy, oldest first`;
+    parts.push(`${head}:\n\n${items.map(m => `[sent ${formatDateTime(m.at)}${m.edited ? `, edited ${formatDateTime(m.edited)}` : ''}]\n${m.text}`).join('\n\n')}`);
+  }
+  return parts.join('\n\n');
+}
+
+async function answer(items) {
+  // Set before anything else, so a message sent meanwhile goes to the queue.
+  Object.assign(chat, { responding: true, interrupting: false, partial: '', actions: [], cancel: null, since: now() });
+  let state = null;
   try {
+    for (const m of items) addMessage('you', m.text, { at: m.at, ...(m.queued ? { queued: true, delivered: now() } : {}), ...(m.edited ? { edited: m.edited } : {}) });
+    const config = loadConfig();
+    const manager = loadAgents(config).manager;
+    if (!manager) throw new Error(t('agents/manager.md is missing.'));
+    state = readState();
+    state.manager ??= {};
+    chat.context = state.manager.context ?? null;
+
+    const model = manager.model ?? config.default_model;
+    const libraries = await chatLibraries(config);
+    await processes(60_000).catch(() => {}); // the projects running on this computer, for the situation
+    const prompt = `<situation>\n${situation(libraries)}\n</situation>\n\n${composeMessage(config.owner, items, state.manager.interrupted)}`;
+    const attempt = session => {
+      // Interrupted while the situation was being gathered: nothing to stop.
+      if (chat.interrupting) return Promise.resolve({ ok: false, canceled: true, text: '', error: t('interrupted by you') });
+      const run = runClaude({
+        dir: ROOT,
+        // A conversation renewed for its size starts with the summary of the previous one and the manager's notes.
+        prompt: !session.resume && state.manager.handoff ? `${handoff()}${prompt}` : prompt,
+        system: manager.instructions,
+        model,
+        effort: manager.chat_effort ?? manager.effort,
+        tools: manager.tools ?? [],
+        disallowed: CHAT_DISALLOWED,
+        addDirs: libraries.map(l => l.dir),
+        // The command line refuses to write to this conversation from inside it.
+        env: { CHIEFMATE_MANAGER: '1' },
+        attribution: config.attribution !== false,
+        maxMinutes: 15,
+        session,
+        log: conversationLog(),
+        onEvent: event => {
+          if (event.type === 'say') chat.partial = event.text;
+          if (event.type === 'action') chat.actions = [...chat.actions, { at: now(), text: event.text }].slice(-40);
+          if (event.type === 'context') chat.context = { ...chat.context, used: event.used, window: event.window };
+        },
+      });
+      chat.cancel = run.cancel;
+      return run.promise;
+    };
+
     let r;
     let resumed = false;
     if (state.manager.session) {
       r = await attempt({ id: state.manager.session, resume: true });
       resumed = r.ok || !!r.text;
-      if (!resumed) r = null; // the old conversation is gone: start another one
+      // The old conversation is gone: start another one. Not when the answer was stopped (interrupted, or over the
+      // time limit): the session is still there, and the next message carries on in it.
+      if (!resumed && !r.canceled) r = null;
     }
     if (!r) {
       const id = randomUUID();
       r = await attempt({ id, resume: false });
       if (!r.session) r.session = id;
     }
-    addMessage('manager', r.text || t("I couldn't answer: {error}", { error: r.error }), { model, ...(r.ok ? {} : { error: r.error }) });
+    if (r.canceled && chat.interrupting) {
+      if (chat.partial) addMessage('manager', chat.partial, { model, interrupted: true });
+      addMessage('system', t('You interrupted the answer. The conversation goes on in the same session, and the manager is told in your next message.'));
+      state.manager.interrupted = now();
+    } else {
+      addMessage('manager', r.text || t("I couldn't answer: {error}", { error: r.error }), { model, ...(r.ok ? {} : { error: r.error }) });
+      delete state.manager.interrupted; // this message told it
+    }
+    let compacted = 0;
     if (r.session) {
       if (!resumed && (r.ok || r.text)) delete state.manager.handoff; // the summary went into the new conversation
       state.manager.session = r.session;
-      const compacted = r.context?.compactions ?? 0;
+      compacted = r.context?.compactions ?? 0;
       const before = resumed ? state.manager.context ?? {} : {};
       if (r.context?.used) {
         state.manager.context = {
@@ -190,14 +292,18 @@ export async function talkToManager(message) {
           compactions: (before.compactions ?? 0) + compacted, compacted: compacted ? now() : before.compacted ?? null,
         };
       }
-      saveState(state);
-      if (compacted) {
-        addMessage('system', t('Claude Code compacted this conversation on its own to make room ({count} time(s) so far).', { count: state.manager.context?.compactions ?? compacted }));
-      }
+    }
+    // Only the manager's part: the rest of the state (the schedule's) may have changed during the answer.
+    const fresh = readState();
+    fresh.manager = state.manager;
+    saveState(fresh);
+    if (compacted) {
+      addMessage('system', t('Claude Code compacted this conversation on its own to make room ({count} time(s) so far).', { count: state.manager.context?.compactions ?? compacted }));
     }
   } finally {
-    Object.assign(chat, { responding: false, partial: '', actions: [], context: null });
-    setImmediate(() => renewIfFull().catch(error => console.error('Renewal:', error.message)));
+    Object.assign(chat, { responding: false, interrupting: false, partial: '', actions: [], context: null, cancel: null, since: null });
+    // The messages sent meanwhile go first; the renewal waits for a quiet moment.
+    if (!deliverPending()) setImmediate(() => renewIfFull().catch(error => console.error('Renewal:', error.message)));
   }
 }
 
@@ -238,9 +344,9 @@ async function renewIfFull() {
   const config = loadConfig();
   const manager = loadAgents(config).manager;
   if (!manager) return;
-  Object.assign(chat, { responding: true, renewing: true, partial: '', actions: [] });
+  Object.assign(chat, { responding: true, renewing: true, interrupting: false, partial: '', actions: [], since: now() });
   try {
-    const r = await runClaude({
+    const run = runClaude({
       dir: ROOT,
       prompt: HANDOFF_PROMPT,
       system: manager.instructions,
@@ -252,7 +358,15 @@ async function renewIfFull() {
       maxMinutes: 10,
       session: { id: session, resume: true },
       log: conversationLog(),
-    }).promise;
+      onEvent: event => {
+        if (event.type === 'action') chat.actions = [...chat.actions, { at: now(), text: event.text }].slice(-40);
+      },
+    });
+    chat.cancel = run.cancel;
+    const r = await run.promise;
+    if (r.canceled && chat.interrupting) {
+      return addMessage('system', t('You interrupted the renewal. The conversation goes on as it was; Chiefmate tries again after the next answer.'));
+    }
     const summary = r.ok ? r.text.trim() : '';
     if (!summary) return console.error('Renewal: no summary.', r.error ?? '');
     const fresh = readState();
@@ -262,7 +376,8 @@ async function renewIfFull() {
     saveState(fresh);
     addMessage('system', t('This conversation filled {percent} of its context. The manager wrote a short summary, and your next message starts a new conversation with it and the notes.', { percent: formatPercent(c.used / c.window) }));
   } finally {
-    Object.assign(chat, { responding: false, renewing: false, partial: '', actions: [] });
+    Object.assign(chat, { responding: false, renewing: false, interrupting: false, partial: '', actions: [], cancel: null, since: null });
+    deliverPending(); // the messages sent during the renewal
   }
 }
 
