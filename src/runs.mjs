@@ -616,7 +616,7 @@ export async function execute(run) {
     Object.assign(run, { status: 'done', ended: now(), result });
     saveRun(run);
     notify(t('Ready for your review'), t('{title}: {result}', { title: run.title, result }), run.pullRequest);
-    reportEvent('pr_ready', `Run ${run.id} "${run.title}" (project ${run.project}) finished: pull request ${run.pullRequest} waits for the owner's approval (only the owner merges). ${result}`);
+    reportEvent('pr_ready', `Run ${run.id} "${run.title}" (project ${run.project}) finished: pull request ${run.pullRequest} waits for the owner's approval. ${result}`);
   } catch (error) {
     Object.assign(run, { status: 'failed', ended: now(), result: error.message });
     saveRun(run);
