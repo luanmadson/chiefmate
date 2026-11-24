@@ -339,7 +339,8 @@ const baseIcon = new Image();
 baseIcon.src = '/icon-32.png';
 let iconMode = '';
 function drawFavicon(mode) {
-  if (mode === iconMode || (mode && !baseIcon.complete)) return;
+  // Not loaded yet, or broken (drawImage would throw and stop the rest of the refresh): try again next time.
+  if (mode === iconMode || (mode && !(baseIcon.complete && baseIcon.naturalWidth))) return;
   const links = document.querySelectorAll('link[rel="icon"]');
   let href = '';
   if (mode) {
