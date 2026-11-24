@@ -160,7 +160,7 @@ export const planItem = id => findIn(readBoard(), id);
 
 // ---------- Following the linked run ----------
 
-/** The item's status for the run's: done with a pull request waits for the owner to approve it. */
+/** The item's status for the run's: done with a pull request (or a branch delivered locally) waits for the owner. */
 function statusForRun(run) {
   switch (run.status) {
     case 'queued':
@@ -170,7 +170,7 @@ function statusForRun(run) {
     case 'running':
       return 'in_progress';
     case 'done':
-      return run.pullRequest ? 'waiting_owner' : 'done';
+      return run.pullRequest || run.delivered ? 'waiting_owner' : 'done';
     case 'failed':
     case 'canceled':
       return 'todo';
@@ -236,7 +236,8 @@ function applyFields(item, fields) {
   if (has('run')) {
     const id = String(fields.run).trim();
     if (!id) Object.assign(item, { run: null, run_status: null });
-    else {
+    else if (id !== item.run) {
+      // Only a new link counts: the same run again, as the app's edit form sends it, changes nothing.
       if (!RUN_ID.test(id)) throw new Error(`Invalid run id "${id}".`);
       const run = readRun(id);
       if (!run) throw new Error(`Run ${id} not found.`);
@@ -253,7 +254,7 @@ export function addItem(fields) {
   const board = readBoard();
   const stamp = now();
   const item = { id: board.next, project: '', title: '', description: '', priority: 'medium', status: 'todo', created: stamp, updated: stamp, run: null, pr: null, run_status: null, archived: null };
-  applyFields(item, { priority: 'medium', status: 'todo', ...fields });
+  applyFields(item, fields); // without a status given, an item linked to a run takes the run's
   if (!item.project) throw new Error('The project is missing.');
   if (!item.title) throw new Error('The title is missing.');
   board.items.push(item);

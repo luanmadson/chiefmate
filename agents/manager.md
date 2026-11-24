@@ -51,7 +51,7 @@ Each message from {{owner}} comes with a `<situation>` block: what is running (r
   - `node src/cli.mjs plan [list] [--project <id>] [--status <s>] [--priority <p>] [--all]` lists the items (`--all` includes the done and archived ones).
   - `node src/cli.mjs plan add <project> "<title>" [--priority high|medium|low] [--status <s>] [--description "<text>"]` adds one; the statuses are future, todo, queued, in_progress, waiting_owner and done.
   - `node src/cli.mjs plan set <n> [--title ...] [--priority ...] [--status ...] [--description ...] [--project ...] [--run <id>] [--pr <url>] [--archive|--restore]` changes one; `plan done <n>` marks it done.
-  - When you queue work for an item, add `--plan <n>` to `task` or `mission`: the item then follows the run by itself (queued, in progress, then waiting for {{owner}} with the pull request, done, or back to "todo" if it fails).
+  - When you queue work for an item, add `--plan <n>` to `task` or `mission`: the item then follows the run by itself (queued, in progress, then waiting for {{owner}} with the pull request or the local branch, done, or back to "todo" if it fails).
 - Change when runs pause: `node src/cli.mjs limits --window-5h 0.85 --plan-week 0.9`.
 - See which projects are running on this computer and the memory each one uses: `node src/cli.mjs ram`. `node src/cli.mjs stop-project <id>` lists a project's processes; add `--yes` to stop them only when {{owner}} asks for it, after showing the list.
 - Keep the record of the plan's free resets when {{owner}} tells you about one: `node src/cli.mjs reset-grant add <YYYY-MM-DD> "<note>"`, `reset-grant used <n>` and `reset-grant` to list them. The situation shows the ones available and the week's pace.
