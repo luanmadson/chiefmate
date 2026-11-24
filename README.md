@@ -282,7 +282,7 @@ Chiefmate can be one of its own projects. Its crew then works on Chiefmate the s
 1. **Add Chiefmate as a project** in your settings, pointing at your copy of this repository, with `"language": "en"`, `"checks": ["npm run check", "npm run smoke"]` and `"playbook": "docs/playbook.md"`. The [playbook](docs/playbook.md) tells the crew how Chiefmate is built and which rules a change must keep.
 2. **Ask for improvements**, in the Manager section or as a task on that project. Ideas for later go to the repository's issues: the manager can open them for you.
 3. **Or give it a routine**: a mission on that project, for example once a week, that works through the open issues.
-4. **Approve.** Every improvement arrives as a pull request. When you merge it, your installation updates itself within ten minutes, once the crew is free. It checks the new version first: if the checks fail, it stays on the current one and tells you.
+4. **Approve.** Every improvement arrives as a pull request. When you merge it, your installation updates itself within ten minutes, once the crew is free. It checks the new version first: if the checks fail, it stays on the current one and tells you. Once it restarts, the app window loads the new version by itself (it waits while you are writing or have a dialog open).
 
 The self-update only touches Chiefmate's own files. Your settings, the history and the working copies are never in git, so they are never overwritten. If Chiefmate's files were changed by hand in your installation, it does not update, and the app says so.
 
@@ -303,7 +303,7 @@ The self-update only touches Chiefmate's own files. Your settings, the history a
 The manager uses these commands (all but the `chat` ones, which are yours), and so can you:
 
 ```
-node src/cli.mjs server                       starts Chiefmate (the shortcut does this for you)
+node src/cli.mjs server [--log]               starts Chiefmate (the shortcut does this for you); --log writes to data/server.log
 node src/cli.mjs status                       what is running, the queue, usage and the crew
 node src/cli.mjs mission <id>                 queues a mission
 node src/cli.mjs task <project> <agent> "..." queues a one-off task (--review: the manager reviews it at the end;

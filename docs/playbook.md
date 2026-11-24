@@ -44,7 +44,7 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
 
    Any change in these places must be explained in the pull request, under a "Security" heading.
 6. **The look**: dark and formal, with thin lines, square corners and brass as the only accent color. No rounded, generic web look. The crew's faces are line art.
-7. **Windows scripts** (`.ps1`, `.vbs`) are ASCII-only, with CRLF line endings.
+7. **Windows scripts** (`.ps1`, `.vbs`) are ASCII-only, with CRLF line endings. A launcher starts Chiefmate with `node src/cli.mjs server --log` and never redirects its output (`>> dataserver.log`): cmd keeps a redirected file locked while Chiefmate runs, and the self-update could not restart it.
 8. **One improvement at a time**, small and complete. Update the README and this playbook when your change makes them outdated.
 
 ## Where the work comes from
