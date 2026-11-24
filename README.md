@@ -49,6 +49,17 @@ Each agent is a Markdown file in `agents/`. Its header sets the name, model, tim
 
 Every agent runs on **Claude Opus 5.5** by default.
 
+**Crews by project.** A project can have a crew of its own with `"crew"` in its settings: its missions and tasks then take only its members. Each member is based on one of the agents above, with an optional name of its own and instructions for that project only:
+
+```json
+"crew": {
+  "generalist": { "extra_instructions": "Instructions for this project only." },
+  "frontend": { "agent": "designer", "name": "Front-end", "mcp": ["playwright"] }
+}
+```
+
+A plain list (`["generalist", "designer"]`) works too. Without `crew`, a project uses the general crew. The manager is global: it reviews every project. The Crew section shows the crews grouped by project.
+
 ## How a mission runs
 
 ```
@@ -63,6 +74,59 @@ queue ─► fresh working copy ─► the crew, one after another ─► manage
 6. **Your approval.** You review and merge on GitHub. From there, your project's own deployment does the rest.
 
 A one-off task follows the same path, with a single agent and, if you tick the box, the manager's review.
+
+### What each step sees
+
+- **Only its project.** A step gets the project's working copy and the project's own personal documentation folder (`docs`), not the whole library it lives in. Libraries in the project's `library` list come too. Everything else is denied to the file tools by permission rules: other projects' working copies, other projects' documentation folders in the libraries, the libraries the project doesn't list and Chiefmate's `data/`. The manager's review sees every library.
+- **None of your own Claude Code configuration.** Steps never load your user settings, hooks, plugins, skills, MCP servers or `~/.claude/CLAUDE.md` (`--setting-sources project,local`, `claudeMdExcludes`, `--strict-mcp-config`). This is deliberate and has no switch. The project's own instruction files (its `CLAUDE.md`, `.claude/`) still apply.
+- **External tools only from Chiefmate's settings.** Declare MCP servers in `mcp_servers` and release them to a project or an agent with `"mcp": ["<name>"]`.
+- **What it received, on record.** Each step writes `data/runs/<id>/<NN>-<agent>.context.md`: the system prompt, the prompt, the model, the tools allowed and denied, the MCP servers, the folders, the repository's instruction files and what Claude Code reported loading. Open it with the "Context received" button in the Log, or `node src/cli.mjs context <id> [step]`.
+
+### When a step needs you
+
+Some work needs a person: signing in to a site, confirming something, a step only you can take. The crew's rules tell every agent to run:
+
+```
+node <chiefmate>/src/cli.mjs needs-you "<what to do>" [--url <address>] [--wait] [--check "<command>"]
+```
+
+Chiefmate records the request in the run and shows it at once: a band at the top of the app ("Needs you: <task> — <what to do>") with a **Done** button, a mark on the window's icon and title, the app's taskbar badge and a Windows notification. With `--url`, the address opens for you:
+- with `browser_cdp` set (the address of your own browser started with remote debugging, such as `http://127.0.0.1:9333`), in a new tab of that browser, where you are already signed in;
+- without it, in a visible browser with Chiefmate's own profile in `data/browser-profile`, which the crew can never read (through Playwright when `playwright-core` is installed, else by starting Edge or Chrome on that profile).
+
+With `--wait`, the agent waits until you click Done, or until its `--check` command succeeds. While it waits, the step's time limit stands still. The wait has a ceiling (`needs_you.max_wait_minutes`, 120 by default): past it, the agent goes on with what it can and the request stays open in the app. The run is never canceled for it, and shows "Waiting for you" meanwhile.
+
+### The prompt builder (optional)
+
+If you keep your project instructions in a document of blocks, Chiefmate can put each step's instructions together from it instead of the project's `notes`. The document is Markdown, kept outside the repository (`prompt_builder.file`):
+
+```markdown
+# Projects
+// selection: one
+## My project
+// tags: code
+// access: browser
+CODE = MYPROJ
+Work on {CODE}, following its documentation.
+
+# Modules
+// selection: several
+## Board
+Update the card on the board when you finish.
+
+# Rules
+// selection: automatic
+## Code rules
+// tags: code
+Keep the existing comments.
+```
+
+- A first-level heading opens a section and a second-level heading a block. Lines starting with `//` set options: `selection` (`one`, `several` or `automatic`; in Portuguese `seleção: uma | várias | automática`), `tags`, `access` (`acessos`), `requires` (`requer`: blocks it brings along) and `include with` (`incluir com`). `NAME = value` sets a variable, and `{NAME}` in the text takes its value.
+- A step gets the project's block (`projects.<id>.prompt_block`), the environment (`prompt_builder.environment`), the optional modules (`projects.<id>.prompt_modules`, or `--modules A,B` on a task) and the automatic blocks that match their tags, accesses or names, each under a `## <block>` heading.
+- Blocks that need you live (a browser, a board, a confirmation) are kept: the agent asks for you with `needs-you`. A sentence that conflicts with the crew's rules (pushing, other branches, pull requests) is replaced by a note saying Chiefmate's rules prevail, and the adaptation is recorded in the step's context.
+- Without the file, the project's `notes` are used as before.
+
+To copy the document from Google Docs, set `prompt_builder.doc_id` and `browser_cdp`, install the optional `playwright-core` (`npm install --no-save playwright-core` in the Chiefmate folder) and run `node src/cli.mjs prompts-sync`, or use the button in the Crew section. Chiefmate borrows your browser's session to download the document's Markdown export: it never changes the document and never touches your tabs.
 
 ## Requirements
 
@@ -99,12 +163,16 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `default_model` | The model for agents that don't set one |
 | `attribution` | `false` keeps the crew's commits and pull requests from crediting Claude (they are credited to you alone) |
 | `backup_dir` | A folder of your own, such as one in a private repository, where Chiefmate keeps an up-to-date copy of these settings |
-| `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. See also "Local delivery" below |
+| `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. Optional: `crew` (its own crew), `mcp` (external tools it releases), `prompt_block` and `prompt_modules` (the prompt builder). See also "Local delivery" below |
 | `missions` | For each mission: the `project`, the `steps` (an agent and its part, in order), the final `review`, the `schedule` (`days` such as `["mon"]` and a `time` such as `"09:00"`) and the `eve_reminder` time |
 | `crew` | Settings for one agent in this installation only, such as `{ "writer": { "model": "claude-opus-5-5", "max_minutes": 90, "extra_instructions": "..." } }` |
 | `library` | Reference libraries: git repositories the manager and the crew may read, such as your personal documentation. Each has a `name`, a `repository`, a `main_branch` and a sentence `about` it. A project uses one with `"library": ["<id>"]`, or with `"docs": "<id>/<folder>"` for its personal documentation, which then takes precedence over the instructions inside the project's own repository |
 | `limits` | When runs pause: `pause_at_5h_window` and `pause_at_plan_week`, as shares of your account's usage (0.85 is 85%) |
 | `plan_resets` | The plan's free resets, which Claude Code doesn't report: `[{ "kind": "full", "expires": "<ISO date>", "used": false, "note": "..." }]`. Easier from the Usage section or `node src/cli.mjs reset-grant` |
+| `mcp_servers` | External tools (MCP servers) the crew may use, in Claude Code's format: `{ "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] } }`. Nothing is released until a project or an agent lists it in `mcp` |
+| `browser_cdp` | The address of your own browser with remote debugging on, such as `http://127.0.0.1:9333`: sign-ins asked by the crew open there, and the prompt builder is copied through it |
+| `needs_you` | `{ "max_wait_minutes": 120 }`: the longest a step waits for you before it goes on without you |
+| `prompt_builder` | The optional prompt builder: `{ "file": "data/manager/prompt-builder.md", "doc_id": "<Google Docs id>", "environment": "<block>" }` |
 | `usage_reader` | The optional reading of your usage page on claude.ai (see below): `{ "enabled": false, "every_hours": 4 }`, and `browser` with the path to Edge or Chrome if it isn't found |
 
 The libraries are read from a copy that Chiefmate refreshes from GitHub before use, in `workspaces/.library/`, so the crew can read them but never change the original. To have the crew change a library, add its repository as a project too: the changes then arrive as pull requests, like everything else.
@@ -169,7 +237,9 @@ The self-update only touches Chiefmate's own files. Your settings, the history a
 
 - **Only you reach the app.** It listens on this computer only, and it refuses commands sent by other websites open in your browser.
 - **Agents have limits.** They cannot push to GitHub, open or merge pull requests, or change the repository's address.
-- **No connectors.** Agents run without MCP connectors and without the variables of your own Claude session.
+- **Each step sees only its project.** Other projects' working copies and documentation, the libraries a project doesn't list and Chiefmate's `data/` are denied by permission rules (see "What each step sees").
+- **None of your own configuration.** Agents run without your Claude Code settings, hooks, plugins, skills, `~/.claude/CLAUDE.md` and MCP servers, and without the variables of your own Claude session. The only external tools are those in `mcp_servers`, released by project or agent.
+- **Sign-ins are yours.** Agents never type passwords: they ask for you with `needs-you`, and the address opens in your browser.
 - **Your data stays home.** Your settings, the history and the working copies (`config/chiefmate.json`, `data/`, `workspaces/`) never go to git.
 - **Stopping processes asks first.** The Projects section and `stop-project` show what will stop and end only those processes. They never stop Chiefmate, what started it or the crew at work (cancel the run for that).
 - **The optional claude.ai reading** keeps a signed-in browser profile in `data/browser-profile`. See its risks above.
@@ -182,11 +252,16 @@ The manager uses these commands, and so can you:
 node src/cli.mjs server                       starts Chiefmate (the shortcut does this for you)
 node src/cli.mjs status                       what is running, the queue, usage and the crew
 node src/cli.mjs mission <id>                 queues a mission
-node src/cli.mjs task <project> <agent> "..." queues a one-off task (--review: the manager reviews it at the end)
+node src/cli.mjs task <project> <agent> "..." queues a one-off task (--review: the manager reviews it at the end;
+                                              --modules A,B: optional blocks of the prompt builder)
 node src/cli.mjs cancel <id>                  cancels a run
 node src/cli.mjs resume <id>                  resumes a run (--ignore-limits goes past the limits this one time)
 node src/cli.mjs history                      the latest runs
 node src/cli.mjs report <id>                  the reports of a run
+node src/cli.mjs context <id> [step]          what each step received: prompt, model, tools, folders, MCP servers
+node src/cli.mjs needs-you "..." [--url <address>] [--wait] [--check "<command>"]
+                                              for a step: asks you to act and, with --wait, waits for Done
+node src/cli.mjs prompts-sync                 copies the prompt builder's document from Google Docs
 node src/cli.mjs limits --window-5h 0.85 --plan-week 0.9
 node src/cli.mjs ram                          the projects running on this computer and their memory
 node src/cli.mjs stop-project <id> [--yes]    lists a project's processes; with --yes, stops them
@@ -215,10 +290,10 @@ English is the source. The app, the notifications and the reports follow `langua
 | `agents/` | The crew, one file per agent |
 | `config/` | `example.json`, and your `chiefmate.json` (not in git) |
 | `scripts/` | Installation on Windows, launchers and checks |
-| `data/` (not in git) | Runs, each step's log, the conversation with the manager, your account's usage, the schedule's and the alerts' state and, if you use the claude.ai reading, its browser profile |
+| `data/` (not in git) | Runs, each step's log and context, the conversation with the manager, your account's usage, the schedule's and the alerts' state and, if you use the claude.ai reading, its browser profile |
 | `workspaces/` (not in git) | The projects' working copies |
 
-Chiefmate has no dependencies besides Node.js. It drives Claude Code (`claude -p`), which uses your account's login and plan.
+Chiefmate has no dependencies besides Node.js. It drives Claude Code (`claude -p`), which uses your account's login and plan. The only optional one is `playwright-core`, for copying the prompt builder from Google Docs (and, if present, for the browser that opens for sign-ins): Chiefmate loads it only when needed and says how to install it when it is missing.
 
 ## License
 

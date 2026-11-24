@@ -15,7 +15,10 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
 | `src/machine.mjs` | This computer: the projects' processes, their memory and stopping them (Windows). |
 | `src/plan.mjs` | The plan's free resets, the week's pace and the alerts (usage, memory, resets), which only warn. |
 | `src/usagepage.mjs` | The optional, read-only reading of the account's usage page on claude.ai, through Edge or Chrome. |
-| `src/claude.mjs` | Runs Claude Code headless (`claude -p`) and follows each action and how full the context is. |
+| `src/claude.mjs` | Runs Claude Code headless (`claude -p`), without the user's own configuration, and follows each action and how full the context is. |
+| `src/access.mjs` | What each step may see: its folders, the permission rules that deny the rest, its MCP servers and the repository's instruction files. |
+| `src/needs.mjs` | When a step needs the owner (`needs-you`): the request, the notice, the address opened in the browser and "Done". |
+| `src/prompts.mjs`, `src/promptsync.mjs` | The optional prompt builder: reading the document of blocks, putting a step's instructions together, and copying it from Google Docs. |
 | `src/workspace.mjs` | git and the projects' working copies. |
 | `src/update.mjs` | The self-update. |
 | `src/store.mjs`, `src/config.mjs`, `src/i18n.mjs`, `src/notify.mjs`, `src/util.mjs`, `src/cli.mjs` | Records, settings and the crew, translations, Windows notifications, helpers and the command line. |
@@ -28,13 +31,14 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
 
 1. **English everywhere**: code, comments, documentation and commit messages.
 2. **Every text the user sees is translated.** On the server it goes through `t()` (`src/i18n.mjs`); in the app, through `t()` (`ui/i18n.js`) or a `data-t` attribute in `ui/index.html`. Write `t()` with a plain quoted string, and add each new text to `ui/locales/pt-BR.json` with a Brazilian Portuguese translation. `npm run check` fails when one is missing.
-3. **No dependencies.** Node.js built-ins and plain browser APIs only. No build step.
+3. **No dependencies.** Node.js built-ins and plain browser APIs only. No build step. The one exception is optional: `playwright-core`, loaded on demand for the prompt builder's copy (and the sign-in browser), with a clear message when it is missing. Nothing else may need it.
 4. **Keep the settings compatible.** Installations update themselves, and their settings are not in this repository. A new setting needs a default in the code. Never rename or remove a setting without migrating it automatically.
 5. **Security is not negotiable.** Don't weaken any of these:
    - the server listens on 127.0.0.1 only;
    - the Host, Origin and `x-chiefmate` checks on every command;
    - the tools agents may never use (`ALWAYS_DISALLOWED` in `src/runs.mjs`, and the conversation's list in `src/manager.mjs`);
-   - the removal of the Claude session's variables in `src/claude.mjs`;
+   - the removal of the Claude session's variables in `src/claude.mjs`, and the flags that keep the user's own Claude Code configuration out of every step (`--setting-sources project,local`, `claudeMdExcludes`, `--strict-mcp-config`);
+   - what each step may see (`src/access.mjs`): only its project, its own documentation folder and the libraries it lists;
    - the rule that only Chiefmate pushes branches and opens pull requests.
 
    Any change in these places must be explained in the pull request, under a "Security" heading.
