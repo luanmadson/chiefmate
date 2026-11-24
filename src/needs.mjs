@@ -2,8 +2,9 @@
 // The agent runs "node <chiefmate>/src/cli.mjs needs-you "<what to do>" [--url <address>] [--wait]". Chiefmate records
 // the request in the run, shows it in the app (a band at the top, the window's icon and title) and in a Windows
 // notification, and opens the address in the owner's browser. With --wait, the command returns when the owner clicks
-// "Done" (or a check the agent gave succeeds). While it waits, the step's time limit stands still; past the longest
-// wait, the command returns and the request stays open: the run is never canceled for it.
+// "Done" (or a check the agent gave succeeds), or answers it from the agent's panel (the command hands the answer
+// over). While it waits, the step's time limit stands still; past the longest wait, the command returns and the
+// request stays open: the run is never canceled for it.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from './config.mjs';
@@ -11,6 +12,7 @@ import { t } from './i18n.mjs';
 import { notify } from './notify.mjs';
 import { activeRun, liveOf } from './runs.mjs';
 import { listRuns, readRun, saveRun, stepsOf } from './store.mjs';
+import { agentSays } from './talk.mjs';
 import { browserPath, PROFILE_DIR } from './usagepage.mjs';
 import { clip, ensureDir, now } from './util.mjs';
 
@@ -70,6 +72,8 @@ export async function askOwner({ run: runId, step, what, url, wait = false, chec
     url: url ? String(url) : null, wait: !!wait, check: check ? clip(check, 300) : null, status: 'open', at: now(),
   };
   (run.requests ??= []).push(request);
+  // The request is also part of the direct conversation: the owner can answer it from the agent's panel.
+  agentSays(run, { step: n, agent: request.agent, text: request.what, kind: 'request', request: request.id });
   saveRun(run);
   notify(t('Needs you: {title}', { title: run.title }), request.what, 'chiefmate:operations');
   if (request.url) {
@@ -97,7 +101,7 @@ export function pollRequest(runId, id) {
   const max = needsSettings().maxWaitMinutes * 60_000;
   const going = liveOf(run.id);
   if (request.status === 'open' && waited < max && going) going.heldUntil = Date.now() + 20_000;
-  return { status: request.status, by: request.by ?? null, waitedMinutes: Math.floor(waited / 60_000), maxWaitMinutes: max / 60_000, timedOut: waited >= max };
+  return { status: request.status, by: request.by ?? null, answer: request.answer ?? null, waitedMinutes: Math.floor(waited / 60_000), maxWaitMinutes: max / 60_000, timedOut: waited >= max };
 }
 
 /** "Done": the owner did it (or the agent's check succeeded). */

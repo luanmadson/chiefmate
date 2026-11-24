@@ -9,9 +9,10 @@ import { processes } from './machine.mjs';
 import { computerLine, planLine } from './plan.mjs';
 import { planningLine } from './planning.mjs';
 import { focus, maxParallel, queued } from './queue.mjs';
-import { ALWAYS_DISALLOWED, liveRuns, prepareLibraries } from './runs.mjs';
+import { activeRun, ALWAYS_DISALLOWED, liveRuns, prepareLibraries } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { sessionsLine } from './sessions.mjs';
+import { talkSituation } from './talk.mjs';
 import { addMessage, listRuns, readPending, readState, readUsage, savePending, saveState, stepsOf } from './store.mjs';
 import { updateInfo } from './update.mjs';
 import { DATA, ensureDir, languageName, now, ROOT, VERSION } from './util.mjs';
@@ -117,6 +118,10 @@ export function situation(libraries = []) {
     lines.push(`- [${r.id}] ${r.title} (project ${r.project}): ${r.status}, ${formatDuration(work)} of agent work${r.pullRequest ? `, PR ${r.pullRequest}` : ''}${r.result ? `. ${r.result}` : ''}${r.note ? `. ${r.note}` : ''}`);
   }
   if (!latest.length) lines.push('- none yet');
+  // What the owner told the crew directly, from the agent's panel (src/talk.mjs): the runs going on and the latest.
+  // A run going on is also among the latest: each run once, the live copy first.
+  const talked = [...going.map(l => activeRun(l.run)).filter(Boolean), ...latest].filter((r, i, all) => all.findIndex(x => x.id === r.id) === i);
+  lines.push(talkSituation(talked, config.owner || 'the owner'));
   const window = (w, name) => `${name} ${formatPercent(w?.used)}${w?.resets ? ` (resets ${formatDateTime(w.resets)})` : ''}`;
   const limits = config.limits ?? {};
   lines.push(`${config.owner}'s account: ${window(usage.five_hour, '5-hour window')}; ${window(usage.seven_day, 'plan week')}. Measured ${usage.updated ? formatDateTime(usage.updated) : 'never'}. Runs pause at ${formatPercent(limits.pause_at_5h_window)} of the 5-hour window and ${formatPercent(limits.pause_at_plan_week)} of the plan week.`);

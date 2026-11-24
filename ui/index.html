@@ -188,6 +188,24 @@
     <footer class="statusbar" id="statusbar"></footer>
   </div>
 
+  <aside id="agent-panel" class="agent-panel" hidden aria-label="Agent at work" data-t-label="Agent at work">
+    <div class="agent-panel-head">
+      <div id="agent-head" class="agent-head"></div>
+      <button type="button" class="button secondary small" id="agent-close" data-t="Close">Close</button>
+    </div>
+    <div class="label agent-section" data-t="Live, step by step">Live, step by step</div>
+    <div id="agent-feed" class="agent-feed" aria-live="polite"></div>
+    <div class="label agent-section" data-t="Direct talk">Direct talk</div>
+    <div id="agent-talk" class="agent-talk"></div>
+    <form id="agent-form" class="agent-form">
+      <textarea name="text" rows="3" maxlength="4000" data-t-placeholder="Write to the agent. Enter sends, Shift+Enter breaks the line." placeholder="Write to the agent. Enter sends, Shift+Enter breaks the line."></textarea>
+      <div class="agent-form-foot">
+        <span class="hint" id="agent-form-hint"></span>
+        <button type="submit" class="button" data-t="Send">Send</button>
+      </div>
+    </form>
+  </aside>
+
   <dialog id="confirm" class="confirm">
     <form method="dialog">
       <div class="label" id="confirm-title"></div>

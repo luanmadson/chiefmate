@@ -149,7 +149,8 @@ async function needsYou() {
   for (;;) {
     const s = await api('/api/needs-you/poll', { run, id });
     if (s.status === 'done') {
-      console.log(s.by === 'check' ? 'Done: the check succeeded.' : 'Done: the owner signaled it is done. Go on.');
+      if (s.answer) console.log(`The owner answered you from the app:\n${s.answer}\n\nTake the answer into account and go on.`);
+      else console.log(s.by === 'check' ? 'Done: the check succeeded.' : 'Done: the owner signaled it is done. Go on.');
       return;
     }
     if (s.timedOut) {

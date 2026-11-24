@@ -1,6 +1,6 @@
 // Runs Claude Code headless (claude -p) and follows what it does, step by step.
 import { execFile, spawn, spawnSync } from 'node:child_process';
-import { createWriteStream, existsSync, writeFileSync } from 'node:fs';
+import { closeSync, createWriteStream, existsSync, fstatSync, openSync, readSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { userClaudeExcludes } from './access.mjs';
@@ -27,6 +27,15 @@ export function environment(extra = {}) {
   return { ...env, ...extra };
 }
 
+/**
+ * How to start Claude Code: its executable and the arguments that come first. A CHIEFMATE_CLAUDE ending in .mjs or .js
+ * is a stand-in script run with this Node.js (the smoke test uses one, so nothing real starts).
+ */
+function command() {
+  const file = executable();
+  return /\.(m?js)$/i.test(file) ? [process.execPath, [file]] : [file, []];
+}
+
 /** Whether Claude Code is installed, and which version. Checked when Chiefmate starts and every 10 minutes. */
 export const claudeInfo = { found: null, version: null, checked: null };
 
@@ -41,7 +50,7 @@ export function checkClaude() {
 }
 
 /** One line saying what the agent did, for the logbook. */
-function describeAction(name, input = {}, dir) {
+export function describeAction(name, input = {}, dir) {
   const file = p => (p ? path.relative(dir, p) || p : '');
   switch (name) {
     case 'Bash':
@@ -118,13 +127,16 @@ export function claudeArgs({ model, effort, tools = [], disallowed = [], addDirs
  * Nothing of the user's own Claude Code configuration reaches the agent, by the owner's decision and with no option to
  * turn it on: no user settings, hooks, plugins or skills (--setting-sources project,local), no ~/.claude/CLAUDE.md or
  * rules (claudeMdExcludes), and no MCP server other than those given here (--strict-mcp-config).
- * Returns { promise, cancel, pid, args }.
+ * spentMs: the time the step already worked before this call (a step resumed for the owner's message keeps its clock).
+ * Returns { promise, cancel, interrupt, pid, args }. interrupt() stops the agent at a safe point, as soon as the
+ * actions under way finish (at most 2 minutes later), so the same session can be resumed with --resume: the result
+ * then has "interrupted" and no error.
  * "start" carries what Claude Code loaded ({ init: tools, mcp_servers, skills, plugins, ... }). Besides "start", "say", "action" and "usage", onEvent gets "context" ({ used, window }: the tokens the last turn
  * filled) and "compact" (Claude Code compacted the conversation: { trigger, before }).
  */
 export function runClaude(options) {
   const {
-    dir, prompt, system, model, env = {}, maxMinutes = 60, isHeld = () => false, log, onEvent = () => {},
+    dir, prompt, system, model, env = {}, maxMinutes = 60, isHeld = () => false, log, onEvent = () => {}, spentMs = 0,
   } = options;
   let systemFile = null;
   if (system) {
@@ -133,7 +145,8 @@ export function runClaude(options) {
   }
   const args = claudeArgs({ ...options, systemFile });
 
-  const child = spawn(executable(), args, { cwd: dir, env: environment(env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  const [file, before] = command();
+  const child = spawn(file, [...before, ...args], { cwd: dir, env: environment(env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   const logStream = log ? createWriteStream(log, { flags: 'a' }) : null;
   let cancelReason = null;
   let final = null;
@@ -142,7 +155,7 @@ export function runClaude(options) {
   const context = { used: 0, window: contextWindow(model), compactions: 0 };
 
   // The time limit counts only the time the agent works: while it waits for the owner, the clock stops.
-  let spent = 0;
+  let spent = spentMs;
   let last = Date.now();
   const timer = setInterval(() => {
     const at = Date.now();
@@ -153,6 +166,17 @@ export function runClaude(options) {
   function cancel(reason = t('canceled')) {
     cancelReason = reason;
     stop(child);
+  }
+
+  // The actions under way (tool calls without their result yet): an interruption waits for them, so no command or
+  // edit is cut in the middle and the session resumes cleanly.
+  const inFlight = new Set();
+  let interrupting = null;
+  function interrupt() {
+    if (cancelReason || interrupting || child.exitCode !== null) return false;
+    interrupting = setTimeout(() => stop(child), 120_000);
+    if (!inFlight.size) stop(child);
+    return true;
   }
 
   child.stdin.end(prompt);
@@ -175,7 +199,10 @@ export function runClaude(options) {
     } else if (event.type === 'assistant') {
       for (const block of event.message?.content ?? []) {
         if (block.type === 'text' && block.text.trim()) onEvent({ type: 'say', text: block.text });
-        if (block.type === 'tool_use') onEvent({ type: 'action', tool: block.name, text: describeAction(block.name, block.input, dir) });
+        if (block.type === 'tool_use') {
+          inFlight.add(block.id);
+          onEvent({ type: 'action', tool: block.name, text: describeAction(block.name, block.input, dir) });
+        }
       }
       // A subagent's turns fill its own context, not this one.
       const used = event.parent_tool_use_id ? 0 : contextOf(event.message?.usage);
@@ -183,6 +210,9 @@ export function runClaude(options) {
         context.used = used;
         onEvent({ type: 'context', used, window: context.window });
       }
+    } else if (event.type === 'user') {
+      for (const block of event.message?.content ?? []) if (block?.type === 'tool_result') inFlight.delete(block.tool_use_id);
+      if (interrupting && !inFlight.size) stop(child);
     } else if (event.type === 'rate_limit_event') {
       recordUsage(event.rate_limit_info);
       onEvent({ type: 'usage', info: event.rate_limit_info });
@@ -197,15 +227,20 @@ export function runClaude(options) {
   const promise = new Promise(resolve => {
     child.on('error', error => {
       clearInterval(timer);
+      clearTimeout(interrupting);
       resolve({ ok: false, error: t("Couldn't start Claude Code: {error}", { error: error.message }) });
     });
     child.on('close', code => {
       clearInterval(timer);
+      clearTimeout(interrupting);
       logStream?.end();
+      const interrupted = !!interrupting && !cancelReason;
       const usage = final?.usage ?? {};
       const result = {
-        ok: !!final && !final.is_error && !cancelReason,
+        ok: !!final && !final.is_error && !cancelReason && !interrupted,
         canceled: !!cancelReason,
+        interrupted,
+        spentMs: spent + (isHeld() ? 0 : Date.now() - last),
         text: typeof final?.result === 'string' ? final.result : '',
         turns: final?.num_turns ?? 0,
         durationMs: final?.duration_ms ?? 0,
@@ -221,11 +256,49 @@ export function runClaude(options) {
         end: final?.subtype ?? null,
       };
       if (cancelReason) result.error = cancelReason;
+      else if (interrupted) result.error = null;
       else if (!final) result.error = t('Claude Code ended without a result (exit code {code}). {output}', { code, output: clip(stderr, 600) });
       else if (final.is_error) result.error = t('Ended with an error ({kind}). {output}', { kind: final.subtype ?? '?', output: clip(final.result ?? '', 600) });
       resolve(result);
     });
   });
 
-  return { promise, cancel, pid: child.pid, args };
+  return { promise, cancel, interrupt, pid: child.pid, args };
+}
+
+/**
+ * What an agent did, read from its step's log (the .jsonl Claude Code writes, as runClaude saves it), from a byte
+ * offset on: only whole lines. Returns { items, next } (the offset to read from next time). Each item:
+ * { type: 'action', tool, text } or { type: 'say', text }. With no offset and a long log, only its end is read.
+ */
+export function readFeed(file, dir, from = null, tail = 1_000_000) {
+  if (!existsSync(file)) return { items: [], next: 0 };
+  const fd = openSync(file, 'r');
+  try {
+    const size = fstatSync(fd).size;
+    const start = from == null ? Math.max(0, size - tail) : Math.min(Math.max(0, Number(from) || 0), size);
+    const length = Math.min(size - start, 4_000_000);
+    const buffer = Buffer.alloc(length);
+    readSync(fd, buffer, 0, length, start);
+    const end = buffer.lastIndexOf(10) + 1; // only whole lines: the last one may still be being written
+    let first = 0;
+    if (from == null && start > 0) first = buffer.indexOf(10) + 1; // started in the middle of a line
+    const items = [];
+    for (const line of buffer.subarray(first, end).toString('utf8').split('\n')) {
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (event.type !== 'assistant' || event.parent_tool_use_id) continue;
+      for (const block of event.message?.content ?? []) {
+        if (block.type === 'text' && block.text.trim()) items.push({ type: 'say', text: clip(block.text, 4000) });
+        if (block.type === 'tool_use') items.push({ type: 'action', tool: block.name, text: describeAction(block.name, block.input, dir) });
+      }
+    }
+    return { items, next: start + end };
+  } finally {
+    closeSync(fd);
+  }
 }

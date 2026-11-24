@@ -17,9 +17,10 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
 | `src/planning.mjs` | The owner's planning board (`data/plan.json`): its items, the import of the manager's old `data/manager/plan.md`, the items that follow their runs (through `onRunSaved` in `src/store.mjs`) and the summary for the manager. |
 | `src/plan.mjs` | The plan's free resets, the week's pace and the alerts (usage, memory, resets), which only warn. |
 | `src/usagepage.mjs` | The optional, read-only reading of the account's usage page on claude.ai, through Edge or Chrome. |
-| `src/claude.mjs` | Runs Claude Code headless (`claude -p`), without the user's own configuration, and follows each action and how full the context is. |
+| `src/claude.mjs` | Runs Claude Code headless (`claude -p`), without the user's own configuration, and follows each action and how full the context is; interrupts a step at a safe point (once its actions under way finish) and reads a step's log for the agent's panel. |
 | `src/access.mjs` | What each step may see: its folders, the permission rules that deny the rest, its MCP servers and the repository's instruction files. |
 | `src/needs.mjs` | When a step needs the owner (`needs-you`): the request, the notice, the address opened in the browser and "Done". |
+| `src/talk.mjs` | The owner's direct talk with an agent at work, from its panel in the app: the message (an answer to the agent's open request, or an interruption at a safe point and the same session resumed with it), the record in the run (`talk`), the section of the step's report and the manager's summary. |
 | `src/prompts.mjs`, `src/promptsync.mjs` | The optional prompt builder: reading the document of blocks, putting a step's instructions together, and copying it from Google Docs. |
 | `src/workspace.mjs` | git and the projects' working copies. |
 | `src/update.mjs` | The self-update. |

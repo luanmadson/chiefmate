@@ -1,5 +1,6 @@
 // How a run (a mission or a one-off task) goes: working copy, the crew in sequence, the manager's review,
 // the project's checks and a pull request.
+import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { instructionFiles, stepAccess, stepMcp } from './access.mjs';
@@ -9,6 +10,7 @@ import { formatDate, formatDateTime, formatDuration, formatNumber, formatPercent
 import { notify } from './notify.mjs';
 import { projectInstructions } from './prompts.mjs';
 import { readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
+import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
 import { clip, languageName, now, ROOT, slug, stamp } from './util.mjs';
 import {
   baseBranch, changedFiles, checkoutBranch, commitPending, createBranch, deliverToClone, newCommits, openPullRequest, prepareLibrary,
@@ -50,6 +52,7 @@ function crewRules(config, project) {
 - If you get stuck, undo whatever is half-done and explain it in your report.
 - Never read, list or copy Chiefmate's \`data/\` folder (including \`data/browser-profile\`, the browser profile Chiefmate uses for the owner), other projects' working copies or other projects' personal documentation. You only get the folders this step needs.
 - When you need ${config.owner || 'the owner'} to act (sign in somewhere, confirm something, do what only a person can do), don't stop and don't work around it: run \`${needsYouCommand()} "<what to do, in ${owner}>" [--url <address>] [--wait] [--check "<command that succeeds once it is done>"]\` with the Bash tool's timeout at 600000 ms. Chiefmate shows the request to the owner and opens the address in their browser. With --wait the command returns once the owner clicks Done (or the check succeeds); if it says it is still waiting, run the command it prints. If it gives up waiting, finish what you can and say in your report what is left for the owner. Never type passwords or codes yourself.
+- ${config.owner || 'The owner'} may write to you directly from the app while you work: the message arrives as your next turn, with your work kept as it was. Answer it in one short message, then go on. To ask ${config.owner || 'the owner'} something, use needs-you with --wait: they can answer from the app, and the answer comes back as the command's output.
 - Your last message is the step's report, in ${owner}: short markdown with what you did (and the files), the sources you used, what you left out and why, and what the reviewer should check.`;
 }
 
@@ -188,7 +191,7 @@ function stepPrompt({ run, step, project, previous, finalReview, changes, config
       '',
       `You are the manager. The crew finished the work below. Before it goes to the owner for approval${local ? ' (as a branch, not a pull request)' : ' as a pull request'}:`,
       `1. See what changed: \`git log --oneline origin/${base}..HEAD\` and the diff of every file that matters.`,
-      '2. Check it against the reports and the project\'s rules. Fix whatever is wrong or incomplete, committing as "Chiefmate: manager review".',
+      '2. Check it against the reports and the project\'s rules. Fix whatever is wrong or incomplete, committing as "Chiefmate: manager review". When the owner guided a step directly (a "direct talk" section at the end of its report), check that the work follows what they said.',
       `3. Run the checks: ${(project.checks ?? []).map(c => `\`${c}\``).join(', ') || 'the ones the project and its documentation describe, as far as this machine allows'}.`,
       `4. Your last message presents the work for approval${local ? ', as the note that goes with the branch' : ', as the pull request text'}, in markdown and in ${languageName(prLanguage)}. End it with a section titled "${t("Manager's verdict", {}, prLanguage)}": what you fixed, the risks and your recommendation (approve, approve with caveats, or do not approve).`,
       '',
@@ -318,12 +321,13 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   const contextFile = path.join(runDir(run.id), `${name}.context.md`);
 
   Object.assign(step, { status: 'running', started: now(), error: null, model, promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
-  Object.assign(l, { step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0 });
+  Object.assign(l, { step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0, talking: false, reply: null, session: null });
   saveRun(run);
 
-  const { promise, cancel, pid, args } = runClaude({
+  // Every step keeps its Claude Code session, so a message from the owner can resume it (src/talk.mjs).
+  let session = { id: randomUUID() };
+  const common = {
     dir,
-    prompt,
     system: agent.instructions,
     model,
     effort: agent.effort,
@@ -340,26 +344,69 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     onEvent: event => {
       followContext(l, event);
       logAction(l, event);
-      if (event.type === 'start' && event.init) appendLoaded(contextFile, event.init);
+      if (event.type === 'start' && event.session) l.session = event.session;
+      if (event.type === 'start' && event.init && !session.resume) appendLoaded(contextFile, event.init);
+      // The first thing the agent says after the owner's message is its answer, shown next to the message.
+      if (event.type === 'say' && l.reply) {
+        agentSays(run, { step: index + 1, agent: step.agent, text: event.text, replyTo: l.reply });
+        l.reply = null;
+        saveRun(run);
+      }
     },
-  });
-  try {
-    writeFileSync(contextFile, contextReport({ run, step, index, agent, dir, model, prompt, tools, disallowed, access, mcp, built, args }));
-  } catch (error) {
-    logAction(l, { type: 'action', text: t("Couldn't write the context report: {error}", { error: error.message }) });
+  };
+  let turn = prompt;
+  let spentMs = 0;
+  const total = { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, turns: 0, durationMs: 0, subagents: 0 };
+  let r;
+  l.talking = true;
+  for (;;) {
+    const proc = runClaude({ ...common, prompt: turn, session, spentMs });
+    if (!session.resume) {
+      try {
+        writeFileSync(contextFile, contextReport({ run, step, index, agent, dir, model, prompt, tools, disallowed, access, mcp, built, args: proc.args }));
+      } catch (error) {
+        logAction(l, { type: 'action', text: t("Couldn't write the context report: {error}", { error: error.message }) });
+      }
+    }
+    l.process = { cancel: proc.cancel, interrupt: proc.interrupt };
+    l.pid = proc.pid; // the agent's process: its memory counts for the project, and it is never stopped from the Projects section
+    // Canceled while the step was being prepared (or between two turns): stop the agent that just started.
+    if (l.cancelRequest) proc.cancel(l.cancelRequest);
+    r = await proc.promise;
+    l.process = null;
+    l.pid = null;
+    spentMs = r.spentMs ?? spentMs;
+    for (const k of Object.keys(total.tokens)) total.tokens[k] += r.tokens?.[k] ?? 0;
+    total.turns += r.turns ?? 0;
+    total.durationMs += r.durationMs ?? 0;
+    total.subagents += r.subagents ?? 0;
+    // Messages the owner sent meanwhile: resume the same session with them as the next turn. Checked and closed with
+    // no wait in between, so a message sent at the very end is never left behind.
+    const messages = pendingTalk(run, index + 1);
+    if (!messages.length) {
+      l.talking = false;
+      break;
+    }
+    if (l.cancelRequest || r.canceled || limitHit(r) || (!r.ok && !r.interrupted)) {
+      l.talking = false;
+      for (const m of messages) Object.assign(m, { status: 'undelivered' });
+      saveRun(run);
+      break;
+    }
+    for (const m of messages) Object.assign(m, { status: 'delivered', delivered: now(), via: 'resume' });
+    l.reply = messages.at(-1).id;
+    session = { id: r.session ?? l.session ?? session.id, resume: true };
+    turn = ownerTurn(messages, config);
+    logAction(l, { type: 'action', text: t('Your message was delivered: the agent goes on in the same session') });
+    saveRun(run);
   }
-  l.process = { cancel };
-  l.pid = pid; // the agent's process: its memory counts for the project, and it is never stopped from the Projects section
-  // Canceled while the step was being prepared: stop the agent that just started.
-  if (l.cancelRequest) cancel(l.cancelRequest);
-  const r = await promise;
-  l.process = null;
-  l.pid = null;
+  l.reply = null;
+  Object.assign(r, total);
 
   const waitUntil = limitHit(r);
   Object.assign(step, {
     status: waitUntil ? 'pending' : r.ok ? 'done' : 'failed', ended: waitUntil ? null : now(), tokens: r.tokens, turns: r.turns,
-    durationMs: r.durationMs, report: r.text, error: r.error ?? null, subagents: r.subagents, actions: l.actions.length,
+    durationMs: r.durationMs, report: (r.text || '') + talkSection(run, index + 1, id => t(agents[id]?.name ?? id), config), error: r.error ?? null, subagents: r.subagents, actions: l.actions.length,
     context: r.context ? { ...r.context, compactions: l.context?.compactions ?? r.context.compactions } : null,
   });
   if (r.context?.used) {
