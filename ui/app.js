@@ -303,15 +303,38 @@ const toolName = tool => (tool === 'codex' ? 'Codex' : 'Claude Code');
 
 // ---------- Navigation ----------
 
-const VIEWS = ['manager', 'operations', 'planning', 'missions', 'crew', 'projects', 'log', 'usage'];
-const currentView = () => (VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
+// A project's page is "#project/<id>".
+const VIEWS = ['manager', 'operations', 'planning', 'missions', 'crew', 'projects', 'log', 'usage', 'project'];
+const pageProject = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length)) : null);
+const currentView = () => (pageProject() ? 'project' : VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
 function showView() {
   const view = currentView();
   for (const v of VIEWS) $(`#view-${v}`).classList.toggle('active', v === view);
   for (const a of document.querySelectorAll('.nav a')) a.classList.toggle('active', a.dataset.view === view);
+  $('#project-jump').value = pageProject() ?? '';
   if (view === 'manager') setTimeout(() => $('#message').focus(), 0);
+  if (view === 'project' && state) {
+    if (projectPage.data?.id !== pageProject()) projectPage.data = null;
+    drawProjectPage();
+    refreshProjectPage();
+  }
 }
 window.addEventListener('hashchange', showView);
+
+/** A project's name that opens its page; any other name (an old board's project, a library) stays plain text. */
+const projectLink = (id, label = projectName(id)) =>
+  state?.projects.some(p => p.id === id) ? `<a class="project-link" href="#project/${encodeURIComponent(id)}" title="${esc(t("Open the project's page"))}">${esc(label)}</a>` : esc(label);
+
+/** The selector at the top: every project, to go straight to its page. */
+function drawProjectJump() {
+  const options = `<option value="">${esc(t('Projects…'))}</option>${state.projects.map(p => `<option value="${esc(p.id)}">${esc(p.name ?? p.id)}</option>`).join('')}`;
+  if (draw('#project-jump', options, options)) $('#project-jump').value = pageProject() ?? '';
+}
+$('#project-jump').addEventListener('change', event => {
+  const id = event.target.value;
+  if (id) location.hash = `#project/${encodeURIComponent(id)}`;
+  event.target.blur();
+});
 
 // ---------- Fixed parts: presence, counters and the status bar ----------
 
@@ -352,7 +375,7 @@ function drawFocus() {
   }
   const others = f.others ?? [];
   if (others.length) parts.push(t('and {count} more: {list}', { count: others.length, list: others.map(o => o.projectName).join(', ') }));
-  const html = `${label}${f.state === 'running' ? liveDot() : ''}<span class="focus-project">${esc(f.projectName)}</span><span class="focus-detail">${parts.map(esc).join(' · ')}</span>`;
+  const html = `${label}${f.state === 'running' ? liveDot() : ''}<span class="focus-project">${projectLink(f.project, f.projectName)}</span><span class="focus-detail">${parts.map(esc).join(' · ')}</span>`;
   $('#focus').title = [f.projectName, ...parts].join(' · ');
   draw('#focus', html, html);
 }
@@ -763,26 +786,37 @@ function sessionState(x) {
 const sessionWhere = x => (x.project ? projectName(x.project) : x.folder ?? x.cwd ?? '');
 
 /** The sessions open (process alive, memory, since when, End) and the profiles, each with its Open button. */
-function drawSessions() {
-  const s = state.sessions ?? { profiles: [], open: [] };
-  const rows = s.open.map(x => `<tr>
+/** The sessions open, as a table (or a line saying there is none). */
+function sessionTable(open) {
+  const rows = open.map(x => `<tr>
       <td><span class="primary">${esc(x.name)}</span><span class="secondary">${esc([toolName(x.tool), sessionWhere(x), x.missing?.length ? t('not in the prompt builder: {list}', { list: x.missing.join(', ') }) : ''].filter(Boolean).join(' · '))}</span></td>
       <td>${stateHtml(sessionState(x))}</td>
       <td class="num">${x.status === 'login' ? '—' : ticking(x.started)}</td>
       <td class="num">${x.alive ? bytes(x.ram) : '—'}</td>
       <td class="row-actions"><button type="button" class="button danger small" data-session-end="${esc(x.id)}">${esc(x.status === 'login' ? t('Cancel') : t('End'))}</button></td>
     </tr>`);
-  const profiles = s.profiles.map(p => `<div class="session-profile">
-      <div><div class="name">${esc(p.name)}</div><div class="hint">${esc([toolName(p.tool), p.project ? projectName(p.project) : p.folder ?? '', p.blocks.length ? t('{count} block(s) of the prompt builder', { count: p.blocks.length }) : ''].filter(Boolean).join(' · '))}</div></div>
+  return rows.length
+    ? `<table class="table"><thead><tr><th>${esc(t('Session'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Open for'))}</th><th>${esc(t('Memory'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
+    : `<div class="empty">${esc(t('No session open.'))}</div>`;
+}
+
+/** The profiles, each with its Open button. */
+const profileCards = profiles => profiles.map(p => `<div class="session-profile">
+      <div><div class="name">${esc(p.name)}</div><div class="hint">${esc([toolName(p.tool), p.project ? projectName(p.project) : p.folder ?? '', p.blocks.length ? t('{count} block(s) of the prompt builder', { count: p.blocks.length }) : '', p.auto ? t('automatic, in your clone') : ''].filter(Boolean).join(' · '))}</div></div>
       <button type="button" class="button secondary small" data-session-open="${esc(p.id)}" title="${esc(p.blocks.join(', '))}">${esc(t('Open'))}</button>
-    </div>`);
+    </div>`).join('');
+
+function drawSessions() {
+  const s = state.sessions ?? { profiles: [], open: [] };
+  // The automatic profiles of the projects are opened from each project's page.
+  const profiles = s.profiles.filter(p => !p.auto);
   const html = `<div class="label" style="margin-top:24px">${esc(t('Live sessions'))}</div>
     <div class="panel sessions">
       <p class="hint">${esc(t('A conversation with Claude Code or Codex in a window of its own, for work you do together, while the crew works in the background. It starts with the blocks of the prompt builder its profile names.'))}</p>
-      ${rows.length ? `<table class="table"><thead><tr><th>${esc(t('Session'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Open for'))}</th><th>${esc(t('Memory'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>` : `<div class="empty">${esc(t('No session open.'))}</div>`}
-      ${profiles.length ? `<div class="session-profiles">${profiles.join('')}</div>` : `<p class="hint">${esc(t('No session profiles yet: add them under "sessions" in the settings (see the README).'))}</p>`}
+      ${sessionTable(s.open)}
+      ${profiles.length ? `<div class="session-profiles">${profileCards(profiles)}</div>` : `<p class="hint">${esc(t('No session profiles yet: add them under "sessions" in the settings (see the README).'))}</p>`}
     </div>`;
-  draw('#op-sessions', JSON.stringify([s.open.map(x => [x.id, x.status, x.alive, Math.round(x.ram / 1048576), x.started]), s.profiles]), html);
+  draw('#op-sessions', JSON.stringify([s.open.map(x => [x.id, x.status, x.alive, Math.round(x.ram / 1048576), x.started]), profiles]), html);
 }
 
 // ---------- Missions ----------
@@ -795,7 +829,7 @@ function drawMissions() {
         <button type="button" class="button" data-run="${esc(m.id)}">${esc(t('Run now'))}</button>
       </div>
       <dl class="facts">
-        <dt>${esc(t('Project'))}</dt><dd>${esc(projectName(m.project))}</dd>
+        <dt>${esc(t('Project'))}</dt><dd>${projectLink(m.project)}</dd>
         <dt>${esc(t('Crew, in order'))}</dt><dd><div class="crew-line">${m.crew.map(id => `<span class="crew-chip">${face(member(id, m.project), 'still', 22)}${esc(agentName(id, m.project))}</span>`).join('<span class="arrow">→</span>')}</div></dd>
         <dt>${esc(t('Schedule'))}</dt><dd>${esc(m.schedule)}</dd>
         <dt>${esc(t('Next run'))}</dt><dd class="num">${m.next ? `${shortDate(m.next)} (${esc(relative(m.next))})` : '—'}</dd>
@@ -860,13 +894,18 @@ function teamLead(a) {
   return `<div class="team-member team-lead"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 34)}<div><div class="name">${esc(t(a.name))}</div><div class="hint">${esc(facts.filter(Boolean).join(' · '))}</div></div>${stateHtml(agentStatus(a))}</div>`;
 }
 
+/** A project's crew: its lead, then its members, each with what it is doing. */
+function teamBody(team) {
+  const members = team.members.map(a => `<div class="team-member"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 30)}<div><div class="name">${esc(t(a.name))}</div><div class="hint">${esc([a.base && a.base !== a.id ? t('Based on {agent}', { agent: agentName(a.base) }) : t(a.title ?? ''), a.extra ? t('with instructions for this project') : '', (a.mcp ?? []).length ? t('tools: {list}', { list: a.mcp.join(', ') }) : ''].filter(Boolean).join(' · '))}</div></div>${stateHtml(agentStatus(a))}</div>`);
+  return `${team.lead ? teamLead(team.lead) : ''}${members.join('') || `<div class="hint">${esc(t('No members.'))}</div>`}`;
+}
+
 function drawTeams() {
   const teams = state.teams ?? [];
   const html = `<div class="teams">${teams.map(team => `
     <div class="team">
-      <div class="team-top"><h3>${esc(team.name)}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>
-      ${team.lead ? teamLead(team.lead) : ''}
-      ${team.members.map(a => `<div class="team-member"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 30)}<div><div class="name">${esc(t(a.name))}</div><div class="hint">${esc([a.base && a.base !== a.id ? t('Based on {agent}', { agent: agentName(a.base) }) : t(a.title ?? ''), a.extra ? t('with instructions for this project') : '', (a.mcp ?? []).length ? t('tools: {list}', { list: a.mcp.join(', ') }) : ''].filter(Boolean).join(' · '))}</div></div>${stateHtml(agentStatus(a))}</div>`).join('') || `<div class="hint">${esc(t('No members.'))}</div>`}
+      <div class="team-top"><h3>${projectLink(team.project, team.name)}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>
+      ${teamBody(team)}
     </div>`).join('')}</div>`;
   draw('#teams', html, html);
 }
@@ -1008,12 +1047,15 @@ function projectState(p) {
   return [t('Stopped'), 'neutral'];
 }
 
-function processRows(p) {
-  const flag = x => (x.crew ? t('crew') : x.session ? t('session') : x.guarded ? t('kept') : '');
+/** A project's processes: name (and whose), PID, memory and command line. */
+function processTable(p) {
+  const flag = x => (x.crew ? t('crew') : x.session ? t('session') : x.dev ? t('development environment') : x.guarded ? t('kept') : '');
   const rows = p.processes.map(x =>
     `<tr><td>${esc(x.name)}${flag(x) ? ` <span class="hint">· ${esc(flag(x))}</span>` : ''}</td><td class="num">${x.pid}</td><td class="num">${bytes(x.ram)}</td><td class="command">${esc(x.command)}</td></tr>`);
-  return `<tr class="processes"><td colspan="4"><table class="table inner"><thead><tr><th>${esc(t('Process'))}</th><th>PID</th><th>${esc(t('Memory'))}</th><th>${esc(t('Command line'))}</th></tr></thead><tbody>${rows.join('')}</tbody></table></td></tr>`;
+  return `<table class="table inner"><thead><tr><th>${esc(t('Process'))}</th><th>PID</th><th>${esc(t('Memory'))}</th><th>${esc(t('Command line'))}</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
 }
+
+const processRows = p => `<tr class="processes"><td colspan="4">${processTable(p)}</td></tr>`;
 
 function drawComputer() {
   const c = state.computer;
@@ -1026,7 +1068,7 @@ function drawComputer() {
     const open = has && expanded.has(p.id);
     const canStop = p.processes.some(x => !x.crew && !x.guarded);
     return `<tr class="${has ? 'clickable' : ''}${open ? ' selected' : ''}"${has ? ` data-expand="${esc(p.id)}"` : ''}>
-      <td><span class="primary">${has ? (open ? '▾ ' : '▸ ') : ''}${esc(p.name)}</span><span class="secondary">${esc(t('{count} process(es)', { count: p.processes.length }))}</span></td>
+      <td><span class="primary">${has ? (open ? '▾ ' : '▸ ') : ''}${projectLink(p.id, p.name)}</span><span class="secondary">${esc(t('{count} process(es)', { count: p.processes.length }))}</span></td>
       <td>${stateHtml(projectState(p))}</td>
       <td class="num">${p.ram ? bytes(p.ram) : '—'}</td>
       <td class="row-actions">${canStop ? `<button type="button" class="button danger small" data-stop="${esc(p.id)}">${esc(t('Stop'))}</button>` : ''}</td>
@@ -1051,6 +1093,222 @@ function drawComputer() {
     <table class="table" style="margin-top:20px"><thead><tr><th>${esc(t('Project'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Memory'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
   draw('#computer', html, html);
 }
+
+// ---------- A project's page ----------
+
+// What the page read of its project (GET /api/project/<id>): the facts, your clone and its branch, the development
+// environment and the recent runs. The rest comes from the state.
+const projectPage = { data: null, loading: false };
+
+async function refreshProjectPage() {
+  const id = pageProject();
+  if (!id || projectPage.loading) return;
+  projectPage.loading = true;
+  try {
+    const data = await api(`/api/project/${encodeURIComponent(id)}`);
+    if (pageProject() === id) projectPage.data = data;
+  } catch (error) {
+    if (pageProject() === id) projectPage.data = { id, error: error.message };
+  } finally {
+    projectPage.loading = false;
+  }
+  if (pageProject() === id && state) drawProjectPage();
+}
+
+const PAGE_PARTS = ['#project-title', '#project-actions', '#project-facts', '#project-team', '#project-runs', '#project-history', '#project-planning', '#project-computer', '#project-sessions'];
+
+function drawProjectPage() {
+  const id = pageProject();
+  if (!id || !state) return;
+  const p = state.projects.find(x => x.id === id);
+  $('#project-task-form').hidden = !p;
+  if (!p) {
+    const html = `<h1>${esc(t('Unknown project: {id}', { id }))}</h1><p>${esc(t('It is not in the settings. Pick a project in the list at the top.'))}</p>`;
+    draw('#project-title', html, html);
+    for (const part of PAGE_PARTS.slice(1)) draw(part, '', '');
+    return;
+  }
+  const info = projectPage.data?.id === id ? projectPage.data : null;
+  const title = `<h1>${esc(p.name ?? id)}</h1><p>${esc(info?.error ?? (info ? info.about || t('No sentence about this project in its settings ("about").') : t('Loading…')))}</p>`;
+  draw('#project-title', title, title);
+  drawProjectActions(id, info);
+  drawProjectFacts(info);
+  drawProjectTeam(id);
+  drawProjectRuns(id);
+  drawProjectHistory(info);
+  drawProjectPlanning(id, p);
+  drawProjectComputer(id, info);
+  drawProjectSessions(id);
+  fillProjectTask(id);
+}
+
+/** The page's buttons: a new task, a live session per tool, the folder, VS Code and the development environment. */
+function drawProjectActions(id, info) {
+  const profiles = (state.sessions?.profiles ?? []).filter(x => x.project === id);
+  const noClone = info && !info.clone ? ` disabled title="${esc(t('No clone of yours on this computer: set "local_clone" in its settings.'))}"` : '';
+  const session = tool => {
+    const profile = profiles.find(x => x.tool === tool);
+    return profile ? `<button type="button" class="button secondary" data-session-open="${esc(profile.id)}"${noClone}>${esc(t('Live session: {tool}', { tool: toolName(tool) }))}</button>` : '';
+  };
+  const dev = info?.dev;
+  const devButton = !info?.devStart ? ''
+    : dev?.status === 'running' ? `<button type="button" class="button danger" data-project-dev="stop">${esc(t('Stop the development environment'))}</button>`
+    : `<button type="button" class="button secondary" data-project-dev="start"${dev?.status === 'starting' ? ' disabled' : noClone}>${esc(dev?.status === 'starting' ? t('Starting…') : t('Start the development environment'))}</button>`;
+  const html = [
+    `<button type="button" class="button" data-project-task>${esc(t('New task'))}</button>`,
+    session('claude'),
+    session('codex'),
+    `<button type="button" class="button secondary" data-project-open="folder"${noClone}>${esc(t('Open folder'))}</button>`,
+    info?.vscode ? `<button type="button" class="button secondary" data-project-open="vscode"${noClone}>${esc(t('Open in VS Code'))}</button>` : '',
+    devButton,
+  ].join('');
+  draw('#project-actions', html, html);
+}
+
+function drawProjectFacts(info) {
+  if (!info || info.error) return draw('#project-facts', '', '');
+  const link = url => (/^https?:\/\//.test(url ?? '') ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>` : esc(url ?? '—'));
+  const from = info.mainBranch === 'current' ? t('from the branch checked out in your clone') : info.mainBranch ? t('from {branch}', { branch: info.mainBranch }) : '';
+  const delivery = info.deliver === 'local' ? t('Local: a branch handed to your clone, nothing goes to GitHub') : t('A pull request for you to approve');
+  const html = `<div class="panel"><dl class="facts project-facts">
+      <dt>${esc(t('Local folder'))}</dt><dd>${info.clone ? `<code>${esc(info.clone)}</code>` : esc(t('No clone of yours on this computer: set "local_clone" in its settings.'))}</dd>
+      <dt>${esc(t('Current branch'))}</dt><dd>${info.branch ? `<code>${esc(info.branch === 'HEAD' ? t('no branch (detached)') : info.branch)}</code>` : '—'}</dd>
+      <dt>${esc(t('Delivery'))}</dt><dd>${esc([delivery, from].filter(Boolean).join(', '))}</dd>
+      <dt>${esc(t('Repository'))}</dt><dd>${link(info.repository)}</dd>
+      ${info.site ? `<dt>${esc(t('Site'))}</dt><dd>${link(info.site)}</dd>` : ''}
+      ${info.docs ? `<dt>${esc(t('Personal documentation'))}</dt><dd><code>${esc(info.docs)}</code></dd>` : ''}
+      <dt>${esc(t('Development environment'))}</dt><dd>${info.devStart ? `<code>${esc(info.devStart)}</code>` : esc(t('None: set "dev_start" in its settings to start it from here.'))}</dd>
+    </dl></div>`;
+  draw('#project-facts', html, html);
+}
+
+function drawProjectTeam(id) {
+  const team = state.teams?.find(x => x.project === id);
+  const html = team
+    ? `<div class="team"><div class="team-top"><h3>${esc(t('Crew'))}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>${teamBody(team)}</div>`
+    : '';
+  draw('#project-team', html, html);
+}
+
+/** The project's runs going on (a click opens the agent's panel) and its runs in the queue. */
+function drawProjectRuns(id) {
+  const runs = going().filter(a => a.project === id);
+  const queue = online ? queueOrder().filter(r => r.project === id) : [];
+  const live = runs.map(a => `<div class="project-run"${a.agent ? opensPanel(a.id) : ''}>
+      ${face(a.agent ? member(a.agent, a.project) : member('manager'), a.agent ? faceState(member(a.agent, a.project)) : 'working', 30)}
+      <div style="min-width:0"><div class="name">${liveDot()} ${esc(a.title)}</div><div class="hint">${esc(stepLine(a))} · ${ticking(a.started)}</div></div>
+      <button type="button" class="button danger small" data-cancel="${esc(a.id)}">${esc(t('Cancel run'))}</button>
+    </div>`);
+  const waiting = queue.map(r => `<div class="project-run">
+      <span></span>
+      <div style="min-width:0"><div class="name">${esc(r.title)}</div><div class="hint">${stateHtml(runLabel(r))}${r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? ` · ${esc(t('not before {when}', { when: shortDate(r.notBefore) }))}` : ''}</div></div>
+      <button type="button" class="button danger small" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button>
+    </div>`);
+  const html = `<div class="panel">
+      <div class="label">${esc(t('Running now'))}</div>${live.join('') || `<div class="hint">${esc(t('Nothing running for this project.'))}</div>`}
+      <div class="label" style="margin-top:16px">${esc(t('Queue'))}</div>${waiting.join('') || `<div class="hint">${esc(t('Nothing in the queue for this project.'))}</div>`}
+    </div>`;
+  draw('#project-runs', JSON.stringify([online, runs.map(a => [a.id, a.step, a.agent, a.status, member(a.agent ?? 'manager', a.project).status]), queue.map(r => [r.id, r.status, r.notBefore, r.needsYou])]), html);
+}
+
+/** The project's latest runs, each with its result and a link to its reports in the Log. */
+function drawProjectHistory(info) {
+  const list = info?.history ?? [];
+  const rows = list.map(r => `<tr>
+      <td class="num">${shortDate(r.created)}</td>
+      <td><span class="primary">${esc(r.title)}</span><span class="secondary">${esc(r.result ?? r.note ?? '')}</span></td>
+      <td>${stateHtml(runLabel(r))}</td>
+      <td class="num">${r.started ? esc(elapsed(r.started, r.ended ?? Date.now())) : '—'}</td>
+      <td class="row-actions"><div class="plan-actions">${r.pullRequest ? prLink(r.pullRequest) : ''}<a href="#log" class="button secondary small" data-select="${esc(r.id)}">${esc(t('Reports'))}</a></div></td>
+    </tr>`);
+  const html = info && !info.error
+    ? `<h2 class="section-title">${esc(t('Recent history'))}</h2>${rows.length
+      ? `<table class="table"><thead><tr><th>${esc(t('Date'))}</th><th>${esc(t('Run'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Time'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
+      : `<div class="empty">${esc(t('No runs of this project yet.'))}</div>`}`
+    : '';
+  draw('#project-history', JSON.stringify([list.map(r => [r.id, r.status, r.ended, r.pullRequest, r.needsYou, r.result]), !!info && !info.error]), html);
+}
+
+/** The project's items on the planning board (open ones, in the board's order). */
+function drawProjectPlanning(id, p) {
+  const items = planItemsNow().filter(i => !i.archived && i.status !== 'done' && (i.project === id || i.project === p.name));
+  const rows = items.map(i => `<tr>
+      <td class="num">#${i.id}</td>
+      <td><span class="primary">${esc(i.title)}</span>${i.description ? `<span class="secondary plan-description">${esc(i.description)}</span>` : ''}</td>
+      <td>${esc(priorityLabel(i.priority))}</td>
+      <td>${stateHtml(planState(i.status))}</td>
+      <td>${planLinks(i)}</td>
+    </tr>`);
+  const html = `<div class="section-head"><h2 class="section-title">${esc(t('Planning'))}</h2><button type="button" class="button secondary small" data-project-planning="${esc(id)}">${esc(t('Open in Planning'))}</button></div>
+    ${rows.length
+      ? `<table class="table"><thead><tr><th>#</th><th>${esc(t('Item'))}</th><th>${esc(t('Priority'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Run or PR'))}</th></tr></thead><tbody>${rows.join('')}</tbody></table>`
+      : `<div class="empty">${esc(t('No open item for this project on the board.'))}</div>`}`;
+  draw('#project-planning', html, html);
+}
+
+/** The project on this computer: its state, its memory, its processes and its development environment. */
+function drawProjectComputer(id, info) {
+  const c = state.computer.projects.find(x => x.id === id);
+  if (!c) return draw('#project-computer', '', '');
+  const canStop = c.processes.some(x => !x.crew && !x.guarded);
+  const dev = info?.dev;
+  const devLine = !info?.devStart ? ''
+    : `<div class="dev-line"><span class="label">${esc(t('Development environment'))}</span>${stateHtml(dev?.status === 'running' ? [t('Running'), 'ok'] : dev?.status === 'starting' ? [t('Starting…'), 'info'] : [t('Stopped'), 'neutral'])}${dev?.status === 'running' ? `<span class="num">${bytes(dev.ram)}</span><button type="button" class="button danger small" data-project-dev="stop">${esc(t('Stop'))}</button>` : dev?.status === 'starting' ? '' : `<button type="button" class="button secondary small" data-project-dev="start"${info.clone ? '' : ' disabled'}>${esc(t('Start'))}</button>`}</div>`;
+  const notes = [state.computer.supported ? '' : t("The projects' processes are read on Windows only."), state.computer.error ? t("Couldn't read the processes: {error}", { error: state.computer.error }) : ''].filter(Boolean);
+  const html = `<h2 class="section-title">${esc(t('On this computer'))}</h2>
+    <div class="panel">
+      <div class="computer-line">${stateHtml(projectState(c))}<span class="num">${c.ram ? bytes(c.ram) : '—'}</span><span class="hint">${esc(t('{count} process(es)', { count: c.processes.length }))}</span>${canStop ? `<button type="button" class="button danger small" data-stop="${esc(id)}">${esc(t('Stop processes'))}</button>` : ''}</div>
+      ${devLine}
+      ${notes.map(n => `<div class="hint">${esc(n)}</div>`).join('')}
+      ${c.processes.length ? processTable(c) : ''}
+    </div>`;
+  draw('#project-computer', html, html);
+}
+
+/** The project's live sessions open, and its profiles (the automatic ones included). */
+function drawProjectSessions(id) {
+  const s = state.sessions ?? { profiles: [], open: [] };
+  const open = s.open.filter(x => x.project === id);
+  const profiles = s.profiles.filter(x => x.project === id);
+  const html = `<h2 class="section-title">${esc(t('Live sessions'))}</h2>
+    <div class="panel sessions">
+      <p class="hint">${esc(t("Claude Code or Codex in a window of its own, in your clone of the project, starting with the project's block of the prompt builder and the environment."))}</p>
+      ${sessionTable(open)}
+      ${profiles.length ? `<div class="session-profiles">${profileCards(profiles)}</div>` : ''}
+    </div>`;
+  draw('#project-sessions', JSON.stringify([open.map(x => [x.id, x.status, x.alive, Math.round(x.ram / 1048576), x.started]), profiles]), html);
+}
+
+// The team lead's choice in the task form: a request, which the lead plans into tasks for the crew.
+const LEAD_REQUEST = '@lead';
+
+/** The task form's members: the project's crew and, when it has a lead, a request for the lead. */
+function fillProjectTask(id) {
+  const select = $('#project-task-agent');
+  const team = state.teams?.find(x => x.project === id);
+  const members = team?.members ?? state.crew.filter(a => a.id !== 'manager');
+  const list = [...(team?.lead ? [[LEAD_REQUEST, t('{lead}: a request, planned into tasks for the crew', { lead: t(team.lead.name) })]] : []), ...members.map(a => [a.id, `${t(a.name)}: ${t(a.title ?? '')}`])];
+  const key = `${id}|${list.map(([value]) => value).join(',')}`;
+  if (select.dataset.list === key) return;
+  const kept = select.value;
+  select.innerHTML = planOptions(list, list.some(([value]) => value === kept) ? kept : list[0]?.[0]);
+  select.dataset.list = key;
+}
+
+$('#project-task-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.target;
+  const project = pageProject();
+  try {
+    if (form.agent.value === LEAD_REQUEST) await api('/api/ask', { project, request: form.instruction.value });
+    else await api('/api/task', { agent: form.agent.value, project, instruction: form.instruction.value, review: form.review.checked });
+    form.instruction.value = '';
+    toast(t('Task queued.'));
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+});
 
 // ---------- The plan's free resets and the claude.ai reading ----------
 
@@ -1169,7 +1427,7 @@ function planRow(i) {
   return `<tr class="plan-row plan-${esc(i.status)}${i.archived ? ' archived' : ''}" data-item="${i.id}">
     <td class="num">#${i.id}</td>
     <td><span class="primary">${esc(i.title)}</span>${i.description ? `<span class="secondary plan-description">${esc(i.description)}</span>` : ''}<span class="secondary">${esc(dates)}${i.archived ? ` · ${esc(t('archived {when}', { when: shortDate(i.archived) }))}` : ''}</span></td>
-    <td>${esc(projectName(i.project))}</td>
+    <td>${projectLink(i.project)}</td>
     <td><select class="inline-select priority-${esc(i.priority)}" data-plan-field="priority" aria-label="${esc(t('Priority'))}">${planOptions(priorities, i.priority)}</select></td>
     <td><select class="inline-select state-${planState(i.status)[1]}" data-plan-field="status" aria-label="${esc(t('Status'))}">${planOptions(statuses, i.status)}</select></td>
     <td>${planLinks(i)}</td>
@@ -1199,7 +1457,7 @@ function drawPlanning(force = false) {
 
   const highlight = waiting.length
     ? `<div class="panel plan-waiting"><div class="label">${esc(t('Waiting for you ({count})', { count: waiting.length }))}</div><ul>${waiting.map(i =>
-      `<li><span class="num">#${i.id}</span> <span class="hint">${esc(projectName(i.project))}</span> <span class="primary">${esc(i.title)}</span>${i.pr ? ` · ${prLink(i.pr)}` : ''}</li>`).join('')}</ul></div>`
+      `<li><span class="num">#${i.id}</span> <span class="hint">${projectLink(i.project)}</span> <span class="primary">${esc(i.title)}</span>${i.pr ? ` · ${prLink(i.pr)}` : ''}</li>`).join('')}</ul></div>`
     : '';
   draw('#planning-waiting', highlight, highlight);
 
@@ -1518,6 +1776,11 @@ async function refresh() {
   drawComputer();
   drawPlan();
   drawPlanning();
+  drawProjectJump();
+  if (currentView() === 'project') {
+    drawProjectPage();
+    refreshProjectPage();
+  }
   tickClocks();
   if (currentView() === 'log') refreshDetail();
 }
@@ -1669,10 +1932,39 @@ $('#limits-form').addEventListener('submit', async event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-needs-done],[data-needs-session],[data-context],[data-prompts-sync],[data-session-open],[data-session-end]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-needs-done],[data-needs-session],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task]');
   if (!target) return;
+  // A project's name inside a row that opens on a click (Projects) goes to its page, and nothing else.
+  if (event.target.closest('a.project-link') && !target.matches('a')) return;
   try {
-    if (target.dataset.run) {
+    if (target.hasAttribute('data-project-task')) {
+      $('#project-task-form').scrollIntoView({ behavior: 'smooth' });
+      $('#project-task-form').instruction.focus();
+      return;
+    } else if (target.dataset.projectPlanning) {
+      planFilter.project = target.dataset.projectPlanning;
+      location.hash = '#planning';
+      drawPlanning(true);
+      return;
+    } else if (target.dataset.projectOpen) {
+      const app = target.dataset.projectOpen;
+      await api('/api/project/open', { project: pageProject(), app });
+      toast(app === 'vscode' ? t('Opening VS Code…') : t('Opening the folder…'));
+      return;
+    } else if (target.dataset.projectDev) {
+      const project = pageProject();
+      if (target.dataset.projectDev === 'stop') {
+        const ok = await confirmDialog(t('Stop the development environment'), t('The window of the development environment of {project} closes, with everything it started.', { project: projectName(project) }), t('Stop'));
+        if (!ok) return;
+        const r = await api('/api/project/dev', { project, action: 'stop' });
+        toast(r.stopped ? t('Development environment stopped.') : t('It was no longer running.'));
+      } else {
+        target.disabled = true;
+        await api('/api/project/dev', { project, action: 'start' });
+        toast(t('Development environment starting in a window of its own.'));
+      }
+      await refreshProjectPage();
+    } else if (target.dataset.run) {
       const mission = state.missions.find(m => m.id === target.dataset.run);
       const ok = await confirmDialog(
         t('Run mission'),

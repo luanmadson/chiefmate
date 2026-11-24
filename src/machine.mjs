@@ -96,6 +96,12 @@ function subtree(pid, children, into = new Set()) {
 
 const isChiefmateServer = p => /cli\.mjs["']?\s+server\b/i.test(p.cmd);
 
+/** The project whose development environment a command line runs ("cli.mjs dev-run <id>", see src/projects.mjs), else null. */
+export function devIdOf(command) {
+  const m = String(command ?? '').match(/cli\.mjs["']?\s+dev-run\s+"?([\w.-]+)/i);
+  return m ? m[1] : null;
+}
+
 /**
  * Groups the processes by project. Chiefmate itself, the crew at work and the live sessions are told apart and never
  * offered for stopping (a session ends from its own button).
@@ -120,8 +126,14 @@ function group(config, list) {
     const id = sessionIdOf(p.cmd);
     if (id) for (const pid of subtree(p.pid, children)) sessionOf.set(pid, id);
   }
+  // The projects' development environments started from the app: each one's window process and everything under it.
+  const devOf = new Map();
+  for (const p of list) {
+    const id = devIdOf(p.cmd);
+    if (id && config.projects?.[id]) for (const pid of subtree(p.pid, children)) devOf.set(pid, id);
+  }
   const mine = subtree(process.pid, children);
-  for (const pid of [...crew, ...sessionOf.keys()]) mine.delete(pid);
+  for (const pid of [...crew, ...sessionOf.keys(), ...devOf.keys()]) mine.delete(pid);
   const guarded = new Set([...mine, ...crew, ...sessionOf.keys()]);
   for (let p = byPid.get(process.pid)?.parent; p && byPid.has(p) && !guarded.has(p); p = byPid.get(p).parent) guarded.add(p); // who started Chiefmate
   for (const p of list) if (isChiefmateServer(p)) guarded.add(p.pid);
@@ -140,6 +152,7 @@ function group(config, list) {
     for (const c of subtree(pid, children)) if (!owner.has(c) && !mine.has(c) && !crew.has(c)) owner.set(c, id);
   }
   for (const [pid, id] of crewProject) if (config.projects?.[id]) owner.set(pid, id);
+  for (const [pid, id] of devOf) if (!crew.has(pid)) owner.set(pid, id);
   // A session's processes count for its project; a session of a library folder (or a folder of its own) has a row of its own.
   const sessions = new Map();
   for (const [pid, id] of sessionOf) {
@@ -152,7 +165,7 @@ function group(config, list) {
 
   const describe = p => ({
     pid: p.pid, name: p.name, ram: p.ram, command: clip(p.cmd || p.exe || p.name, 220), crew: crew.has(p.pid), guarded: guarded.has(p.pid),
-    session: sessionOf.get(p.pid) ?? null,
+    session: sessionOf.get(p.pid) ?? null, dev: devOf.has(p.pid),
   });
   const byProject = new Map();
   for (const [pid, id] of owner) byProject.set(id, [...(byProject.get(id) ?? []), describe(byPid.get(pid))]);
@@ -163,7 +176,12 @@ function group(config, list) {
     const window = s.pids.find(pid => sessionIdOf(byPid.get(pid)?.cmd) === s.id);
     return { id: s.id, name: s.record?.name ?? s.id, project: s.record?.project ?? null, pid: window ?? null, ram: sum(items), processes: items };
   });
-  return { byProject, chiefmate, sessions: sessionList };
+  // Each development environment: its window process and its memory, all it started included.
+  const dev = [...new Set(devOf.values())].map(id => {
+    const pids = [...devOf].filter(([, x]) => x === id).map(([pid]) => pid);
+    return { project: id, pids: pids.filter(pid => devIdOf(byPid.get(pid)?.cmd) === id), ram: pids.reduce((total, pid) => total + (byPid.get(pid)?.ram ?? 0), 0) };
+  });
+  return { byProject, chiefmate, sessions: sessionList, dev };
 }
 
 const sum = items => items.reduce((total, p) => total + p.ram, 0);
@@ -171,7 +189,7 @@ const sum = items => items.reduce((total, p) => total + p.ram, 0);
 /** The computer's memory, the projects running on it and their state, from the latest reading (it never waits). */
 export function computer(config = loadConfig(), queue = queued()) {
   if (SUPPORTED && (!cache || Date.now() - cache.at > MAX_AGE)) refreshProcesses();
-  const { byProject, chiefmate, sessions } = cache ? group(config, cache.list) : { byProject: new Map(), chiefmate: process.memoryUsage().rss, sessions: [] };
+  const { byProject, chiefmate, sessions, dev } = cache ? group(config, cache.list) : { byProject: new Map(), chiefmate: process.memoryUsage().rss, sessions: [], dev: [] };
   const waiting = new Set(queue.map(r => r.project));
   const working = new Set(liveRuns().map(l => l.project));
   const projects = Object.entries(config.projects ?? {}).map(([id, p]) => {
@@ -195,6 +213,7 @@ export function computer(config = loadConfig(), queue = queued()) {
     chiefmate: { ram: chiefmate },
     projects,
     sessions,
+    dev,
   };
 }
 

@@ -48,14 +48,33 @@ export function sessionIdOf(command) {
 
 /**
  * The profiles: "sessions": { "<id>": { "name", "tool": "claude" | "codex", "project" or "library_folder"
- * ("<library>/<folder>"), "prompt_blocks": ["..."], "model", "cwd" } }.
+ * ("<library>/<folder>"), "prompt_blocks": ["..."], "model", "cwd" } }. Then the automatic ones: for each project,
+ * one per tool the settings have no profile of for that project (see autoProfiles).
  */
 export function sessionProfiles(config = loadConfig()) {
-  return Object.entries(config.sessions ?? {}).map(([id, p]) => ({
+  const configured = Object.entries(config.sessions ?? {}).map(([id, p]) => ({
     id, name: p?.name ?? id, tool: String(p?.tool ?? 'claude').toLowerCase(), project: p?.project ?? null, library_folder: p?.library_folder ?? null,
     prompt_blocks: (Array.isArray(p?.prompt_blocks) ? p.prompt_blocks : String(p?.prompt_blocks ?? '').split(',')).map(b => String(b).trim()).filter(Boolean),
-    model: p?.model ?? null, cwd: p?.cwd ?? null,
+    model: p?.model ?? null, cwd: p?.cwd ?? null, auto: false,
   }));
+  return [...configured, ...autoProfiles(config, configured)];
+}
+
+/**
+ * The automatic profiles, never written to the settings: "project-<id>-claude" and "project-<id>-codex", opened from
+ * the project's page. They open in your own clone of the project and start with the project's block of the prompt
+ * builder ("prompt_block") and the environment ("prompt_builder.environment"), when there is a copy of the builder.
+ */
+function autoProfiles(config, configured) {
+  const { file, environment } = builderSettings(config);
+  const builder = !!file && existsSync(file);
+  return Object.entries(config.projects ?? {}).flatMap(([id, p]) => TOOLS
+    .filter(tool => !configured.some(x => (x.project === id && x.tool === tool) || x.id === `project-${id}-${tool}`))
+    .map(tool => ({
+      id: `project-${id}-${tool}`, name: `${p?.name ?? id} (${tool === 'codex' ? 'Codex' : 'Claude Code'})`, tool, project: id, library_folder: null,
+      prompt_blocks: builder && p?.prompt_block ? [p.prompt_block, environment].filter(Boolean) : [],
+      model: tool === 'claude' ? config.default_model ?? null : null, cwd: null, auto: true,
+    })));
 }
 
 /** Your own copy of a repository on this computer: the folder itself, or ~/Documents/GitHub/<repository name>. */
@@ -66,6 +85,12 @@ function ownCopy(repository) {
   const name = path.basename(text.replace(/[\\/]+$/, '')).replace(/\.git$/, '');
   const guess = name ? path.join(os.homedir(), 'Documents', 'GitHub', name) : null;
   return guess && existsSync(guess) ? guess : null;
+}
+
+/** Your own clone of a project (local_clone, or the repository's folder in Documents/GitHub), or null. */
+export function projectClone(project) {
+  const own = [project?.local_clone, ownCopy(project?.repository)].find(d => d && existsSync(d));
+  return own ? path.resolve(own) : null;
 }
 
 /**
@@ -82,9 +107,9 @@ export function sessionFolder(config, profile) {
   if (profile.project) {
     const project = config.projects?.[profile.project];
     if (!project) throw new Error(t('Unknown project: {id}', { id: profile.project }));
-    const own = [project.local_clone, ownCopy(project.repository)].find(d => d && existsSync(d));
+    const own = projectClone(project);
     if (!own) throw new Error(t('Session "{name}": set "cwd" to your own clone of the project. The working copy in workspaces/ belongs to the crew and is reset before every run.', { name: profile.name }));
-    return { dir: path.resolve(own), copy: false };
+    return { dir: own, copy: false };
   }
   if (profile.library_folder) {
     const [id, ...rest] = String(profile.library_folder).split(/[\\/]/).filter(Boolean);
@@ -97,26 +122,31 @@ export function sessionFolder(config, profile) {
   throw new Error(t('Session "{name}" needs "project", "library_folder" or "cwd".', { name: profile.name }));
 }
 
-/** The first message: a short header and the blocks of the prompt builder the profile names, variables filled in. */
+/**
+ * The first message: a short header and the blocks of the prompt builder the profile names, variables filled in. An
+ * automatic profile always has one: the header, the project's sentence "about" it and the blocks found.
+ */
 export function sessionPrompt(config, profile, folder) {
   let built = null;
   if (profile.prompt_blocks.length) {
     const { file } = builderSettings(config);
     if (!file || !existsSync(file)) throw new Error(t('Session "{name}" uses blocks of the prompt builder, but there is no copy of it on this computer ("prompt_builder.file").', { name: profile.name }));
     built = assembleBlocks(parseBlocks(readFileSync(file, 'utf8')), profile.prompt_blocks);
-    if (!built.blocks.length) throw new Error(t('None of the blocks of session "{name}" is in the prompt builder: {list}', { name: profile.name, list: profile.prompt_blocks.join(', ') }));
+    if (!built.blocks.length && !profile.auto) throw new Error(t('None of the blocks of session "{name}" is in the prompt builder: {list}', { name: profile.name, list: profile.prompt_blocks.join(', ') }));
   }
   const lines = [
     `# ${profile.name}`,
     `A live session with ${config.owner || 'the owner'}, opened by Chiefmate on ${formatDateTime(new Date())}. Working folder: ${folder.dir}. Talk to ${config.owner || 'the owner'} in ${languageName(config.language || 'en')}.`,
   ];
+  const project = profile.auto ? config.projects?.[profile.project] : null;
+  if (project) lines.push(`Project: ${project.name ?? profile.project}${project.site ? ` (${project.site})` : ''}. ${project.about ?? ''}`.trim());
   if (folder.copy) lines.push("This folder is Chiefmate's read-only copy of a library: it is reset from GitHub, so anything changed here is lost. Read it; write only where the owner tells you.");
   if (built?.text) lines.push('', built.text);
-  return { text: lines.join('\n'), blocks: built?.blocks ?? [], missing: built?.missing ?? [], blocksGiven: !!built };
+  return { text: lines.join('\n'), blocks: built?.blocks ?? [], missing: built?.missing ?? [], blocksGiven: !!built || !!project };
 }
 
 /** Every path Windows finds for a command, through where.exe. */
-function where(name) {
+export function where(name) {
   const r = spawnSync('where.exe', [name], { encoding: 'utf8', windowsHide: true });
   return r.status === 0 ? r.stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean) : [];
 }
@@ -179,22 +209,28 @@ function codexSignedIn() {
   });
 }
 
-/** Opens the session's window: Windows Terminal when there is one, else PowerShell. Returns which. */
-function openWindow(session) {
+/**
+ * Opens a window of its own running "node src/cli.mjs <args>" in a folder: Windows Terminal when there is one, else
+ * PowerShell. Returns which. The arguments are ids (letters, digits, "_", "." and "-"): they need no quoting.
+ */
+export function openConsole(name, cwd, args) {
   const cli = path.join(ROOT, 'src', 'cli.mjs');
-  const title = `Chiefmate: ${session.name}`.replace(/[^\p{L}\p{N} .:_-]/gu, '').slice(0, 60);
-  const options = { cwd: session.cwd, detached: true, stdio: 'ignore' };
+  const title = `Chiefmate: ${name}`.replace(/[^\p{L}\p{N} .:_()-]/gu, '').slice(0, 60);
+  const options = { cwd, detached: true, stdio: 'ignore' };
   const terminal = process.platform === 'win32' ? where('wt')[0] : null;
   if (terminal) {
-    spawn(terminal, ['-w', 'new', 'new-tab', '--title', title, '-d', session.cwd, process.execPath, cli, 'session-run', session.id], options).unref();
+    spawn(terminal, ['-w', 'new', 'new-tab', '--title', title, '-d', cwd, process.execPath, cli, ...args], options).unref();
     return 'terminal';
   }
   const quote = s => `'${String(s).replaceAll("'", "''")}'`;
-  const command = `$Host.UI.RawUI.WindowTitle = ${quote(title)}; & ${quote(process.execPath)} ${quote(cli)} session-run ${session.id}`;
+  const command = `$Host.UI.RawUI.WindowTitle = ${quote(title)}; & ${quote(process.execPath)} ${quote(cli)} ${args.join(' ')}`;
   // "start" gives PowerShell a console window of its own. The line is written as cmd.exe reads it (no double quotes inside).
   spawn('cmd.exe', [`/d /c start "" powershell.exe -NoLogo -NoProfile -Command "${command}"`], { ...options, windowsHide: true, windowsVerbatimArguments: true }).unref();
   return 'powershell';
 }
+
+/** Opens the session's window. */
+const openWindow = session => openConsole(session.name, session.cwd, ['session-run', session.id]);
 
 function launch(session) {
   Object.assign(session, { status: 'starting', started: now(), window: openWindow(session) });
@@ -339,7 +375,7 @@ export function sessionsState(config = loadConfig(), machine = computer(config))
     };
   };
   return {
-    profiles: sessionProfiles(config).map(p => ({ id: p.id, name: p.name, tool: p.tool, project: p.project, folder: p.library_folder, blocks: p.prompt_blocks, model: p.model })),
+    profiles: sessionProfiles(config).map(p => ({ id: p.id, name: p.name, tool: p.tool, project: p.project, folder: p.library_folder, blocks: p.prompt_blocks, model: p.model, auto: p.auto })),
     open: records.filter(s => OPEN.includes(s.status)).map(brief),
     recent: records.filter(s => !OPEN.includes(s.status)).slice(0, 5).map(brief),
   };
@@ -347,8 +383,9 @@ export function sessionsState(config = loadConfig(), machine = computer(config))
 
 /** For the manager's situation: the sessions open, in one line. */
 export function sessionsLine(config) {
-  const { open, profiles } = sessionsState(config);
-  const list = open.map(s => `${s.name} [${s.id}] (${s.tool}, ${s.project ? `project ${s.project}` : s.folder ? `library folder ${s.folder}` : s.cwd}, ${s.status === 'login' ? 'waiting for the owner to sign in to Codex' : `${s.alive ? 'open' : 'starting'} since ${formatDateTime(s.started)}${s.ram ? `, ${formatBytes(s.ram)}` : ''}`})`);
+  const { open, profiles: all } = sessionsState(config);
+  const profiles = all.filter(p => !p.auto);
+  const list =open.map(s => `${s.name} [${s.id}] (${s.tool}, ${s.project ? `project ${s.project}` : s.folder ? `library folder ${s.folder}` : s.cwd}, ${s.status === 'login' ? 'waiting for the owner to sign in to Codex' : `${s.alive ? 'open' : 'starting'} since ${formatDateTime(s.started)}${s.ram ? `, ${formatBytes(s.ram)}` : ''}`})`);
   const available = profiles.map(p => p.id).join(', ');
-  return `Live sessions (windows where ${config.owner || 'the owner'} works with an agent; not the crew, and not yours to end unless asked): ${list.join('; ') || 'none open'}.${available ? ` Profiles: ${available} (node src/cli.mjs session <profile> opens one).` : ''}`;
+  return `Live sessions (windows where ${config.owner || 'the owner'} works with an agent; not the crew, and not yours to end unless asked): ${list.join('; ') || 'none open'}.${available ? ` Profiles: ${available} (node src/cli.mjs session <profile> opens one).` : ''} Each project also has project-<id>-claude and project-<id>-codex, opened in the owner's own clone of the project.`;
 }

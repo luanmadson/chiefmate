@@ -97,6 +97,9 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 blocks; with no profile, lists the profiles and the sessions open;
                                                 --dry-run shows the folder, the command and the first message only
   node src/cli.mjs session end <id>             ends a live session (its window closes)
+  node src/cli.mjs dev <project> [--dry-run]    starts the project's development environment ("dev_start" in its settings)
+                                                in a window of its own, in your clone; --dry-run shows what would run
+  node src/cli.mjs dev stop <project>           stops it, with everything it started
   node src/cli.mjs cancel <id>                  cancels a run
   node src/cli.mjs resume <id> [--ignore-limits]
                                                 resumes a paused, failed or canceled run
@@ -419,6 +422,27 @@ async function main() {
       // Inside the session's window (see src/sessions.mjs).
       const { runSession } = await import('./sessions.mjs');
       await runSession(rest[0]);
+      return;
+    }
+    case 'dev': {
+      const projects = await import('./projects.mjs');
+      const [first, second] = rest.filter(x => !x.startsWith('--'));
+      const stop = first === 'stop';
+      const id = stop ? second : first;
+      if (!id) throw new Error('Which project? node src/cli.mjs dev <project> | dev stop <project>');
+      const body = { project: id, action: stop ? 'stop' : 'start', dryRun: has('--dry-run') };
+      const local = () => (stop ? projects.stopDev(id, body) : projects.startDev(id, body));
+      const r = await apiOr('/api/project/dev', body, local);
+      if (r.dryRun && !stop) console.log(`Would run, in a window of its own:\n  ${r.command}\nin ${r.cwd}`);
+      else if (r.dryRun) console.log(r.pids.length ? `Would stop the window process(es) ${r.pids.join(', ')} and everything under them.` : 'Nothing running.');
+      else if (stop) console.log(r.stopped ? 'Development environment stopped.' : 'Nothing running.');
+      else console.log(`Development environment started (${r.window === 'terminal' ? 'Windows Terminal' : 'PowerShell'}): ${r.command}, in ${r.cwd}`);
+      return;
+    }
+    case 'dev-run': {
+      // Inside the development environment's window (see src/projects.mjs).
+      const { runDev } = await import('./projects.mjs');
+      await runDev(rest[0]);
       return;
     }
     case 'prompts-sync': {

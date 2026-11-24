@@ -11,12 +11,13 @@ import { chat, editPending, interruptManager, managerContext, newConversation, r
 import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { changePlan, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
+import { openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderStatus } from './prompts.mjs';
 import { isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
 import { activeRun, createRun, liveRuns } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
-import { endSession, finishSessionRequest, openSession, sessionRequests, sessionsState } from './sessions.mjs';
+import { endSession, finishSessionRequest, openSession, planSession, sessionRequests, sessionsState } from './sessions.mjs';
 import { talkTo } from './talk.mjs';
 import { listRuns, readConversation, readNotifications, readPending, readRun, readUsage, runDir, stepsOf } from './store.mjs';
 import { updateInfo } from './update.mjs';
@@ -138,6 +139,19 @@ function runFeed(id, params) {
     step: n, current, total: steps.length, agent: step?.agent ?? null, stepStatus: step?.status ?? null, stepStarted: step?.started ?? null,
     review: step === run.review, items, next, talk: (run.talk ?? []).slice(-80), requests: (run.requests ?? []).filter(r => r.status === 'open'),
   };
+}
+
+/**
+ * A project's page: its facts, your clone and its branch, its development environment, and its recent runs (the ones
+ * neither waiting nor going on, newest first). The rest of the page (crew, runs going on, planning, memory, sessions)
+ * comes from the state.
+ */
+async function projectPage(id) {
+  const config = loadConfig();
+  const info = await projectInfo(id, config, computer(config));
+  const going = new Set(liveRuns().map(l => l.run));
+  const history = listRuns().filter(r => r.project === id && !['queued', 'waiting'].includes(r.status) && !going.has(r.id)).slice(0, 15).map(summary);
+  return { ...info, history };
 }
 
 /** A run's task, short, for "waiting for <who>: <task>". */
@@ -299,6 +313,8 @@ export function startServer() {
           const data = runFeed(decodeURIComponent(feed[1]), url.searchParams);
           return data ? reply(res, 200, data) : reply(res, 404, { error: t('Run not found.') });
         }
+        const page = url.pathname.match(/^\/api\/project\/([^/]+)$/);
+        if (page) return reply(res, 200, await projectPage(decodeURIComponent(page[1])));
         if (url.pathname.startsWith('/api/run/')) {
           const run = readRun(decodeURIComponent(url.pathname.slice('/api/run/'.length)));
           return run ? reply(res, 200, run) : reply(res, 404, { error: t('Run not found.') });
@@ -344,8 +360,24 @@ export function startServer() {
           return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner'));
         case '/api/run/talk':
           return reply(res, 200, talkTo(body.run, body.text));
-        case '/api/session':
+        case '/api/session': {
+          // With "dryRun": the folder and the first message it would open with, and nothing opens.
+          if (body.dryRun) {
+            const { profile, folder, prompt } = planSession(loadConfig(), String(body.profile ?? ''));
+            return reply(res, 200, { dryRun: true, profile: profile.id, tool: profile.tool, cwd: folder.dir, blocks: prompt.blocks, missing: prompt.missing, prompt: prompt.blocksGiven ? prompt.text : null });
+          }
           return reply(res, 200, await openSession(String(body.profile ?? ''), { origin: body.origin ?? 'app' }));
+        }
+        case '/api/project/open':
+          // "app": "folder" (the file manager) or "vscode", in your own clone of the project.
+          return reply(res, 200, openProjectApp(String(body.project ?? ''), String(body.app ?? ''), { dryRun: !!body.dryRun }));
+        case '/api/project/dev': {
+          // The project's development environment ("dev_start"): "action": "start" or "stop".
+          const options = { dryRun: !!body.dryRun };
+          if (body.action === 'start') return reply(res, 200, await startDev(String(body.project ?? ''), options));
+          if (body.action === 'stop') return reply(res, 200, await stopDev(String(body.project ?? ''), options));
+          return reply(res, 400, { error: t('Say "start" or "stop".') });
+        }
         case '/api/session/end':
           return reply(res, 200, await endSession(String(body.id ?? '')));
         case '/api/prompts-sync':
