@@ -2,7 +2,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { checkClaude, claudeInfo } from './claude.mjs';
+import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, saveConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { computer, processes, stoppable, stopProject } from './machine.mjs';
@@ -16,10 +16,12 @@ import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.
 import { activeRun, createRun, liveRuns } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { endSession, finishSessionRequest, openSession, sessionRequests, sessionsState } from './sessions.mjs';
+import { talkTo } from './talk.mjs';
 import { listRuns, readConversation, readNotifications, readPending, readRun, readUsage, runDir, stepsOf } from './store.mjs';
 import { updateInfo } from './update.mjs';
 import { isReading, readerSettings, readerStatus, readUsagePage, signedIn } from './usagepage.mjs';
-import { now, ROOT, VERSION } from './util.mjs';
+import { clip, now, ROOT, VERSION } from './util.mjs';
+import { projectDir } from './workspace.mjs';
 
 const UI = path.join(ROOT, 'ui');
 const TYPES = {
@@ -105,6 +107,34 @@ function contextFile(id, n) {
 }
 
 /**
+ * What an agent at work is doing, live, for its panel in the app: the actions and the text of a step, read from the
+ * step's log (data/runs/<id>/<NN>-<agent>.jsonl) from the byte offset "from" on, with the run's direct conversation
+ * and its open requests. step: the step to read (by default, the one at work or the last one that started).
+ */
+function runFeed(id, params) {
+  if (!/^[\w.-]+$/.test(id) || id.includes('..')) return null;
+  const run = activeRun(id) ?? readRun(id);
+  if (!run) return null;
+  const l = liveRuns().find(x => x.run === id) ?? null;
+  const steps = stepsOf(run);
+  const started = steps.reduce((n, s, i) => (s.status !== 'pending' ? i + 1 : n), 1);
+  const current = l?.step ?? started;
+  const n = Math.max(1, Math.min(steps.length, Number(params.get('step')) || current));
+  const step = steps[n - 1];
+  const file = step ? path.join(runDir(id), `${String(n).padStart(2, '0')}-${step.agent}.jsonl`) : null;
+  const from = params.has('from') ? Number(params.get('from')) : null;
+  const { items, next } = file ? readFeed(file, projectDir(run.project), from) : { items: [], next: 0 };
+  return {
+    run: id, title: run.title, project: run.project, status: run.status, live: !!l, talking: !!l?.talking && l.step === n,
+    step: n, current, total: steps.length, agent: step?.agent ?? null, stepStatus: step?.status ?? null, stepStarted: step?.started ?? null,
+    review: step === run.review, items, next, talk: (run.talk ?? []).slice(-80), requests: (run.requests ?? []).filter(r => r.status === 'open'),
+  };
+}
+
+/** A run's task, short, for "waiting for <who>: <task>". */
+const shortTask = r => clip(String(r.instruction ?? '').split('\n')[0].trim() || r.title, 60);
+
+/**
  * Each crew member's presence: what they are doing now, their last work and their work this week.
  * going: the runs going on now (runs of different projects go on at once, so one agent may be at work on two).
  */
@@ -112,9 +142,17 @@ function crew(agents, config, runs, going, queue, conversation) {
   const since = Date.now() - 7 * 86400_000;
   const pendingFor = id => r => stepsOf(r).some(s => s.status === 'pending' && s.agent === id);
   const titles = list => list.map(r => r.title).join(' · ');
+  // What a step waiting its turn waits for: the agent at work on its run, or the run ahead of it in the queue
+  // (the one of the same project, else the oldest going on when there is no room for one more).
+  const inRun = r => ({ agent: stepsOf(r).find(s => s.status === 'running')?.agent ?? null, project: r.project, task: shortTask(r) });
+  const ahead = r => {
+    const before = going.find(g => g.project === r.project) ?? (going.length >= maxParallel(config) ? going[0] : null);
+    return before ? { agent: null, project: before.project, task: shortTask(before) } : null;
+  };
   return Object.values(agents).map(agent => {
     let status = 'idle';
     let run = null;
+    let waitingFor = null;
     const working = going.filter(r => stepsOf(r).some(s => s.status === 'running' && s.agent === agent.id));
     const waitingIn = going.filter(pendingFor(agent.id));
     if (claudeInfo.found === false) status = 'offline';
@@ -122,10 +160,10 @@ function crew(agents, config, runs, going, queue, conversation) {
       const reviewing = working.every(r => r.review?.status === 'running' && r.review.agent === agent.id);
       [status, run] = [reviewing ? 'reviewing' : 'working', titles(working)];
     } else if (agent.id === 'manager' && chat.responding) status = 'thinking';
-    else if (waitingIn.length) [status, run] = ['queued', titles(waitingIn)];
+    else if (waitingIn.length) [status, run, waitingFor] = ['queued', titles(waitingIn), inRun(waitingIn[0])];
     else {
       const next = queue.find(pendingFor(agent.id));
-      if (next) [status, run] = [next.status === 'waiting' ? 'waiting' : 'queued', next.title];
+      if (next) [status, run, waitingFor] = [next.status === 'waiting' ? 'waiting' : 'queued', next.title, next.status === 'waiting' ? null : ahead(next)];
     }
     let last = null;
     const week = { steps: 0, minutes: 0, answers: 0 };
@@ -145,7 +183,9 @@ function crew(agents, config, runs, going, queue, conversation) {
     return {
       id: agent.id, name: agent.name, title: agent.title, role: agent.role, model: agent.model ?? config.default_model,
       effort: agent.effort ?? null, maxMinutes: agent.max_minutes ?? null,
-      color: agent.color ?? null, face: agent.face ?? null, status, run, last, week,
+      color: agent.color ?? null, face: agent.face ?? null, status, run, last, week, waitingFor,
+      // The runs this member is at work on now: a click on it opens its panel.
+      runs: working.map(r => r.id),
     };
   });
 }
@@ -162,7 +202,7 @@ function buildState() {
   const going = liveRuns().map(l => ({ l, run: activeRun(l.run) ?? runs.find(r => r.id === l.run) })).filter(x => x.run);
   const goingIds = new Set(going.map(x => x.run.id));
   const running = going.map(({ l, run }) => ({
-    ...summary(run), step: l.step, agent: l.agent, stepStarted: l.started, context: l.context, actions: l.actions.slice(-80),
+    ...summary(run), step: l.step, agent: l.agent, stepStarted: l.started, context: l.context, actions: l.actions.slice(-80), talking: !!l.talking,
   }));
   const queue = queued();
   const conversation = readConversation();
@@ -242,6 +282,11 @@ export function startServer() {
           const file = contextFile(decodeURIComponent(context[1]), context[2]);
           return file ? reply(res, 200, { text: readFileSync(file, 'utf8') }) : reply(res, 404, { error: t('No context recorded for this step.') });
         }
+        const feed = url.pathname.match(/^\/api\/run\/([^/]+)\/feed$/);
+        if (feed) {
+          const data = runFeed(decodeURIComponent(feed[1]), url.searchParams);
+          return data ? reply(res, 200, data) : reply(res, 404, { error: t('Run not found.') });
+        }
         if (url.pathname.startsWith('/api/run/')) {
           const run = readRun(decodeURIComponent(url.pathname.slice('/api/run/'.length)));
           return run ? reply(res, 200, run) : reply(res, 404, { error: t('Run not found.') });
@@ -278,6 +323,8 @@ export function startServer() {
         case '/api/needs-you/done':
           if (body.session) return reply(res, 200, finishSessionRequest(String(body.session), String(body.id ?? '')));
           return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner'));
+        case '/api/run/talk':
+          return reply(res, 200, talkTo(body.run, body.text));
         case '/api/session':
           return reply(res, 200, await openSession(String(body.profile ?? ''), { origin: body.origin ?? 'app' }));
         case '/api/session/end':
