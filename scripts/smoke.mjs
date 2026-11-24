@@ -20,6 +20,19 @@ writeFileSync(path.join(data, 'manager', 'plan.md'), [
   '| 3 | Sample | First thing | Alta | Em andamento |', '| 7 | Sample | Second thing | Baixa | Aguarda o dono decidir |', '| 8 | Other | Third thing | Média | Depende do item 3 |',
 ].join('\n'));
 writeFileSync(path.join(data, 'manager', 'pending.json'), JSON.stringify([{ id: 'smoke1', text: 'Waiting', at: new Date().toISOString(), queued: true }]));
+// A finished run with a step's log, for the agent's panel: a text, an action and a last line still being written.
+mkdirSync(path.join(data, 'runs', 'smoke-feed'), { recursive: true });
+writeFileSync(path.join(data, 'runs', 'smoke-feed.json'), JSON.stringify({
+  id: 'smoke-feed', kind: 'task', project: 'none', title: 'Generalist: smoke', status: 'done', created: new Date().toISOString(),
+  steps: [{ agent: 'generalist', status: 'done', started: new Date().toISOString() }],
+}));
+const feedLines = [
+  { type: 'system', subtype: 'init', session_id: 's' },
+  { type: 'assistant', message: { content: [{ type: 'text', text: 'Reading the README first.' }, { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test' } }] } },
+  { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } },
+].map(e => JSON.stringify(e)).join('\n');
+const feedWhole = `${feedLines}\n`;
+writeFileSync(path.join(data, 'runs', 'smoke-feed', '01-generalist.jsonl'), `${feedWhole}{"type":"assistant","message":{"content":[{"type":"text","text":"half`);
 const child = spawn(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'server'], {
   cwd: root,
   env: { ...process.env, CHIEFMATE_PORT: String(port), CHIEFMATE_SMOKE: '1' },
@@ -113,6 +126,16 @@ try {
     expect((await post('/api/task', { project: 'none', agent: 'generalist', instruction: 'x', plan: 999 })).status === 400, 'a task linked to an item that does not exist was not refused');
     const archived = await post('/api/planning', { action: 'archive', id: 9 });
     expect(archived.ok && (await archived.json()).item?.archived, 'an item was not archived');
+    // The agent's panel: the step's log read live, from where it stopped, and the direct talk refused off a step.
+    const feed = await (await fetch(`${base}/api/run/smoke-feed/feed`)).json();
+    expect(feed.step === 1 && feed.items?.length === 2 && feed.items[0].type === 'say' && feed.items[1].tool === 'Bash', `the agent's panel did not read the step's log: ${JSON.stringify(feed.items)}`);
+    expect(feed.next === Buffer.byteLength(feedWhole) && !feed.live && !feed.talking, 'the panel read a line still being written, or took a finished run as going on');
+    const again = await (await fetch(`${base}/api/run/smoke-feed/feed?step=1&from=${feed.next}`)).json();
+    expect(again.items?.length === 0 && again.next === feed.next, 'reading the log again from where it stopped repeated what was already shown');
+    expect((await fetch(`${base}/api/run/none/feed`)).status === 404, 'the panel of a run that does not exist did not answer 404');
+    expect((await post('/api/run/talk', { run: 'smoke-feed', text: 'Hello' })).status === 400, 'a message to a run not going on was not refused');
+    expect((await post('/api/run/talk', { run: 'smoke-feed', text: ' ' })).status === 400, 'an empty message to an agent was not refused');
+    expect(state.crew.every(a => Array.isArray(a.runs) && 'waitingFor' in a), "the crew has no runs to open a panel on, or no \"waiting for\"");
     const interrupt = await post('/api/manager/interrupt', {});
     expect(interrupt.ok && (await interrupt.json()).interrupted === false, 'interrupting a manager that is not answering did something');
   }
@@ -160,6 +183,72 @@ try {
   expect(line.includes('#3 Sample: First thing') && line.includes('waiting for Owner: #7'), `the manager's summary of the board is wrong: ${line}`);
 } catch (error) {
   failures.push(`planning checks: ${error.message}`);
+}
+
+// The direct talk with an agent at work, in this process: a made-up step going on (nothing real runs), then a
+// stand-in for Claude Code (a small script) interrupted at a safe point and resumed with the owner's message.
+try {
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const { live } = await import(src('runs.mjs'));
+  const { pendingTalk, talkSection, talkSituation, talkTo, ownerTurn } = await import(src('talk.mjs'));
+  const { pollRequest } = await import(src('needs.mjs'));
+  const { runClaude } = await import(src('claude.mjs'));
+  const run = { id: 'smoke-talk', title: 'Generalist: smoke', project: 'none', status: 'running', created: new Date().toISOString(), steps: [{ agent: 'generalist', status: 'running' }], requests: [] };
+  let interrupted = 0;
+  live.set(run.id, { run: run.id, memory: run, agent: 'generalist', step: 1, talking: true, heldUntil: 0, actions: [], process: { interrupt: () => interrupted++ } });
+  const first = talkTo(run.id, 'Use the other file');
+  expect(first.status === 'pending' && interrupted === 1 && pendingTalk(run, 1).length === 1, 'a message to an agent at work did not interrupt it, or was not kept to deliver');
+  // The agent waits for the owner (needs-you --wait, polled just now): the message answers the request instead.
+  run.requests.push({ id: 'r1', step: 1, agent: 'generalist', what: 'Which file?', wait: true, status: 'open', at: new Date().toISOString() });
+  live.get(run.id).heldUntil = Date.now() + 20_000;
+  const answer = talkTo(run.id, 'The second one');
+  const polled = pollRequest(run.id, 'r1');
+  expect(answer.via === 'request' && interrupted === 1 && polled.status === 'done' && polled.answer === 'The second one', "a message to an agent waiting for the owner did not answer its request");
+  const section = talkSection(run, 1, id => id, { owner: 'Owner', language: 'en' });
+  expect(section.includes('Owner') && section.includes('Use the other file') && section.includes('The second one'), `the step's report does not get the direct talk: ${section}`);
+  expect(talkSituation([run], 'Owner').includes('Owner guided step 1 (generalist): "Use the other file"'), "the manager's situation does not get the direct talk");
+  live.get(run.id).talking = false;
+  let refused = false;
+  try {
+    talkTo(run.id, 'Between steps');
+  } catch {
+    refused = true;
+  }
+  expect(refused, 'a message was accepted while no step was at work');
+  live.delete(run.id);
+
+  // The stand-in: it starts an action, finishes it after a moment, then "works" for 30 seconds; resumed with a
+  // message, it answers at once. The interruption must wait for the action and stop the rest.
+  const fake = path.join(data, 'fake-claude.mjs');
+  writeFileSync(fake, [
+    "const args = process.argv.slice(2);",
+    "const id = args[args.indexOf('--resume') + 1] && args.includes('--resume') ? args[args.indexOf('--resume') + 1] : args[args.indexOf('--session-id') + 1];",
+    "let prompt = ''; process.stdin.on('data', d => (prompt += d)); process.stdin.on('end', () => {",
+    "  const say = e => process.stdout.write(JSON.stringify(e) + '\\n');",
+    "  say({ type: 'system', subtype: 'init', session_id: id, model: 'm' });",
+    "  if (args.includes('--resume')) { say({ type: 'assistant', message: { content: [{ type: 'text', text: 'Understood.' }] } }); say({ type: 'result', subtype: 'success', result: 'Report after: ' + prompt.split('\\n')[3], session_id: id, num_turns: 1 }); return; }",
+    "  say({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test' } }] } });",
+    "  setTimeout(() => say({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } }), 700);",
+    "  setTimeout(() => say({ type: 'result', subtype: 'success', result: 'too late', session_id: id }), 30000);",
+    "});",
+  ].join('\n'));
+  process.env.CHIEFMATE_CLAUDE = fake;
+  const log = path.join(data, 'fake.jsonl');
+  const started = Date.now();
+  let stoppedAt = null;
+  const proc = runClaude({ dir: data, prompt: 'Work', model: 'm', session: { id: 'smoke-session' }, log, onEvent: e => e.type === 'action' && proc.interrupt() });
+  const r = await proc.promise;
+  stoppedAt = Date.now() - started;
+  expect(proc.args.includes('--session-id') && !proc.args.includes('--no-session-persistence'), "a step's session is not kept, so it could not be resumed");
+  expect(r.interrupted && !r.ok && !r.error && !r.canceled, `the interrupted step did not end as interrupted: ${JSON.stringify({ ...r, context: undefined })}`);
+  expect(stoppedAt >= 600 && stoppedAt < 20_000, `the interruption did not wait for the action under way, or did not stop the agent (${stoppedAt} ms)`);
+  const resumed = runClaude({ dir: data, prompt: ownerTurn([{ text: 'Use the other file', at: new Date().toISOString() }], { owner: 'Owner', language: 'en' }), model: 'm', session: { id: 'smoke-session', resume: true }, log });
+  const back = await resumed.promise;
+  expect(resumed.args[resumed.args.indexOf('--resume') + 1] === 'smoke-session', 'the step was not resumed in the same session');
+  expect(back.ok && back.text === 'Report after: Use the other file', `the resumed session did not get the owner's message as its next turn: ${back.text ?? back.error}`);
+  process.env.CHIEFMATE_CLAUDE = path.join(data, 'no-claude.exe');
+} catch (error) {
+  failures.push(`direct talk checks: ${error.message}`);
 }
 
 // Without the server: the crews by project, what a step may see, the command line and the prompt builder,
