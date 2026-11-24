@@ -94,7 +94,7 @@ queue ─► fresh working copy ─► the crew, one after another ─► manage
 
 A one-off task follows the same path, with a single agent and, if you tick the box, the manager's review. A request to a project's team lead (`ask`) does too: the lead's planning first, then the tasks it planned, its first review and the manager's final review.
 
-Runs going on at the same time never share a working copy: each project has its own. The reference libraries are shared, so Chiefmate runs only one update of each library at a time, and a run that asks for a library while it is being updated gets that same update. The self-update waits until every run has ended.
+Runs going on at the same time never share a working copy: each project has its own. The reference libraries are shared, so Chiefmate runs only one update of each library at a time, and a run that asks for a library while it is being updated gets that same update. The self-update pauses the runs going on and resumes them after it (or, in `"wait"` mode, waits until every run has ended: see "Chiefmate improves itself").
 
 ### What each step sees
 
@@ -264,6 +264,7 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `browser_cdp` | The address of your own browser with remote debugging on, such as `http://127.0.0.1:9333`: sign-ins asked by the crew open there, and the prompt builder is copied through it. Any local program can control a browser with remote debugging on: prefer a separate profile |
 | `needs_you` | `{ "max_wait_minutes": 120 }`: the longest a step waits for you before it goes on without you |
 | `prompt_builder` | The optional prompt builder: `{ "file": "data/manager/prompt-builder.md", "doc_id": "<Google Docs id>", "environment": "<block>" }` |
+| `auto_update_mode` | How the self-update installs an approved update (see "Chiefmate improves itself"): `"pause"` (the default) pauses the work going on at a safe point, installs and resumes it by itself; `"wait"` installs only once no run is going on and the manager is free |
 | `manager_updates` | The manager's news in the conversation (see "News from the manager"): `true` (the default, every event), `false` (none) or a list of the events that wake it, such as `["run_failed", "pr_ready", "needs_you"]` |
 | `usage_reader` | The optional reading of your usage page on claude.ai (see below): `{ "enabled": false, "every_hours": 4 }`, and `browser` with the path to Edge or Chrome if it isn't found |
 
@@ -351,7 +352,15 @@ Chiefmate can be one of its own projects. Its crew then works on Chiefmate the s
 1. **Add Chiefmate as a project** in your settings, pointing at your copy of this repository, with `"language": "en"`, `"checks": ["npm run check", "npm run smoke"]` and `"playbook": "docs/playbook.md"`. The [playbook](docs/playbook.md) tells the crew how Chiefmate is built and which rules a change must keep.
 2. **Ask for improvements**, in the Manager section or as a task on that project. Ideas for later go to the repository's issues: the manager can open them for you.
 3. **Or give it a routine**: a mission on that project, for example once a week, that works through the open issues.
-4. **Approve.** Every improvement arrives as a pull request. When you merge it, your installation updates itself within ten minutes, once the crew is free. It checks the new version first: if the checks fail, it stays on the current one and tells you. Once it restarts, the app window loads the new version by itself (it waits while you are writing or have a dialog open).
+4. **Approve.** Every improvement arrives as a pull request. When you merge it, your installation updates itself within ten minutes (at once if the manager runs `node src/cli.mjs update-check` after the merge). It checks the new version first: if the checks fail, it stays on the current one and tells you. Once it restarts, the app window loads the new version by itself (it waits while you are writing or have a dialog open).
+
+**The work going on doesn't hold the update back.** With `auto_update_mode` at `"pause"` (the default), and whenever you click **Update now** (in the Manager section, under "Crew on board", while an approved update waits) or run `node src/cli.mjs update-now --yes`:
+1. no new run starts and the manager starts no new answer: your messages wait in the queue;
+2. each run going on pauses at a safe point: its agent finishes the action under way (at most two minutes), and its step is kept to resume the same Claude Code session (`--resume`), told that Chiefmate was updated and should carry on where it stopped. A run preparing its working copy, running its checks or opening its pull request pauses at its next step, or ends first;
+3. the update waits for the manager to finish its answer. To not wait, click **Interrupt the manager's answer** in the same place (or add `--interrupt-manager`): the conversation goes on in the same session;
+4. Chiefmate installs, checks the new version and restarts. The paused runs go first in the queue and resume by themselves, and the messages in the queue go to the manager. If the checks fail, Chiefmate goes back to the version it had and resumes everything the same way (that version is not tried again on its own: a newer one, or **Update now**, is).
+
+With `"wait"`, the update installs only once no run is going on and the manager is free, as in earlier versions. Either way, if the work doesn't pause within an hour, Chiefmate stays on the current version, resumes everything and tries again later. Live sessions and development environments are never paused or waited for.
 
 The self-update only touches Chiefmate's own files. Your settings, the history and the working copies are never in git, so they are never overwritten. If Chiefmate's files were changed by hand in your installation, it does not update, and the app says so.
 
@@ -395,6 +404,9 @@ node src/cli.mjs dev <project>                starts the project's development e
                                               its own (--dry-run shows what would run); dev stop <project> stops it
 node src/cli.mjs cancel <id>                  cancels a run
 node src/cli.mjs resume <id>                  resumes a run (--ignore-limits goes past the limits this one time)
+node src/cli.mjs update-check                 looks for an approved update now (after a merge), instead of within 10 minutes
+node src/cli.mjs update-now [--yes]           installs the approved update now, pausing the work going on and resuming it
+                                              after the restart (--interrupt-manager: doesn't wait for the manager's answer)
 node src/cli.mjs history                      the latest runs
 node src/cli.mjs report <id>                  the reports of a run
 node src/cli.mjs context <id> [step]          what each step received: prompt, model, tools, folders, MCP servers

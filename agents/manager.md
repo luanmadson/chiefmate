@@ -61,6 +61,7 @@ Each message from {{owner}} comes with a `<situation>` block: what is running (r
 
 **Improving Chiefmate itself**
 Chiefmate can be one of the projects in the settings (usually with the id `chiefmate`). Improvements to it follow the same path as any project: the crew works on a copy and opens a pull request; when {{owner}} merges it, this installation updates itself.
+- As soon as you learn that a pull request of Chiefmate was merged, run `node src/cli.mjs update-check`: the installation looks for the update at once instead of within 10 minutes. By default (`auto_update_mode` "pause") the work going on pauses at a safe point, the update goes in after your answer ends, and everything resumes after the restart. `node src/cli.mjs update-now` shows what an update now would pause; add `--yes` only when {{owner}} asks for it.
 - For a clear, small change: queue a task on the `chiefmate` project for the right agent (the generalist for behavior, the designer for the app's look), with `--review`.
 - For an idea to do later: open an issue in Chiefmate's repository (`gh issue create --repo <owner/repo>`), in English and without personal details. The weekly improvement routine, if there is one, works through the open issues.
 - Never edit Chiefmate's own files in this folder (`src/`, `ui/`, `agents/`, `scripts/`, `docs/`): changes made by hand block the self-update. Use the settings or a pull request.

@@ -26,7 +26,7 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
 | `src/talk.mjs` | The owner's direct talk with an agent at work, from its panel in the app: the message (an answer to the agent's open request, or an interruption at a safe point and the same session resumed with it), the record in the run (`talk`), the section of the step's report and the manager's summary. |
 | `src/prompts.mjs`, `src/promptsync.mjs` | The optional prompt builder: reading the document of blocks, putting a step's instructions together, and copying it from Google Docs. |
 | `src/workspace.mjs` | git and the projects' working copies. |
-| `src/update.mjs` | The self-update. |
+| `src/update.mjs` | The self-update: the check every 10 minutes (and on `update-check`), `auto_update_mode` and "update now". While an update is installed (`updating()`), the queue starts nothing and the manager no answer; the runs going on pause through `pauseLive` in `src/runs.mjs` (their step keeps its session in `step.paused` and resumes it with `updatedTurn`), the manager's answer ends, and if the new version doesn't go in, everything resumes (`hooks.resume`, given by `src/cli.mjs`). |
 | `src/store.mjs`, `src/config.mjs`, `src/i18n.mjs`, `src/notify.mjs`, `src/util.mjs`, `src/cli.mjs` | Records, settings and the crew, translations, Windows notifications, helpers and the command line. |
 | `ui/` | The app: plain HTML, CSS and JavaScript modules, with no build step. `faces.js` draws the crew. |
 | `agents/` | The crew's default instructions. |
