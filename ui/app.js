@@ -608,7 +608,20 @@ function drawBridge() {
   let updateLine = online ? t('Chiefmate {version}, up to date', { version: state.version }) : '';
   if (online && update.waiting && update.blocked === 'changes') updateLine = t('Update waiting: files were changed by hand here');
   else if (online && update.waiting && update.blocked === 'checks') updateLine = t('Update not installed: the new version failed its checks');
-  else if (online && update.waiting) updateLine = t('Update approved: it installs when the crew is free');
+  else if (online && update.waiting && update.blocked === 'merge') updateLine = t("Update waiting: this installation's branch has commits of its own");
+  else if (online && update.waiting && update.mode === 'wait') updateLine = t('Update approved: it installs when the crew is free');
+  else if (online && update.waiting) updateLine = t('Update approved: it installs on the next check, pausing the work going on');
+  // An update going on: what it is doing now. Waiting for the manager, the owner may interrupt its answer.
+  const job = online ? update.installing : null;
+  if (job) {
+    const paused = job.paused?.length ? ` ${t('{count} run(s) paused for it resume after the restart.', { count: job.paused.length })}` : '';
+    if (job.stage === 'pausing') updateLine = t('Updating: pausing the work going on at a safe point…') + paused;
+    else if (job.stage === 'manager') updateLine = (job.interruptManager ? t("Updating: interrupting the manager's answer…") : t("Updating: waiting for the manager's answer to end…")) + paused;
+    else updateLine = t('Updating: checking the new version; Chiefmate restarts by itself…') + paused;
+  }
+  let updateButton = '';
+  if (job?.stage === 'manager' && !job.interruptManager) updateButton = `<button type="button" class="button secondary small" data-update-now="interrupt">${esc(t("Interrupt the manager's answer"))}</button>`;
+  else if (online && !job && update.waiting && !['changes', 'merge'].includes(update.blocked)) updateButton = `<button type="button" class="button small" data-update-now="now">${esc(t('Update now'))}</button>`;
   const roster = others.map(a => {
     const s = agentStatus(a);
     return `<li>${face(a, faceState(a), 30, `${t(a.name)}: ${s[0]}`)}<div><div class="roster-name"><span>${esc(t(a.name))}</span>${stateHtml(s)}</div><div class="hint">${esc(agentDetail(a))} · ${esc(shortModel(a.model))}</div></div></li>`;
@@ -620,7 +633,7 @@ function drawBridge() {
         ${stateHtml(status)}</div></div>
     <div class="label">${esc(t('Crew on board'))}</div>
     <ul class="roster">${roster.join('')}</ul>
-    <div class="connection hint">${esc(claudeLine)}<br>${esc(accountLine)}${online && account.updated ? ` · ${esc(t('measured {when}', { when: relative(account.updated) }))}` : ''}${updateLine ? `<br>${esc(updateLine)}` : ''}</div>`;
+    <div class="connection hint">${esc(claudeLine)}<br>${esc(accountLine)}${online && account.updated ? ` · ${esc(t('measured {when}', { when: relative(account.updated) }))}` : ''}${updateLine ? `<br>${esc(updateLine)}` : ''}${updateButton ? `<div class="actions left update-actions">${updateButton}</div>` : ''}</div>`;
   const signature = JSON.stringify([online, (state?.crew ?? []).map(a => [a.id, a.status, a.run, a.last?.at, a.model]), claude, account, update, Math.floor(Date.now() / 60000)]);
   draw('#bridge', signature, html);
 }
@@ -1823,6 +1836,33 @@ $('#interrupt').addEventListener('click', async () => {
   try {
     const r = await api('/api/manager/interrupt', {});
     if (!r.interrupted) toast(t('The manager had already finished.'));
+  } catch (error) {
+    toast(error.message);
+  }
+  refresh();
+});
+
+// "Update now": installs the approved update without waiting for the crew, after a confirmation; while the update
+// waits for the manager, the same place offers to interrupt its answer.
+$('#bridge').addEventListener('click', async event => {
+  const button = event.target.closest('[data-update-now]');
+  if (!button) return;
+  const interrupt = button.dataset.updateNow === 'interrupt';
+  const runs = going().length;
+  let text;
+  if (interrupt) text = t("The manager stops its answer now, so the update can go in. The conversation goes on in the same session after the restart, and your next message tells it the answer was interrupted.");
+  else {
+    text = [
+      runs ? t('The {count} run(s) going on pause at a safe point: each agent finishes the action under way, and its step resumes the same session after the update, told that Chiefmate was updated.', { count: runs }) : t('No run is going on.'),
+      state.manager.responding ? t('The manager is answering: the update waits for the answer to end (you can interrupt it here meanwhile).') : '',
+      t('Then Chiefmate installs the new version, checks it and restarts. The paused runs and the messages in the queue resume by themselves. If the checks fail, Chiefmate stays on the current version and resumes the same way.'),
+    ].filter(Boolean).join(' ');
+  }
+  const ok = await confirmDialog(interrupt ? t("Interrupt the manager's answer") : t('Update now'), text, interrupt ? t('Interrupt') : t('Update now'));
+  if (!ok) return;
+  try {
+    await api('/api/update-now', { interruptManager: interrupt });
+    toast(interrupt ? t("Interrupting the manager's answer…") : t('Updating: the work going on pauses at a safe point.'));
   } catch (error) {
     toast(error.message);
   }

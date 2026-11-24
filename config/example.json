@@ -52,5 +52,6 @@
   "needs_you": {
     "max_wait_minutes": 120
   },
-  "manager_updates": true
+  "manager_updates": true,
+  "auto_update_mode": "pause"
 }

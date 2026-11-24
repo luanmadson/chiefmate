@@ -90,6 +90,9 @@ try {
     const post = (route, body) => fetch(base + route, { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1' }, body: JSON.stringify(body) });
     expect((await post('/api/stop-project', { project: 'none' })).status === 400, 'stopping a project without a confirmed list was not refused');
     expect((await post('/api/reset-grants', { action: 'used', index: 9999 })).status === 400, 'marking a free reset that does not exist was not refused');
+    // Updates are off in the smoke test: "update now" and "update check" answer so, and nothing is fetched or installed.
+    expect(['pause', 'wait'].includes(state.update.mode) && state.update.installing === null, `/api/state has no update mode, or an update going on: ${JSON.stringify(state.update)}`);
+    expect((await post('/api/update-now', {})).status === 400 && (await post('/api/update-check', {})).status === 400, 'an update was tried in the smoke test, where updates are off');
     expect(Array.isArray(state.teams) && state.teams.every(x => x.project && Array.isArray(x.members)), '/api/state has no crews by project');
     expect(Array.isArray(state.needs), "/api/state has no list of the owner's requests");
     expect((await post('/api/needs-you', { what: 'Sign in' })).status === 400, 'a request for the owner without a run was not refused');
@@ -305,6 +308,79 @@ try {
   process.env.CHIEFMATE_CLAUDE = path.join(data, 'no-claude.exe');
 } catch (error) {
   failures.push(`direct talk checks: ${error.message}`);
+}
+
+// Updating without waiting, in this process, with made-up hooks (no git, no restart, no real run or answer): the runs
+// going on are asked to pause, the update waits for them and for the manager (interrupting it when asked), and when the
+// new version does not go in, the paused work and the manager's queue go on.
+try {
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const update = await import(src('update.mjs'));
+  const { live, pauseAll, pauseLive, updatedTurn } = await import(src('runs.mjs'));
+  const { queued } = await import(src('queue.mjs'));
+  const { saveRun } = await import(src('store.mjs'));
+  const { chat, deliverPending, removePending, sendToManager } = await import(src('manager.mjs'));
+  expect(update.updateMode({}) === 'pause' && update.updateMode({ auto_update_mode: 'wait' }) === 'wait' && update.updateMode({ auto_update_mode: 'x' }) === 'pause', '"auto_update_mode" does not default to "pause", or "wait" is not kept');
+
+  // A step at work is interrupted at a safe point, once; a run between steps is only marked.
+  let interrupts = 0;
+  live.set('smoke-pause-a', { run: 'smoke-pause-a', project: 'a', actions: [], process: { interrupt: () => interrupts++ } });
+  live.set('smoke-pause-b', { run: 'smoke-pause-b', project: 'b', actions: [], process: null });
+  const asked = pauseAll();
+  expect(asked.join() === 'smoke-pause-a,smoke-pause-b' && interrupts === 1 && live.get('smoke-pause-b').pauseRequest && !pauseLive('smoke-pause-a') && interrupts === 1, `the runs going on were not asked to pause once each: ${asked}`);
+  const turn = updatedTurn([{ text: 'Also fix the title', at: new Date().toISOString() }], { owner: 'Owner', language: 'en' });
+  expect(turn.startsWith('Chiefmate was updated') && turn.includes('Continue from where you left off') && turn.includes('Also fix the title'), `a step resumed after the update is not told so, or loses the owner's message: ${turn}`);
+
+  // The run paused for the update goes back to the front of the queue.
+  saveRun({ id: 'smoke-q-old', project: 'a', status: 'queued', created: '2026-01-01T00:00:00Z', steps: [] });
+  saveRun({ id: 'smoke-q-paused', project: 'b', status: 'queued', resumeFirst: true, created: '2026-01-02T00:00:00Z', steps: [] });
+  const order = queued().map(r => r.id);
+  expect(order.indexOf('smoke-q-paused') === 0 && order.includes('smoke-q-old'), `a run paused for the update does not resume first: ${order}`);
+  saveRun({ id: 'smoke-q-old', project: 'a', status: 'canceled', created: '2026-01-01T00:00:00Z', steps: [] });
+  saveRun({ id: 'smoke-q-paused', project: 'b', status: 'canceled', created: '2026-01-02T00:00:00Z', steps: [] });
+
+  // The update itself: the crew pauses (two looks), then the manager's answer is interrupted, then the install fails.
+  const calls = { interrupt: 0, resume: 0, apply: 0 };
+  let busy = 2;
+  let answering = true;
+  const hooks = {
+    pollMs: 10,
+    pauseRuns: () => (busy > 1 ? ['smoke-pause-a'] : []),
+    crewBusy: () => busy-- > 0,
+    managerAnswering: () => answering,
+    interruptManager: () => {
+      calls.interrupt++;
+      answering = false;
+      return true;
+    },
+    resume: () => calls.resume++,
+    apply: async job => {
+      calls.apply++;
+      // While the update is going on, a message to the manager waits in its queue, and nothing is delivered.
+      const held = sendToManager('During the update');
+      expect(job.stage === 'installing' && update.updating() && held.queued && !deliverPending() && !chat.responding, 'a message to the manager was delivered during the update');
+      removePending(held.id);
+      return false;
+    },
+  };
+  const job = { since: new Date().toISOString(), by: 'owner', stage: 'pausing', paused: [], interruptManager: true };
+  update.updateInfo.installing = job;
+  const installed = await update.install(job, hooks);
+  expect(!installed && calls.apply === 1 && calls.interrupt === 1 && calls.resume === 1 && job.paused.join() === 'smoke-pause-a', `the update did not pause the crew, interrupt the manager when asked and resume after a failed install: ${JSON.stringify({ installed, calls, job })}`);
+  expect(update.updateInfo.installing === null && !update.updating(), 'a failed update kept holding the queue and the manager');
+
+  // Without "interrupt", the update waits for the answer to end.
+  answering = true;
+  setTimeout(() => (answering = false), 50);
+  const waited = { ...hooks, interruptManager: () => (calls.interrupt++, true), crewBusy: () => false, apply: async () => true };
+  const job2 = { since: new Date().toISOString(), by: 'auto', stage: 'pausing', paused: [], interruptManager: false };
+  update.updateInfo.installing = job2;
+  expect((await update.install(job2, waited)) && calls.interrupt === 1 && !answering, "the update interrupted the manager without being asked, or did not wait for its answer");
+  update.updateInfo.installing = null;
+  live.delete('smoke-pause-a');
+  live.delete('smoke-pause-b');
+} catch (error) {
+  failures.push(`update checks: ${error.message}`);
 }
 
 // Without the server: the crews by project, what a step may see, the command line and the prompt builder,

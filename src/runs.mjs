@@ -119,6 +119,34 @@ export function cancelLive(id, reason) {
   return true;
 }
 
+/**
+ * Asks a run going on to pause for an update of Chiefmate: its agent is interrupted at a safe point (once the actions
+ * under way finish) and the step is kept to resume the same Claude Code session after the update; the run goes back
+ * to the front of the queue. A run that is preparing its working copy, running its checks or opening its pull request
+ * pauses only at its next step, or ends first. Returns false when it is not going on, or was already asked.
+ */
+export function pauseLive(id) {
+  const l = live.get(id);
+  if (!l || l.cancelRequest || l.pauseRequest) return false;
+  l.pauseRequest = true;
+  l.process?.interrupt?.();
+  logAction(l, { type: 'action', text: t('Pausing at a safe point for an update of Chiefmate') });
+  return true;
+}
+
+/** Asks every run going on to pause for an update of Chiefmate (see pauseLive). Returns the ids it asked. */
+export const pauseAll = () => [...live.keys()].filter(pauseLive);
+
+/** The next turn of a step resumed after an update of Chiefmate, with the owner's messages sent meanwhile. */
+export function updatedTurn(messages, config = loadConfig()) {
+  const lines = [
+    'Chiefmate was updated while you were working: your work was paused at a safe point so the new version could be installed, and this session now resumes.',
+    'Continue from where you left off. The branch, the files and this session are as you left them. A command that was still running when you were paused may have been cut off: check its result before you go on.',
+    "When you finish, your last message is still the step's full report.",
+  ];
+  return messages.length ? `${lines.join('\n')}\n\n${ownerTurn(messages, config)}` : lines.join('\n');
+}
+
 /** Before every step: your account's usage, in the plan's 5-hour window and week. */
 function checkLimits(config, run) {
   if (run.ignoreLimits) return null;
@@ -346,12 +374,17 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
 
   // A team lead reads and judges: whatever it changes in the working copy (through the shell) is dropped after its step.
   const before = agent.lead ? await headCommit(dir) : null;
-  Object.assign(step, { status: 'running', started: now(), error: null, model, promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
+  // Asked to pause for an update while the step was being prepared: it starts after the update, as it would now.
+  if (l.pauseRequest) return { paused: true };
+  // A step paused for an update of Chiefmate resumes its own Claude Code session, with its clock and its counts.
+  const paused = step.paused ?? null;
+  delete step.paused;
+  Object.assign(step, { status: 'running', started: paused ? step.started ?? now() : now(), error: null, model, promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
   Object.assign(l, { step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0, talking: false, reply: null, session: null });
   saveRun(run);
 
   // Every step keeps its Claude Code session, so a message from the owner can resume it (src/talk.mjs).
-  let session = { id: randomUUID() };
+  let session = paused ? { id: paused.session, resume: true } : { id: randomUUID() };
   const common = {
     dir,
     system: agent.instructions,
@@ -381,9 +414,19 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     },
   };
   let turn = prompt;
-  let spentMs = 0;
-  const total = { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, turns: 0, durationMs: 0, subagents: 0 };
+  let spentMs = paused?.spentMs ?? 0;
+  const total = paused?.total ?? { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, turns: 0, durationMs: 0, subagents: 0 };
+  let resuming = !!paused;
+  if (paused) {
+    // The owner's messages sent while the step was paused go with the notice of the update.
+    const messages = pendingTalk(run, index + 1);
+    for (const m of messages) Object.assign(m, { status: 'delivered', delivered: now(), via: 'resume' });
+    if (messages.length) l.reply = messages.at(-1).id;
+    turn = updatedTurn(messages, config);
+    logAction(l, { type: 'action', text: t('Chiefmate was updated: the agent goes on in the same session') });
+  }
   let r;
+  let pausedNow = false;
   l.talking = true;
   for (;;) {
     const proc = runClaude({ ...common, prompt: turn, session, spentMs });
@@ -406,6 +449,22 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     total.turns += r.turns ?? 0;
     total.durationMs += r.durationMs ?? 0;
     total.subagents += r.subagents ?? 0;
+    // The session paused for an update is gone (or never started): the step starts over, as it did before pauses.
+    if (resuming && !r.ok && !r.canceled && !r.interrupted && !r.turns && !r.text && !l.cancelRequest && !limitHit(r)) {
+      resuming = false;
+      session = { id: randomUUID() };
+      turn = prompt;
+      logAction(l, { type: 'action', text: t("The step's session could not be resumed after the update: it starts over") });
+      continue;
+    }
+    resuming = false;
+    // Paused for an update of Chiefmate: the session is kept, and the step resumes it after the update (the owner's
+    // messages not delivered yet go along then).
+    if (l.pauseRequest && !l.cancelRequest && !r.canceled && (r.interrupted || pendingTalk(run, index + 1).length)) {
+      pausedNow = true;
+      l.talking = false;
+      break;
+    }
     // Messages the owner sent meanwhile: resume the same session with them as the next turn. Checked and closed with
     // no wait in between, so a message sent at the very end is never left behind.
     const messages = pendingTalk(run, index + 1);
@@ -427,6 +486,12 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     saveRun(run);
   }
   l.reply = null;
+  if (pausedNow) {
+    Object.assign(step, { status: 'pending', paused: { session: r.session ?? l.session ?? session.id, spentMs, total, at: now() } });
+    logAction(l, { type: 'action', text: t('Paused for the update: the step resumes in the same session afterwards') });
+    saveRun(run);
+    return { paused: true };
+  }
   Object.assign(r, total);
 
   const waitUntil = limitHit(r);
@@ -511,7 +576,14 @@ export async function execute(run) {
   const log = text => logAction(l, { type: 'action', text });
   const firstTime = !run.started;
   Object.assign(run, { status: 'running', started: run.started ?? now(), notBefore: null, note: null });
+  delete run.resumeFirst;
   saveRun(run);
+
+  // Paused for an update of Chiefmate: back to the front of the queue, to resume as soon as the update is over.
+  const pauseForUpdate = () => {
+    Object.assign(run, { status: 'queued', resumeFirst: true, note: t('Paused for an update of Chiefmate. It resumes by itself as soon as the update is over.') });
+    saveRun(run);
+  };
 
   const wait = (waitUntil, note) => {
     Object.assign(run, { status: waitUntil ? 'waiting' : 'paused', notBefore: waitUntil ?? null, note });
@@ -552,10 +624,12 @@ export async function execute(run) {
       const order = [...run.steps.map(step => ({ step, finalReview: false })), ...(run.review ? [{ step: run.review, finalReview: true }] : [])];
       const index = order.findIndex(x => x.step.status === 'pending' || x.step.status === 'running');
       if (index < 0 || l.cancelRequest) break;
+      if (l.pauseRequest) return pauseForUpdate();
       const { step, finalReview } = order[index];
       const limit = checkLimits(config, run);
       if (limit) return wait(limit.waitUntil, limit.note);
-      const { waitUntil } = await runStep({ l, run, step, index, dir, project, config, agents, libraries, base, finalReview });
+      const { waitUntil, paused } = await runStep({ l, run, step, index, dir, project, config, agents, libraries, base, finalReview });
+      if (paused && !l.cancelRequest) return pauseForUpdate();
       if (waitUntil) return wait(waitUntil, t('Your account reached its limit in the middle of a step'));
       if (step.agent === LEAD) afterLead(run, step, agents, log);
     }
