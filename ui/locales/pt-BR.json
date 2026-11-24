@@ -690,5 +690,6 @@
   "The manager is answering: the update waits for the answer to end (you can interrupt it here meanwhile).": "O gerente está respondendo: a atualização espera a resposta terminar (você pode interrompê-la aqui enquanto isso).",
   "Then Chiefmate installs the new version, checks it and restarts. The paused runs and the messages in the queue resume by themselves. If the checks fail, Chiefmate stays on the current version and resumes the same way.": "Depois o Chiefmate instala a versão nova, verifica e reinicia. As execuções pausadas e as mensagens na fila retomam sozinhas. Se a verificação falhar, o Chiefmate fica na versão atual e retoma do mesmo jeito.",
   "Interrupting the manager's answer…": "Interrompendo a resposta do gerente…",
-  "Updating: the work going on pauses at a safe point.": "Atualizando: o trabalho em andamento pausa num ponto seguro."
+  "Updating: the work going on pauses at a safe point.": "Atualizando: o trabalho em andamento pausa num ponto seguro.",
+  "Choose Claude Code or Codex.": "Escolha o Claude Code ou o Codex."
 }

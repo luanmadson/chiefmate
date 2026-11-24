@@ -134,26 +134,42 @@ If you keep your project instructions in a document of blocks, Chiefmate can put
 ```markdown
 # Projects
 // selection: one
+// label: Project
+// DOCS = folder Docs{CODE}
 ## My project
 // tags: code
-// access: browser
-CODE = MYPROJ
-Work on {CODE}, following its documentation.
+// CODE = MYPROJ
+Work on {CODE}, following its documentation ({DOCS}).
 
 # Modules
 // selection: several
 ## Board
+// access: Trello
 Update the card on the board when you finish.
+## Start the system
+// requires: code
+Start it in development mode.
 
 # Rules
 // selection: automatic
 ## Code rules
-// tags: code
+// include with: code
 Keep the existing comments.
+## Browser sign-in
+// include with: access
+Open the browser and wait for me to sign in ({ACCESS}).
+
+# Ready choices
+// selection: combinations
+My project with the board = My project + Board + Start the system
 ```
 
-- A first-level heading opens a section and a second-level heading a block. Lines starting with `//` set options: `selection` (`one`, `several` or `automatic`; in Portuguese `seleção: uma | várias | automática`), `tags`, `access` (`acessos`), `requires` (`requer`: blocks it brings along) and `include with` (`incluir com`). `NAME = value` sets a variable, and `{NAME}` in the text takes its value.
-- A step gets the project's block (`projects.<id>.prompt_block`), the environment (`prompt_builder.environment`), the optional modules (`projects.<id>.prompt_modules`, or `--modules A,B` on a task) and the automatic blocks that match their tags, accesses or names, each under a `## <block>` heading.
+- A first-level heading opens a section and a second-level heading a block; the document's order is the prompt's order. Lines starting with `//` set options (each also in Portuguese):
+  - on a section: `selection` (`seleção`): `one` (`uma`), `several` (`várias`), `automatic` (`automática`), `combinations` (`combinações`: ready choices, one per line, `Name = Block + Block`) or `ignore` (`ignorar`); `label` (`rótulo`): the prefix of its blocks' headings, as in `## Project: My project`.
+  - on a block: `tags`; `access` (`acessos`): services it needs signed in, joined into `{ACCESS}` (`{ACESSOS}`); `requires` (`requer`): the block can only be chosen when these blocks or tags are chosen; `include with` (`incluir com`): when an automatic block comes in.
+  - In `requires` and `include with`, a comma asks for every item and a vertical bar for any of them (`home | work`); `always` (`sempre`) holds for any choice and `access` (`acessos`) when a chosen block needs a sign-in. An automatic block without `include with` comes in when it shares a tag or an access with the blocks chosen, or always when it has neither.
+  - `NAME = value` sets a variable (on a section, it serves all its blocks), and `{NAME}` in the text takes its value. A value can hold other variables, of the block, its section or the other blocks chosen; a variable left with no value stays as `{NAME}` and is reported (in the step's context, in a session's dry run and in the app's prompt builder).
+- A step gets the project's block (`projects.<id>.prompt_block`), the environment (`prompt_builder.environment`), the optional modules (`projects.<id>.prompt_modules`, or `--modules A,B` on a task) and the automatic blocks their choice brings, each under its heading. A requirement not met is reported in the step's context.
 - Blocks that need you live (a browser, a board, a confirmation) are kept: the agent asks for you with `needs-you`. A sentence that conflicts with the crew's rules (pushing, other branches, pull requests) is replaced by a note saying Chiefmate's rules prevail, and the adaptation is recorded in the step's context.
 - Without the file, the project's `notes` are used as before.
 
@@ -204,7 +220,7 @@ Besides the work the crew does in the background, you can open a conversation wi
 
 - `tool`: `claude` (Claude Code) or `codex` (Codex CLI).
 - Where it opens: `cwd` when you give it; for a `project`, your own clone of it (`local_clone`, or `Documents/GitHub/<repository name>`), never the crew's working copy, which is reset before every run; for a `library_folder` (`<library>/<folder>`), that folder in your own clone of the library or, failing that, in Chiefmate's read-only copy (anything changed there is lost, and the first message says so).
-- `prompt_blocks`: blocks of the prompt builder, by name, in any section. They are put together as for a step: the automatic and required blocks they bring come along and the variables are filled in. Nothing is adapted to the crew's rules: you are there. Without `prompt_blocks`, the session starts with no first message.
+- `prompt_blocks`: blocks of the prompt builder, by name, in any section. They are put together as for a step: the automatic blocks they bring come along and the variables are filled in. Nothing is adapted to the crew's rules: you are there. Without `prompt_blocks`, the session starts with no first message.
 - `model`: optional.
 - Each project also gets an automatic profile per tool it has no profile of, opened from its page (see "Project pages"). Operations lists only the profiles in your settings.
 

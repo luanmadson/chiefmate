@@ -513,9 +513,36 @@ try {
     '## Book', '// tags: book', 'Nothing.',
   ].join('\n');
   const built = assemble(parseBlocks(doc), { blockName: 'Sample project', environment: 'Office', modules: ['Board'] });
-  expect(built.blocks.join() === 'Office,Sample project,Board,Code rules,Browser access,Confirmation', `the prompt builder chose the wrong blocks: ${built.blocks.join()}`);
+  // "requires" only allows a block (it brings nothing): Board stays, and its unmet requirement is reported.
+  expect(built.blocks.join() === 'Office,Sample project,Board,Code rules,Browser access', `the prompt builder chose the wrong blocks: ${built.blocks.join()}`);
+  expect(built.missing.join() === 'requirement of "Board": Confirmation', `an unmet requirement was not reported: ${built.missing.join()}`);
   expect(built.text.includes('## Sample project') && built.text.includes('Work on SAMPLE.') && built.text.includes('Work from the office.'), "the prompt builder's variables or headings are wrong");
   expect(built.adaptations.length === 1 && built.text.includes('Never push without review.'), "the prompt builder's adaptation to the crew's rules is wrong");
+
+  // The document's own format (in Portuguese, escaped as Google Docs exports it): a variable inside another one's value,
+  // "incluir com" by tags (comma: all; bar: any; "sempre"; "acessos"), "requer", "rótulo" and the ready combinations.
+  const docPt = [
+    '# COMO USAR', '// seleção: ignorar', 'Help text.',
+    '# AMBIENTES', '// seleção: uma  ', '// rótulo: Ambiente', '## Casa', '// tags: casa  ', '// REPO \\= {REPO\\_NOME}, in the Sample folder', 'At home.',
+    '## Trabalho', '// tags: trabalho', 'At work.',
+    '# ACESSO', '// seleção: automática', '## Browser', '// incluir com: acessos', '// ACESSOS \\= the services I name', 'Wait for my sign-in ({ACESSOS}).',
+    '# PROJETOS', '// seleção: uma', '// rótulo: Projeto', '// DOCS \\= folder Docs{SIGLA}', '## Alpha', '// tags: código  ', '// SIGLA \\= ALPHA  ', '// REPO\\_NOME \\= alpha',
+    'Read {DOCS}, then the repository ({REPO}). Also {PASTA\\_X}.',
+    '# REGRAS', '// seleção: automática', '## Code rules', '// incluir com: código', 'Keep comments.', '## Library', '// incluir com: casa \\| trabalho', 'The library.',
+    '## Both', '// incluir com: código, trabalho', 'Only with both.', '## Always', '// incluir com: sempre', 'Always.',
+    '# MÓDULOS', '// seleção: várias', '## Start', '// requer: código', 'Start it.', '## Book reader', '// requer: livro', 'Read the book.', '## Board', '// acessos: Board, Mail', 'Update the card.',
+    '# COMBINAÇÕES PRONTAS', '// seleção: combinações', '', 'Alpha at home \\= Alpha \\+ Casa \\+ Start', '', 'Alpha at work \\= Alpha \\+ Trabalho \\+ Board',
+  ].join('\n');
+  const sectionsPt = parseBlocks(docPt);
+  const home = assembleBlocks(sectionsPt, ['Alpha', 'Casa', 'Start']);
+  expect(home.blocks.join() === 'Casa,Alpha,Code rules,Library,Always,Start', `the automatic blocks did not come in by their tags: ${home.blocks.join()}`);
+  expect(home.text.includes('Read folder DocsALPHA, then the repository (alpha, in the Sample folder).'), `a variable inside another one was not filled in: ${home.text}`);
+  expect(home.text.includes('## Ambiente: Casa') && home.text.includes('## Projeto: Alpha') && home.unresolved.join() === 'PASTA_X', `the labels or the unfilled variables are wrong: ${home.unresolved.join()}`);
+  const { combinations, composeChoice } = await import(src('prompts.mjs'));
+  expect(combinations(sectionsPt).map(c => `${c.name}=${c.blocks.join('+')}`).join() === 'Alpha at home=Alpha+Casa+Start,Alpha at work=Alpha+Trabalho+Board', 'the ready combinations were not read');
+  const work = composeChoice(sectionsPt, { chosen: ['Alpha', 'Trabalho', 'Board'], off: ['Always'] });
+  expect(work.blocks.join() === 'Trabalho,Browser,Alpha,Code rules,Library,Both,Board' && work.off.join() === 'Always', `a choice with an automatic block turned off is wrong: ${work.blocks.join()}`);
+  expect(work.text.includes('Wait for my sign-in (Board and Mail).') && work.unavailable.join() === 'Book reader', `the accesses or the blocks not allowed are wrong: ${work.unavailable.join()}`);
 
   // A live session: the blocks its profile names, by name in any section, with what they bring; nothing adapted.
   const session = assembleBlocks(parseBlocks(doc), ['Sample project', 'Office', 'Nowhere']);
@@ -543,6 +570,8 @@ try {
       refused = true;
     }
     expect(refused, 'a session with an unknown tool was not refused');
+    const written = planSession(sessionConfig, 'review', { prompt: '  My own prompt.  ' });
+    expect(written.prompt.text === 'My own prompt.' && written.prompt.written, "a prompt written in the prompt builder is not a session's first message as it is");
     expect(sessionIdOf('"C:\\nodejs\\node.exe" "C:\\chiefmate\\src\\cli.mjs" session-run 2026-01-02-0900-review') === '2026-01-02-0900-review' && sessionIdOf('node src/cli.mjs server') === null, "a session's window process is not recognized");
 
     // A project's page: the automatic session profile (only for a tool the settings have no profile of), opened in
@@ -561,6 +590,11 @@ try {
     const auto = sessionProfiles(pageConfig).filter(p => p.auto);
     expect(auto.map(p => p.id).join() === 'project-alpha-claude,project-beta-claude,project-beta-codex', `the automatic session profiles are wrong: ${auto.map(p => p.id).join()}`);
     expect(auto[0].prompt_blocks.join() === 'Sample project,Office' && auto[0].model === 'some-model' && !auto[1].prompt_blocks.length, "an automatic profile did not get the project's block and the environment");
+    const { profileFor } = await import(src('sessions.mjs'));
+    expect(profileFor(pageConfig, 'alpha', 'codex') === 'mine' && profileFor(pageConfig, 'alpha', 'claude') === 'project-alpha-claude', "the prompt builder's live session would not use the project's profile for the tool");
+    const { writtenInstructions } = await import(src('prompts.mjs'));
+    const sent = writtenInstructions('Work on it. Then push to GitHub.');
+    expect(sent.adaptations.length === 1 && sent.text.startsWith('Work on it.'), "a prompt sent with a task was not adapted to the crew's rules");
     const opened = planSession(pageConfig, 'project-alpha-claude');
     expect(opened.folder.dir === path.resolve(clone) && opened.prompt.text.includes('Project: Alpha. A sample.') && opened.prompt.text.includes('Work on SAMPLE.') && opened.prompt.text.includes('Work from the office.'), `an automatic session did not open in the clone with the project's prompt: ${opened.prompt.text.slice(0, 300)}`);
     let noClone = false;

@@ -132,7 +132,7 @@ export function sessionPrompt(config, profile, folder) {
   if (profile.prompt_blocks.length) {
     const { file } = builderSettings(config);
     if (!file || !existsSync(file)) throw new Error(t('Session "{name}" uses blocks of the prompt builder, but there is no copy of it on this computer ("prompt_builder.file").', { name: profile.name }));
-    built = assembleBlocks(parseBlocks(readFileSync(file, 'utf8')), profile.prompt_blocks);
+    built = assembleBlocks(parseBlocks(readFileSync(file, 'utf8')), profile.prompt_blocks, { language: config.language });
     if (!built.blocks.length && !profile.auto) throw new Error(t('None of the blocks of session "{name}" is in the prompt builder: {list}', { name: profile.name, list: profile.prompt_blocks.join(', ') }));
   }
   const lines = [
@@ -143,7 +143,7 @@ export function sessionPrompt(config, profile, folder) {
   if (project) lines.push(`Project: ${project.name ?? profile.project}${project.site ? ` (${project.site})` : ''}. ${project.about ?? ''}`.trim());
   if (folder.copy) lines.push("This folder is Chiefmate's read-only copy of a library: it is reset from GitHub, so anything changed here is lost. Read it; write only where the owner tells you.");
   if (built?.text) lines.push('', built.text);
-  return { text: lines.join('\n'), blocks: built?.blocks ?? [], missing: built?.missing ?? [], blocksGiven: !!built || !!project };
+  return { text: lines.join('\n'), blocks: built?.blocks ?? [], missing: built?.missing ?? [], unresolved: built?.unresolved ?? [], blocksGiven: !!built || !!project };
 }
 
 /** Every path Windows finds for a command, through where.exe. */
@@ -188,13 +188,26 @@ export function sessionArgs(session, config, prompt) {
   ];
 }
 
-/** What a profile would open, without opening anything: { profile, folder, prompt }. */
-export function planSession(config, profileId) {
+/** A project's profile for a tool: its own in "sessions", else the automatic one. */
+export function profileFor(config, projectId, tool) {
+  if (!config.projects?.[projectId]) throw new Error(t('Unknown project: {id}', { id: projectId }));
+  if (!TOOLS.includes(tool)) throw new Error(t('Choose Claude Code or Codex.'));
+  const all = sessionProfiles(config);
+  return (all.find(p => p.project === projectId && p.tool === tool && !p.auto) ?? all.find(p => p.id === `project-${projectId}-${tool}`)).id;
+}
+
+/**
+ * What a profile would open, without opening anything: { profile, folder, prompt }. With "prompt" (written in the
+ * app's prompt builder), that text is the first message, as it is.
+ */
+export function planSession(config, profileId, { prompt: written = null } = {}) {
   const profile = sessionProfiles(config).find(p => p.id === profileId);
   if (!profile) throw new Error(t('Unknown session profile: {id}', { id: profileId }));
   if (!TOOLS.includes(profile.tool)) throw new Error(t('Session "{name}": "tool" must be "claude" or "codex".', { name: profile.name }));
   const folder = sessionFolder(config, profile);
-  return { profile, folder, prompt: sessionPrompt(config, profile, folder) };
+  const text = String(written ?? '').trim();
+  const prompt = text ? { text, blocks: [], missing: [], unresolved: [], blocksGiven: true, written: true } : sessionPrompt(config, profile, folder);
+  return { profile, folder, prompt };
 }
 
 /** Whether Codex is signed in ("codex login status" succeeds). */
@@ -242,9 +255,9 @@ function launch(session) {
  * Opens a session from a profile: writes its first message and record, and opens its window. When Codex is not signed
  * in, asks the owner to sign in (as a step's "needs-you" does) and opens the window once that is done.
  */
-export async function openSession(profileId, { origin = 'app' } = {}) {
+export async function openSession(profileId, { origin = 'app', prompt: written = null } = {}) {
   const config = loadConfig();
-  const { profile, folder, prompt } = planSession(config, profileId);
+  const { profile, folder, prompt } = planSession(config, profileId, { prompt: written });
   // Resolved here and kept in the record: the window (Windows Terminal) doesn't get Chiefmate's environment.
   const command = toolCommand(profile.tool);
   ensureDir(SESSIONS);
@@ -254,7 +267,7 @@ export async function openSession(profileId, { origin = 'app' } = {}) {
   writeFileSync(promptFile(id), `${prompt.text}\n`);
   const session = {
     id, profile: profile.id, name: profile.name, tool: profile.tool, project: profile.project, library_folder: profile.library_folder,
-    cwd: folder.dir, readOnlyCopy: folder.copy, model: profile.model, command, blocks: prompt.blocks, missing: prompt.missing, firstMessage: prompt.blocksGiven,
+    cwd: folder.dir, readOnlyCopy: folder.copy, model: profile.model, command, blocks: prompt.written ? ['(written in the prompt builder)'] : prompt.blocks, missing: prompt.missing, firstMessage: prompt.blocksGiven,
     origin, created: now(), status: 'starting', requests: [],
   };
   if (profile.tool === 'codex' && !(await codexSignedIn())) {
