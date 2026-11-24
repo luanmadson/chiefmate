@@ -4,7 +4,7 @@ import path from 'node:path';
 import { runClaude } from './claude.mjs';
 import { loadAgents, loadConfig } from './config.mjs';
 import { formatDateTime, formatDuration, formatPercent, t } from './i18n.mjs';
-import { queued } from './queue.mjs';
+import { focus, queued } from './queue.mjs';
 import { ALWAYS_DISALLOWED, live, prepareLibraries } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { addMessage, listRuns, readState, readUsage, saveState, stepsOf } from './store.mjs';
@@ -34,6 +34,19 @@ async function chatLibraries(config) {
   return libraryCopies;
 }
 
+/** The project in focus, in one line: the run going on now, else the next one in the queue. */
+function focusLine(config) {
+  const f = focus(config);
+  if (!f) return 'Focus: no project in focus (nothing running, queue empty).';
+  const what = `project ${f.project} (${f.projectName}), ${f.kind} "${f.title}" [${f.run}]`;
+  if (f.state === 'running') {
+    const who = f.agent ? `${f.agent} at work (step ${f.step ?? '-'})` : 'preparing the working copy';
+    return `Focus: ${what}, ${who}, running for ${formatDuration(Date.now() - new Date(f.since).getTime())}.`;
+  }
+  const when = f.notBefore && new Date(f.notBefore).getTime() > Date.now() ? `, not before ${formatDateTime(f.notBefore)}` : '';
+  return `Focus: nothing running; next in the queue is ${what}${f.agent ? `, starting with ${f.agent}` : ''}${when}.`;
+}
+
 /** A snapshot of the moment, sent along with each of your messages. */
 export function situation(libraries = []) {
   const config = loadConfig();
@@ -42,6 +55,7 @@ export function situation(libraries = []) {
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const lines = [`Now: ${formatDateTime(new Date())} (${zone}). Reply in ${languageName(config.language || 'en')}.`];
   lines.push(`Chiefmate ${VERSION}${updateInfo.waiting ? `; an approved update with ${updateInfo.waiting} change(s) is waiting to be installed${updateInfo.blocked ? ` (blocked: ${updateInfo.blocked})` : ''}` : ''}.`);
+  lines.push(focusLine(config));
   lines.push(live.run ? `Running: ${live.title} (step ${live.step ?? '-'}: ${live.agent ?? 'preparing'}), run ${live.run}.` : 'Running: nothing.');
   const queue = queued();
   lines.push(

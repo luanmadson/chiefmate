@@ -23,7 +23,7 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
   | **Log** | Every run, with each step's report, the checks and the pull request link. |
   | **Usage** | Your Claude account's usage, and when Chiefmate pauses to look after it. |
 
-- **Crew portraits** that show at a glance who is standing by, working, thinking or waiting for a limit to reset. The title bar tells you whether Chiefmate is online and waiting for you.
+- **Crew portraits** that show at a glance who is standing by, working, thinking or waiting for a limit to reset. The title bar tells you whether Chiefmate is online and waiting for you, and which project is in focus: the one being worked on (the mission or task, the agent at work and for how long) or, when nothing is running, the next one in the queue.
 - **Scheduled missions**, for example every Monday at 9:00. They wake the computer from sleep.
 - **Windows notifications**: the evening before a mission, when a run starts, when it pauses for a limit and when it is ready for your review.
 - **One-off tasks** for any agent, at any time.

@@ -250,6 +250,29 @@ function drawPresence() {
   draw('#presence', html, html);
 }
 
+/** The project in focus: the run going on now, else the next one in the queue. */
+function drawFocus() {
+  const f = online ? state.focus : null;
+  const label = `<span class="label">${esc(t('Focus'))}</span>`;
+  if (!f) {
+    const text = online ? t('No project in focus') : '—';
+    const html = `${label}<span class="focus-none">${esc(text)}</span>`;
+    $('#focus').title = text;
+    draw('#focus', html, html);
+    return;
+  }
+  const parts = [f.kind === 'mission' ? t('Mission') : t('Task'), f.title];
+  if (f.state === 'running') parts.push(f.agent ? agentName(f.agent) : t('preparing'), t('for {time}', { time: elapsed(f.since) }));
+  else {
+    parts.unshift(t('Next in the queue'));
+    if (f.agent) parts.push(agentName(f.agent));
+    if (f.notBefore && new Date(f.notBefore).getTime() > Date.now()) parts.push(t('not before {when}', { when: shortDate(f.notBefore) }));
+  }
+  const html = `${label}<span class="focus-project">${esc(f.projectName)}</span><span class="focus-detail">${parts.map(esc).join(' · ')}</span>`;
+  $('#focus').title = [f.projectName, ...parts].join(' · ');
+  draw('#focus', html, html);
+}
+
 function drawCounters() {
   const a = state.current;
   draw('#counter-operations', `${!!a}-${state.queue.length}`, a ? '●' : state.queue.length ? String(state.queue.length) : '');
@@ -579,6 +602,7 @@ function drawUsage() {
 function drawOffline() {
   online = false;
   drawPresence();
+  drawFocus();
   drawStatusbar();
   if (state) {
     drawBridge();
@@ -608,6 +632,7 @@ async function refresh() {
   online = true;
   $('#version').textContent = `Chiefmate ${state.version}`;
   drawPresence();
+  drawFocus();
   drawCounters();
   drawStatusbar();
   drawChat();

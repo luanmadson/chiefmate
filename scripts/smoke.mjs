@@ -39,7 +39,7 @@ try {
     failures.push('the server did not start');
   } else {
     const state = await (await fetch(`${base}/api/state`)).json();
-    for (const key of ['version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'queue', 'history', 'usage', 'manager']) {
+    for (const key of ['version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'focus', 'queue', 'history', 'usage', 'manager']) {
       expect(key in state, `/api/state has no "${key}"`);
     }
     expect(state.crew?.some(a => a.id === 'manager'), 'the crew has no manager');

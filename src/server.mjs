@@ -6,7 +6,7 @@ import { checkClaude, claudeInfo } from './claude.mjs';
 import { loadAgents, loadConfig, saveConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { chat, newConversation, talkToManager } from './manager.mjs';
-import { cancel, nudgeQueue, queued, resume } from './queue.mjs';
+import { cancel, focus, nudgeQueue, queued, resume } from './queue.mjs';
 import { createRun, live } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { addMessage, listRuns, readConversation, readNotifications, readRun, readUsage, stepsOf } from './store.mjs';
@@ -134,6 +134,7 @@ function buildState() {
       last: lastOf(id) ? summary(lastOf(id)) : null,
     })),
     crew: crew(agents, config, runs, current, queue, conversation),
+    focus: focus(config),
     current: current ? { ...summary(current), step: live.step, agent: live.agent, stepStarted: live.started, actions: live.actions.slice(-80) } : null,
     queue: queue.map(summary),
     history: runs.filter(r => !['queued', 'waiting'].includes(r.status) && r.id !== live.run).slice(0, 30).map(summary),
