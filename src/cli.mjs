@@ -112,6 +112,10 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs history [n]                  the latest runs
   node src/cli.mjs report <id>                  the report of each step of a run
   node src/cli.mjs context <id> [step]          what each step received: prompt, model, tools, folders, MCP servers
+  node src/cli.mjs project-context <project> [member] [--short] [--json]
+                                                everything the project's crew (or one member) gets now, in order and by
+                                                source, with sizes in tokens; its live sessions' first messages; and what
+                                                changed since each member's last run. --short leaves the texts out
   node src/cli.mjs needs-you "<what to do>" [--url <address>] [--wait] [--check "<command>"] [--id <request>]
                                                 for a step of a run: asks the owner to act and, with --wait, waits
                                                 until they click Done (or the check command succeeds)
@@ -446,6 +450,15 @@ async function main() {
       const files = readdirSync(dir).filter(f => f.endsWith('.context.md') && f.startsWith(prefix)).sort();
       if (!files.length) throw new Error('No context recorded for this run or step (runs from before this version have none).');
       for (const f of files) console.log(`${readFileSync(`${dir}/${f}`, 'utf8')}\n`);
+      return;
+    }
+    case 'project-context': {
+      // Put together here, from the settings, the same way the runs do (src/context.mjs): nothing runs or opens.
+      const { contextText, projectContext } = await import('./context.mjs');
+      const [project, member] = rest.filter(x => !x.startsWith('--'));
+      if (!project) throw new Error('Which project? node src/cli.mjs project-context <project> [member]');
+      const context = projectContext(loadConfig(), project, { member: member ?? null });
+      console.log(has('--json') ? JSON.stringify(context, null, 2) : contextText(context, { full: !has('--short') }));
       return;
     }
     case 'needs-you':

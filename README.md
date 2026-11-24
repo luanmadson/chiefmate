@@ -170,7 +170,7 @@ My project with the board = My project + Board + Start the system
   - on a block: `tags`; `access` (`acessos`): services it needs signed in, joined into `{ACCESS}` (`{ACESSOS}`); `requires` (`requer`): the block can only be chosen when these blocks or tags are chosen; `include with` (`incluir com`): when an automatic block comes in.
   - In `requires` and `include with`, a comma asks for every item and a vertical bar for any of them (`home | work`); `always` (`sempre`) holds for any choice and `access` (`acessos`) when a chosen block needs a sign-in. An automatic block without `include with` comes in when it shares a tag or an access with the blocks chosen, or always when it has neither.
   - `NAME = value` sets a variable (on a section, it serves all its blocks), and `{NAME}` in the text takes its value. A value can hold other variables, of the block, its section or the other blocks chosen; a variable left with no value stays as `{NAME}` and is reported (in the step's context, in a session's dry run and in the app's prompt builder).
-- A step gets the project's block (`projects.<id>.prompt_block`), the environment (`prompt_builder.environment`), the optional modules (`projects.<id>.prompt_modules`, or `--modules A,B` on a task) and the automatic blocks their choice brings, each under its heading. A requirement not met is reported in the step's context.
+- A step gets the project's block (`projects.<id>.prompt_block`), the environment (`prompt_builder.environment`), the optional modules (`projects.<id>.prompt_modules`, or `--modules A,B` on a task) and the automatic blocks their choice brings, each under its heading, except the automatic blocks the project turned off (`projects.<id>.prompt_exclude`, also left out of its live sessions). A requirement not met is reported in the step's context.
 - Blocks that need you live (a browser, a board, a confirmation) are kept: the agent asks for you with `needs-you`. A sentence that conflicts with the crew's rules (pushing, other branches, pull requests) is replaced by a note saying Chiefmate's rules prevail, and the adaptation is recorded in the step's context.
 - Without the file, the project's `notes` are used as before.
 
@@ -207,6 +207,19 @@ And these buttons:
 - **Start the development environment**, for a project with `dev_start` in its settings (such as `"dev_start": "npm run dev"`): runs that command in your clone, in a window of its own (Windows Terminal, or PowerShell), through `node src/cli.mjs dev-run <project>`. Its processes count in the project's memory, marked "development environment", and **Stop** closes the window with everything it started. From the command line: `node src/cli.mjs dev <project>` (`--dry-run` shows what would run) and `dev stop <project>`.
 
 Without your own clone of the project, the buttons that need it are disabled and the page says to set `local_clone`.
+
+### The Context tab
+
+The page's **Context** tab (`#project/<id>/context`) shows everything that is passed to whoever works on the project, put together by the same code the runs use, in the real order and with the source of each part:
+
+- **For each member of the project's crew, its team lead and the manager's final review**: the system prompt added to Claude Code's own (the agent's `agents/<id>.md`, the installation's `crew.<id>.extra_instructions`, the project crew member's or the team lead's extra instructions, the lead's role); the repository's instruction files Claude Code would load (`CLAUDE.md` at the start, those in subfolders when it works there; `AGENTS.md` is listed but only Codex reads it by itself); then the first message, part by part: the run and the task (shown with placeholders), the project memory kept by the team lead, the project instructions from the prompt builder (each block with how it came in: chosen as the project's block, the environment or a module, by "include with", by a shared tag, by "requires" or always), the project's `notes` and `agent_notes`, the libraries and the personal documentation, and Chiefmate's rules for the crew. Then the model and effort, the folders allowed and the paths denied, the tools allowed and denied, and the MCP servers.
+- **Sizes**: each part, each block and each member's total, in approximate tokens (about 4 characters per token). Claude Code's own system prompt and tool definitions are not counted.
+- **What each live session of the project opens with**: its first message and its blocks.
+- **Since the last run**: for each member, what changed against the last `.context.md` a real step of the project wrote (the model, the system prompt, each section of the prompt, the blocks, the folders, the tools, the MCP servers and the instruction files). The run's own parts (its task, the reports before) are not compared.
+
+Below, **Change the context**: turn the prompt builder's optional modules on (`prompt_modules`) and its automatic blocks off for the project (`prompt_exclude`), and edit the project's `notes` and, for each member, its extra instructions (the team lead's and a project crew member's stay in the project; a member of the general crew's are the agent's notes for the whole installation, `crew.<id>.extra_instructions`) and its `agent_notes`. **Preview** shows each setting that changes and what each member and live session would get (the lines that leave and come in, and the size before and after); **Save** writes the settings and records the change in `data/projects/<id>/context-history.jsonl`, shown as the tab's history. Nothing is saved without a preview of the same changes.
+
+From the command line: `node src/cli.mjs project-context <project> [member]` prints the same, with the texts (`--short` leaves them out, `--json` gives the data).
 
 ## Live sessions
 
@@ -281,7 +294,7 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `default_model` | The model for agents that don't set one |
 | `attribution` | `false` keeps the crew's commits and pull requests from crediting Claude (they are credited to you alone) |
 | `backup_dir` | A folder of your own, such as one in a private repository, where Chiefmate keeps an up-to-date copy of these settings |
-| `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. Optional: `crew` (its own crew), `lead` (its team lead, see "The crew"), `mcp` (external tools it releases), `prompt_block` and `prompt_modules` (the prompt builder), `dev_start` (the command that starts its development environment from its page, such as `npm run dev`). See also "Local delivery" below |
+| `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. Optional: `crew` (its own crew), `lead` (its team lead, see "The crew"), `mcp` (external tools it releases), `prompt_block`, `prompt_modules` and `prompt_exclude` (the prompt builder), `dev_start` (the command that starts its development environment from its page, such as `npm run dev`). See also "Local delivery" below |
 | `missions` | For each mission: the `project`, the `steps` (an agent and its part, in order), the final `review`, the `schedule` (`days` such as `["mon"]` and a `time` such as `"09:00"`) and the `eve_reminder` time |
 | `crew` | Settings for one agent in this installation only, such as `{ "writer": { "model": "claude-opus-5-5", "max_minutes": 90, "extra_instructions": "..." } }` |
 | `library` | Reference libraries: git repositories the manager and the crew may read, such as your personal documentation. Each has a `name`, a `repository`, a `main_branch` and a sentence `about` it, and optionally `local_clone`, your own clone of it, where the live sessions of its folders open. A project uses one with `"library": ["<id>"]`, or with `"docs": "<id>/<folder>"` for its personal documentation, which then takes precedence over the instructions inside the project's own repository |
@@ -439,6 +452,9 @@ node src/cli.mjs update-now [--yes]           installs the approved update now, 
 node src/cli.mjs history                      the latest runs
 node src/cli.mjs report <id>                  the reports of a run
 node src/cli.mjs context <id> [step]          what each step received: prompt, model, tools, folders, MCP servers
+node src/cli.mjs project-context <project> [member] [--short] [--json]
+                                              everything the project's crew gets now, by source, with sizes in tokens,
+                                              its live sessions' first messages and what changed since the last run
 node src/cli.mjs needs-you "..." [--url <address>] [--wait] [--check "<command>"]
                                               for a step: asks you to act and, with --wait, waits for Done
 node src/cli.mjs prompts-sync                 copies the prompt builder's document from Google Docs
@@ -470,7 +486,7 @@ English is the source. The app, the notifications and the reports follow `langua
 | `agents/` | The crew, one file per agent |
 | `config/` | `example.json`, and your `chiefmate.json` (not in git) |
 | `scripts/` | Installation on Windows, launchers and checks |
-| `data/` (not in git) | Runs, each step's log and context, the live sessions' first messages and records, the prompt builder's last choice per project, the planning board (`plan.json`), the team leads' project memories (`projects/<id>/memory.md`), the conversation with the manager, your account's usage, the schedule's and the alerts' state and, if you use the claude.ai reading, its browser profile |
+| `data/` (not in git) | Runs, each step's log and context, the live sessions' first messages and records, the prompt builder's last choice per project, the planning board (`plan.json`), the team leads' project memories (`projects/<id>/memory.md`), the history of the changes made in each project's Context tab (`projects/<id>/context-history.jsonl`), the conversation with the manager, your account's usage, the schedule's and the alerts' state and, if you use the claude.ai reading, its browser profile |
 | `workspaces/` (not in git) | The projects' working copies |
 
 Chiefmate has no dependencies besides Node.js. It drives Claude Code (`claude -p`), which uses your account's login and plan. The only optional one is `playwright-core`, for copying the prompt builder from Google Docs (and, if present, for the browser that opens for sign-ins): Chiefmate loads it only when needed and says how to install it when it is missing.
