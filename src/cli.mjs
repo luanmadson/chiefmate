@@ -54,6 +54,7 @@ async function main() {
       }
       const { startServer } = await import('./server.mjs');
       const { server, port: p } = startServer();
+      if (!process.env.CHIEFMATE_SMOKE) (await import('./config.mjs')).backupConfig();
       // The smoke test only needs the app and the API: no queue, no schedule, no updates.
       if (!process.env.CHIEFMATE_SMOKE) {
         const { startQueue } = await import('./queue.mjs');

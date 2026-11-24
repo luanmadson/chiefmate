@@ -1,5 +1,5 @@
 // The settings (config/chiefmate.json, created from config/example.json on the first run) and the crew (agents/*.md).
-import { copyFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { languageName, readJson, ROOT, writeJson } from './util.mjs';
 
@@ -16,6 +16,24 @@ export function loadConfig() {
 
 export function saveConfig(config) {
   writeJson(CONFIG_FILE, config);
+  backupConfig(config);
+}
+
+/**
+ * With "backup_dir" in the settings (a folder of your own, such as one in a private repository),
+ * keeps an up-to-date copy of the settings there: on every save and whenever Chiefmate starts.
+ */
+export function backupConfig(config = loadConfig()) {
+  if (!config.backup_dir) return;
+  try {
+    const target = path.join(config.backup_dir, 'chiefmate.json');
+    const text = `${JSON.stringify(config, null, 2)}\n`;
+    if (existsSync(target) && readFileSync(target, 'utf8') === text) return;
+    mkdirSync(config.backup_dir, { recursive: true });
+    writeFileSync(target, text);
+  } catch (error) {
+    console.error('Settings backup:', error.message);
+  }
 }
 
 /** Reads an agent's header: "key: value", "key: [a, b]" or a list of "- item" lines. */

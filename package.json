@@ -1,6 +1,6 @@
 {
   "name": "chiefmate",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "A command center for AI agents on your own computer: a manager who answers to you, a crew of agents, scheduled missions and usage limits. Powered by Claude Code.",
   "license": "PolyForm-Noncommercial-1.0.0",
