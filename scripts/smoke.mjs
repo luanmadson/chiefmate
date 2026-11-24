@@ -156,6 +156,17 @@ try {
     expect((await fetch(`${base}/api/prompt-builder?project=no-such-project`)).status === 400, 'the prompt builder of a project that does not exist did not answer 400');
     expect((await post('/api/prompt-builder/session', { project: 'no-such-project', tool: 'claude', prompt: 'Hello', dryRun: true })).status === 400, "a session from the prompt builder for a project that does not exist was not refused");
     if (state.projects[0]) expect((await post('/api/prompt-builder/session', { project: state.projects[0].id, tool: 'claude', prompt: ' ', dryRun: true })).status === 400, 'a session from the prompt builder with an empty prompt was not refused');
+    // A project's Context tab: everything its crew gets, in order and by source. A preview saves nothing, and saving
+    // no change is refused (the installation's settings are never written here).
+    if (state.projects[0]) {
+      const id = state.projects[0].id;
+      const ctx = await (await fetch(`${base}/api/project/${encodeURIComponent(id)}/context`)).json();
+      expect(Array.isArray(ctx.members) && ctx.members.at(-1)?.kind === 'manager' && ctx.members.every(m => m.tokens.total === m.tokens.system + m.tokens.repository + m.tokens.prompt && m.system[0]?.key === 'agent' && m.prompt[0]?.key === 'header' && m.prompt.at(-1)?.key === 'rules') && Array.isArray(ctx.sessions) && Array.isArray(ctx.history), `/api/project/<id>/context is incomplete: ${JSON.stringify(ctx).slice(0, 300)}`);
+      const preview = await (await post('/api/project/context/preview', { project: id, changes: {} })).json();
+      expect(Array.isArray(preview.changed) && !preview.changed.length && preview.members?.length === ctx.members.length, `a preview with no change is wrong: ${JSON.stringify(preview).slice(0, 200)}`);
+      expect((await post('/api/project/context/save', { project: id, changes: {} })).status === 400, 'saving no change to the context was not refused');
+    }
+    expect((await fetch(`${base}/api/project/no-such-project/context`)).status === 400, 'the context of a project that does not exist did not answer 400');
     expect(state.projects.every(p => ['claude', 'codex'].every(tool => state.sessions.profiles.some(x => x.project === p.id && x.tool === tool))), 'a project has no live session profile (its own or automatic) for each tool');
     const first = state.projects[0];
     if (first) {
@@ -636,6 +647,56 @@ try {
     expect(devIdOf('"C:\\nodejs\\node.exe" "C:\\chiefmate\\src\\cli.mjs" dev-run alpha') === 'alpha' && devIdOf('node src/cli.mjs session-run x') === null, "a development environment's window process is not recognized");
     const info = await projects.projectInfo('alpha', pageConfig, { dev: [{ project: 'alpha', pids: [42], ram: 1024 }] });
     expect(info.clone === path.resolve(clone) && info.dev?.status === 'running' && info.dev.ram === 1024 && info.vscode && info.deliver === 'pull_request', `the project's page facts are wrong: ${JSON.stringify(info)}`);
+
+    // A project's Context tab, from made-up settings: each member's parts in order and by source, the blocks and how
+    // each came in, an automatic block turned off for the project, what changed since the last recorded step, and the
+    // changes previewed and saved (to a made-up place: no settings file is written) with their history.
+    const { loadAgents } = await import(src('config.mjs'));
+    expect(Object.values(loadAgents({ owner: 'Owner', crew: { writer: { extra_instructions: 'Extra.' } } })).every(a => a.instructions === a.instructionParts.map(p => p.text).join('')), "an agent's instruction parts are not its instructions");
+    const ctx = await import(src('context.mjs'));
+    const ctxConfig = {
+      owner: 'Owner', language: 'en', default_model: 'some-model', prompt_builder: { file: builder, environment: 'Office' },
+      crew: { designer: { extra_instructions: 'Installation note.' } },
+      projects: { ctx: { name: 'Ctx', about: 'A sample.', main_branch: 'main', prompt_block: 'Sample project', prompt_modules: ['Board'], prompt_exclude: ['Browser access'], agent_notes: { designer: 'Mind the colors.' }, lead: { name: 'Ctx lead' }, crew: ['generalist', 'designer'] } },
+    };
+    const generalistSystem = ctx.projectContext(ctxConfig, 'ctx', { member: 'generalist', diffs: false, sent: true }).members[0].sent.system;
+    const fence = '``````';
+    mkdirSync(path.join(data, 'runs', 'smoke-ctx'), { recursive: true });
+    writeFileSync(path.join(data, 'runs', 'smoke-ctx.json'), JSON.stringify({ id: 'smoke-ctx', kind: 'task', project: 'ctx', title: 'Ctx run', status: 'done', created: new Date().toISOString(), steps: [{ agent: 'generalist', status: 'done', started: new Date().toISOString() }] }));
+    writeFileSync(path.join(data, 'runs', 'smoke-ctx', '01-generalist.context.md'), [
+      '# Context received: generalist (step 1), run smoke-ctx', '', '- Model: `old-model`, time limit 60 min', '', '## Tools allowed', '- `Bash`', '',
+      '## Prompt builder', '- Blocks: Office, Sample project, Board, Code rules, Browser access', '',
+      "## System prompt (added to Claude Code's own)", `${fence}markdown`, generalistSystem, fence, '',
+      '## Prompt', `${fence}markdown`, '# Ctx run', '', '## Your part', 'An old task.', '', '## Office', '', 'Work from the office.', '', '## Old section', 'Gone now.', fence, '',
+    ].join('\n'));
+    const context = ctx.projectContext(ctxConfig, 'ctx');
+    const byId = Object.fromEntries(context.members.map(m => [m.id, m]));
+    expect(context.members.map(m => m.id).join() === 'generalist,designer,lead,manager', `the context's members are wrong: ${context.members.map(m => m.id).join()}`);
+    expect(byId.designer.system.map(p => p.key).join() === 'agent,installation' && byId.lead.system.map(p => p.key).join() === 'agent,lead-role' && byId.designer.prompt.some(p => p.key === 'agent-notes' && p.source === 'projects.ctx.agent_notes.designer'), "the context's parts or sources are wrong");
+    const ctxBuilder = byId.generalist.prompt.find(p => p.key === 'builder');
+    expect(ctxBuilder?.blocks.map(b => `${b.name}:${b.how}:${b.role ?? ''}`).join() === 'Office:chosen:environment,Sample project:chosen:project block,Board:chosen:module,Code rules:tags:' && ctxBuilder.off.join() === 'Browser access', `the context's blocks or how they came in are wrong: ${JSON.stringify(ctxBuilder?.blocks.map(b => [b.name, b.how, b.role]))}`);
+    const changes = byId.generalist.diff?.changes ?? [];
+    expect(byId.generalist.diff?.run === 'smoke-ctx' && changes.some(c => c.what === 'model' && c.before === 'old-model') && changes.some(c => c.what === 'section' && c.name === 'Old section' && c.status === 'removed')
+      && changes.some(c => c.what === 'blocks' && c.removed.join() === 'Browser access') && !changes.some(c => c.what === 'system' || c.name === 'Your part' || c.name === 'Office') && byId.designer.diff === null,
+    `what changed since the last run is wrong: ${JSON.stringify(changes.map(c => [c.what, c.name, c.status]))}`);
+    expect(context.sessions.length === 2 && context.sessions.every(s => s.error), "the project's live sessions without the owner's clone did not say why");
+    expect(ctx.contextText(context).includes('by a shared tag') && ctx.contextText(context, { full: false }).includes('# Context of Ctx'), 'the context as text is wrong');
+    const applied = ctx.applyChanges(ctxConfig, 'ctx', { modules: ['Board', 'Unused module'], exclude: [], notes: 'N', extra: { generalist: 'G', lead: 'L', manager: 'M' }, agentNotes: { designer: '' } });
+    const fields = applied.changed.map(c => c.field).join();
+    expect(fields === 'projects.ctx.prompt_modules,projects.ctx.prompt_exclude,projects.ctx.notes,projects.ctx.agent_notes.designer,projects.ctx.crew.generalist.extra_instructions,projects.ctx.lead.extra_instructions,crew.manager.extra_instructions'
+      && applied.config.projects.ctx.crew[0].extra_instructions === 'G' && applied.config.projects.ctx.lead.extra_instructions === 'L' && !applied.config.projects.ctx.agent_notes && !ctxConfig.projects.ctx.notes, `the context's changes were applied wrong: ${fields}`);
+    let wrongBlock = false;
+    try {
+      ctx.applyChanges(ctxConfig, 'ctx', { modules: ['Board', 'Code rules'] });
+    } catch {
+      wrongBlock = true;
+    }
+    expect(wrongBlock, 'an automatic block was accepted as a module');
+    const preview = ctx.previewChanges('ctx', { exclude: [] }, ctxConfig);
+    expect(preview.changed.length === 1 && preview.members.find(m => m.id === 'generalist')?.added.includes('Ask the owner to sign in.'), "the preview of a change doesn't show what the crew would get");
+    let saved = null;
+    ctx.saveChanges('ctx', { notes: 'Hello' }, { config: ctxConfig, save: c => (saved = c) });
+    expect(saved?.projects.ctx.notes === 'Hello' && ctx.readHistory('ctx')[0]?.changes[0]?.field === 'projects.ctx.notes', "a saved change was not recorded in the project's history");
   } finally {
     rmSync(sessionTemp, { recursive: true, force: true });
   }

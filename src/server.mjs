@@ -4,6 +4,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
+import { previewChanges, projectContext, saveChanges } from './context.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
 import { computer, processes, stoppable, stopProject } from './machine.mjs';
@@ -318,6 +319,9 @@ export function startServer() {
           const config = loadConfig();
           return reply(res, 200, { ...builderPage(config, url.searchParams.get('project') ?? ''), syncing: isSyncing(), cdp: !!config.browser_cdp });
         }
+        // The project's Context tab: everything its crew gets, in order and by source (src/context.mjs).
+        const projectContextPath = url.pathname.match(/^\/api\/project\/([^/]+)\/context$/);
+        if (projectContextPath) return reply(res, 200, projectContext(loadConfig(), decodeURIComponent(projectContextPath[1]), { member: url.searchParams.get('member') || null }));
         const page = url.pathname.match(/^\/api\/project\/([^/]+)$/);
         if (page) return reply(res, 200, await projectPage(decodeURIComponent(page[1])));
         if (url.pathname.startsWith('/api/run/')) {
@@ -385,6 +389,12 @@ export function startServer() {
           if (body.action === 'stop') return reply(res, 200, await stopDev(String(body.project ?? ''), options));
           return reply(res, 400, { error: t('Say "start" or "stop".') });
         }
+        case '/api/project/context/preview':
+          // What the changes to the project's context would do ("changes": modules, exclude, notes, agentNotes, extra); nothing is saved.
+          return reply(res, 200, previewChanges(String(body.project ?? ''), body.changes ?? {}));
+        case '/api/project/context/save':
+          // Saves them in the settings and records them in data/projects/<id>/context-history.jsonl.
+          return reply(res, 200, saveChanges(String(body.project ?? ''), body.changes ?? {}, { by: body.origin === 'cli' ? 'cli' : 'app' }));
         case '/api/session/end':
           return reply(res, 200, await endSession(String(body.id ?? '')));
         case '/api/prompt-builder/compose':

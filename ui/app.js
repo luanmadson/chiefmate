@@ -303,9 +303,11 @@ const toolName = tool => (tool === 'codex' ? 'Codex' : 'Claude Code');
 
 // ---------- Navigation ----------
 
-// A project's page is "#project/<id>"; the prompt builder is "#builder", or "#builder/<id>" for a project.
+// A project's page is "#project/<id>" (its Context tab, "#project/<id>/context"); the prompt builder is "#builder",
+// or "#builder/<id>" for a project.
 const VIEWS = ['manager', 'operations', 'planning', 'missions', 'crew', 'projects', 'builder', 'log', 'usage', 'project'];
-const pageProject = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length)) : null);
+const pageProject = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length).split('/')[0]) : null);
+const pageTab = () => (location.hash.startsWith('#project/') && location.hash.slice('#project/'.length).split('/')[1] === 'context' ? 'context' : 'overview');
 const builderHash = () => /^#builder(\/|$)/.test(location.hash);
 const builderProjectOf = () => (location.hash.startsWith('#builder/') ? decodeURIComponent(location.hash.slice('#builder/'.length)) : '');
 const currentView = () => (pageProject() ? 'project' : builderHash() ? 'builder' : VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
@@ -319,6 +321,8 @@ function showView() {
     if (projectPage.data?.id !== pageProject()) projectPage.data = null;
     drawProjectPage();
     refreshProjectPage();
+    // The Context tab is read again each time it is opened (not on every refresh of the app).
+    if (pageTab() === 'context') openProjectContext(pageProject());
   }
   if (view === 'builder' && state) openBuilder(builderProjectOf());
 }
@@ -1147,7 +1151,7 @@ async function refreshProjectPage() {
   if (pageProject() === id && state) drawProjectPage();
 }
 
-const PAGE_PARTS = ['#project-title', '#project-actions', '#project-facts', '#project-team', '#project-runs', '#project-history', '#project-planning', '#project-computer', '#project-sessions'];
+const PAGE_PARTS = ['#project-title', '#project-actions', '#project-tabs', '#project-facts', '#project-team', '#project-runs', '#project-history', '#project-planning', '#project-computer', '#project-sessions'];
 
 function drawProjectPage() {
   const id = pageProject();
@@ -1158,12 +1162,25 @@ function drawProjectPage() {
     const html = `<h1>${esc(t('Unknown project: {id}', { id }))}</h1><p>${esc(t('It is not in the settings. Pick a project in the list at the top.'))}</p>`;
     draw('#project-title', html, html);
     for (const part of PAGE_PARTS.slice(1)) draw(part, '', '');
+    $('#project-overview').hidden = false;
+    $('#project-context').hidden = true;
     return;
   }
   const info = projectPage.data?.id === id ? projectPage.data : null;
   const title = `<h1>${esc(p.name ?? id)}</h1><p>${esc(info?.error ?? (info ? info.about || t('No sentence about this project in its settings ("about").') : t('Loading…')))}</p>`;
   draw('#project-title', title, title);
   drawProjectActions(id, info);
+  const tab = pageTab();
+  const tabs = [['overview', `#project/${encodeURIComponent(id)}`, t('Overview')], ['context', `#project/${encodeURIComponent(id)}/context`, t('Context')]]
+    .map(([key, href, label]) => `<a href="${href}" class="tab${key === tab ? ' active' : ''}"${key === tab ? ' aria-current="page"' : ''}>${esc(label)}</a>`).join('');
+  draw('#project-tabs', tabs, tabs);
+  $('#project-overview').hidden = tab !== 'overview';
+  $('#project-context').hidden = tab !== 'context';
+  if (tab === 'context') {
+    if (projectContext.id !== id) openProjectContext(id);
+    else drawProjectContext();
+    return;
+  }
   drawProjectFacts(info);
   drawProjectTeam(id);
   drawProjectRuns(id);
@@ -1312,6 +1329,388 @@ function drawProjectSessions(id) {
   draw('#project-sessions', JSON.stringify([open.map(x => [x.id, x.status, x.alive, Math.round(x.ram / 1048576), x.started]), profiles]), html);
 }
 
+// ---------- A project's Context tab ----------
+
+// What the tab read (GET /api/project/<id>/context), the member shown and the preview of the changes being written.
+const projectContext = { id: null, data: null, loading: false, error: null, member: null, preview: null, busy: false, ticket: 0 };
+
+async function openProjectContext(id) {
+  if (projectContext.id !== id) Object.assign(projectContext, { id, data: null, error: null, member: null, preview: null });
+  else if (projectContext.loading) return;
+  // Only the latest reading counts (another project may have been opened meanwhile).
+  const ticket = ++projectContext.ticket;
+  projectContext.loading = true;
+  drawProjectContext();
+  try {
+    const data = await api(`/api/project/${encodeURIComponent(id)}/context`);
+    if (projectContext.ticket === ticket) Object.assign(projectContext, { data, error: null, preview: null });
+  } catch (error) {
+    if (projectContext.ticket === ticket) projectContext.error = error.message;
+  } finally {
+    if (projectContext.ticket === ticket) projectContext.loading = false;
+  }
+  if (projectContext.ticket !== ticket) return;
+  if (!projectContext.data?.members.some(m => m.id === projectContext.member)) projectContext.member = projectContext.data?.members[0]?.id ?? null;
+  drawProjectContext();
+}
+
+const tokenCount = n => t('~{count} tokens', { count: Number(n ?? 0).toLocaleString(locale()) });
+
+function contextPartTitle(key) {
+  switch (key) {
+    case 'agent': return t("The agent's instructions");
+    case 'installation': return t('Notes for this installation');
+    case 'project-member': return t("Notes for this project's crew");
+    case 'lead-role': return t("The team lead's role");
+    case 'lead-notes': return t('Notes for the team lead');
+    case 'header': return t('The run and the task');
+    case 'memory': return t('Project memory');
+    case 'lead': return t('How the team lead reviews');
+    case 'playbook': return t("The mission's playbook");
+    case 'builder': return t('Project instructions (prompt builder)');
+    case 'notes': return t("The project's notes");
+    case 'agent-notes': return t("The project's notes for this member");
+    case 'libraries': return t('Libraries and personal documentation');
+    case 'review': return t('The final review');
+    case 'lead-review': return t("The team lead's plan and opinion");
+    case 'reports': return t('The reports of the steps before');
+    case 'rules': return t("Chiefmate's rules for the crew");
+    default: return key;
+  }
+}
+
+function blockHow(b) {
+  const condition = b.condition ?? '';
+  switch (b.how) {
+    case 'chosen':
+      if (b.role === 'project block') return t("chosen: the project's block");
+      if (b.role === 'environment') return t('chosen: the environment');
+      if (b.role === 'module') return t('chosen: a module of the project');
+      if (b.role === 'profile') return t("chosen: in the session's profile");
+      return t('chosen');
+    case 'include-with': return t('by "include with": {condition}', { condition });
+    case 'tags': return t('by a shared tag: {condition}', { condition });
+    case 'requires': return t('by "requires": {condition}', { condition });
+    default: return t('always');
+  }
+}
+
+function fileKindLabel(kind) {
+  switch (kind) {
+    case 'start': return t('loaded at the start');
+    case 'folder': return t('loaded when it works in that folder');
+    case 'agents': return t('not loaded by Claude Code by itself (Codex reads it)');
+    case 'settings': return t('settings of the repository');
+    case 'ignored': return t('ignored (--strict-mcp-config)');
+    default: return t('available to the agent');
+  }
+}
+
+function memberRoleLabel(m) {
+  if (m.kind === 'lead') return t('Team lead: first review of every run');
+  if (m.kind === 'manager') return t('Manager: final review');
+  return m.base && m.base !== m.id ? t('Crew member, based on {base}', { base: agentName(m.base) }) : t('Crew member');
+}
+
+/** A part of the context: its title, its source and its size; opened, its text. */
+const contextPart = (title, source, tokens, body, extra = '') => `<details class="context-part">
+    <summary><span class="context-part-title">${esc(title)}</span><code class="context-source">${esc(source ?? '')}</code><span class="num">${tokens == null ? '' : tokenCount(tokens)}</span></summary>
+    ${extra}${body ? `<pre class="context-text">${esc(body)}</pre>` : ''}
+  </details>`;
+
+const contextBlocks = blocks => blocks?.length
+  ? `<table class="table inner context-blocks"><thead><tr><th>${esc(t('Block'))}</th><th>${esc(t('How it came in'))}</th><th>${esc(t('Size'))}</th></tr></thead><tbody>${blocks.map(b => `<tr>
+      <td><span class="primary">${esc(b.name)}</span><span class="secondary">${esc(b.section)}</span></td>
+      <td>${esc(blockHow(b))}${b.adapted ? `<span class="secondary">${esc(t("{count} line(s) adapted to the crew's rules", { count: b.adapted }))}</span>` : ''}</td>
+      <td class="num">${tokenCount(b.tokens)}</td></tr>`).join('')}</tbody></table>`
+  : '';
+
+const diffLines = (removed = [], added = [], max = 60) => {
+  const lines = [...removed.map(l => `<span class="del">- ${esc(l)}</span>`), ...added.map(l => `<span class="add">+ ${esc(l)}</span>`)];
+  if (!lines.length) return '';
+  return `<pre class="context-diff">${lines.slice(0, max).join('\n')}${lines.length > max ? `\n${esc(t('… and {count} more line(s)', { count: lines.length - max }))}` : ''}</pre>`;
+};
+
+function contextChangeLabel(c) {
+  const status = c.status === 'added' ? t('new') : c.status === 'removed' ? t('gone') : t('changed');
+  switch (c.what) {
+    case 'model': return t('Model and effort: {before} → {after}', { before: c.before || '—', after: c.after || '—' });
+    case 'system': return t('System prompt: {status}', { status });
+    case 'section': return t('Section "{name}": {status}', { name: c.name, status });
+    case 'blocks': return t('Blocks of the prompt builder: {status}', { status });
+    case 'folders': return t('Folders allowed: {status}', { status });
+    case 'tools': return t('Tools allowed: {status}', { status });
+    case 'denied': return t('Tools and paths denied: {status}', { status });
+    case 'mcp': return t('External tools (MCP): {status}', { status });
+    case 'files': return t("The repository's instruction files: {status}", { status });
+    default: return `${c.what}: ${status}`;
+  }
+}
+
+function contextDiffHtml(diff) {
+  if (!diff) return `<p class="hint">${esc(t('No context recorded for this member in this project yet: the comparison starts with its next run.'))}</p>`;
+  const head = `<p class="hint">${esc(t('Compared with what step {step} of "{title}" received ({when}).', { step: diff.step, title: diff.title, when: shortDate(diff.at) }))} <a href="#log" data-select="${esc(diff.run)}">${esc(t('Reports'))}</a>${diff.written ? ` · ${esc(t('That run had a prompt written in the prompt builder.'))}` : ''}${diff.modules?.length ? ` · ${esc(t('That run had extra modules: {list}', { list: diff.modules.join(', ') }))}` : ''}</p>`;
+  if (!diff.changes.length) return `${head}${stateHtml([t('Nothing changed since then.'), 'ok'])}`;
+  const items = diff.changes.map(c => {
+    const lists = c.what !== 'section' && c.what !== 'system' && (c.added || c.removed) ? diffLines(c.removed, c.added) : '';
+    const lines = c.what === 'section' || c.what === 'system' ? (c.status === 'changed' ? diffLines(c.removed, c.added) : `<span class="hint">${esc(tokenCount(c.tokens))}</span>`) : '';
+    return `<li><span class="${c.status === 'removed' ? 'state state-error' : c.status === 'added' ? 'state state-ok' : 'state state-warn'}">${esc(contextChangeLabel(c))}</span>${lists}${lines}</li>`;
+  });
+  return `${head}<ul class="context-changes">${items.join('')}</ul>`;
+}
+
+function contextMemberHtml(m) {
+  const repo = m.repository;
+  const repoItems = !repo.exists
+    ? `<p class="hint">${esc(t('The working copy ({path}) is created on the first run: no file read yet.', { path: repo.dir }))}</p>`
+    : !repo.files.length
+      ? `<p class="hint">${esc(t('None.'))}</p>`
+      : repo.files.map(f => (f.text != null ? contextPart(f.file, fileKindLabel(f.kind), f.tokens, f.text) : `<div class="context-row"><code>${esc(f.file)}</code><span class="hint">${esc(fileKindLabel(f.kind))}</span></div>`)).join('');
+  const prompt = m.prompt.map(p => {
+    let extra = '';
+    if (p.key === 'builder') {
+      extra = contextBlocks(p.blocks)
+        + (p.off?.length ? `<p class="hint">${esc(t('Turned off for this project: {list}', { list: p.off.join(', ') }))}</p>` : '')
+        + (p.missing ?? []).map(x => `<p class="state state-warn">${esc(t('Not found: {what}', { what: x }))}</p>`).join('')
+        + (p.unresolved?.length ? `<p class="state state-warn">${esc(t('Variables left unfilled: {list}', { list: p.unresolved.map(v => `{${v}}`).join(', ') }))}</p>` : '');
+    }
+    return contextPart(contextPartTitle(p.key), p.source, p.tokens, p.text, extra);
+  }).join('');
+  const a = m.access;
+  const list = items => (items.length ? items.map(x => `<code>${esc(x)}</code>`).join(' ') : '—');
+  return `<div class="panel context-member">
+      <div class="section-head"><h3>${esc(t(m.name))} <span class="hint">${esc(memberRoleLabel(m))}</span></h3><span class="num">${esc(t('Total: {tokens}', { tokens: tokenCount(m.tokens.total) }))}</span></div>
+      <div class="context-heading"><span>${esc(t("1. System prompt, added to Claude Code's own"))}</span><span class="num">${tokenCount(m.tokens.system)}</span></div>
+      ${m.system.map(p => contextPart(contextPartTitle(p.key), p.source, p.tokens, p.text)).join('')}
+      <div class="context-heading"><span>${esc(t("2. The repository's instruction files"))}</span><span class="num">${esc(t('{tokens} at the start', { tokens: tokenCount(m.tokens.repository) }))}</span></div>
+      ${repoItems}
+      <div class="context-heading"><span>${esc(t('3. First message'))}</span><span class="num">${tokenCount(m.tokens.prompt)}</span></div>
+      ${prompt}
+      <div class="context-heading"><span>${esc(t('4. Model, folders, tools and external tools'))}</span></div>
+      <dl class="facts project-facts">
+        <dt>${esc(t('Model'))}</dt><dd>${esc(m.model ? shortModel(m.model) : '—')}${m.effort ? ` · ${esc(t('effort {effort}', { effort: m.effort }))}` : ''} · ${esc(t('up to {minutes} min per step', { minutes: m.maxMinutes }))}</dd>
+        <dt>${esc(t('Working copy'))}</dt><dd><code>${esc(a.workingCopy)}</code></dd>
+        <dt>${esc(t('Folders allowed'))}</dt><dd>${list(a.addDirs)}</dd>
+        <dt>${esc(t('Paths denied'))}</dt><dd><details><summary>${esc(t('{count} rule(s)', { count: a.deniedPaths.length }))}</summary><pre class="context-text">${esc(a.deniedPaths.join('\n'))}</pre></details></dd>
+        <dt>${esc(t('Tools allowed'))}</dt><dd>${a.tools.length ? list(a.tools) : esc(t("the agent's defaults"))}</dd>
+        <dt>${esc(t('Tools denied'))}</dt><dd>${list(a.deniedTools)}</dd>
+        <dt>${esc(t('External tools (MCP)'))}</dt><dd>${list(a.mcp)}${a.mcpUnknown.length ? ` <span class="state state-warn">${esc(t('released but not configured: {list}', { list: a.mcpUnknown.join(', ') }))}</span>` : ''}</dd>
+      </dl>
+      <div class="context-heading"><span>${esc(t('5. Since the last run'))}</span></div>
+      ${contextDiffHtml(m.diff)}
+    </div>`;
+}
+
+function contextSummaryHtml(d) {
+  const rows = d.members.map(m => `<tr class="clickable${m.id === projectContext.member ? ' selected' : ''}" data-context-member="${esc(m.id)}">
+      <td><span class="primary">${esc(t(m.name))}</span><span class="secondary">${esc(memberRoleLabel(m))}</span></td>
+      <td class="num">${tokenCount(m.tokens.system)}</td><td class="num">${tokenCount(m.tokens.repository)}</td><td class="num">${tokenCount(m.tokens.prompt)}</td>
+      <td class="num"><strong>${tokenCount(m.tokens.total)}</strong></td>
+      <td>${m.diff ? (m.diff.changes.length ? stateHtml([t('{count} change(s)', { count: m.diff.changes.length }), 'warn']) : stateHtml([t('as in the last run'), 'ok'])) : `<span class="hint">${esc(t('no run yet'))}</span>`}</td>
+    </tr>`);
+  return `<table class="table"><thead><tr><th>${esc(t('Who works on the project'))}</th><th>${esc(t('System prompt'))}</th><th>${esc(t('Repository'))}</th><th>${esc(t('First message'))}</th><th>${esc(t('Total'))}</th><th>${esc(t('Since the last run'))}</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+}
+
+function contextBuilderLine(b) {
+  if (b.used) return stateHtml([t('Prompt builder: block "{block}"{environment}', { block: b.block, environment: b.environment ? t(', environment "{name}"', { name: b.environment }) : '' }), 'ok']);
+  if (b.error) return stateHtml([t("Couldn't read the prompt builder: {error}", { error: b.error }), 'error']);
+  const why = !b.configured ? t('no document configured ("prompt_builder.file")') : !b.exists ? t('no copy of it on this computer') : t('no "prompt_block" for this project');
+  return stateHtml([t("Prompt builder not used ({why}): the project's notes go instead", { why }), 'neutral']);
+}
+
+function contextSessionsHtml(sessions) {
+  if (!sessions.length) return `<div class="empty">${esc(t('No live session profile for this project.'))}</div>`;
+  return sessions.map(s => {
+    if (s.error) return `<div class="context-row"><span class="primary">${esc(s.name)}</span><span class="state state-warn">${esc(s.error)}</span></div>`;
+    const files = (s.repository?.files ?? []).filter(f => f.kind === 'start');
+    const extra = contextBlocks(s.blocks)
+      + (files.length ? `<p class="hint">${esc(t('Claude Code also loads at the start: {list}', { list: files.map(f => `${f.file} (${tokenCount(f.tokens)})`).join(', ') }))}</p>` : '')
+      + (s.missing ?? []).map(x => `<p class="state state-warn">${esc(t('Not found: {what}', { what: x }))}</p>`).join('');
+    return contextPart(`${s.name}`, `${toolName(s.tool)} · ${s.cwd}`, s.text == null ? null : s.tokens, s.text ?? t('No first message: the profile names no blocks of the prompt builder.'), extra);
+  }).join('');
+}
+
+function extraScopeLabel(scope) {
+  if (scope === 'lead') return t("The team lead's extra instructions, in this project");
+  if (scope === 'project') return t("Extra instructions for this member, in this project's crew");
+  return t('Extra instructions for this agent in every project of this installation');
+}
+
+function contextFormHtml(d) {
+  const b = d.builder;
+  const options = b.options;
+  const blocks = options
+    ? `<div class="context-options">
+        <fieldset><legend>${esc(t('Optional modules of the prompt builder'))}</legend>${options.modules.map(o => `<label class="option"><input type="checkbox" name="module" value="${esc(o.name)}"${o.on ? ' checked' : ''}> ${esc(o.name)} <span class="hint">${esc(o.section)}</span></label>`).join('') || `<p class="hint">${esc(t('None in the document.'))}</p>`}</fieldset>
+        <fieldset><legend>${esc(t('Automatic blocks'))}</legend>${options.automatic.map(o => `<label class="option"><input type="checkbox" name="automatic" value="${esc(o.name)}"${o.off ? '' : ' checked'}> ${esc(o.name)} <span class="hint">${esc(o.off ? t('turned off for this project') : o.active ? t('comes in now') : t("doesn't come in with this choice"))}</span></label>`).join('') || `<p class="hint">${esc(t('None in the document.'))}</p>`}</fieldset>
+      </div>`
+    : `<p class="hint">${esc(t("The prompt builder's blocks can be turned on or off here once the project has a block in it (\"prompt_block\") and the document has a copy on this computer."))}</p>`;
+  const members = d.members.map(m => {
+    const extra = d.settings.extra[m.id] ?? { text: '', scope: 'installation' };
+    return `<details class="context-edit-member"><summary>${esc(t(m.name))} <span class="hint">${esc(memberRoleLabel(m))}</span></summary>
+        <label><span>${esc(extraScopeLabel(extra.scope))} <code>${esc(extra.field ?? '')}</code></span><textarea rows="3" data-extra="${esc(m.id)}">${esc(extra.text)}</textarea></label>
+        <label><span>${esc(t("This project's notes for this member"))} <code>projects.${esc(d.project.id)}.agent_notes.${esc(m.id)}</code></span><textarea rows="3" data-agent-notes="${esc(m.id)}">${esc(d.settings.agentNotes[m.id] ?? '')}</textarea></label>
+      </details>`;
+  }).join('');
+  return `<form id="context-form" class="panel form context-form">
+      <div class="label">${esc(t('Change the context'))}</div>
+      <p class="hint">${esc(t('Preview first, then save: the changes go to the settings, and the next steps and live sessions of this project get them. Every saving is kept in the history below.'))}</p>
+      ${blocks}
+      <label><span>${esc(t('Notes for the project'))} <code>projects.${esc(d.project.id)}.notes</code></span><textarea name="notes" rows="4">${esc(d.settings.notes)}</textarea></label>
+      ${b.used ? `<p class="hint">${esc(t("The prompt builder is used for this project, so these notes don't go to the crew; each member's notes below do."))}</p>` : ''}
+      <div class="label" style="margin-top:12px">${esc(t('Each member'))}</div>
+      ${members}
+      <div class="actions left"><button type="button" class="button secondary" data-context-preview>${esc(t('Preview'))}</button><button type="button" class="button" data-context-save hidden>${esc(t('Save'))}</button></div>
+    </form>
+    <div id="context-preview"></div>`;
+}
+
+function contextHistoryHtml(history) {
+  if (!history.length) return `<div class="empty">${esc(t('No change made from the app yet.'))}</div>`;
+  const rows = history.map(h => `<tr>
+      <td class="num">${shortDate(h.at)}</td><td>${esc(h.by === 'cli' ? t('command line') : t('app'))}</td>
+      <td><details><summary>${esc(h.changes.map(c => c.field).join(', '))}</summary>${h.changes.map(c => `<div class="hint"><code>${esc(c.field)}</code></div>${diffLines(c.before ? c.before.split('\n') : [], c.after ? c.after.split('\n') : [])}`).join('')}</details></td>
+    </tr>`);
+  return `<table class="table"><thead><tr><th>${esc(t('Date'))}</th><th>${esc(t('From'))}</th><th>${esc(t('What changed'))}</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+}
+
+function drawProjectContext() {
+  const c = projectContext;
+  if (!c.data) {
+    const html = c.error ? `<div class="panel"><p class="state state-error">${esc(c.error)}</p><button type="button" class="button secondary small" data-context-refresh>${esc(t('Try again'))}</button></div>` : `<div class="empty">${esc(t('Loading…'))}</div>`;
+    draw('#project-context', JSON.stringify(['empty', c.id, c.error]), html);
+    return;
+  }
+  const d = c.data;
+  const skeleton = `<div class="section-head context-top">
+      <p class="hint">${esc(t("Everything each member of the crew gets when it works on this project, put together the way the runs do it, in order and with the source of each part. Sizes are estimates (about 4 characters per token); Claude Code's own system prompt and tool definitions are not counted."))}</p>
+      <button type="button" class="button secondary small" data-context-refresh>${esc(t('Refresh'))}</button>
+    </div>
+    <div class="context-builder">${contextBuilderLine(d.builder)}</div>
+    <div id="context-summary"></div>
+    <div id="context-member"></div>
+    <h2 class="section-title">${esc(t('Live sessions: first message'))}</h2>
+    <div class="panel">${contextSessionsHtml(d.sessions)}</div>
+    <h2 class="section-title">${esc(t('Change'))}</h2>
+    ${contextFormHtml(d)}
+    <h2 class="section-title">${esc(t('History of changes'))}</h2>
+    ${contextHistoryHtml(d.history)}`;
+  if (draw('#project-context', JSON.stringify(['data', c.id, d.generated]), skeleton)) drawContextPreview();
+  const m = d.members.find(x => x.id === c.member) ?? d.members[0];
+  draw('#context-summary', JSON.stringify([d.generated, m?.id]), contextSummaryHtml(d));
+  draw('#context-member', JSON.stringify([d.generated, m?.id]), m ? contextMemberHtml(m) : '');
+  const refresh = $('#project-context [data-context-refresh]');
+  if (refresh) refresh.disabled = c.loading;
+}
+
+/** What the changes would do, under the form; "Save" shows once there is a preview of real changes. */
+function drawContextPreview() {
+  const box = $('#context-preview');
+  const save = $('#project-context [data-context-save]');
+  if (!box) return;
+  const p = projectContext.preview;
+  if (save) save.hidden = !p?.changed.length;
+  if (!p) {
+    box.innerHTML = '';
+    return;
+  }
+  if (!p.changed.length) {
+    box.innerHTML = `<div class="panel">${stateHtml([t('Nothing changed.'), 'neutral'])}</div>`;
+    return;
+  }
+  const fields = p.changed.map(c => `<li><code>${esc(c.field)}</code>${diffLines(c.before ? c.before.split('\n') : [], c.after ? c.after.split('\n') : [])}</li>`).join('');
+  const effect = list => list.map(x => {
+    const changed = x.removed.length || x.added.length;
+    return `<li><span class="primary">${esc(t(x.name))}</span> <span class="num">${tokenCount(x.before)} → ${tokenCount(x.after)}</span>${changed ? `<details><summary>${esc(t('{out} line(s) out, {in} in', { out: x.removed.length, in: x.added.length }))}</summary>${diffLines(x.removed, x.added, 120)}</details>` : ` <span class="hint">${esc(t('unchanged'))}</span>`}</li>`;
+  }).join('');
+  box.innerHTML = `<div class="panel context-preview">
+      <div class="label">${esc(t('Preview: nothing is saved yet'))}</div>
+      <ul class="context-changes">${fields}</ul>
+      <div class="label" style="margin-top:12px">${esc(t('What each one would get'))}</div>
+      <ul class="context-changes">${effect(p.members)}</ul>
+      ${p.sessions.length ? `<div class="label" style="margin-top:12px">${esc(t('Live sessions'))}</div><ul class="context-changes">${effect(p.sessions)}</ul>` : ''}
+    </div>`;
+}
+
+/** The form's changes, against the context read: only what really differs. */
+function contextChanges() {
+  const form = $('#context-form');
+  const d = projectContext.data;
+  const changes = {};
+  const same = (x, y) => [...x].sort().join('\n') === [...y].sort().join('\n');
+  const options = d.builder.options;
+  if (options) {
+    const listed = new Set([...options.modules, ...options.automatic].map(o => o.name));
+    const modules = [...form.querySelectorAll('input[name="module"]:checked')].map(i => i.value);
+    const off = [...form.querySelectorAll('input[name="automatic"]:not(:checked)')].map(i => i.value);
+    // Names the document no longer has stay as they were.
+    const keptModules = d.builder.modules.filter(n => !listed.has(n));
+    const keptOff = d.builder.exclude.filter(n => !listed.has(n));
+    if (!same([...modules, ...keptModules], d.builder.modules)) changes.modules = [...d.builder.modules.filter(n => modules.includes(n) || keptModules.includes(n)), ...modules.filter(n => !d.builder.modules.includes(n))];
+    if (!same([...off, ...keptOff], d.builder.exclude)) changes.exclude = [...keptOff, ...off];
+  }
+  if (form.notes.value.trim() !== d.settings.notes.trim()) changes.notes = form.notes.value;
+  for (const area of form.querySelectorAll('textarea[data-extra]')) {
+    const id = area.dataset.extra;
+    if (area.value.trim() !== (d.settings.extra[id]?.text ?? '').trim()) (changes.extra ??= {})[id] = area.value;
+  }
+  for (const area of form.querySelectorAll('textarea[data-agent-notes]')) {
+    const id = area.dataset.agentNotes;
+    if (area.value.trim() !== String(d.settings.agentNotes[id] ?? '').trim()) (changes.agentNotes ??= {})[id] = area.value;
+  }
+  return changes;
+}
+
+$('#project-context').addEventListener('click', async event => {
+  const row = event.target.closest('[data-context-member]');
+  if (row) {
+    projectContext.member = row.dataset.contextMember;
+    drawProjectContext();
+    return;
+  }
+  if (event.target.closest('[data-context-refresh]')) {
+    openProjectContext(projectContext.id);
+    return;
+  }
+  const preview = event.target.closest('[data-context-preview]');
+  const save = event.target.closest('[data-context-save]');
+  if ((!preview && !save) || projectContext.busy) return;
+  const id = projectContext.id;
+  const changes = contextChanges();
+  projectContext.busy = true;
+  (preview ?? save).disabled = true;
+  try {
+    if (preview) {
+      projectContext.preview = { ...(await api('/api/project/context/preview', { project: id, changes })), changes };
+      drawContextPreview();
+    } else {
+      // What is saved is what was previewed: a change written after the preview needs a new one.
+      if (JSON.stringify(changes) !== JSON.stringify(projectContext.preview?.changes)) {
+        projectContext.preview = null;
+        drawContextPreview();
+        toast(t('The form changed after the preview: preview it again.'));
+        return;
+      }
+      const result = await api('/api/project/context/save', { project: id, changes });
+      if (projectContext.id === id) Object.assign(projectContext, { data: result.context, preview: null });
+      toast(t('Saved: the next steps and live sessions of this project get it.'));
+      drawProjectContext();
+    }
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    projectContext.busy = false;
+    (preview ?? save).disabled = false;
+  }
+});
+
+// Writing in the form after a preview: "Save" waits for a new preview.
+$('#project-context').addEventListener('input', event => {
+  if (!event.target.closest('#context-form') || !projectContext.preview) return;
+  projectContext.preview = null;
+  drawContextPreview();
+});
+
 // The team lead's choice in the task form: a request, which the lead plans into tasks for the crew.
 const LEAD_REQUEST = '@lead';
 
@@ -1366,7 +1765,7 @@ async function openBuilder(project, { reload = false } = {}) {
     if (!keep) {
       // The last choice made for the project; the first time, its block, the environment and its modules.
       const names = builderSections().flatMap(s => s.blocks.map(b => b.name));
-      const start = data.last ?? { chosen: data.defaults, off: [] };
+      const start = data.last ?? { chosen: data.defaults, off: data.defaultsOff ?? [] };
       builder.chosen = (start.chosen ?? []).filter(n => hasName(names, n));
       builder.off = (start.off ?? []).filter(n => hasName(names, n));
       builder.allCombos = false;

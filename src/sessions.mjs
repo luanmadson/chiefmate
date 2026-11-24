@@ -132,7 +132,9 @@ export function sessionPrompt(config, profile, folder) {
   if (profile.prompt_blocks.length) {
     const { file } = builderSettings(config);
     if (!file || !existsSync(file)) throw new Error(t('Session "{name}" uses blocks of the prompt builder, but there is no copy of it on this computer ("prompt_builder.file").', { name: profile.name }));
-    built = assembleBlocks(parseBlocks(readFileSync(file, 'utf8')), profile.prompt_blocks, { language: config.language });
+    // The automatic blocks the project turned off ("prompt_exclude") stay out of its sessions too.
+    const off = config.projects?.[profile.project]?.prompt_exclude ?? [];
+    built = assembleBlocks(parseBlocks(readFileSync(file, 'utf8')), profile.prompt_blocks, { language: config.language, off });
     if (!built.blocks.length && !profile.auto) throw new Error(t('None of the blocks of session "{name}" is in the prompt builder: {list}', { name: profile.name, list: profile.prompt_blocks.join(', ') }));
   }
   const lines = [
@@ -143,7 +145,7 @@ export function sessionPrompt(config, profile, folder) {
   if (project) lines.push(`Project: ${project.name ?? profile.project}${project.site ? ` (${project.site})` : ''}. ${project.about ?? ''}`.trim());
   if (folder.copy) lines.push("This folder is Chiefmate's read-only copy of a library: it is reset from GitHub, so anything changed here is lost. Read it; write only where the owner tells you.");
   if (built?.text) lines.push('', built.text);
-  return { text: lines.join('\n'), blocks: built?.blocks ?? [], missing: built?.missing ?? [], unresolved: built?.unresolved ?? [], blocksGiven: !!built || !!project };
+  return { text: lines.join('\n'), blocks: built?.blocks ?? [], details: built?.details ?? [], missing: built?.missing ?? [], unresolved: built?.unresolved ?? [], blocksGiven: !!built || !!project };
 }
 
 /** Every path Windows finds for a command, through where.exe. */
