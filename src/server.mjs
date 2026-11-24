@@ -20,7 +20,7 @@ import { describeSchedule, nextRun } from './schedule.mjs';
 import { endSession, finishSessionRequest, openSession, planSession, sessionRequests, sessionsState } from './sessions.mjs';
 import { talkTo } from './talk.mjs';
 import { listRuns, readConversation, readNotifications, readPending, readRun, readUsage, runDir, stepsOf } from './store.mjs';
-import { updateInfo } from './update.mjs';
+import { checkNow, updateInfo, updateMode, updateNow } from './update.mjs';
 import { isReading, readerSettings, readerStatus, readUsagePage, signedIn } from './usagepage.mjs';
 import { clip, now, ROOT, VERSION } from './util.mjs';
 import { projectDir } from './workspace.mjs';
@@ -242,7 +242,7 @@ function buildState() {
     owner: config.owner,
     language: config.language || 'en',
     ai: { claude: { ...claudeInfo }, account: { status: usage.status ?? null, updated: usage.updated ?? null } },
-    update: { ...updateInfo },
+    update: { ...updateInfo, mode: updateMode(config) },
     projects: Object.entries(config.projects ?? {}).map(([id, p]) => ({ id, name: p.name, site: p.site })),
     missions: Object.entries(config.missions ?? {}).map(([id, m]) => ({
       id, name: m.name, description: m.description, project: m.project,
@@ -395,6 +395,12 @@ export function startServer() {
           const pending = url.pathname.endsWith('/edit') ? editPending(id, body.message) : removePending(id);
           return pending ? reply(res, 200, { pending }) : reply(res, 404, { error: t('This message is no longer in the queue: it was delivered or removed.') });
         }
+        case '/api/update-now':
+          // Installs the approved update now, pausing the work going on (src/update.mjs); "interruptManager" interrupts
+          // the manager's answer instead of waiting for it.
+          return reply(res, 200, await updateNow({ interruptManager: !!body.interruptManager }));
+        case '/api/update-check':
+          return reply(res, 200, await checkNow());
         case '/api/manager/interrupt':
           return reply(res, 200, { interrupted: interruptManager() });
         case '/api/new-conversation':

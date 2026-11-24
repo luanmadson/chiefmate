@@ -103,6 +103,12 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs cancel <id>                  cancels a run
   node src/cli.mjs resume <id> [--ignore-limits]
                                                 resumes a paused, failed or canceled run
+  node src/cli.mjs update-check                 looks for an approved update of Chiefmate now (after a merge), instead of
+                                                within 10 minutes; it then installs as "auto_update_mode" says
+  node src/cli.mjs update-now [--yes] [--interrupt-manager]
+                                                installs the approved update now: shows what pauses; with --yes, pauses
+                                                the runs going on at a safe point, waits for the manager's answer (or
+                                                interrupts it), installs, restarts and resumes the paused work
   node src/cli.mjs history [n]                  the latest runs
   node src/cli.mjs report <id>                  the report of each step of a run
   node src/cli.mjs context <id> [step]          what each step received: prompt, model, tools, folders, MCP servers
@@ -305,6 +311,21 @@ async function sessionCommand() {
   if (s.missing?.length) console.log(`Not found in the prompt builder: ${s.missing.join(', ')}`);
 }
 
+/** What an update going on is doing, in one line. */
+function updateLine(u) {
+  const job = u.installing;
+  if (!job) {
+    if (u.blocked === 'changes') return "It can't be installed: Chiefmate's files were changed by hand in this installation.";
+    if (u.blocked === 'merge') return "It can't be installed: this installation's branch has commits of its own.";
+    if (u.blocked === 'checks') return 'It failed its checks, so Chiefmate stayed on the current version.';
+    return u.mode === 'wait' ? 'It installs once the crew and the manager are free ("auto_update_mode": "wait").' : 'It installs on the next check.';
+  }
+  const paused = job.paused?.length ? ` ${job.paused.length} run(s) paused for it resume after the restart.` : '';
+  if (job.stage === 'pausing') return `Installing: pausing the runs going on at a safe point.${paused}`;
+  if (job.stage === 'manager') return `Installing: waiting for the manager's answer to end${job.interruptManager ? ' (it is being interrupted)' : ''}.${paused}`;
+  return `Installing the new version: Chiefmate checks it and restarts by itself.${paused}`;
+}
+
 const machineBytes = n => `${Math.round((n ?? 0) / 1024 ** 2)} MB`;
 
 async function main() {
@@ -326,16 +347,29 @@ async function main() {
         const { startQueue } = await import('./queue.mjs');
         const { startSchedule } = await import('./schedule.mjs');
         const { startUpdates } = await import('./update.mjs');
-        const { live } = await import('./runs.mjs');
+        const { live, pauseAll } = await import('./runs.mjs');
+        const { nudgeQueue } = await import('./queue.mjs');
         const { startSessions } = await import('./sessions.mjs');
-        const { deliverPending, managerBusy } = await import('./manager.mjs');
+        const { chat, deliverPending, interruptManager, managerBusy } = await import('./manager.mjs');
         const { startWatch } = await import('./plan.mjs');
         startQueue();
         startSchedule();
         startWatch();
         startSessions();
-        // The update waits for every run going on to end (and for the manager); the sessions' windows stay open.
-        startUpdates({ isBusy: () => live.size > 0 || managerBusy(), beforeRestart: () => new Promise(resolve => server.close(() => resolve())) });
+        // In "pause" mode (and on "update now") the update pauses the runs going on and waits for the manager's answer;
+        // in "wait" mode, it waits for every run to end and for the manager. The sessions' windows stay open.
+        startUpdates({
+          isBusy: () => live.size > 0 || managerBusy(),
+          crewBusy: () => live.size > 0,
+          pauseRuns: pauseAll,
+          managerAnswering: () => chat.responding,
+          interruptManager,
+          resume: () => {
+            nudgeQueue();
+            deliverPending();
+          },
+          beforeRestart: () => new Promise(resolve => server.close(() => resolve())),
+        });
         deliverPending(); // messages left in the queue when Chiefmate stopped
         (await import('./news.mjs')).startNews(); // and the news for the manager, such as "update installed"
       }
@@ -481,6 +515,33 @@ async function main() {
         console.log(`${p.id.padEnd(16)} ${state[p.state].padEnd(25)} ${formatBytes(p.ram).padStart(8)}  ${p.processes.length} process(es)`);
         for (const x of p.processes) console.log(`    ${String(x.pid).padStart(6)} ${formatBytes(x.ram).padStart(8)}  ${x.name}${x.crew ? ' (crew)' : ''}${x.session ? ' (session)' : ''}${x.guarded ? ' (kept)' : ''}  ${x.command}`);
       }
+      return;
+    }
+    case 'update-check': {
+      const u = await api('/api/update-check', {});
+      if (!u.waiting) console.log(`Chiefmate ${(await api('/api/health')).version} is up to date.`);
+      else console.log(`An approved update is waiting (${u.waiting} change(s)). ${updateLine(u)}`);
+      return;
+    }
+    case 'update-now': {
+      if (has('--interrupt-manager') && process.env.CHIEFMATE_MANAGER) throw new Error("The manager can't interrupt its own answer: run update-now without --interrupt-manager.");
+      const s = await api('/api/state');
+      if (s.update.installing) {
+        if (has('--interrupt-manager')) await api('/api/update-now', { interruptManager: true });
+        console.log(updateLine({ ...s.update, installing: { ...s.update.installing, interruptManager: s.update.installing.interruptManager || has('--interrupt-manager') } }));
+        return;
+      }
+      const going = s.running ?? [];
+      if (!has('--yes')) {
+        console.log(s.update.waiting ? `An approved update is waiting (${s.update.waiting} change(s); run update-check first for the latest).` : 'No approved update was seen yet: update-now looks for one first.');
+        if (!going.length) console.log('No run is going on.');
+        else console.log(['These runs would pause at a safe point and resume after the restart:', ...going.map(r => `  ${r.title} [${r.id}], step ${r.step ?? '-'}: ${r.agent ?? 'preparing'}`)].join('\n'));
+        if (s.manager.responding) console.log(`The manager is answering: the update waits for the answer to end${has('--interrupt-manager') ? ' (with --interrupt-manager, it is interrupted)' : ' (add --interrupt-manager to interrupt it)'}.`);
+        console.log('Nothing was done. Add --yes to update now.');
+        return;
+      }
+      const u = await api('/api/update-now', { interruptManager: has('--interrupt-manager') });
+      console.log(updateLine(u));
       return;
     }
     case 'stop-project': {

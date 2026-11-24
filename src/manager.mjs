@@ -15,7 +15,7 @@ import { describeSchedule, nextRun } from './schedule.mjs';
 import { sessionsLine } from './sessions.mjs';
 import { talkSituation } from './talk.mjs';
 import { addMessage, listRuns, readPending, readState, readUsage, savePending, saveState, stepsOf } from './store.mjs';
-import { updateInfo } from './update.mjs';
+import { updateInfo, updating } from './update.mjs';
 import { DATA, ensureDir, languageName, now, ROOT, VERSION } from './util.mjs';
 
 /**
@@ -98,7 +98,7 @@ export function situation(libraries = []) {
   const usage = readUsage();
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const lines = [`Now: ${formatDateTime(new Date())} (${zone}). Reply in ${languageName(config.language || 'en')}.`];
-  lines.push(`Chiefmate ${VERSION}${updateInfo.waiting ? `; an approved update with ${updateInfo.waiting} change(s) is waiting to be installed${updateInfo.blocked ? ` (blocked: ${updateInfo.blocked})` : ''}` : ''}.`);
+  lines.push(`Chiefmate ${VERSION}${updateInfo.waiting ? `; an approved update with ${updateInfo.waiting} change(s) is waiting to be installed${updateInfo.installing ? ` (being installed now: ${updateInfo.installing.stage})` : updateInfo.blocked ? ` (blocked: ${updateInfo.blocked})` : ''}` : ''}. Updates: "${updateInfo.mode}" mode${updateInfo.mode === 'pause' ? ' (the work going on pauses at a safe point and resumes after the restart)' : ' (installed once the crew and you are free)'}.`);
   lines.push(focusLine(config));
   const going = liveRuns();
   lines.push(
@@ -167,7 +167,7 @@ export function sendToManager(text) {
   if (!message) throw new Error(t('Write a message.'));
   const list = readPending();
   if (list.length >= MAX_PENDING) throw new Error(t('The queue already has {count} messages. Wait for the manager, or remove some.', { count: list.length }));
-  const queued = chat.responding || list.length > 0;
+  const queued = chat.responding || list.length > 0 || updating();
   const item = { id: randomUUID().slice(0, 8), text: message, at: now(), queued };
   list.push(item);
   savePending(list);
@@ -186,7 +186,7 @@ export function deliverNews(events) {
   let item = list.find(m => m.from === 'chiefmate');
   if (item) item.events = [...item.events, ...events].slice(-30);
   else {
-    item = { id: randomUUID().slice(0, 8), from: 'chiefmate', events: [...events], at: now(), queued: chat.responding || list.length > 0 };
+    item = { id: randomUUID().slice(0, 8), from: 'chiefmate', events: [...events], at: now(), queued: chat.responding || list.length > 0 || updating() };
     list.push(item);
   }
   item.text = item.events.map(e => `${e.kind}: ${e.text}`).join('\n');
@@ -220,9 +220,12 @@ export function removePending(id) {
 /** Whether the manager is answering, or has messages waiting (the self-update waits for both). */
 export const managerBusy = () => chat.responding || readPending().length > 0;
 
-/** When the manager is free, hands it the whole queue as one message. Returns whether an answer started. */
+/**
+ * When the manager is free, hands it the whole queue as one message. Returns whether an answer started. While an update
+ * of Chiefmate is being installed, the queue waits: it goes after the update (or the restart).
+ */
 export function deliverPending() {
-  if (chat.responding) return false;
+  if (chat.responding || updating()) return false;
   const items = readPending();
   if (!items.length) return false;
   savePending([]);
@@ -400,7 +403,7 @@ async function renewIfFull() {
   const state = readState();
   const c = state.manager?.context;
   const session = state.manager?.session;
-  if (!session || !c?.used || !c.window || c.used / c.window < RENEW_AT || chat.responding) return;
+  if (!session || !c?.used || !c.window || c.used / c.window < RENEW_AT || chat.responding || updating()) return;
   const config = loadConfig();
   const manager = loadAgents(config).manager;
   if (!manager) return;

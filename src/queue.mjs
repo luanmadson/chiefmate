@@ -4,6 +4,7 @@ import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { activeRun, cancelLive, execute, live, liveRuns } from './runs.mjs';
 import { listRuns, readRun, saveRun, stepsOf } from './store.mjs';
+import { updating } from './update.mjs';
 import { now } from './util.mjs';
 
 /** "max_parallel": how many runs (of different projects) may go on at once. 3 by default, at least 1. */
@@ -21,11 +22,14 @@ function recoverInterrupted() {
   }
 }
 
-/** Runs waiting their turn: queued, or waiting for the account's limit to reset. */
+/**
+ * Runs waiting their turn: queued, or waiting for the account's limit to reset. The runs paused for an update of
+ * Chiefmate come first: their working copy is as their step left it.
+ */
 export function queued() {
   return listRuns()
     .filter(r => r.status === 'queued' || r.status === 'waiting')
-    .sort((a, b) => a.created.localeCompare(b.created));
+    .sort((a, b) => (b.resumeFirst ? 1 : 0) - (a.resumeFirst ? 1 : 0) || a.created.localeCompare(b.created));
 }
 
 const ready = (run, at = Date.now()) => !run.notBefore || new Date(run.notBefore).getTime() <= at;
@@ -79,6 +83,8 @@ export function focus(config = loadConfig()) {
 }
 
 function tick() {
+  // While an update of Chiefmate is being installed, nothing starts: the queue goes on after it.
+  if (updating()) return;
   const free = maxParallel() - live.size - starting.size;
   if (free <= 0) return;
   for (const next of pickNext(queued().filter(r => !live.has(r.id) && !starting.has(r.id)), busyProjects(), free)) {
