@@ -163,13 +163,17 @@ export function parseUsagePage(text) {
     const i = lines.findIndex(l => pattern.test(l));
     for (let j = i; i >= 0 && j < Math.min(lines.length, i + 8); j++) {
       const m = lines[j].match(/(\d{1,3}(?:[.,]\d+)?)\s*%/);
-      if (m) return Math.min(1, Number(m[1].replace(',', '.')) / 100);
+      if (!m) continue;
+      const share = Math.min(1, Number(m[1].replace(',', '.')) / 100);
+      return /remaining|left|restante/i.test(lines[j]) ? 1 - share : share; // "60% remaining" is 40% used
     }
     return null;
   };
   const five_hour = percentAfter(/current session|sess[ãa]o atual|5[- ]hour|5 horas/i);
   const seven_day = percentAfter(/weekly|this week|all models|semanal|esta semana|todos os modelos/i);
+  // A line with a percentage is about a limit ("Resets in 3 hr · 40% remaining"), never about free resets.
   const grantAt = lines.findIndex(l =>
+    !/%/.test(l) &&
     /(free|gratuit|gr[áa]tis|bonus|b[ôo]nus).{0,40}(reset|redefini)|(reset|redefini)\w*.{0,40}(available|dispon[íi]ve|remaining|restante)/i.test(l),
   );
   let grants = null;
