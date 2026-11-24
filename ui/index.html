@@ -87,6 +87,9 @@
           </div>
         </div>
         <div id="crew"></div>
+        <h2 class="section-title" data-t="Crews by project">Crews by project</h2>
+        <div id="teams"></div>
+        <div id="prompt-builder"></div>
         <form id="task-form" class="panel form">
           <div class="label" data-t="Assign a task">Assign a task</div>
           <div class="fields">
@@ -160,6 +163,15 @@
       <div class="actions">
         <button value="no" class="button secondary" data-t="Cancel">Cancel</button>
         <button value="yes" class="button" id="confirm-yes"></button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="context-dialog" class="confirm context-dialog">
+    <form method="dialog">
+      <div class="label" id="context-title" data-t="Context received">Context received</div>
+      <pre id="context-text" class="context-text"></pre>
+      <div class="actions">
+        <button value="close" class="button secondary" data-t="Close">Close</button>
       </div>
     </form>
   </dialog>

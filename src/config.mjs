@@ -89,3 +89,33 @@ export function loadAgents(config = loadConfig()) {
   }
   return Object.fromEntries(Object.entries(agents).sort(([, a], [, b]) => (a.order ?? 99) - (b.order ?? 99)));
 }
+
+/** A project's "crew" setting as [member id, settings] pairs: a list of agent ids, or { "<member id>": { ... } }. */
+function memberSpecs(crew) {
+  if (Array.isArray(crew)) return crew.map(x => (typeof x === 'string' ? [x, {}] : [x?.id ?? x?.agent, x ?? {}])).filter(([id]) => id);
+  return Object.entries(crew ?? {}).map(([id, spec]) => [id, spec ?? {}]);
+}
+
+/**
+ * The crew of one project. With "projects.<id>.crew", only its members (plus the manager, who stays global):
+ * { "<member id>": { "agent": "<base agent, the member id by default>", "name": "...", "extra_instructions": "...",
+ * "model": "...", "max_minutes": 60, "mcp": ["playwright"] } } or simply ["generalist", "designer"].
+ * Without it, the general crew. Each member keeps its base agent's face and instructions.
+ */
+export function projectCrew(config = loadConfig(), projectId, agents = loadAgents(config)) {
+  const project = config.projects?.[projectId];
+  if (!project?.crew) return agents;
+  const team = agents.manager ? { manager: agents.manager } : {};
+  for (const [id, spec] of memberSpecs(project.crew)) {
+    const baseId = spec.agent ?? id;
+    const base = agents[baseId];
+    if (!base || baseId === 'manager') continue;
+    const { agent: _base, id: _id, extra_instructions: extra, ...settings } = spec;
+    const instructions = base.instructions + (extra ? `\n\n## Notes for this project's crew (${project.name ?? projectId})\n\n${extra}` : '');
+    team[id] = { ...base, ...settings, id, base: baseId, project: projectId, instructions };
+  }
+  return team;
+}
+
+/** Whether a project has a crew of its own. */
+export const hasOwnCrew = (config, projectId) => !!config.projects?.[projectId]?.crew;

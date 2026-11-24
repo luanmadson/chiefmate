@@ -1,17 +1,20 @@
 // The app (http://localhost:4747) and the API it uses. It only answers this computer.
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { checkClaude, claudeInfo } from './claude.mjs';
-import { loadAgents, loadConfig, saveConfig } from './config.mjs';
+import { loadAgents, loadConfig, projectCrew, saveConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { computer, processes, stoppable, stopProject } from './machine.mjs';
 import { chat, managerContext, newConversation, talkToManager } from './manager.mjs';
+import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
+import { builderStatus } from './prompts.mjs';
+import { isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, focus, nudgeQueue, queued, resume } from './queue.mjs';
 import { createRun, live } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
-import { addMessage, listRuns, readConversation, readNotifications, readRun, readUsage, stepsOf } from './store.mjs';
+import { addMessage, listRuns, readConversation, readNotifications, readRun, readUsage, runDir, stepsOf } from './store.mjs';
 import { updateInfo } from './update.mjs';
 import { isReading, readerSettings, readerStatus, readUsagePage, signedIn } from './usagepage.mjs';
 import { now, ROOT, VERSION } from './util.mjs';
@@ -70,9 +73,34 @@ function readBody(req) {
 const summary = run => ({
   id: run.id, title: run.title, kind: run.kind, mission: run.mission, project: run.project, origin: run.origin, status: run.status,
   created: run.created, started: run.started, ended: run.ended, notBefore: run.notBefore, note: run.note, result: run.result,
-  pullRequest: run.pullRequest,
+  pullRequest: run.pullRequest, needsYou: (run.requests ?? []).filter(r => r.status === 'open').length,
   steps: stepsOf(run).map(s => ({ agent: s.agent, status: s.status, review: s === run.review })),
 });
+
+/**
+ * The crews by project: a project with "crew" in its settings has its own members (with their presence counted on
+ * that project's runs only); the others use the general crew. The manager is global and is not repeated here.
+ */
+function teams(config, agents, general, runs, current, queue, conversation) {
+  return Object.entries(config.projects ?? {}).map(([id, p]) => {
+    if (!p.crew) return { project: id, name: p.name ?? id, own: false, members: general.filter(a => a.id !== 'manager') };
+    const team = Object.fromEntries(Object.entries(projectCrew(config, id, agents)).filter(([key]) => key !== 'manager'));
+    const mine = r => r.project === id;
+    const members = crew(team, config, runs.filter(mine), current && mine(current) ? current : null, queue.filter(mine), []).map(m => ({
+      ...m, base: team[m.id].base, extra: !!p.crew?.[m.id]?.extra_instructions, mcp: team[m.id].mcp ?? [],
+    }));
+    return { project: id, name: p.name ?? id, own: true, members };
+  });
+}
+
+/** The file of a step's context report: data/runs/<id>/<NN>-<agent>.context.md. */
+function contextFile(id, n) {
+  if (!/^[\w.-]+$/.test(id) || id.includes('..') || !readRun(id)) return null;
+  const prefix = `${String(Number(n)).padStart(2, '0')}-`;
+  const dir = runDir(id);
+  const name = readdirSync(dir).find(f => f.startsWith(prefix) && f.endsWith('.context.md'));
+  return name ? path.join(dir, name) : null;
+}
 
 /** Each crew member's presence: what they are doing now, their last work and their work this week. */
 function crew(agents, config, runs, current, queue, conversation) {
@@ -116,6 +144,7 @@ function crew(agents, config, runs, current, queue, conversation) {
 function buildState() {
   const config = loadConfig();
   const agents = loadAgents(config);
+  let general;
   const runs = listRuns();
   const current = live.run ? runs.find(r => r.id === live.run) ?? null : null;
   const queue = queued();
@@ -137,7 +166,10 @@ function buildState() {
       schedule: describeSchedule(m.schedule), next: nextRun(m.schedule)?.toISOString() ?? null,
       last: lastOf(id) ? summary(lastOf(id)) : null,
     })),
-    crew: crew(agents, config, runs, current, queue, conversation),
+    crew: (general = crew(agents, config, runs, current, queue, conversation)),
+    teams: teams(config, agents, general, runs, current, queue, conversation),
+    needs: openRequests(runs),
+    prompts: { ...builderStatus(config), syncing: isSyncing(), cdp: !!config.browser_cdp },
     focus: focus(config),
     current: current ? { ...summary(current), step: live.step, agent: live.agent, stepStarted: live.started, context: live.context, actions: live.actions.slice(-80) } : null,
     queue: queue.map(summary),
@@ -180,6 +212,11 @@ export function startServer() {
           await processes(5000);
           return reply(res, 200, computer());
         }
+        const context = url.pathname.match(/^\/api\/run\/([^/]+)\/context\/(\d+)$/);
+        if (context) {
+          const file = contextFile(decodeURIComponent(context[1]), context[2]);
+          return file ? reply(res, 200, { text: readFileSync(file, 'utf8') }) : reply(res, 404, { error: t('No context recorded for this step.') });
+        }
         if (url.pathname.startsWith('/api/run/')) {
           const run = readRun(decodeURIComponent(url.pathname.slice('/api/run/'.length)));
           return run ? reply(res, 200, run) : reply(res, 404, { error: t('Run not found.') });
@@ -202,10 +239,19 @@ export function startServer() {
         case '/api/task': {
           const run = createRun({
             kind: 'task', projectId: body.project, agent: body.agent, instruction: body.instruction, review: !!body.review, origin: body.origin ?? 'app',
+            modules: body.modules ?? [],
           });
           nudgeQueue();
           return reply(res, 200, summary(run));
         }
+        case '/api/needs-you':
+          return reply(res, 200, await askOwner(body));
+        case '/api/needs-you/poll':
+          return reply(res, 200, pollRequest(body.run, body.id));
+        case '/api/needs-you/done':
+          return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner'));
+        case '/api/prompts-sync':
+          return reply(res, 200, await syncPrompts());
         case '/api/cancel':
           return reply(res, 200, { status: cancel(body.id) });
         case '/api/resume':

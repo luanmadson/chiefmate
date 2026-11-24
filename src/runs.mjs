@@ -1,26 +1,37 @@
 // How a run (a mission or a one-off task) goes: working copy, the crew in sequence, the manager's review,
 // the project's checks and a pull request.
-import { existsSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { instructionFiles, stepAccess, stepMcp } from './access.mjs';
 import { contextWindow, runClaude } from './claude.mjs';
-import { loadAgents, loadConfig } from './config.mjs';
+import { loadConfig, projectCrew } from './config.mjs';
 import { formatDate, formatDateTime, formatDuration, formatNumber, formatPercent, t } from './i18n.mjs';
 import { notify } from './notify.mjs';
+import { projectInstructions } from './prompts.mjs';
 import { readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
-import { clip, languageName, now, slug, stamp } from './util.mjs';
+import { clip, languageName, now, ROOT, slug, stamp } from './util.mjs';
 import {
   baseBranch, changedFiles, checkoutBranch, commitPending, createBranch, deliverToClone, newCommits, openPullRequest, prepareLibrary,
   prepareWorkspace, projectDir, runChecks,
 } from './workspace.mjs';
 
 /** What the app shows as happening right now. */
-export const live = { run: null, title: null, project: null, step: null, agent: null, started: null, pid: null, context: null, actions: [] };
+export const live = { run: null, title: null, project: null, step: null, agent: null, started: null, pid: null, context: null, actions: [], heldUntil: 0 };
 
 let currentProcess = null;
 let cancelRequest = null;
+let running = null;
+/** The run going on, as it is in memory (its steps save it as they go). */
+export const activeRun = () => running;
 
 // No agent pushes anything to GitHub or changes it: Chiefmate itself pushes the branch and opens the pull request.
 export const ALWAYS_DISALLOWED = ['Bash(git push:*)', 'Bash(gh pr:*)', 'Bash(gh repo:*)', 'Bash(git remote:*)'];
+
+/** How a step asks for the owner (see src/needs.mjs). */
+function needsYouCommand() {
+  const cli = path.join(ROOT, 'src', 'cli.mjs').replaceAll('\\', '/');
+  return 'node ' + (/\s/.test(cli) ? '"' + cli + '"' : cli) + ' needs-you';
+}
 
 function crewRules(config, project) {
   const owner = languageName(config.language || 'en');
@@ -32,23 +43,29 @@ function crewRules(config, project) {
 - The project's documentation outranks your own preferences. Read what you need before changing anything.
 - Write project content in the language the project already uses.
 - If you get stuck, undo whatever is half-done and explain it in your report.
-- Never read, list or copy \`data/browser-profile\` (the browser profile Chiefmate uses to read the account's usage page) or anything else in Chiefmate's \`data/\` folder.
+- Never read, list or copy Chiefmate's \`data/\` folder (including \`data/browser-profile\`, the browser profile Chiefmate uses for the owner), other projects' working copies or other projects' personal documentation. You only get the folders this step needs.
+- When you need ${config.owner || 'the owner'} to act (sign in somewhere, confirm something, do what only a person can do), don't stop and don't work around it: run \`${needsYouCommand()} "<what to do, in ${owner}>" [--url <address>] [--wait] [--check "<command that succeeds once it is done>"]\` with the Bash tool's timeout at 600000 ms. Chiefmate shows the request to the owner and opens the address in their browser. With --wait the command returns once the owner clicks Done (or the check succeeds); if it says it is still waiting, run the command it prints. If it gives up waiting, finish what you can and say in your report what is left for the owner. Never type passwords or codes yourself.
 - Your last message is the step's report, in ${owner}: short markdown with what you did (and the files), the sources you used, what you left out and why, and what the reviewer should check.`;
 }
 
-export function createRun({ kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null }) {
+export function createRun({ kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [] }) {
   const config = loadConfig();
-  const agents = loadAgents(config);
   let title, steps, finalReview, project;
   if (kind === 'mission') {
     const mission = config.missions?.[missionId];
     if (!mission) throw new Error(t('Unknown mission: {id}', { id: missionId }));
     project = mission.project;
     title = mission.name;
+    const agents = projectCrew(config, project);
+    for (const s of [...mission.steps, ...(mission.review ? [mission.review] : [])]) {
+      if (!agents[s.agent]) throw new Error(t('{agent} is not in the crew of {project}.', { agent: s.agent, project }));
+    }
     steps = mission.steps.map(s => ({ agent: s.agent, part: s.part, status: 'pending' }));
     finalReview = mission.review ? { agent: mission.review.agent, part: mission.review.part, status: 'pending' } : null;
   } else {
-    if (!agents[agent]) throw new Error(t('Unknown agent: {id}', { id: agent }));
+    if (!config.projects?.[projectId]) throw new Error(t('Unknown project: {id}', { id: projectId }));
+    const agents = projectCrew(config, projectId);
+    if (!agents[agent]) throw new Error(t('{agent} is not in the crew of {project}.', { agent, project: projectId }));
     if (!instruction?.trim()) throw new Error(t('Write what the agent should do.'));
     project = projectId;
     title = `${t(agents[agent].name)}: ${clip(instruction, 70)}`;
@@ -62,6 +79,7 @@ export function createRun({ kind, missionId, projectId, agent, instruction, revi
   return saveRun({
     id, kind, mission: missionId ?? null, project, title, instruction: instruction ?? null, origin,
     status: 'queued', created: now(), notBefore, branch: `chiefmate/${id}`, steps, review: finalReview,
+    modules: (Array.isArray(modules) ? modules : String(modules ?? '').split(',')).map(m => String(m).trim()).filter(Boolean),
   });
 }
 
@@ -108,15 +126,18 @@ export async function prepareLibraries(config, ids, onStep = () => {}) {
 
 const libraryIds = project => [...(project.library ?? []), ...(project.docs ? [project.docs.split('/')[0]] : [])];
 
-/** The prompt's lines about the libraries and the project's personal documentation. */
-function libraryLines(project, libraries) {
-  if (!libraries.length) return [];
-  const lines = ['', '## Reference library (read only)'];
-  for (const l of libraries) lines.push(`- ${l.name}: \`${l.dir}\`. ${l.about}`.trim());
-  lines.push('Read what helps. It is a copy: anything you change there is discarded before the next run.');
-  if (project.docs) {
-    const [id, ...rest] = project.docs.split('/');
-    const docs = path.join(libraries.find(l => l.id === id)?.dir ?? '', ...rest);
+/**
+ * The prompt's lines about the libraries this step may read and the project's personal documentation.
+ * A crew member gets only the libraries the project lists, plus its own documentation folder; the manager gets them all.
+ */
+function libraryLines(project, libraries, access) {
+  const lines = [];
+  const shown = libraries.filter(l => access.addDirs.includes(l.dir));
+  if (shown.length) lines.push('', '## Reference library (read only)');
+  for (const l of shown) lines.push(`- ${l.name}: \`${l.dir}\`. ${l.about}`.trim());
+  if (shown.length) lines.push('Read what helps. It is a copy: anything you change there is discarded before the next run.');
+  if (access.docs) {
+    const docs = access.docs;
     lines.push(
       '',
       '## Personal documentation for this project',
@@ -132,7 +153,7 @@ function logAction(event) {
   if (live.actions.length > 300) live.actions.splice(0, live.actions.length - 300);
 }
 
-function stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries, base }) {
+function stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries, base, access, built }) {
   const prLanguage = project.language || config.language || 'en';
   const local = project.deliver === 'local';
   const lines = [
@@ -146,9 +167,11 @@ function stepPrompt({ run, step, project, previous, finalReview, changes, config
   if (project.playbook && run.kind === 'mission') {
     lines.push('', `This mission's playbook is \`${project.playbook}\`. Read it before you start and do only your part.`);
   }
-  const notes = [project.notes, project.agent_notes?.[step.agent]].filter(Boolean).join('\n\n');
+  // From the prompt builder when there is one for the project; else the project's notes.
+  if (built) lines.push('', '## Project instructions (from the prompt builder)', built.text);
+  const notes = [built ? null : project.notes, project.agent_notes?.[step.agent] ?? project.agent_notes?.[agentBase(step.agent, run, config)]].filter(Boolean).join('\n\n');
   if (notes) lines.push('', '## Notes for this project', notes);
-  lines.push(...libraryLines(project, libraries));
+  lines.push(...libraryLines(project, libraries, access));
   if (finalReview) {
     lines.push(
       '',
@@ -186,34 +209,134 @@ function followContext(event) {
   }
 }
 
+/** The base agent of a crew member (a project's crew can rename agents), for the project's per-agent notes. */
+const agentBase = (id, run, config) => projectCrew(config, run.project)[id]?.base ?? id;
+
+// A fence longer than any run of backticks in the text, so the text shows whole.
+const fence = text => '`'.repeat(Math.max(3, ...(String(text).match(/`+/g) ?? []).map(m => m.length + 1)));
+const fenced = (text, lang = '') => `${fence(text)}${lang}\n${text}\n${fence(text)}`;
+const bullets = items => (items.length ? items.map(i => `- \`${i}\``).join('\n') : '- (none)');
+
+/** What the step received, written next to its log as data/runs/<id>/<NN>-<agent>.context.md. */
+function contextReport({ run, step, index, agent, dir, model, prompt, tools, disallowed, access, mcp, built, args }) {
+  const builder = built
+    ? [
+      `- File: \`${built.file}\``,
+      `- Blocks: ${built.blocks.join(', ')}`,
+      ...built.missing.map(m => `- Not found: ${m}`),
+      ...built.adaptations.map(a => `- Adapted in "${a.block}" (Chiefmate's rules prevail): ${a.line}`),
+    ].join('\n')
+    : "- Not used (no file, or no block for the project): the project's notes went instead.";
+  return [
+    `# Context received: ${step.agent} (step ${index + 1}), run ${run.id}`,
+    '',
+    `- Model: \`${model}\`${agent.effort ? `, effort \`${agent.effort}\`` : ''}, time limit ${agent.max_minutes ?? 60} min`,
+    `- Agent: \`${agent.id}\`${agent.base ? ` (based on \`${agent.base}\`, crew of ${agent.project})` : ''}, instructions from \`${agent.file}\``,
+    "- The user's own Claude Code configuration: none. Setting sources `project,local` (no user settings, hooks, plugins or skills), `claudeMdExcludes` for `~/.claude` (no global CLAUDE.md or rules), `--strict-mcp-config`.",
+    '',
+    '## Folders',
+    `- Working copy (the current folder): \`${dir}\``,
+    ...(access.addDirs.length ? access.addDirs.map(d => `- Also allowed (--add-dir): \`${d}\``) : ['- No other folder.']),
+    '',
+    '## Tools allowed',
+    bullets(tools),
+    '',
+    '## Tools and paths denied',
+    bullets(disallowed),
+    '',
+    '## External tools (MCP)',
+    mcp.names.length ? mcp.names.map(n => `- \`${n}\`: \`${JSON.stringify(mcp.servers[n])}\``).join('\n') : '- (none)',
+    ...(mcp.unknown.length ? [`- Released but missing from "mcp_servers": ${mcp.unknown.join(', ')}`] : []),
+    '',
+    "## The repository's instruction files",
+    bullets(instructionFiles(dir)),
+    '',
+    '## Prompt builder',
+    builder,
+    '',
+    '## Command line',
+    fenced(args.map(a => (/[\s"{}]/.test(a) ? JSON.stringify(a) : a)).join(' ')),
+    '',
+    "## System prompt (added to Claude Code's own)",
+    fenced(agent.instructions, 'markdown'),
+    '',
+    '## Prompt',
+    fenced(prompt, 'markdown'),
+    '',
+  ].join('\n');
+}
+
+/** Adds to the context report what Claude Code says it loaded, from the first event of the step. */
+function appendLoaded(file, init) {
+  const names = list => (list ?? []).map(x => (typeof x === 'string' ? x : x?.name ?? JSON.stringify(x))).join(', ') || '(none)';
+  const servers = (init.mcp_servers ?? []).map(s => `${s.name} (${s.status})`).join(', ') || '(none)';
+  try {
+    appendFileSync(file, [
+      '## What Claude Code loaded (as it reported when the step started)',
+      `- Tools: ${names(init.tools)}`,
+      `- MCP servers: ${servers}`,
+      `- Skills: ${names(init.skills)}`,
+      `- Plugins: ${names(init.plugins)}`,
+      `- Extra folders: ${names(init.additional_directories)}`,
+      '',
+    ].join('\n'));
+  } catch {
+    // the report is a convenience: the step goes on
+  }
+}
+
 async function runStep({ run, step, index, dir, project, config, agents, libraries, base, finalReview = false }) {
   const agent = agents[step.agent];
   if (!agent) throw new Error(t('Unknown agent: {id}', { id: step.agent }));
   const previous = run.steps.filter(s => s !== step && s.status !== 'pending');
   const changes = finalReview ? await changedFiles(dir, base).catch(() => '') : '';
   const model = agent.model ?? config.default_model;
+  const access = stepAccess({ config, projectId: run.project, project, libraries, manager: step.agent === 'manager' });
+  const mcp = stepMcp(config, project, agent);
+  let built = null;
+  try {
+    built = projectInstructions(config, project, run.modules ?? []);
+  } catch (error) {
+    logAction({ type: 'action', text: t("Couldn't read the prompt builder: {error}", { error: error.message }) });
+  }
+  for (const a of built?.adaptations ?? []) logAction({ type: 'action', text: t('Prompt builder: a line of "{block}" was adapted to the crew\'s rules', { block: a.block }) });
+  const prompt = stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries, base, access, built });
+  const tools = [...new Set([...(agent.tools ?? []), ...mcp.tools])];
+  const disallowed = [...new Set([...ALWAYS_DISALLOWED, ...(agent.disallowed ?? []), ...access.denied])];
+  const name = `${String(index + 1).padStart(2, '0')}-${step.agent}`;
+  const contextFile = path.join(runDir(run.id), `${name}.context.md`);
 
-  Object.assign(step, { status: 'running', started: now(), error: null, model });
-  Object.assign(live, { step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [] });
+  Object.assign(step, { status: 'running', started: now(), error: null, model, promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
+  Object.assign(live, { step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0 });
   saveRun(run);
 
-  const { promise, cancel, pid } = runClaude({
+  const { promise, cancel, pid, args } = runClaude({
     dir,
-    prompt: stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries, base }),
+    prompt,
     system: agent.instructions,
     model,
     effort: agent.effort,
-    tools: agent.tools ?? [],
-    disallowed: [...ALWAYS_DISALLOWED, ...(agent.disallowed ?? [])],
-    addDirs: libraries.map(l => l.dir),
+    tools,
+    disallowed,
+    addDirs: access.addDirs,
+    mcpServers: mcp.servers,
+    // For "needs-you": which run and step is asking, and where Chiefmate answers.
+    env: { CHIEFMATE_RUN: run.id, CHIEFMATE_STEP: String(index + 1), CHIEFMATE_PORT: String(Number(process.env.CHIEFMATE_PORT) || config.port || 4747) },
     attribution: config.attribution !== false,
     maxMinutes: agent.max_minutes ?? 60,
-    log: path.join(runDir(run.id), `${String(index + 1).padStart(2, '0')}-${step.agent}.jsonl`),
+    isHeld: () => Date.now() < live.heldUntil,
+    log: path.join(runDir(run.id), `${name}.jsonl`),
     onEvent: event => {
       followContext(event);
       logAction(event);
+      if (event.type === 'start' && event.init) appendLoaded(contextFile, event.init);
     },
   });
+  try {
+    writeFileSync(contextFile, contextReport({ run, step, index, agent, dir, model, prompt, tools, disallowed, access, mcp, built, args }));
+  } catch (error) {
+    logAction({ type: 'action', text: t("Couldn't write the context report: {error}", { error: error.message }) });
+  }
   currentProcess = { cancel };
   live.pid = pid; // the agent's process: its memory counts for the project, and it is never stopped from the Projects section
   const r = await promise;
@@ -255,9 +378,10 @@ function pullRequestBody(run, checks, agents, lang) {
 /** Runs (or resumes) a run until the end, a pause for a limit, or a cancellation. */
 export async function execute(run) {
   const config = loadConfig();
-  const agents = loadAgents(config);
+  const agents = projectCrew(config, run.project);
   const project = config.projects?.[run.project];
   cancelRequest = null;
+  running = run;
   Object.assign(live, { run: run.id, title: run.title, project: run.project, step: null, agent: null, started: now(), pid: null, context: null, actions: [] });
   const firstTime = !run.started;
   Object.assign(run, { status: 'running', started: run.started ?? now(), notBefore: null, note: null });
@@ -353,6 +477,7 @@ export async function execute(run) {
     saveRun(run);
     notify(t('Chiefmate hit an error'), t('{title}: {error}', { title: run.title, error: clip(error.message, 180) }));
   } finally {
-    Object.assign(live, { run: null, title: null, project: null, step: null, agent: null, pid: null, context: null });
+    running = null;
+    Object.assign(live, { run: null, title: null, project: null, step: null, agent: null, pid: null, context: null, heldUntil: 0 });
   }
 }

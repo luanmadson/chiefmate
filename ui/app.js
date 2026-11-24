@@ -174,6 +174,9 @@ function runState(status) {
   }
 }
 
+/** A run's state, with "Waiting for you" while one of its steps waits for the owner. */
+const runLabel = r => (r?.needsYou && ['running', 'queued', 'waiting', 'paused'].includes(r.status) ? [t('Waiting for your action'), 'warn'] : runState(r?.status));
+
 const stateHtml = ([label, kind]) => `<span class="state state-${kind}">${esc(label)}</span>`;
 
 function originLabel(origin) {
@@ -226,8 +229,14 @@ const agentContextMeter = a => contextMeter(t('Context: {agent}', { agent: agent
 // ---------- The crew ----------
 
 const FALLBACK_MANAGER = { id: 'manager', name: 'Chiefmate', title: 'Manager', color: '#c9a45d', face: 'cap', status: 'idle' };
-const member = id => state?.crew.find(a => a.id === id) ?? (id === 'manager' ? FALLBACK_MANAGER : { id, name: id });
-const agentName = id => t(member(id).name ?? id);
+function member(id, project) {
+  const team = project ? state?.teams?.find(x => x.project === project) : null;
+  return team?.members.find(a => a.id === id)
+    ?? state?.crew.find(a => a.id === id)
+    ?? state?.teams?.flatMap(x => x.members).find(a => a.id === id)
+    ?? (id === 'manager' ? FALLBACK_MANAGER : { id, name: id });
+}
+const agentName = (id, project) => t(member(id, project).name ?? id);
 const faceState = agent => (online ? agent.status ?? 'idle' : 'offline');
 const stepFace = step => ({ running: step.review ? 'reviewing' : 'working', done: 'done', failed: 'failed', pending: 'queued' })[step.status] ?? 'still';
 
@@ -352,7 +361,12 @@ function drawFavicon(mode) {
     g.fillRect(17, 17, 15, 15);
     g.fillStyle = g.strokeStyle = '#c9a45d';
     if (mode === 'running') g.fillRect(19, 19, 11, 11);
-    else {
+    else if (mode === 'needs') {
+      g.fillRect(17, 17, 15, 15);
+      g.fillStyle = '#0b0d10';
+      g.fillRect(23, 19, 3, 7);
+      g.fillRect(23, 28, 3, 2);
+    } else {
       g.lineWidth = 2;
       g.strokeRect(20, 20, 9, 9);
     }
@@ -372,14 +386,28 @@ function drawTitle() {
   let title = 'Chiefmate';
   if (a) title = `● ${[`${a.agent ? agentName(a.agent) : t('preparing')} ${a.step ?? 1}/${a.steps.length}`, waiting, 'Chiefmate'].filter(Boolean).join(' · ')}`;
   else if (count) title = `○ ${waiting} · Chiefmate`;
+  const needs = online ? state?.needs?.length ?? 0 : 0;
+  if (needs) title = `! ${t('Needs you ({count})', { count: needs })} · ${title.replace(/^[●○] /, '')}`;
   if (document.title !== title) document.title = title;
-  drawFavicon(a ? 'running' : count ? 'queued' : '');
+  drawFavicon(needs ? 'needs' : a ? 'running' : count ? 'queued' : '');
+  // The badge on the app's icon in the taskbar, where the browser supports it.
+  if (needs !== drawTitle.badge && 'setAppBadge' in navigator) {
+    (needs ? navigator.setAppBadge(needs) : navigator.clearAppBadge()).catch(() => {});
+    drawTitle.badge = needs;
+  }
 }
 
 /** The band of alerts at the top: low memory, the account's usage, free resets. They warn; nothing is paused. */
 function drawAlerts() {
   const list = online ? state.alerts ?? [] : [];
-  const html = list.map(a => `<a class="alert" href="#${esc(a.view ?? 'manager')}">${stateHtml([a.text, a.level === 'critical' ? 'error' : 'warn'])}</a>`).join('');
+  const needs = (online ? state.needs ?? [] : []).map(n => `
+    <div class="needs" role="alert">
+      <div class="needs-text"><span class="needs-label">${esc(t('Needs you'))}</span>${esc(t('{task}: {what}', { task: n.title, what: n.what }))}
+        <span class="hint">${esc([n.agent ? agentName(n.agent, n.project) : '', projectName(n.project), relative(n.at)].filter(Boolean).join(' · '))}${n.url ? ` · <a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${n.openError ? ` · ${esc(n.openError)}` : ''}</span>
+      </div>
+      <button type="button" class="button" data-needs-done="${esc(n.run)}" data-request="${esc(n.id)}">${esc(t('Mark as done'))}</button>
+    </div>`).join('');
+  const html = needs + list.map(a => `<a class="alert" href="#${esc(a.view ?? 'manager')}">${stateHtml([a.text, a.level === 'critical' ? 'error' : 'warn'])}</a>`).join('');
   draw('#alerts', html, html);
 }
 
@@ -608,7 +636,7 @@ function drawMissions() {
       </div>
       <dl class="facts">
         <dt>${esc(t('Project'))}</dt><dd>${esc(projectName(m.project))}</dd>
-        <dt>${esc(t('Crew, in order'))}</dt><dd><div class="crew-line">${m.crew.map(id => `<span class="crew-chip">${face(member(id), 'still', 22)}${esc(agentName(id))}</span>`).join('<span class="arrow">→</span>')}</div></dd>
+        <dt>${esc(t('Crew, in order'))}</dt><dd><div class="crew-line">${m.crew.map(id => `<span class="crew-chip">${face(member(id, m.project), 'still', 22)}${esc(agentName(id, m.project))}</span>`).join('<span class="arrow">→</span>')}</div></dd>
         <dt>${esc(t('Schedule'))}</dt><dd>${esc(m.schedule)}</dd>
         <dt>${esc(t('Next run'))}</dt><dd class="num">${m.next ? `${shortDate(m.next)} (${esc(relative(m.next))})` : '—'}</dd>
         <dt>${esc(t('Last run'))}</dt><dd>${m.last ? `${stateHtml(runState(m.last.status))} <span class="num hint">${shortDate(m.last.created)}</span>${m.last.pullRequest ? ` · <a href="${esc(m.last.pullRequest)}" target="_blank" rel="noopener">${esc(t('pull request'))}</a>` : ''}` : '—'}</dd>
@@ -643,11 +671,50 @@ function drawCrew() {
   });
   const html = `<div class="crew-grid">${cards.join('')}</div>`;
   draw('#crew', html, html);
-  const agentSelect = $('#task-agent');
-  if (!agentSelect.options.length) {
-    agentSelect.innerHTML = state.crew.filter(a => a.id !== 'manager').map(a => `<option value="${esc(a.id)}">${esc(t(a.name))}: ${esc(t(a.title ?? ''))}</option>`).join('');
+  drawTeams();
+  drawPromptBuilder();
+  if (!$('#task-project').options.length) {
     $('#task-project').innerHTML = state.projects.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+    fillTaskAgents();
   }
+}
+
+/** The task form's agents: the crew of the project chosen (its own, or the general crew). */
+function fillTaskAgents() {
+  const select = $('#task-agent');
+  const kept = select.value;
+  const team = state.teams?.find(x => x.project === $('#task-project').value);
+  const members = team?.members ?? state.crew.filter(a => a.id !== 'manager');
+  select.innerHTML = members.map(a => `<option value="${esc(a.id)}">${esc(t(a.name))}: ${esc(t(a.title ?? ''))}</option>`).join('');
+  if (members.some(a => a.id === kept)) select.value = kept;
+}
+
+function drawTeams() {
+  const teams = state.teams ?? [];
+  const html = `<div class="teams">${teams.map(team => `
+    <div class="team">
+      <div class="team-top"><h3>${esc(team.name)}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>
+      ${team.members.map(a => `<div class="team-member">${face(a, faceState(a), 30)}<div><div class="name">${esc(t(a.name))}</div><div class="hint">${esc([a.base && a.base !== a.id ? t('Based on {agent}', { agent: agentName(a.base) }) : t(a.title ?? ''), a.extra ? t('with instructions for this project') : '', (a.mcp ?? []).length ? t('tools: {list}', { list: a.mcp.join(', ') }) : ''].filter(Boolean).join(' · '))}</div></div>${stateHtml(agentStatus(a))}</div>`).join('') || `<div class="hint">${esc(t('No members.'))}</div>`}
+    </div>`).join('')}</div>`;
+  draw('#teams', html, html);
+}
+
+function drawPromptBuilder() {
+  const p = state.prompts ?? {};
+  let html = '';
+  if (p.configured) {
+    const copy = p.sync?.synced_at
+      ? t('Copied from Google Docs on {when}.', { when: shortDate(p.sync.synced_at) })
+      : p.exists ? t('Copy on this computer from {when}.', { when: shortDate(p.modified) }) : t('No copy on this computer yet: the steps use the projects\' notes.');
+    html = `<div class="panel">
+      <div class="label">${esc(t('Prompt builder'))}</div>
+      <p>${esc(copy)}${p.environment ? ` ${esc(t('Environment: {name}.', { name: p.environment }))}` : ''}</p>
+      ${p.sync?.ok === false ? `<p>${stateHtml([p.sync.error, 'error'])}</p>` : ''}
+      <div class="actions left"><button type="button" class="button secondary small" data-prompts-sync ${p.syncing || !p.docId || !p.cdp ? 'disabled' : ''}>${esc(p.syncing ? t('Copying…') : t('Copy from Google Docs'))}</button>
+      ${!p.docId || !p.cdp ? `<span class="hint">${esc(t('Needs "prompt_builder.doc_id" and "browser_cdp" in the settings.'))}</span>` : ''}</div>
+    </div>`;
+  }
+  draw('#prompt-builder', html, html);
 }
 
 // ---------- Log ----------
@@ -665,14 +732,14 @@ function drawLog() {
     return `<tr class="clickable${r.id === selectedRun ? ' selected' : ''}" data-select="${esc(r.id)}">
       <td class="num">${shortDate(r.created)}</td>
       <td><span class="primary">${esc(r.title)}</span><span class="secondary">${esc(details)}</span></td>
-      <td>${stateHtml(runState(r.status))}</td>
+      <td>${stateHtml(runLabel(r))}</td>
       <td class="num">${r.started ? esc(elapsed(r.started, r.ended ?? Date.now())) : '—'}</td>
     </tr>`;
   });
   const html = list.length
     ? `<table class="table"><thead><tr><th>${esc(t('Date'))}</th><th>${esc(t('Run'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Time'))}</th></tr></thead><tbody>${rows.join('')}</tbody></table>`
     : `<div class="empty">${esc(t('No runs yet.'))}</div>`;
-  draw('#log-list', JSON.stringify([selectedRun, list.map(r => [r.id, r.status, r.ended, r.pullRequest]), Math.floor(Date.now() / 60000)]), html);
+  draw('#log-list', JSON.stringify([selectedRun, list.map(r => [r.id, r.status, r.ended, r.pullRequest, r.needsYou]), Math.floor(Date.now() / 60000)]), html);
 }
 
 async function refreshDetail(force = false) {
@@ -700,17 +767,21 @@ async function refreshDetail(force = false) {
     if (!body) body = s.status === 'pending' ? t('Not started yet.') : s.status === 'running' ? t('Working…') : t('No report.');
     return `
       <div class="report">
-        <div class="report-top"><div class="report-who">${face(member(s.agent), stepFace(s), 26)}<strong>${i + 1}. ${esc(agentName(s.agent))}${s.review ? `, ${esc(t('review'))}` : ''}</strong></div>${stateHtml(runState(s.status))}</div>
-        <div class="hint num">${facts.map(esc).join(' · ')}</div>
+        <div class="report-top"><div class="report-who">${face(member(s.agent, r.project), stepFace(s), 26)}<strong>${i + 1}. ${esc(agentName(s.agent, r.project))}${s.review ? `, ${esc(t('review'))}` : ''}</strong></div>${stateHtml(runState(s.status))}</div>
+        <div class="hint num">${facts.map(esc).join(' · ')}${s.status !== 'pending' ? ` · <button type="button" class="button secondary small" data-context="${esc(r.id)}" data-step="${i + 1}">${esc(t('Context received'))}</button>` : ''}</div>
         <div class="body">${md(body)}</div>
       </div>`;
   });
+  // What the crew asked of the owner during the run.
+  const requests = (r.requests ?? []).length
+    ? `<div class="report"><div class="report-top"><strong>${esc(t('Asked of you'))}</strong></div>${r.requests.map(q => `<div>${stateHtml(q.status === 'open' ? [t('Waiting for your action'), 'warn'] : [t('Done'), 'ok'])} ${esc(q.what)}${q.url ? ` · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${q.status === 'open' ? ` <button type="button" class="button small" data-needs-done="${esc(r.id)}" data-request="${esc(q.id)}">${esc(t('Mark as done'))}</button>` : ''}</div>`).join('')}</div>`
+    : '';
   const checks = r.checks?.length
     ? `<div class="report"><div class="report-top"><strong>${esc(t('Checks'))}</strong></div>${r.checks.map(c => `<div>${stateHtml(c.ok ? [t('Passed'), 'ok'] : [t('Failed'), 'error'])} <code>${esc(c.command)}</code></div>`).join('')}</div>`
     : '';
   const html = `
     <h2>${esc(r.title)}</h2>
-    <div class="hint">${stateHtml(runState(r.status))} · <span class="num">${shortDate(r.created)}</span> · ${esc(projectName(r.project))} · ${esc(originLabel(r.origin))}${r.started ? ` · <span class="num">${esc(elapsed(r.started, r.ended ?? Date.now()))}</span>` : ''}</div>
+    <div class="hint">${stateHtml(runLabel({ ...r, needsYou: (r.requests ?? []).filter(x => x.status === 'open').length }))} · <span class="num">${shortDate(r.created)}</span> · ${esc(projectName(r.project))} · ${esc(originLabel(r.origin))}${r.started ? ` · <span class="num">${esc(elapsed(r.started, r.ended ?? Date.now()))}</span>` : ''}</div>
     ${r.result ? `<p>${esc(r.result)}</p>` : ''}${r.note ? `<p class="hint">${esc(r.note)}</p>` : ''}
     ${r.instruction ? `<p class="hint">${esc(t('Instruction: {text}', { text: r.instruction }))}</p>` : ''}
     <div class="actions left">
@@ -719,7 +790,7 @@ async function refreshDetail(force = false) {
       ${r.status === 'paused' ? `<button type="button" class="button secondary" data-resume="${esc(r.id)}" data-ignore>${esc(t('Resume past the limit'))}</button>` : ''}
       ${canCancel ? `<button type="button" class="button danger" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button>` : ''}
     </div>
-    ${reports.join('')}${checks}`;
+    ${requests}${reports.join('')}${checks}`;
   draw('#log-detail', JSON.stringify([r.id, r.updated, r.status]), html);
 }
 
@@ -968,6 +1039,8 @@ $('#task-form').addEventListener('submit', async event => {
   }
 });
 
+$('#task-project').addEventListener('change', fillTaskAgents);
+
 $('#reset-form').addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.target;
@@ -1013,7 +1086,7 @@ $('#limits-form').addEventListener('submit', async event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-needs-done],[data-context],[data-prompts-sync]');
   if (!target) return;
   try {
     if (target.dataset.run) {
@@ -1028,6 +1101,11 @@ document.addEventListener('click', async event => {
       toast(t('Mission queued.'));
       location.hash = '#operations';
     } else if (target.dataset.assign) {
+      if (![...$('#task-agent').options].some(o => o.value === target.dataset.assign)) {
+        const home = state.teams?.find(x => x.members.some(a => a.id === target.dataset.assign));
+        if (home) $('#task-project').value = home.project;
+        fillTaskAgents();
+      }
       $('#task-agent').value = target.dataset.assign;
       $('#task-form').scrollIntoView({ behavior: 'smooth' });
       $('#task-form').instruction.focus();
@@ -1059,6 +1137,20 @@ document.addEventListener('click', async event => {
       const ok = await confirmDialog(t('Remove free reset'), t('Remove free reset number {index} from the record?', { index: target.dataset.resetRemove }), t('Remove'));
       if (!ok) return;
       await api('/api/reset-grants', { action: 'remove', index: Number(target.dataset.resetRemove) });
+    } else if (target.dataset.needsDone) {
+      await api('/api/needs-you/done', { run: target.dataset.needsDone, id: target.dataset.request });
+      toast(t('Marked as done. The crew goes on.'));
+      if (selectedRun === target.dataset.needsDone) await refreshDetail(true);
+    } else if (target.dataset.context) {
+      const { text } = await api(`/api/run/${encodeURIComponent(target.dataset.context)}/context/${target.dataset.step}`);
+      $('#context-text').textContent = text;
+      $('#context-dialog').showModal();
+      return;
+    } else if (target.hasAttribute('data-prompts-sync')) {
+      target.disabled = true;
+      toast(t('Copying the prompt builder…'));
+      const status = await api('/api/prompts-sync', {});
+      toast(status.ok ? t('Prompt builder copied.') : status.error);
     } else if (target.dataset.reader) {
       const action = target.dataset.reader;
       await api('/api/usage-reader', action === 'now' ? { read: true } : { enabled: action === 'on' });

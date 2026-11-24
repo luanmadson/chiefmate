@@ -1,8 +1,10 @@
 // Starts a temporary Chiefmate on a spare port (only the app and the API: no queue, no schedule, no updates)
 // and checks that everything answers. Usage: npm run smoke
 import { spawn } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const port = 47000 + Math.floor(Math.random() * 900);
@@ -39,7 +41,7 @@ try {
     failures.push('the server did not start');
   } else {
     const state = await (await fetch(`${base}/api/state`)).json();
-    for (const key of ['now', 'version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'focus', 'current', 'queue', 'history', 'usage', 'manager', 'computer', 'plan', 'alerts']) {
+    for (const key of ['now', 'version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'teams', 'needs', 'prompts', 'focus', 'current', 'queue', 'history', 'usage', 'manager', 'computer', 'plan', 'alerts']) {
       expect(key in state, `/api/state has no "${key}"`);
     }
     // What the app shows live (the run going on, its clock, its last action, the queue's order) comes from these.
@@ -62,6 +64,10 @@ try {
     const post = (route, body) => fetch(base + route, { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1' }, body: JSON.stringify(body) });
     expect((await post('/api/stop-project', { project: 'none' })).status === 400, 'stopping a project without a confirmed list was not refused');
     expect((await post('/api/reset-grants', { action: 'used', index: 9999 })).status === 400, 'marking a free reset that does not exist was not refused');
+    expect(Array.isArray(state.teams) && state.teams.every(x => x.project && Array.isArray(x.members)), '/api/state has no crews by project');
+    expect(Array.isArray(state.needs), "/api/state has no list of the owner's requests");
+    expect((await post('/api/needs-you', { what: 'Sign in' })).status === 400, 'a request for the owner without a run was not refused');
+    expect((await fetch(`${base}/api/run/none/context/1`)).status === 404, "a step's context of a run that does not exist did not answer 404");
     const outside = await fetch(`${base}/../package.json`);
     expect(!outside.ok || !(await outside.text()).includes('"name": "chiefmate"'), 'a file outside ui/ was served');
   }
@@ -69,6 +75,74 @@ try {
   failures.push(error.message);
 } finally {
   child.kill();
+}
+
+// Without the server: the crews by project, what a step may see, the command line and the prompt builder,
+// with made-up settings, folders and documents (nothing personal).
+try {
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const { projectCrew } = await import(src('config.mjs'));
+  const { stepAccess, stepMcp } = await import(src('access.mjs'));
+  const { claudeArgs } = await import(src('claude.mjs'));
+  const { assemble, parseBlocks } = await import(src('prompts.mjs'));
+
+  const agents = {
+    manager: { id: 'manager', name: 'Chiefmate', instructions: 'm' },
+    generalist: { id: 'generalist', name: 'Generalist', instructions: 'g' },
+    designer: { id: 'designer', name: 'Designer', instructions: 'd' },
+  };
+  const config = {
+    projects: {
+      alpha: { name: 'Alpha', docs: 'lib/DocsALPHA', crew: { builder: { agent: 'generalist', name: 'Builder', extra_instructions: 'Alpha only.' } }, mcp: ['browser'] },
+      beta: { name: 'Beta' },
+    },
+    mcp_servers: { browser: { command: 'npx', args: ['some-mcp-server'] } },
+  };
+  const alpha = projectCrew(config, 'alpha', agents);
+  expect(Object.keys(alpha).sort().join() === 'builder,manager', "a project's own crew is not just its members and the manager");
+  expect(alpha.builder.base === 'generalist' && alpha.builder.instructions.includes('Alpha only.'), "a member of a project's crew lost its base agent or its instructions");
+  expect(Object.keys(projectCrew(config, 'beta', agents)).length === 3, 'a project without a crew does not get the general crew');
+  const mcp = stepMcp(config, config.projects.alpha, alpha.builder);
+  expect(mcp.names.join() === 'browser' && mcp.tools.join() === 'mcp__browser', "the project's MCP server was not released");
+
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-'));
+  try {
+    const ws = path.join(temp, 'workspaces');
+    for (const d of ['alpha', 'beta', '.library/lib/DocsALPHA', '.library/lib/DocsBETA', '.library/lib/Notes', '.library/other']) mkdirSync(path.join(ws, d), { recursive: true });
+    const libraries = [{ id: 'lib', dir: path.join(ws, '.library', 'lib') }];
+    const access = stepAccess({ config, projectId: 'alpha', project: config.projects.alpha, libraries, workspaces: ws, data: path.join(temp, 'data') });
+    const denied = access.denied.join('\n');
+    expect(access.addDirs.length === 1 && access.addDirs[0].endsWith('DocsALPHA'), 'a step got more than its own documentation folder');
+    for (const name of ['beta', 'DocsBETA', 'Notes', 'other', 'data']) expect(denied.includes(`/${name}/**)`), `a step was not denied ${name}`);
+    expect(!denied.includes('DocsALPHA') && !/\/alpha\/\*\*\)/.test(denied), "a step was denied its own folders");
+    expect(/^Read\(\/\/[a-z]\//.test(access.denied[0]) || access.denied[0].startsWith('Read(///'), 'the permission rules do not use absolute paths');
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+
+  const args = claudeArgs({ model: 'm', attribution: false, mcpServers: mcp.servers, disallowed: ['Read(//x/**)'], tools: ['Bash'] });
+  const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
+  const userFolder = `${path.join(os.homedir(), '.claude').replaceAll('\\', '/')}/**`;
+  expect(args[args.indexOf('--setting-sources') + 1] === 'project,local', 'the steps would load the user settings');
+  expect(args.includes('--strict-mcp-config') && JSON.parse(args[args.indexOf('--mcp-config') + 1]).mcpServers.browser, 'the MCP servers do not come only from Chiefmate');
+  expect(settings.claudeMdExcludes?.includes(userFolder), "the user's ~/.claude/CLAUDE.md is not excluded");
+
+  const doc = [
+    '# Environments', '// selection: one', '## Office', 'Work from {PLACE}.', 'PLACE = the office',
+    '# Projects', '// selection: one', '## Sample project', '// tags: code', '// access: browser', '// CODE = SAMPLE',
+    'Work on {CODE}. When you finish, push to GitHub.', 'Never push without review.',
+    '# Modules', '// selection: several', '## Board', '// requires: Confirmation', 'Update the card.',
+    '## Unused module', 'Nothing.',
+    '# Automatic', '// selection: automatic', '## Code rules', '// tags: code', 'Keep the comments.',
+    '## Browser access', '// tags: browser', 'Ask the owner to sign in.', '## Confirmation', '// include with: Other', 'Confirm first.',
+    '## Book', '// tags: book', 'Nothing.',
+  ].join('\n');
+  const built = assemble(parseBlocks(doc), { blockName: 'Sample project', environment: 'Office', modules: ['Board'] });
+  expect(built.blocks.join() === 'Office,Sample project,Board,Code rules,Browser access,Confirmation', `the prompt builder chose the wrong blocks: ${built.blocks.join()}`);
+  expect(built.text.includes('## Sample project') && built.text.includes('Work on SAMPLE.') && built.text.includes('Work from the office.'), "the prompt builder's variables or headings are wrong");
+  expect(built.adaptations.length === 1 && built.text.includes('Never push without review.'), "the prompt builder's adaptation to the crew's rules is wrong");
+} catch (error) {
+  failures.push(`unit checks: ${error.message}`);
 }
 
 if (failures.length) {

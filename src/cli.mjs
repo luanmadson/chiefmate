@@ -29,13 +29,19 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs server                       starts the app, the queue, the schedule and the updates (http://localhost:${port()})
   node src/cli.mjs status                       what is running, the queue, the account's usage and the crew
   node src/cli.mjs mission <id>                 queues a mission (the ids are in config/chiefmate.json)
-  node src/cli.mjs task <project> <agent> "<what to do>" [--review]
-                                                queues a one-off task; --review has the manager review it at the end
+  node src/cli.mjs task <project> <agent> "<what to do>" [--review] [--modules A,B]
+                                                queues a one-off task; --review has the manager review it at the end;
+                                                --modules adds optional blocks of the prompt builder
   node src/cli.mjs cancel <id>                  cancels a run
   node src/cli.mjs resume <id> [--ignore-limits]
                                                 resumes a paused, failed or canceled run
   node src/cli.mjs history [n]                  the latest runs
   node src/cli.mjs report <id>                  the report of each step of a run
+  node src/cli.mjs context <id> [step]          what each step received: prompt, model, tools, folders, MCP servers
+  node src/cli.mjs needs-you "<what to do>" [--url <address>] [--wait] [--check "<command>"] [--id <request>]
+                                                for a step of a run: asks the owner to act and, with --wait, waits
+                                                until they click Done (or the check command succeeds)
+  node src/cli.mjs prompts-sync                 copies the prompt builder's document from Google Docs, through your browser
   node src/cli.mjs limits [--window-5h 0.85] [--plan-week 0.9]
                                                 when runs pause, as a share of the account's 5-hour window and plan week
   node src/cli.mjs ram                          the projects running on this computer and the memory each one uses
@@ -55,6 +61,56 @@ async function apiOr(route, body, local) {
   } catch (error) {
     if (error.cause?.code !== 'ECONNREFUSED' && !/fetch failed/.test(error.message)) throw error;
     return local();
+  }
+}
+
+/**
+ * "needs-you", run by a step (Chiefmate gives it CHIEFMATE_RUN and CHIEFMATE_STEP). Without --wait it only records
+ * the request. With --wait it waits in rounds of at most 9 minutes (the Bash tool stops a command at 10): exit code 0
+ * when it is done, 3 when the round ended and it is still waiting (run the command printed), 2 past the longest wait.
+ */
+async function needsYou() {
+  const run = process.env.CHIEFMATE_RUN;
+  if (!run) throw new Error('needs-you is for a step of a Chiefmate run (CHIEFMATE_RUN is not set).');
+  const check = option('--check');
+  let id = option('--id');
+  if (!id) {
+    const what = rest.find((x, i) => !x.startsWith('--') && !['--url', '--check', '--id'].includes(rest[i - 1]));
+    const request = await api('/api/needs-you', { run, step: process.env.CHIEFMATE_STEP, what, url: option('--url'), wait: has('--wait'), check });
+    id = request.id;
+    const opened = { browser_cdp: "in a new tab of the owner's browser", playwright: 'in a browser window for the owner', browser: 'in a browser window for the owner' }[request.opened];
+    console.log(`Request ${id} sent to the owner${opened ? `; the address opened ${opened}` : ''}.${request.openError ? ` The address did not open: ${request.openError}` : ''}`);
+    if (!has('--wait')) return;
+  }
+  const { spawnSync } = await import('node:child_process');
+  const roundEnds = Date.now() + 9 * 60_000;
+  let lastCheck = 0;
+  for (;;) {
+    const s = await api('/api/needs-you/poll', { run, id });
+    if (s.status === 'done') {
+      console.log(s.by === 'check' ? 'Done: the check succeeded.' : 'Done: the owner signaled it is done. Go on.');
+      return;
+    }
+    if (s.timedOut) {
+      console.log(`No answer within ${s.maxWaitMinutes} min. The request stays open in the app: finish what you can and say in your report what is left for the owner.`);
+      process.exitCode = 2;
+      return;
+    }
+    if (check && Date.now() - lastCheck >= 15_000) {
+      lastCheck = Date.now();
+      if (spawnSync(check, { shell: true, stdio: 'ignore', windowsHide: true, timeout: 60_000 }).status === 0) {
+        await api('/api/needs-you/done', { run, id, by: 'check' });
+        console.log('Done: the check succeeded.');
+        return;
+      }
+    }
+    if (Date.now() >= roundEnds) {
+      const self = process.argv[1].replaceAll('\\', '/');
+      console.log(`Still waiting for the owner (${s.waitedMinutes} of at most ${s.maxWaitMinutes} min). To keep waiting, run: node ${/\s/.test(self) ? `"${self}"` : self} needs-you --wait --id ${id}${check ? ` --check ${JSON.stringify(check)}` : ''}`);
+      process.exitCode = 3;
+      return;
+    }
+    await new Promise(r => setTimeout(r, 5000));
   }
 }
 
@@ -109,7 +165,8 @@ async function main() {
     }
     case 'task': {
       const [project, agent, instruction] = rest;
-      const run = await api('/api/task', { project, agent, instruction, review: has('--review'), origin: option('--origin') ?? 'manager' });
+      const modules = (option('--modules') ?? '').split(',').map(m => m.trim()).filter(Boolean);
+      const run = await api('/api/task', { project, agent, instruction, review: has('--review'), modules, origin: option('--origin') ?? 'manager' });
       console.log(`Queued: ${run.title} [${run.id}]`);
       return;
     }
@@ -131,6 +188,27 @@ async function main() {
       for (const step of stepsOf(run)) {
         console.log(`## ${step.agent} (${step.status}, ${formatDuration(step.durationMs)}, ${step.model ?? ''})\n${step.report || step.error || '(no report)'}\n`);
       }
+      return;
+    }
+    case 'context': {
+      const { readdirSync, readFileSync } = await import('node:fs');
+      const { runDir } = await import('./store.mjs');
+      if (!rest[0] || !readRun(rest[0])) throw new Error('Run not found. Use: context <id> [step]');
+      const dir = runDir(rest[0]);
+      const prefix = rest[1] ? `${String(Number(rest[1])).padStart(2, '0')}-` : '';
+      const files = readdirSync(dir).filter(f => f.endsWith('.context.md') && f.startsWith(prefix)).sort();
+      if (!files.length) throw new Error('No context recorded for this run or step (runs from before this version have none).');
+      for (const f of files) console.log(`${readFileSync(`${dir}/${f}`, 'utf8')}\n`);
+      return;
+    }
+    case 'needs-you':
+      await needsYou();
+      return;
+    case 'prompts-sync': {
+      const { syncPrompts } = await import('./promptsync.mjs');
+      const status = await apiOr('/api/prompts-sync', {}, () => syncPrompts());
+      if (!status.ok) throw new Error(status.error);
+      console.log(`Prompt builder copied at ${formatDateTime(status.synced_at)} (${status.bytes} bytes).`);
       return;
     }
     case 'limits': {

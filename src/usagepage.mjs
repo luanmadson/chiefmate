@@ -26,7 +26,7 @@ export const readerSettings = (config = loadConfig()) => ({
 export const readerStatus = () => readJson(STATUS_FILE, {});
 export const signedIn = () => existsSync(PROFILE_DIR);
 
-function browserPath(config) {
+export function browserPath(config) {
   if (config.usage_reader?.browser) return config.usage_reader.browser;
   const env = process.env;
   return [

@@ -3,6 +3,7 @@ import { execFile, spawn, spawnSync } from 'node:child_process';
 import { createWriteStream, existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import { userClaudeExcludes } from './access.mjs';
 import { t } from './i18n.mjs';
 import { recordUsage } from './store.mjs';
 import { clip, now } from './util.mjs';
@@ -19,11 +20,11 @@ function executable() {
  * The agent's environment: this computer's, minus the variables of any Claude session that started Chiefmate
  * (with them, Claude Code thinks it is running inside another session).
  */
-function environment() {
+function environment(extra = {}) {
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (/^CLAUDE/i.test(key)) delete env[key];
   env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1';
-  return env;
+  return { ...env, ...extra };
 }
 
 /** Whether Claude Code is installed, and which version. Checked when Chiefmate starts and every 10 minutes. */
@@ -85,27 +86,17 @@ function stop(child) {
   else child.kill('SIGTERM');
 }
 
-/**
- * Runs one step. Returns { promise, cancel }. The time limit is the only cap: there is no spending cap.
- * options: dir, prompt, system (the agent's instructions), model, effort, tools, disallowed, addDirs (more folders
- * the agent may read), attribution (false: commits and pull requests don't credit Claude), maxMinutes,
- * session ({ id, resume }), log (a .jsonl file), onEvent(event).
- * Besides "start", "say", "action" and "usage", onEvent gets "context" ({ used, window }: the tokens the last turn
- * filled) and "compact" (Claude Code compacted the conversation: { trigger, before }).
- */
-export function runClaude(options) {
-  const {
-    dir, prompt, system, model, effort, tools = [], disallowed = [], addDirs = [], attribution = true, maxMinutes = 60, session, log,
-    onEvent = () => {},
-  } = options;
-  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--permission-mode', 'dontAsk', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'];
+/** The command line of a step (see runClaude below). */
+export function claudeArgs({ model, effort, tools = [], disallowed = [], addDirs = [], mcpServers = {}, attribution = true, systemFile, session }) {
+  const args = [
+    '-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--permission-mode', 'dontAsk',
+    '--setting-sources', 'project,local', '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers }),
+  ];
   if (effort) args.push('--effort', String(effort));
-  if (!attribution) args.push('--settings', JSON.stringify({ includeCoAuthoredBy: false, attribution: { commit: '', pr: '' } }));
-  if (system) {
-    const systemFile = `${log}.instructions.md`;
-    writeFileSync(systemFile, system);
-    args.push('--append-system-prompt-file', systemFile);
-  }
+  const settings = { claudeMdExcludes: userClaudeExcludes() };
+  if (!attribution) Object.assign(settings, { includeCoAuthoredBy: false, attribution: { commit: '', pr: '' } });
+  args.push('--settings', JSON.stringify(settings));
+  if (systemFile) args.push('--append-system-prompt-file', systemFile);
   if (session?.resume) args.push('--resume', session.id);
   else if (session?.id) args.push('--session-id', session.id);
   else args.push('--no-session-persistence');
@@ -113,8 +104,36 @@ export function runClaude(options) {
   // The lists go last: each one runs until the next "--", and the prompt goes through standard input.
   if (disallowed.length) args.push('--disallowedTools', ...disallowed);
   if (tools.length) args.push('--allowedTools', ...tools);
+  return args;
+}
 
-  const child = spawn(executable(), args, { cwd: dir, env: environment(), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+/**
+ * Runs one step. Returns { promise, cancel }. The time limit is the only cap: there is no spending cap.
+ * options: dir, prompt, system (the agent's instructions), model, effort, tools, disallowed, addDirs (more folders
+ * the agent may read), mcpServers (the external tools from Chiefmate's settings, by name), env (more environment
+ * variables), attribution (false: commits and pull requests don't credit Claude), maxMinutes, isHeld() (true while
+ * the agent waits for the owner: that time doesn't count against maxMinutes), session ({ id, resume }),
+ * log (a .jsonl file), onEvent(event).
+ *
+ * Nothing of the user's own Claude Code configuration reaches the agent, by the owner's decision and with no option to
+ * turn it on: no user settings, hooks, plugins or skills (--setting-sources project,local), no ~/.claude/CLAUDE.md or
+ * rules (claudeMdExcludes), and no MCP server other than those given here (--strict-mcp-config).
+ * Returns { promise, cancel, pid, args }.
+ * "start" carries what Claude Code loaded ({ init: tools, mcp_servers, skills, plugins, ... }). Besides "start", "say", "action" and "usage", onEvent gets "context" ({ used, window }: the tokens the last turn
+ * filled) and "compact" (Claude Code compacted the conversation: { trigger, before }).
+ */
+export function runClaude(options) {
+  const {
+    dir, prompt, system, model, env = {}, maxMinutes = 60, isHeld = () => false, log, onEvent = () => {},
+  } = options;
+  let systemFile = null;
+  if (system) {
+    systemFile = `${log}.instructions.md`;
+    writeFileSync(systemFile, system);
+  }
+  const args = claudeArgs({ ...options, systemFile });
+
+  const child = spawn(executable(), args, { cwd: dir, env: environment(env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   const logStream = log ? createWriteStream(log, { flags: 'a' }) : null;
   let cancelReason = null;
   let final = null;
@@ -122,7 +141,15 @@ export function runClaude(options) {
   let mainModel = model;
   const context = { used: 0, window: contextWindow(model), compactions: 0 };
 
-  const timer = setTimeout(() => cancel(t('went over the time limit ({minutes} min)', { minutes: maxMinutes })), maxMinutes * 60_000);
+  // The time limit counts only the time the agent works: while it waits for the owner, the clock stops.
+  let spent = 0;
+  let last = Date.now();
+  const timer = setInterval(() => {
+    const at = Date.now();
+    if (!isHeld()) spent += at - last;
+    last = at;
+    if (spent >= maxMinutes * 60_000) cancel(t('went over the time limit ({minutes} min)', { minutes: maxMinutes }));
+  }, 5000);
   function cancel(reason = t('canceled')) {
     cancelReason = reason;
     stop(child);
@@ -140,7 +167,8 @@ export function runClaude(options) {
     }
     if (event.type === 'system' && event.subtype === 'init') {
       if (event.model) [mainModel, context.window] = [event.model, contextWindow(event.model)];
-      onEvent({ type: 'start', model: event.model, session: event.session_id });
+      const { tools: loaded, mcp_servers, skills, plugins, agents, memory_paths, additional_directories } = event;
+      onEvent({ type: 'start', model: event.model, session: event.session_id, init: { tools: loaded, mcp_servers, skills, plugins, agents, memory_paths, additional_directories } });
     } else if (event.type === 'system' && event.subtype === 'compact_boundary') {
       context.compactions++;
       onEvent({ type: 'compact', trigger: event.compact_metadata?.trigger ?? 'auto', before: event.compact_metadata?.pre_tokens ?? null });
@@ -168,11 +196,11 @@ export function runClaude(options) {
 
   const promise = new Promise(resolve => {
     child.on('error', error => {
-      clearTimeout(timer);
+      clearInterval(timer);
       resolve({ ok: false, error: t("Couldn't start Claude Code: {error}", { error: error.message }) });
     });
     child.on('close', code => {
-      clearTimeout(timer);
+      clearInterval(timer);
       logStream?.end();
       const usage = final?.usage ?? {};
       const result = {
@@ -199,5 +227,5 @@ export function runClaude(options) {
     });
   });
 
-  return { promise, cancel, pid: child.pid };
+  return { promise, cancel, pid: child.pid, args };
 }
