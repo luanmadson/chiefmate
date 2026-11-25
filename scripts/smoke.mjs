@@ -86,7 +86,7 @@ try {
       unchanged = again.status === 304 && again.size === 0;
     }
     expect(unchanged, '/api/state has no tag, or an unchanged state did not answer 304');
-    for (const key of ['now', 'version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'teams', 'needs', 'prompts', 'focus', 'running', 'current', 'parallel', 'sessions', 'queue', 'history', 'usage', 'manager', 'computer', 'plan', 'planning', 'alerts', 'attention']) {
+    for (const key of ['now', 'version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'teams', 'needs', 'prompts', 'focus', 'running', 'current', 'parallel', 'sessions', 'queue', 'history', 'usage', 'manager', 'computer', 'plan', 'planning', 'alerts', 'attention', 'decisions']) {
       expect(key in state, `/api/state has no "${key}"`);
     }
     // What the app shows live (the run going on, its clock, its last action, the queue's order) comes from these.
@@ -309,6 +309,23 @@ try {
     // actions refused inside a step.
     expect((await post('/api/watchdog', { text: 'smoke' })).status === 200, "the watchdog's news was refused");
     const cli = (args, env = {}) => execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), ...args], { env: { ...process.env, CHIEFMATE_PORT: String(port), ...env }, stdio: 'pipe', windowsHide: true, encoding: 'utf8' });
+    // The manager's question with buttons (ask-owner): a card with one button per option; the answer closes it (the
+    // news never reaches a manager here; CHIEFMATE_RUN emptied, as when the crew runs this). A step asks with needs-you.
+    const askedOut = cli(['ask-owner', 'Ship it?', '--context', 'Two lines of why.', '--options', 'Yes|No|Wait', '--recommend', 'wait'], { CHIEFMATE_RUN: '' });
+    const cardsNow = async () => (await (await fetch(`${base}/api/state`)).json()).decisions ?? [];
+    const questionCard = (await cardsNow()).find(c => c.kind === 'question' && c.title === 'Ship it?');
+    expect(askedOut.includes('Question #') && questionCard?.options?.join('|') === 'Yes|No|Wait' && questionCard.recommend === 'Wait' && questionCard.what === 'Two lines of why.',
+      `the manager's question is not a card with its options: ${askedOut} ${JSON.stringify(questionCard)}`);
+    expect((await post('/api/decide', { card: questionCard?.id, action: 'answer', option: 'Maybe' })).status !== 200, 'an answer that is not one of the options was accepted');
+    expect((await post('/api/decide', { card: questionCard?.id, action: 'answer', option: 'no' })).ok && !(await cardsNow()).some(c => c.id === questionCard?.id),
+      'answering a question from its card failed, or the card stayed');
+    let askRefused = false;
+    try {
+      cli(['ask-owner', 'From a step?'], { CHIEFMATE_RUN: 'x' });
+    } catch {
+      askRefused = true;
+    }
+    expect(askRefused, 'a step of a run asked the owner with ask-owner');
     const look = JSON.parse(cli(['watch', '--dry-run', '--json']));
     expect(look.health === true && Array.isArray(look.problems) && !look.rescue && !look.problems.some(p => p.id === 'server_down'), `the watchdog's look is wrong: ${JSON.stringify(look)}`);
     expect(!existsSync(path.join(data, 'watch', 'state.json')), "the watchdog's dry run saved its state");
@@ -1254,6 +1271,87 @@ try {
   expect(urgent.includes('scenario="reminder"') && urgent.includes('activationType="system"') && !toastXml('Done', 'x').includes('scenario'), 'an urgent Windows notification does not stay until seen');
 } catch (error) {
   failures.push(`attention levels: ${error.message}`);
+}
+
+// The owner's decision cards, in this process with made-up records (no gh, no git, nothing told to the manager): what
+// each card says, the project beside the number, a project someone else reviews (no Approve), "not now", the answers
+// to the manager's questions and the discards.
+try {
+  process.env.CHIEFMATE_SMOKE = '1';
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const { addQuestion, decide, decisionCards, openQuestions } = await import(src('decisions.mjs'));
+  const { attentionItems } = await import(src('attention.mjs'));
+  const { readRun, saveRun } = await import(src('store.mjs'));
+  const { planItems, proposeItem, triageItem } = await import(src('planning.mjs'));
+  const { t } = await import(src('i18n.mjs'));
+  const config = { projects: { 'zz-p': { name: 'Proj', local_clone: path.join(data, 'no-clone') }, 'zz-q': { name: 'Shared', merge_by_owner: false } } };
+  const at = new Date(Date.now() - 3600_000).toISOString();
+  const made = [
+    { id: 'd-pr', project: 'zz-p', title: 'Better cards', summary: 'Cards with buttons.', status: 'done', created: at, ended: at, pullRequest: 'https://github.com/o/r/pull/34', checks: [{ ok: true }, { ok: false }], outcome: { done: ['Cards'], change: 'You decide with one click.', needs: 'No' } },
+    { id: 'd-shared', project: 'zz-q', title: 'Shared fix', status: 'done', created: at, ended: at, pullRequest: 'https://github.com/o/s/pull/9' },
+    { id: 'd-local', project: 'zz-p', title: 'Local work', status: 'done', created: at, ended: at, branch: 'cm/local', delivered: path.join(data, 'no-clone') },
+  ];
+  for (const r of made) saveRun(r);
+  const runs = () => made.map(r => readRun(r.id));
+  const bad = [{ question: '' }, { question: 'Q', options: 'Only one' }, { question: 'Q', options: 'A|B', recommend: 'C' }, { question: 'Q', options: 'A|B|C|D|E|F|G' }, { question: 'Q', options: 'A|B', project: 'nope' }];
+  expect(bad.every(b => {
+    try {
+      addQuestion(b, config);
+      return false;
+    } catch {
+      return true;
+    }
+  }), 'a question without text, with one option or too many, a recommendation outside them or an unknown project was accepted');
+  const q = addQuestion({ question: 'Publish now?', context: 'It goes live.', options: 'Sim|Não|Esperar', recommend: 'esperar', project: 'zz-p' }, config);
+  expect(q.recommend === 'Esperar' && addQuestion({ question: 'Plain?' }, config).options.length === 2, 'a question lost its recommendation, or one without options has no Yes and No');
+  const item = proposeItem({ project: 'zz-p', title: 'Decision card check', summary: 'First line.\nMore detail.', agent: 'designer', by: 'smoke' });
+  triageItem(item.id, { recommend: 'now', note: 'Quick win', risk: 'Touches the menu' });
+  const cardsFor = () => {
+    const items = planItems();
+    const questions = openQuestions();
+    return decisionCards({ config, attention: attentionItems({ config, runs: runs(), items, questions }), items, questions });
+  };
+  const cards = cardsFor();
+  const card = id => cards.find(c => c.id === id);
+  const pr = card('pr:d-pr');
+  expect(pr?.label === t('PR #{number} of {project}', { number: 34, project: 'Proj' }) && pr.approve && pr.what === 'Cards with buttons.' && pr.change.includes('You decide with one click.')
+    && pr.risk.includes(t('{count} check(s) failed: look at them before approving.', { count: 1 })) && !pr.thirdParty, `a pull request's card is wrong: ${JSON.stringify(pr)}`);
+  const shared = card('pr:d-shared');
+  expect(shared?.thirdParty && !shared.approve && shared.level === 'info' && !shared.change, `a pull request someone else reviews is not a card without Approve: ${JSON.stringify(shared)}`);
+  let refused = false;
+  try {
+    await decide({ card: shared.id, action: 'approve' }, cards);
+  } catch {
+    refused = true;
+  }
+  expect(refused, 'a pull request someone else reviews was merged from its card');
+  const local = card('pr:d-local');
+  expect(local?.label === t('Branch {branch} of {project}', { branch: 'cm/local', project: 'Proj' }) && local.approve && !cards.some(c => c.id === 'done:d-local'), `a branch delivered locally is not a card: ${JSON.stringify(local)}`);
+  const asked = card(`question:${q.id}`);
+  expect(asked?.options.join('|') === 'Sim|Não|Esperar' && asked.recommend === 'Esperar' && asked.what === 'It goes live.', `a question's card is wrong: ${JSON.stringify(asked)}`);
+  const proposal = card(`decide:${item.id}`);
+  expect(proposal?.risk === 'Touches the menu' && proposal.recommend.includes('Quick win') && proposal.what === 'First line.' && proposal.detail.includes('More detail.')
+    && proposal.label === t('Item #{number} of {project}', { number: item.id, project: 'Proj' }), `a proposal's card is wrong: ${JSON.stringify(proposal)}`);
+  // "Not now" fades the card to the end; it stays pending.
+  expect((await decide({ card: 'pr:d-pr', action: 'later' }, cards)).done === 'later', '"not now" failed');
+  const faded = cardsFor();
+  expect(faded.find(c => c.id === 'pr:d-pr')?.seen && faded.at(-1).seen, 'a card left for later did not fade to the end');
+  // An answer (once), a discarded branch and a discarded proposal leave the cards.
+  expect((await decide({ card: asked.id, action: 'answer', option: 'esperar' }, cards)).answer === 'Esperar', 'the answer to a question was not recorded');
+  let twice = false;
+  try {
+    await decide({ card: asked.id, action: 'answer', option: 'Sim' }, cards);
+  } catch {
+    twice = true;
+  }
+  expect(twice, 'a question was answered twice');
+  expect((await decide({ card: local.id, action: 'discard' }, cards)).done === 'discarded' && readRun('d-local').discarded?.by === 'owner', 'a local branch was not discarded from its card');
+  await decide({ card: proposal.id, action: 'discard' }, cards);
+  const left = cardsFor().map(c => c.id);
+  expect(!left.includes(local.id) && !left.includes(asked.id) && !left.includes(proposal.id) && left.includes('pr:d-pr'), `a decided card is still pending: ${JSON.stringify(left)}`);
+  expect(planItems().find(i => i.id === item.id)?.status === 'discarded', 'a proposal discarded from its card is not discarded on the board');
+} catch (error) {
+  failures.push(`decision cards: ${error.message}`);
 }
 
 // Live sessions in the app, in this process, with stand-ins for Claude Code and Codex (no real tool, no window): the

@@ -572,8 +572,11 @@ function attnNotice(i) {
     i.url ? `<a href="${esc(i.url)}" target="_blank" rel="noopener">${esc(t('Open the pull request'))}</a>` : '',
   ].filter(Boolean);
   const open = i.view === 'log' && i.run ? `href="#log" data-select="${esc(i.run)}"` : `href="#${esc(i.view)}"`;
+  // A notice with a decision card: "Decide" opens it on the manager's page.
+  const decide = !r && currentView() !== 'manager' && decisionsNow().some(c => c.id === i.id);
   const actions = r
     ? needsButtons({ ...r, project: i.project }, ' small')
+    : decide ? `<a class="button small" href="#manager">${esc(t('Decide'))}</a>`
     : `${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
   return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
       <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
@@ -676,6 +679,102 @@ function drawClock() {
   $('#clock').textContent = new Date().toLocaleString(locale(), { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
+// ---------- Decisions: what waits for your decision, as cards ----------
+// Built by the server (src/decisions.mjs) from the notices: a pull request or branch to merge, a proposal the manager
+// triaged, a question the manager asked. The essentials first (what, what changes, the risk, the recommendation), the
+// detail folded, the buttons large. "Not now" fades a card to the end, under "Left for later".
+
+const decisionsNow = () => (online ? state?.decisions ?? [] : []);
+const decisionKind = c => ({ merge: c.thirdParty ? t('Waiting for a third-party review') : t('Merge'), decision: t('Proposal'), question: t('Question') })[c.kind] ?? '';
+
+function decisionCardHtml(c) {
+  const facts = [
+    [t('If you approve'), c.change],
+    [t('Watch out'), c.risk],
+    [t('The manager recommends'), c.recommend],
+  ].filter(([, text]) => text);
+  const links = [
+    c.url ? `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(t('Open the pull request'))}</a>` : '',
+    c.run ? `<a href="#log" data-select="${esc(c.run)}">${esc(t('See the run'))}</a>` : '',
+    c.item ? `<a href="#planning">${esc(t('See on the board'))}</a>` : '',
+  ].filter(Boolean);
+  const button = (action, label, kind = '', extra = '') => `<button type="button" class="button${kind}" data-decide="${esc(action)}" data-card="${esc(c.id)}"${extra}>${esc(label)}</button>`;
+  const choices = c.kind === 'question'
+    ? c.options.map(o => button('answer', o, o === c.recommend ? '' : ' secondary', ` data-option="${esc(o)}"${o === c.recommend ? ` title="${esc(t('Recommended by the manager'))}"` : ''}`)).join('')
+    : c.approve ? button('approve', t('Approve')) : '';
+  const buttons = [
+    choices,
+    // Someone else's review only informs: "Hide" sends it to the archive.
+    c.seen ? '' : button('later', c.thirdParty ? t('Hide') : t('Not now'), ' secondary'),
+    button('discard', t('Discard'), ' danger'),
+    button('talk', t('Talk about this'), ' secondary'),
+  ].join('');
+  const about = [esc(c.label), c.at ? esc(relative(c.at)) : ''].filter(Boolean).join(' · ');
+  return `<article class="decision" data-level="${esc(c.level)}" data-card="${esc(c.id)}"${c.seen ? ' data-seen' : ''}>
+      <div class="decision-head"><span class="attn-mark" data-level="${esc(c.level)}" aria-hidden="true"></span><span class="decision-kind">${esc(decisionKind(c))}</span><span class="decision-about">${about}</span>${c.seen ? `<span class="tag">${esc(t('left for later'))}</span>` : ''}</div>
+      <div class="decision-title">${esc(c.title)}</div>
+      ${c.what && c.what !== c.title ? `<p class="decision-what">${esc(c.what)}</p>` : ''}
+      ${facts.length ? `<dl class="decision-facts">${facts.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('')}</dl>` : ''}
+      ${c.thirdParty ? `<p class="decision-third">${esc(t('Someone else reviews and merges the work of this project: nothing for you to approve here.'))}</p>` : ''}
+      ${c.detail || links.length ? `<details class="decision-detail" data-detail="${esc(c.id)}"><summary>${esc(t('Details'))}</summary>${c.detail ? `<div class="decision-detail-body">${md(c.detail)}</div>` : ''}${links.length ? `<div class="hint">${links.join(' · ')}</div>` : ''}</details>` : ''}
+      <div class="decision-buttons">${buttons}</div>
+    </article>`;
+}
+
+/** The cards above the conversation with the manager: the ones not decided yet, then the ones left for later. */
+function drawDecisions() {
+  const cards = decisionsNow();
+  const box = $('#decisions');
+  box.hidden = !cards.length;
+  const fresh = cards.filter(c => !c.seen);
+  const later = cards.filter(c => c.seen);
+  const head = `<div class="decisions-head">${attnMark(fresh)}<span class="label">${esc(t('Waiting for your decision ({count})', { count: fresh.length }))}</span></div>`;
+  const rest = later.length ? `<details class="decisions-later" data-detail="later"><summary>${esc(t('Left for later ({count})', { count: later.length }))}</summary>${later.map(decisionCardHtml).join('')}</details>` : '';
+  const html = cards.length ? head + fresh.map(decisionCardHtml).join('') + rest : '';
+  // What you opened stays open when the cards are drawn again.
+  const opened = [...box.querySelectorAll('details[open]')].map(d => d.dataset.detail);
+  if (draw('#decisions', JSON.stringify([cards, language()]), html)) {
+    for (const d of box.querySelectorAll('details')) if (opened.includes(d.dataset.detail)) d.open = true;
+  }
+}
+
+/** "Talk about this": the conversation with the manager, your message started with the item quoted. */
+function talkAbout(c) {
+  if (currentView() !== 'manager') location.hash = '#manager';
+  const box = $('#message');
+  const quote = t('About {what} ("{title}"): ', { what: c.label, title: c.title });
+  if (!box.value.includes(quote)) box.value = `${quote}${box.value}`;
+  box.focus();
+  box.setSelectionRange(box.value.length, box.value.length);
+}
+
+$('#decisions').addEventListener('click', async event => {
+  const button = event.target.closest('[data-decide]');
+  if (!button) return;
+  const c = decisionsNow().find(x => x.id === button.dataset.card);
+  if (!c) return;
+  const action = button.dataset.decide;
+  if (action === 'talk') return talkAbout(c);
+  // Merging and closing a pull request are confirmed: the click is your authorization (src/merge.mjs).
+  const how = c.url ? t('Chiefmate merges the pull request on GitHub.') : t('Chiefmate merges the branch into the branch checked out in your clone; nothing is sent to GitHub.');
+  if (c.kind === 'merge' && action === 'approve' && !(await confirmDialog(t('Approve and merge'), `${c.label}: ${c.title}. ${how}`, t('Approve')))) return;
+  const closes = c.url ? t('The pull request is closed on GitHub; it can be reopened there.') : t('The branch stays in your clone, not merged.');
+  if (c.kind === 'merge' && action === 'discard' && !(await confirmDialog(t('Discard this work'), `${c.label}: ${c.title}. ${closes}`, t('Discard')))) return;
+  const card = button.closest('.decision');
+  for (const b of card.querySelectorAll('button')) b.disabled = true;
+  try {
+    const r = await api('/api/decide', { card: c.id, action, option: button.dataset.option });
+    toast({
+      merged: t('Merged.'), later: c.thirdParty ? t('Hidden: it is in the archive.') : t('Left for later: the card stays at the end, faded.'), discarded: t('Discarded.'),
+      approved: t('Approved: it becomes a task for its agent, in its turn.'), answered: t('Answer sent to the manager: {answer}', { answer: r.answer ?? '' }),
+    }[r.done] ?? '');
+  } catch (error) {
+    toast(error.message);
+    for (const b of card.querySelectorAll('button')) b.disabled = false;
+  }
+  await refresh();
+});
+
 // ---------- Manager ----------
 
 // The events Chiefmate tells the manager about (src/news.mjs), as the app names them.
@@ -684,7 +783,7 @@ const newsEvent = kind => ({
   needs_you: t('needs you'), update_installed: t('update installed'), update_blocked: t('update blocked'),
   memory_alert: t('memory alert'), usage_alert: t('usage alert'), session_ended: t('live session ended'), plan_proposed: t('new proposal'),
   idle: t('empty queue'), autopilot_report: t('autopilot report'), watchdog: t('watchdog'),
-  away: t('away mode on'), back: t('back from away mode'),
+  away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'),
 }[kind] ?? kind);
 
 let chatScrolled = false;
@@ -3356,6 +3455,7 @@ async function refresh() {
   drawTitle();
   drawStatusbar();
   drawChat();
+  drawDecisions();
   drawBridge();
   drawSituation();
   drawOperations();
