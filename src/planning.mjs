@@ -10,7 +10,7 @@ import path from 'node:path';
 import { loadConfig, projectCrew } from './config.mjs';
 import { reportEvent } from './news.mjs';
 import { onRunSaved, readRun, stepsOf } from './store.mjs';
-import { clip, DATA, now, readJson, writeJson } from './util.mjs';
+import { clip, DATA, now, parseLevel, readJson, writeJson } from './util.mjs';
 
 const BOARD_FILE = path.join(DATA, 'plan.json');
 // The manager's board from before this one: a Markdown table, imported once when data/plan.json does not exist yet.
@@ -290,6 +290,7 @@ function applyFields(item, fields) {
   if (has('description')) item.description = String(fields.description).trim().slice(0, 4000);
   if (has('priority')) item.priority = parsePriority(fields.priority);
   if (has('agent')) item.agent = checkAgent(item.project, fields.agent);
+  if (has('level')) item.level = parseLevel(fields.level);
   if (has('status')) {
     const status = parseStatus(fields.status);
     // Approved by hand: it waits its turn like one approved with "do" (an agent is needed for its task).
@@ -412,15 +413,15 @@ const TRIAGE_FROM = ['proposed', 'triaged', 'future', 'todo'];
 
 /**
  * The manager's triage: { priority, agent, recommend (now | later | discard), note (one line on why), risk (one line on
- * what to watch, for the owner's decision card), order (a position in the owner's list) }. The item then waits for the
- * owner's decision.
+ * what to watch, for the owner's decision card), order (a position in the owner's list), level (the approval level: 1,
+ * 2 or 3) }. The item then waits for the owner's decision.
  */
-export function triageItem(id, { priority, agent, recommend, note, risk, order } = {}) {
+export function triageItem(id, { priority, agent, recommend, note, risk, order, level } = {}) {
   const board = readBoard();
   const item = findIn(board, id);
   if (item.archived || !TRIAGE_FROM.includes(item.status)) throw new Error(`Item #${item.id} is ${item.archived ? 'archived' : item.status}: only proposed, future or to-do items are triaged.`);
   if (recommend == null || recommend === '') throw new Error(`Recommend something: --recommend ${RECOMMENDATIONS.join('|')}.`);
-  applyFields(item, { priority: priority || undefined, agent: agent || undefined });
+  applyFields(item, { priority: priority || undefined, agent: agent || undefined, level: level ?? undefined });
   if (!item.agent) throw new Error(`Say which agent would do item #${item.id}: --agent <member>.`);
   Object.assign(item, { recommend: parseRecommendation(recommend), recommend_note: clip(note, 200) || item.recommend_note || '', recommend_risk: clip(risk, 200) || item.recommend_risk || '', triaged_at: now(), status: 'triaged', updated: now() });
   placeAt(board, item, order != null && order !== '' ? order : item.rank ?? Number.MAX_SAFE_INTEGER);
@@ -517,7 +518,7 @@ async function startNext() {
   for (const item of next.values()) {
     try {
       if (!config.projects?.[item.project]) throw new Error(`${item.project} is not a project in the settings`);
-      started.push(createRun({ kind: 'task', projectId: item.project, agent: item.agent, instruction: taskInstruction(item), review: true, origin: 'plan', plan: item.id }));
+      started.push(createRun({ kind: 'task', projectId: item.project, agent: item.agent, instruction: taskInstruction(item), review: true, origin: 'plan', plan: item.id, level: item.level ?? null }));
     } catch (error) {
       // Back to "to do", with the reason, so it doesn't hold the project's turn.
       console.error(`Planning: item #${item.id} could not start:`, error.message);
@@ -529,7 +530,7 @@ async function startNext() {
 
 /** The app's commands: { action: add | set | archive | restore | propose | triage | approve | later | discard | reorder, id, ...fields }. */
 export async function changePlan(body = {}) {
-  const fields = Object.fromEntries(['project', 'title', 'description', 'priority', 'status', 'agent', 'run', 'pr'].filter(k => body[k] !== undefined).map(k => [k, body[k]]));
+  const fields = Object.fromEntries(['project', 'title', 'description', 'priority', 'status', 'agent', 'run', 'pr', 'level'].filter(k => body[k] !== undefined).map(k => [k, body[k]]));
   switch (body.action) {
     case 'add':
       return addItem(fields);
@@ -544,7 +545,7 @@ export async function changePlan(body = {}) {
       return proposeItem({ project: body.project, title: body.title, summary: body.summary ?? body.description, agent: body.agent, priority: body.priority, by: who.by, run: who.run });
     }
     case 'triage':
-      return triageItem(body.id, { priority: body.priority, agent: body.agent, recommend: body.recommend, note: body.note, risk: body.risk, order: body.order });
+      return triageItem(body.id, { priority: body.priority, agent: body.agent, recommend: body.recommend, note: body.note, risk: body.risk, order: body.order, level: body.level });
     case 'approve':
       // The manager's approval for the owner, within the autopilot's limits only.
       if (body.autopilot) return (await import('./autopilot.mjs')).autopilotApprove(body.id);
@@ -583,7 +584,7 @@ export function planningLine(owner = 'the owner') {
   parts.push(proposed.length
     ? `proposals waiting for your triage (plan triage, or plan discard): ${proposed.slice(0, 10).map(i => `${short(i)} (by ${i.proposed_by ?? '?'}${i.agent ? `, for ${i.agent}` : ''}, ${i.priority}${i.description ? `: ${clip(i.description, 120)}` : ''})`).join('; ')}${more(proposed, 10)}`
     : 'no proposal waiting for your triage');
-  if (deciding.length) parts.push(`triaged, waiting for ${owner}'s decision, in order: ${deciding.slice(0, 8).map(i => `${short(i)} (recommended: ${i.recommend}, for ${i.agent})`).join('; ')}${more(deciding, 8)}`);
+  if (deciding.length) parts.push(`triaged, waiting for ${owner}'s decision, in order: ${deciding.slice(0, 8).map(i => `${short(i)} (recommended: ${i.recommend}, for ${i.agent}, level ${i.level ?? '?'})`).join('; ')}${more(deciding, 8)}`);
   if (approved.length) parts.push(`approved by ${owner}, waiting their turn (one task per project at a time): ${list(approved, 8)}`);
   parts.push(high.length ? `high priority: ${high.slice(0, 8).map(i => `${short(i)} (${label(i.status)})`).join('; ')}${more(high, 8)}` : 'no high-priority item open');
   parts.push(waiting.length ? `waiting for ${owner}: ${list(waiting, 8)}` : `nothing waiting for ${owner}`);

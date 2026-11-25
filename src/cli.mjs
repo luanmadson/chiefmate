@@ -16,10 +16,10 @@ const option = name => {
 };
 const has = name => rest.includes(name);
 // The words of a command that are not options nor their values ("--title <text>").
-const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--note', '--recommend', '--project'];
+const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--level', '--note', '--recommend', '--project'];
 const words = () => rest.filter((x, i) => !x.startsWith('--') && !VALUED.includes(rest[i - 1]));
 /** The title and summary given with --title and --summary: nothing is generated for them. */
-const brief = () => ({ title: option('--title'), summary: option('--summary') });
+const brief = () => ({ title: option('--title'), summary: option('--summary'), level: option('--level') });
 // CHIEFMATE_PORT runs a second, temporary Chiefmate next to yours (the smoke test does this).
 const port = () => Number(process.env.CHIEFMATE_PORT) || loadConfig().port || 4747;
 const work = run => formatDuration(stepsOf(run).reduce((sum, s) => sum + (s.durationMs ?? 0), 0));
@@ -74,31 +74,36 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs server [--log]               starts the app, the queue, the schedule and the updates (http://localhost:${port()});
                                                 --log writes what it prints to data/server.log
   node src/cli.mjs status                       what is running, the queue, the account's usage and the crew
-  node src/cli.mjs mission <id> [--plan <n>]    queues a mission (the ids are in config/chiefmate.json)
-  node src/cli.mjs task <project> <agent> "<what to do>" [--review] [--modules A,B] [--plan <n>]
+  node src/cli.mjs mission <id> [--plan <n>] [--level 1|2|3]
+                                                queues a mission (the ids are in config/chiefmate.json)
+  node src/cli.mjs task <project> <agent> "<what to do>" [--review] [--modules A,B] [--plan <n>] [--level 1|2|3]
                                                 queues a one-off task; --review has the manager review it at the end;
                                                 --modules adds optional blocks of the prompt builder; --plan links it
-                                                to item n of the planning board, which then follows the run
-  node src/cli.mjs ask <project> "<request>" [--plan <n>]
+                                                to item n of the planning board, which then follows the run; --level is
+                                                the approval level of its result (1: the manager decides, 2: the owner
+                                                approves, 3: only the owner), shown on the owner's decision card
+  node src/cli.mjs ask <project> "<request>" [--plan <n>] [--level 1|2|3]
                                                 queues a request for the project's team lead ("lead" in its settings):
                                                 the lead plans it into at most 3 tasks for the project's crew, reviews
                                                 their work first, and the manager does the final review
+  node src/cli.mjs level <run id> <1|2|3|none>  sets (or clears) the approval level of a run
   node src/cli.mjs plan [list] [--project <id>] [--status <s>] [--priority <p>] [--all]
                                                 the planning board: open items by priority (--all: done and archived too)
   node src/cli.mjs plan add <project> "<title>" [--priority high|medium|low] [--status <s>] [--description "<text>"]
                                                 adds an item; statuses: proposed, triaged, approved, future, todo, queued,
                                                 in_progress, waiting_owner, done, discarded
   node src/cli.mjs plan set <n> [--title ...] [--description ...] [--project ...] [--priority ...] [--status ...] [--agent ...]
-                            [--run <id>] [--pr <url>] [--archive | --restore]
+                            [--run <id>] [--pr <url>] [--level 1|2|3|none] [--archive | --restore]
                                                 changes item n (--run "" or --pr "" removes the link)
   node src/cli.mjs plan done <n>                marks item n as done
   node src/cli.mjs plan propose <project> "<short title>" --summary "<1-2 sentences>" [--agent <member>] [--priority ...]
                                                 for the crew: proposes an item (status "proposed", the author recorded);
                                                 the manager hears of it and triages it, the owner decides
-  node src/cli.mjs plan triage <n> --recommend now|later|discard [--agent <member>] [--priority ...] [--note "..."]
-                            [--risk "..."] [--order <position>]
+  node src/cli.mjs plan triage <n> --recommend now|later|discard --level 1|2|3 [--agent <member>] [--priority ...]
+                            [--note "..."] [--risk "..."] [--order <position>]
                                                 for the manager: the item then waits for the owner's decision (--risk:
-                                                one line on what to watch, shown on the owner's card)
+                                                one line on what to watch, shown on the owner's card; --level: its
+                                                approval level, also shown there)
   node src/cli.mjs plan approve|later|discard <n> [--reason "..."] [--duplicate-of <m>]
                                                 the decision: "approve" makes it a task for its agent (one approved task
                                                 per project at a time, the others wait in order), "later" leaves it for
@@ -145,6 +150,7 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs resume <id> [--ignore-limits]
                                                 resumes a paused, failed or canceled run
   node src/cli.mjs ask-owner "<question>" [--context "<explanation>"] [--options "Yes|No|Wait"] [--recommend <option>] [--project <id>]
+                            [--level 1|2|3]
                                                 the manager's question for the owner: a card in the app with one button
                                                 per option; the answer comes back as "owner_decided" news
   node src/cli.mjs request [list] [--project <id>] [--all]
@@ -352,10 +358,10 @@ async function requestCommand() {
 async function planCommand() {
   const planning = await import('./planning.mjs');
   // The options that take a value.
-  const keys = ['title', 'description', 'project', 'priority', 'status', 'agent', 'run', 'pr', 'summary', 'recommend', 'note', 'risk', 'order', 'reason', 'by', 'duplicate-of'];
+  const keys = ['title', 'description', 'project', 'priority', 'status', 'agent', 'run', 'pr', 'level', 'summary', 'recommend', 'note', 'risk', 'order', 'reason', 'by', 'duplicate-of'];
   const [action = 'list', ...args] = rest.filter((x, i) => !x.startsWith('--') && !keys.includes(rest[i - 1]?.slice(2)));
-  const fields = () => Object.fromEntries(['title', 'description', 'project', 'priority', 'status', 'agent', 'run', 'pr'].filter(k => option(`--${k}`) !== undefined).map(k => [k, option(`--${k}`)]));
-  const line = i => `#${String(i.id).padEnd(3)} ${i.priority.padEnd(6)} ${i.status.padEnd(13)} ${i.project}: ${i.title}${i.agent ? `  (${i.agent})` : ''}${i.recommend ? `  [recommended: ${i.recommend}]` : ''}${i.run ? `  [run ${i.run}${i.run_status ? `, ${i.run_status}` : ''}]` : ''}${i.pr ? `  ${i.pr}` : ''}${i.archived ? '  (archived)' : ''}`;
+  const fields = () => Object.fromEntries(['title', 'description', 'project', 'priority', 'status', 'agent', 'run', 'pr', 'level'].filter(k => option(`--${k}`) !== undefined).map(k => [k, option(`--${k}`)]));
+  const line = i => `#${String(i.id).padEnd(3)} ${i.priority.padEnd(6)} ${i.status.padEnd(13)} ${i.project}: ${i.title}${i.agent ? `  (${i.agent})` : ''}${i.recommend ? `  [recommended: ${i.recommend}]` : ''}${i.level ? `  [level ${i.level}]` : ''}${i.run ? `  [run ${i.run}${i.run_status ? `, ${i.run_status}` : ''}]` : ''}${i.pr ? `  ${i.pr}` : ''}${i.archived ? '  (archived)' : ''}`;
   const notes = i => [
     i.description,
     i.proposed_by ? `Proposed by ${i.proposed_by}${i.proposed_run ? ` (run ${i.proposed_run})` : ''}.` : '',
@@ -388,7 +394,7 @@ async function planCommand() {
       return;
     }
     case 'triage':
-      show('Triaged', await change({ action: 'triage', id: which(), priority: option('--priority'), agent: option('--agent'), recommend: option('--recommend'), note: option('--note'), risk: option('--risk'), order: option('--order') }));
+      show('Triaged', await change({ action: 'triage', id: which(), priority: option('--priority'), agent: option('--agent'), recommend: option('--recommend'), note: option('--note'), risk: option('--risk'), order: option('--order'), level: option('--level') }));
       return;
     case 'approve':
     case 'later':
@@ -704,15 +710,27 @@ async function main() {
       console.log(`Queued: ${run.title} [${run.id}]. The team lead plans it into at most 3 tasks for the crew.`);
       return;
     }
+    case 'level': {
+      // The manager's approval level for a run: what its decision card says (src/decisions.mjs).
+      const [id, value] = rest.filter(x => !x.startsWith('--'));
+      if (!id || value === undefined) throw new Error('Use: node src/cli.mjs level <run id> <1|2|3|none>');
+      const r = await apiOr('/api/level', { run: id, level: value }, async () => {
+        const { setRunLevel } = await import('./runs.mjs');
+        const run = setRunLevel(id, value);
+        return { run: run.id, title: run.title, level: run.level };
+      });
+      console.log(r.level ? `Level ${r.level}: ${r.title} [${r.run}]` : `No level: ${r.title} [${r.run}]`);
+      return;
+    }
     case 'chat':
       await chatCommand();
       return;
     case 'ask-owner': {
       // The manager's (or the owner's) question; a step of a run asks with needs-you instead.
       if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error('A step of a run asks the owner with needs-you.');
-      const question = rest.find((x, i) => !x.startsWith('--') && !['--context', '--options', '--recommend', '--project'].includes(rest[i - 1]));
+      const question = rest.find((x, i) => !x.startsWith('--') && !['--context', '--options', '--recommend', '--project', '--level'].includes(rest[i - 1]));
       if (!question) throw new Error('Which question? node src/cli.mjs ask-owner "<question>" --context "<explanation>" --options "Yes|No|Wait"');
-      const q = (await api('/api/ask-owner', { question, context: option('--context'), options: option('--options'), recommend: option('--recommend'), project: option('--project') })).question;
+      const q = (await api('/api/ask-owner', { question, context: option('--context'), options: option('--options'), recommend: option('--recommend'), project: option('--project'), level: option('--level') })).question;
       console.log(`Question #${q.id} is waiting for the owner in the app: ${q.question} [${q.options.join(' | ')}]${q.recommend ? ` (recommended: ${q.recommend})` : ''}`);
       console.log('The answer comes back to you as "owner_decided" news. Do not ask it again in the conversation.');
       return;
@@ -857,6 +875,8 @@ async function main() {
       }
       const m = await api('/api/merge', { run: id, by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' });
       console.log(m.kind === 'pr' ? `Merged: ${m.url}.` : `Merged: ${m.branch} into ${m.base}, in ${m.dir}. Nothing was sent to GitHub.`);
+      if (m.copies?.done?.length) console.log(`Updated after the merge: ${m.copies.done.join(', ')}.`);
+      if (m.copiesNote) console.log(`Not updated: ${m.copiesNote}`);
       return;
     }
     case 'close-pr': {

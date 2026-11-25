@@ -158,6 +158,7 @@ What needs you shows up as a notice with one of three levels, the same component
 
 What only you can decide waits as a card in **Decisions**, a section of its own (its mark in the menu counts the cards), so you decide with one click instead of writing "yes" or "no":
 - **What a card says.** Compact, the essentials first: what it is, with the project beside its number ("PR #34 of Chiefmate", "Item #12 of Riffdex"), its title, the manager's recommendation in a few words ("Recommends: Approve with caveats", read after "Recommendation:" in the final review's verdict) and the buttons. The rest (what changes if you approve, what to watch out for, such as checks that failed or no final review, the recommendation's reason, the review's full verdict, what was done and the links) is folded under **Details**. The card's color is its notice's level.
+- **Whose decision it is.** Each card carries a badge with the approval level the manager gave its run, item or question: **Level 2 · needs you** and **Level 3 · only you** stand out; **Level 1 · the manager settles it** is quiet, and those cards fold under **The manager will settle it (N)**, below what needs you; a card with no level shows a neutral **Level ?**. The menu's mark counts the cards of levels 2, 3 and ?, never those of level 1. The manager sets the level when it queues the work (`--level 1|2|3` on `task`, `ask` and `mission`, or later with `level <run id> <1|2|3>`), triages a proposal (`plan triage --level`, `plan set --level`) or asks (`ask-owner --level`). Level 1 is low-risk work within what you already approved or told the manager to handle alone; level 2, what you approve (new features that go live, money, personal data, security, new accounts, a change of direction, a new project); level 3, what is never done without you. A level 1 merge still follows the rule below: the manager merges only with your authorization, which may be a standing one you gave it for level 1 work.
 - **The cards.** A pull request or a branch delivered locally, ready to merge; a crew proposal the manager triaged (its risk comes from `plan triage --risk`); a question the manager asked you, with one button per option (`ask-owner`, below); and a request of a project's agent in charge that the manager brought to you, with **Authorize**, **Wait** and **Refuse** (see "Talking to the agent in charge").
 - **The buttons.** **Approve** merges the work (confirmed first, through the same path as `merge <id> --yes`) or turns the proposal into a task; a question has its options instead, the one the manager recommends in brass. **Not now** fades the card to the end, under "Left for later", where it stays pending. **Discard** closes the pull request on GitHub (it can be reopened there; the branch stays), leaves a local branch unmerged, discards the proposal (restorable in Planning) or drops the question. **Talk about this** starts your message to the manager with the item quoted.
 - **On a phone.** The same cards, with the buttons' short labels (**Approve**, **Later**, **Discard**, **Talk**), each as wide as its label.
@@ -171,6 +172,7 @@ A finished run's work goes in only when you say so. Chiefmate merges it itself, 
 - **From the app.** Its card's **Approve** (see above), or **Merge** on the run's page in Operations: a finished run with a pull request (or a branch delivered locally) has it. It shows what is merged and how many checks failed; your confirmation is the authorization.
 - **Through the manager.** When a run is ready and reviewed, the manager tells you its card is waiting, naming the pull request or branch with its project (`node src/cli.mjs merge <id>` shows them). If you tell it "yes" for that run in the conversation, it runs `merge <id> --yes`. Without it, never; an answer to one of its questions is never a merge's yes.
 - **What a merge does.** A pull request is merged on GitHub (`gh pr merge --merge`); a merged pull request of Chiefmate itself is installed at once, as with `update-check`. A branch delivered locally is merged into the branch it started from in your clone (`local_clone`), with nothing sent to GitHub: the clone must have that branch checked out and no changes left to commit, and a merge with conflicts is undone.
+- **The copies you read.** After a merge, the project's reference library (a library whose `repository` is the project's own) is brought up to date, and, for a pull request, your own clone moves forward to the merged branch, only by a fast forward: when it has another branch checked out, changes not committed, or commits of its own, it is left as it is and the app (and the manager) tell you to update it yourself. Chiefmate's own installation updates itself.
 - **When it fails.** The error shows in the app, and the manager hears of it at once (`merge_failed`). A conflict with the main branch is the crew's to solve: the manager queues a task that brings the run's branch up to date and solves it, and tells you in one line; its new pull request (or branch) replaces the old one. A branch settles by itself once the new one is merged; the old pull request is closed by the manager (or by you) with `node src/cli.mjs close-pr <old run> --replaced-by <new run> --yes`, which comments on it naming the new one and records who asked. It refuses unless the new run, of the same project and with its pull request open or merged, works on the same board item or names the old run (its id, branch or pull request) in its instruction. Anything else (your clone on another branch or with changes, GitHub refusing for another reason), the manager tells you what to do.
 - **After it.** The run shows "Merged", by you or by the manager; its item on the board becomes done, and its pull request notice goes away. A merge from the app is news to the manager (`merged`). The crew can never merge: the command refuses to run inside a step.
 
@@ -286,7 +288,7 @@ The app opens documents itself, read only, on this computer and through the remo
 - **CSV and XLSX** show as a table, with one tab per sheet, a fixed header and the row numbers; a preview shows at most 5,000 rows, and says so. The workbook is read with Node.js itself (an XLSX file is a zip of XML parts): no dependency.
 - **Any other file** shows its name, size and date, with **Download**.
 
-Where it opens from: the file paths in the conversation with the manager, the news, the steps' reports and the runs' summaries become links (a relative path is looked for in the run's files, then in the project's folders); each run in the Log has **Files**, what it created or changed on its branch (with thumbnails of its images), read from its branch even after the crew moved on; and each project's **Files** tab browses its folders.
+Where it opens from: the file paths in the conversation with the manager, the news, the steps' reports and the runs' summaries become links (a relative path is looked for in the run's files, then in the project's copies: your clone, its reference library and the crew's working copy; when several have it, the newest wins and the viewer says which copy it came from; when none has it, the message says where it looked and which copy is behind its origin's main branch, such as a clone without a merge done on GitHub; a full path that no longer exists is looked for the same way in the project's other copies); each run in the Log has **Files**, what it created or changed on its branch (with thumbnails of its images), read from its branch even after the crew moved on; and each project's **Files** tab browses its folders.
 
 What it may open (its roots): each project's working copy (`workspaces/<id>`), your own clone of it, the reference libraries (`workspaces/.library`) and the folders you add in `viewer.extra_roots`. Nothing else, and never, even inside them, Chiefmate's `data/` and `config/chiefmate.json`, `.git`, `node_modules`, `.env` files, keys (`*.pem`, `*.key`, `id_rsa`…) or anything named for secrets. Each file is at most 50 MB. See "Security".
 
@@ -610,17 +612,19 @@ node src/cli.mjs task <project> <agent> "..." queues a one-off task (--review: t
 node src/cli.mjs ask <project> "..."          queues a request for the project's team lead, who plans it into at most
                                               3 tasks for the crew and reviews them first (--plan <n>)
                                               mission, task and ask take --title "..." (at most about 60 characters) and
-                                              --summary "..." (one or two sentences): nothing is generated for them
+                                              --summary "..." (one or two sentences): nothing is generated for them;
+                                              and --level 1|2|3, the approval level its decision card shows
+node src/cli.mjs level <run id> <1|2|3|none>  sets (or clears) a run's approval level
 node src/cli.mjs plan [list]                  the planning board's open items (--project, --status, --priority; --all)
 node src/cli.mjs plan add <project> "..."     adds an item (--priority high|medium|low, --status, --description)
 node src/cli.mjs plan set <n> --status ...    changes an item (--title, --description, --project, --priority, --agent, --run,
-                                              --pr, --archive, --restore)
+                                              --pr, --level, --archive, --restore)
 node src/cli.mjs plan done <n>                marks an item as completed
 node src/cli.mjs plan propose <project> "..." for the crew: proposes an item (--summary "<1-2 sentences>", --agent <member>,
                                               --priority); the manager triages it, you decide
 node src/cli.mjs plan triage <n> --recommend now|later|discard
                                               for the manager: the item waits for your decision (--agent, --priority,
-                                              --note "<why>", --risk "<what to watch>", --order <position>)
+                                              --note "<why>", --risk "<what to watch>", --order <position>, --level 1|2|3)
 node src/cli.mjs plan approve|later|discard <n>
                                               your decision: "approve" makes it a task for its agent, one per project
                                               at a time, in your order (discard: --reason "...", --duplicate-of <m>;
@@ -654,7 +658,7 @@ node src/cli.mjs dev <project>                starts the project's development e
                                               its own (--dry-run shows what would run); dev stop <project> stops it
 node src/cli.mjs cancel <id>                  cancels a run
 node src/cli.mjs resume <id>                  resumes a run (--ignore-limits goes past the limits this one time)
-node src/cli.mjs ask-owner "<question>" --options "Yes|No|Wait" [--context "..."] [--recommend <option>] [--project <id>]
+node src/cli.mjs ask-owner "<question>" --options "Yes|No|Wait" [--context "..."] [--recommend <option>] [--project <id>] [--level 1|2|3]
                                               for the manager: a question for you, as a card with one button per option
 node src/cli.mjs request [list] [--project <id>] [--all]
                                               the requests of the projects' agents in charge (--all: answered ones too);
