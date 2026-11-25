@@ -99,7 +99,8 @@ export async function processList() {
 /** The kinds of process the crew's work starts, and only those: git, Claude Code headless and Codex exec. */
 export function crewKind(p) {
   const name = String(p.name).toLowerCase();
-  if (/^git(-remote-https?)?\.exe$/.test(name)) return 'git';
+  // git's own daemons (fsmonitor, credential cache) outlive their parent by design: never orphans.
+  if (/^git(-remote-https?)?\.exe$/.test(name)) return /--daemon\b/.test(p.cmd) ? null : 'git';
   if (name === 'claude.exe' && /\s-p(\s|$)|--output-format\s+stream-json/.test(p.cmd)) return 'claude';
   if (name === 'codex.exe' && /\bexec\b/.test(p.cmd)) return 'codex';
   return null;
@@ -364,7 +365,10 @@ export async function rescueRestart({ dryRun = false, config = loadConfig() } = 
     await stopPids(crew.map(p => p.pid));
     for (let i = 0; i < 20 && (await listener(config)); i++) await sleep(1000);
   }
-  spawn(path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'wscript.exe'), [path.join(ROOT, 'scripts', 'start-hidden.vbs')], { cwd: ROOT, detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  // Through its own sign-in task when there is one, so the new server is not part of the watchdog's task (Windows
+  // stops what a task leaves running when it stops the task); else straight from here.
+  const viaTask = await powershell("Start-ScheduledTask -TaskPath '\\Chiefmate\\' -TaskName 'Start at sign-in' -ErrorAction Stop").then(() => true, () => false);
+  if (!viaTask) spawn(path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'wscript.exe'), [path.join(ROOT, 'scripts', 'start-hidden.vbs')], { cwd: ROOT, detached: true, stdio: 'ignore', windowsHide: true }).unref();
   const started = await alive({ tries: 12, gap: 5000, config });
   log(`rescue restart: stopped ${server?.pid ?? 'nothing'}${crew.length ? ` and ${crew.length} crew process(es)` : ''}; ${started ? 'started' : 'did not start'}`);
   return { ...plan, started };

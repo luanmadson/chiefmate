@@ -319,6 +319,7 @@ try {
     { pid: 15, parent: 16, name: 'codex.exe', cmd: 'codex exec --json', created: ago(40) },
     { pid: 16, parent: 1, name: 'cmd.exe', cmd: 'cmd', created: ago(10) },
     { pid: 17, parent: 99, name: 'node.exe', cmd: 'node src/cli.mjs server', created: ago(40) },
+    { pid: 18, parent: 99, name: 'git.exe', cmd: 'git fsmonitor--daemon run --detach', created: ago(40) },
   ];
   expect(watch.orphansIn(list, at).map(p => p.pid).join(',') === '10,14,15', `the orphans are wrong: ${watch.orphansIn(list, at).map(p => p.pid)}`);
   const prompt = watch.rescuePrompt({ problems: [{ level: 'stuck', text: 'Something stuck.' }] }, { owner: 'Owner', language: 'pt-BR' });
