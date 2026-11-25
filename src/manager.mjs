@@ -18,6 +18,7 @@ import { talkSituation } from './talk.mjs';
 import { addMessage, listRuns, readPending, readState, readUsage, savePending, saveState, stepsOf } from './store.mjs';
 import { updateInfo, updating } from './update.mjs';
 import { DATA, ensureDir, languageName, now, ROOT, VERSION } from './util.mjs';
+import { noTrace } from './workspace.mjs';
 
 /**
  * What the app shows while the manager thinks (or writes the summary that renews the conversation): since when, the
@@ -133,7 +134,8 @@ export function situation(libraries = []) {
   lines.push(planningLine(config.owner || 'the owner'));
   lines.push(autopilotLine(config, usage));
   lines.push(contextLine());
-  const delivery = p => (p.deliver === 'local' ? `, local delivery: the result is a branch in ${p.local_clone ?? 'the working copy'}, nothing goes to GitHub` : ', delivered as a pull request');
+  const delivery = p => (p.deliver === 'local' ? `, local delivery: the result is a branch in ${p.local_clone ?? 'the working copy'}, nothing goes to GitHub` : ', delivered as a pull request')
+    + (noTrace(p) ? ', no trace: others work on it, so its branch names (from the run titles), commits and files never name Chiefmate' : '');
   lines.push(`Projects: ${Object.entries(config.projects ?? {}).map(([id, p]) => `${id} (${p.name}, ${p.repository}${delivery(p)}${p.docs ? `, personal docs in ${p.docs}` : ''})`).join('; ') || 'none'}.`);
   for (const l of libraries) lines.push(`Reference library ${l.id} (${l.name}), read only, a copy refreshed from GitHub: ${l.dir}. ${l.about}`.trim());
   lines.push(`Crew: ${Object.values(agents).map(a => `${a.id} (${a.name}, ${a.model ?? config.default_model})`).join(', ')}.`);

@@ -1342,6 +1342,51 @@ try {
   failures.push(`merge checks: ${error.message}`);
 }
 
+// No trace of Chiefmate (src/workspace.mjs), with made-up repositories in the temporary folder: a neutral branch name
+// that never overwrites one of the clone's, the traces found in the run's work, and the clone's branch moved forward
+// without switching branches.
+try {
+  const ws = await import(pathToFileURL(path.join(root, 'src', 'workspace.mjs')).href);
+  const owner = path.join(data, 'nt-clone');
+  const copy = path.join(data, 'nt-copy');
+  const git = (dir, ...args) => execFileSync('git', ['-c', 'user.name=smoke', '-c', 'user.email=smoke@example.com', ...args], { cwd: dir, encoding: 'utf8', windowsHide: true, stdio: 'pipe' });
+  mkdirSync(owner);
+  git(owner, 'init', '-q', '-b', 'feature/x');
+  writeFileSync(path.join(owner, 'a.txt'), 'a\n');
+  git(owner, 'add', '.');
+  git(owner, 'commit', '-q', '-m', 'start');
+  git(owner, 'branch', 'wip/fix-the-report');
+  git(data, 'clone', '-q', owner, copy);
+  const local = { deliver: 'local', local_clone: owner };
+  expect(ws.noTrace(local) && !ws.noTrace({ ...local, no_trace: false }) && !ws.noTrace({}) && ws.noTrace({ no_trace: true }), 'no_trace is not on by default with local delivery only');
+  expect(ws.runBranch({}, 'id1', 'Fix') === 'chiefmate/id1' && ws.runBranch(local, 'id1', 'Fix the report!') === 'wip/fix-the-report'
+    && ws.runBranch({ ...local, deliver_branch: 'work' }, 'id1', 'Fix') === 'work/fix' && ws.runBranch({ ...local, deliver_branch: 'current' }, 'id1', 'Fix') === 'wip/fix',
+  'the run branch names are wrong');
+  const branch = await ws.freeBranch(owner, 'wip/fix-the-report');
+  expect(branch === 'wip/fix-the-report-2', `a branch of the clone would be reused: ${branch}`);
+  git(copy, 'checkout', '-q', '-b', branch);
+  writeFileSync(path.join(copy, 'b.txt'), 'b\n');
+  git(copy, 'add', '.');
+  git(copy, 'commit', '-q', '-m', 'Add b');
+  expect((await ws.traces(copy, 'feature/x')).length === 0, 'clean work was taken for a trace of Chiefmate');
+  writeFileSync(path.join(copy, 'chiefmate_tmp.py'), 'x = 1\n');
+  writeFileSync(path.join(copy, 'b.txt'), 'b\n# made by Chiefmate\n');
+  git(copy, 'add', '.');
+  git(copy, 'commit', '-q', '-m', 'Chiefmate: generalist (fix)');
+  const found = await ws.traces(copy, 'feature/x');
+  expect(found.length === 3 && found.some(x => /chiefmate_tmp\.py/.test(x)) && found.some(x => /b\.txt/.test(x)), `the traces were not all found: ${JSON.stringify(found)}`);
+  git(copy, 'reset', '-q', '--hard', 'HEAD~1');
+  await ws.deliverToClone(copy, branch, owner);
+  writeFileSync(path.join(owner, 'a.txt'), 'changed\n');
+  expect(/changes/.test(await ws.advanceClone(owner, branch, 'feature/x')) && !existsSync(path.join(owner, 'b.txt')), 'a clone with changes not committed was moved forward');
+  git(owner, 'checkout', '-q', '--', 'a.txt');
+  expect((await ws.advanceClone(owner, branch, 'feature/x')) === null && existsSync(path.join(owner, 'b.txt'))
+    && git(owner, 'branch', '--show-current').trim() === 'feature/x' && !git(owner, 'branch', '--list', branch).trim(),
+  "the clone's branch was not moved forward in place, or the run's branch was left behind");
+} catch (error) {
+  failures.push(`no trace checks: ${error.message}`);
+}
+
 try {
   rmSync(data, { recursive: true, force: true, maxRetries: 5 });
 } catch {

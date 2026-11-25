@@ -21,8 +21,8 @@ import { readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.m
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
 import { clip, languageName, now, ROOT, slug, stamp } from './util.mjs';
 import {
-  baseBranch, changedFiles, checkoutBranch, commitPending, createBranch, deliverToClone, newCommits, openPullRequest, prepareLibrary,
-  prepareWorkspace, projectDir, runChecks,
+  advanceClone, baseBranch, changedFiles, checkoutBranch, commitPending, createBranch, deliverToClone, freeBranch, newCommits, noTrace,
+  openPullRequest, prepareLibrary, prepareWorkspace, projectDir, runBranch, runChecks, traces,
 } from './workspace.mjs';
 
 /**
@@ -61,7 +61,8 @@ function crewRules(config, project, projectId, reportLang = config.language || '
   return `## Chiefmate rules (for the whole crew)
 - You are part of the Chiefmate crew, working on one step of a run. Work alone, step by step. Avoid subagents: start one only when it is truly necessary, and never several at once.
 - The current folder is a working copy of the project, already on the run's branch. Commit your work with clear messages that follow the project's convention (see \`git log\`); if there is none, write them in ${content}. Never push, switch branches or open pull requests: Chiefmate does that at the end.
-- If the project's playbook says to create a branch, push or open a pull request, skip that part.
+- If the project's playbook says to create a branch, push or open a pull request, skip that part.${noTrace(project) ? `
+- Others work on this project too and must not learn of Chiefmate or of AI agents from it: never write "Chiefmate", "Claude" or that an AI or agent did the work in commit messages, file or folder names (temporary ones too, such as no chiefmate_*.py), code, comments or documentation. Commit messages read as the owner's own, in the project's convention. Delete the temporary files and scripts you create before you finish, or keep them outside the project's folder.` : ''}
 - The project's documentation outranks your own preferences. Read what you need before changing anything.
 - Write project content in the language the project already uses.
 - If you get stuck, undo whatever is half-done and explain it in your report.
@@ -143,7 +144,7 @@ export function createRun({
   for (let n = 2; existsSync(runFile(id)); n++) id = `${base}-${n}`;
   const run = saveRun({
     id, kind, mission: missionId ?? null, project, title, summary, briefBy, instruction: instruction ?? null, origin,
-    status: 'queued', created: now(), notBefore, branch: `chiefmate/${id}`, steps, review: finalReview,
+    status: 'queued', created: now(), notBefore, branch: runBranch(config.projects[project], id, title), steps, review: finalReview,
     modules: (Array.isArray(modules) ? modules : String(modules ?? '').split(',')).map(m => String(m).trim()).filter(Boolean),
     // The planning board's item this run was queued for: the item follows the run (src/planning.mjs).
     ...(plan != null && plan !== '' ? { plan: Number(String(plan).replace(/^#/, '')) } : {}),
@@ -306,7 +307,7 @@ function logAction(l, event) {
  * A step's prompt in parts, in order, each with a key and where it comes from (the project's Context tab shows them,
  * src/context.mjs): their lines, joined, are the prompt as it is sent.
  */
-export function promptParts({ run, step, project, previous, finalReview, changes, config, libraries, base, access, built, agents }) {
+export function promptParts({ run, step, project, previous, finalReview, changes, traces, config, libraries, base, access, built, agents }) {
   const prLanguage = project.language || config.language || 'en';
   const local = project.deliver === 'local';
   const parts = [];
@@ -348,7 +349,7 @@ export function promptParts({ run, step, project, previous, finalReview, changes
       '',
       `You are the manager. The crew finished the work below. Before it goes to the owner for approval${local ? ' (as a branch, not a pull request)' : ' as a pull request'}:`,
       `1. See what changed: \`git log --oneline origin/${base}..HEAD\` and the diff of every file that matters.`,
-      `2. Check it against the reports and the project's rules${run.lead?.opinion ? ", weighing the team lead's opinion below (its first review)" : ''}. Fix whatever is wrong or incomplete, committing as "Chiefmate: manager review". When the owner guided a step directly (a "direct talk" section at the end of its report), check that the work follows what they said.`,
+      `2. Check it against the reports and the project's rules${run.lead?.opinion ? ", weighing the team lead's opinion below (its first review)" : ''}. Fix whatever is wrong or incomplete, committing as ${noTrace(project) ? "the owner would, with a short message in the project's convention that names neither Chiefmate nor a review by an AI" : '"Chiefmate: manager review"'}. When the owner guided a step directly (a "direct talk" section at the end of its report), check that the work follows what they said.`,
       `3. Run the checks: ${(project.checks ?? []).map(c => `\`${c}\``).join(', ') || 'the ones the project and its documentation describe, as far as this machine allows'}.`,
       `4. Your last message presents the work for approval${local ? ', as the note that goes with the branch' : ', as the pull request text'}, in markdown and in ${languageName(prLanguage)}, starting with the final summary the rules below describe. End it with a section titled "${t("Manager's verdict", {}, prLanguage)}": what you fixed, the risks and your recommendation (approve, approve with caveats, or do not approve).`,
       '',
@@ -357,6 +358,15 @@ export function promptParts({ run, step, project, previous, finalReview, changes
       changes || '(none)',
       '```',
     );
+    if (traces?.length) {
+      // With no trace (src/workspace.mjs): the branch is not handed over while any of these is left.
+      lines.push(
+        '',
+        '## Traces of Chiefmate to remove',
+        'Others must not learn of Chiefmate from this work, and the branch is not handed over while any of these is left. Remove them: rename or delete the files, rewrite the text and, for commit messages or authors, rewrite this run\'s commits (`git reset --soft` to the base and commit again, as the owner would).',
+        ...traces.map(x => `- ${x}`),
+      );
+    }
     add('review', 'Chiefmate: the final review (src/runs.mjs)', lines);
     add('lead-review', "Chiefmate: the team lead's plan and opinion", finalReviewLines(run, lead));
   }
@@ -478,6 +488,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   if (!agent) throw new Error(t('Unknown agent: {id}', { id: step.agent }));
   const previous = run.steps.filter(s => s !== step && s.status !== 'pending' && s.status !== 'skipped');
   const changes = finalReview ? await changedFiles(dir, base).catch(() => '') : '';
+  const found = finalReview && noTrace(project) ? await traces(dir, base).catch(() => []) : [];
   const model = agent.model ?? config.default_model;
   const access = stepAccess({ config, projectId: run.project, project, libraries, manager: step.agent === 'manager' });
   const mcp = stepMcp(config, project, agent);
@@ -488,7 +499,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     logAction(l, { type: 'action', text: t("Couldn't read the prompt builder: {error}", { error: error.message }) });
   }
   for (const a of built?.adaptations ?? []) logAction(l, { type: 'action', text: t('Prompt builder: a line of "{block}" was adapted to the crew\'s rules', { block: a.block }) });
-  const prompt = stepPrompt({ run, step, project, previous, finalReview, changes, config, libraries, base, access, built, agents });
+  const prompt = stepPrompt({ run, step, project, previous, finalReview, changes, traces: found, config, libraries, base, access, built, agents });
   const { tools, disallowed } = stepTools(agent, mcp, access);
   const name = `${String(index + 1).padStart(2, '0')}-${step.agent}`;
   const contextFile = path.join(runDir(run.id), `${name}.context.md`);
@@ -637,7 +648,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   if (before) {
     const dropped = await discardSince(dir, before).catch(e => (step.error = `${step.error ?? ''} Discard: ${e.message}`.trim(), false));
     if (dropped) logAction(l, { type: 'action', text: t('The team lead changed files, which it may not do: the changes were dropped') });
-  } else await commitPending(dir, `Chiefmate: ${t(agent.name)} (${run.title})`).catch(e => (step.error = `${step.error ?? ''} Commit: ${e.message}`.trim()));
+  } else await commitPending(dir, noTrace(project) ? run.title : `Chiefmate: ${t(agent.name)} (${run.title})`).catch(e => (step.error = `${step.error ?? ''} Commit: ${e.message}`.trim()));
   saveRun(run);
   return { waitUntil };
 }
@@ -797,6 +808,10 @@ export async function execute(run) {
       l.preparing.signal.throwIfAborted();
       dir = await prepareWorkspace(run.project, project, run.base, log, { signal: l.preparing.signal });
       l.preparing = null;
+      // A neutral name is not unique by itself: a branch of yours with that name is never overwritten.
+      if (noTrace(project) && project.deliver === 'local' && project.local_clone && existsSync(project.local_clone)) {
+        run.branch = await freeBranch(project.local_clone, run.branch);
+      }
       await createBranch(dir, run.branch);
       run.prepared = true;
       saveRun(run);
@@ -868,16 +883,33 @@ export async function execute(run) {
     if (project.deliver === 'local') {
       // Local delivery: the branch goes to your own clone (or stays in the working copy). Nothing goes to GitHub.
       writeFileSync(bodyFile, body);
+      if (noTrace(project)) {
+        const left = await traces(dir, base);
+        if (left.length) throw new Error(t('Not handed over: the work still names Chiefmate ({list}). It stays on the branch {branch} of the working copy ({path}) until the next run of the project.', { list: clip(left.join('; '), 300), branch: run.branch, path: dir }));
+      }
       let where = t('the branch {branch} of the working copy ({path})', { branch: run.branch, path: dir });
+      let onto = null; // "deliver_branch": "current" and the move forward went through
       if (project.local_clone) {
         log(t('Handing the branch to your clone of {name}', { name: project.name }));
         await deliverToClone(dir, run.branch, project.local_clone);
         where = t('the branch {branch} of your clone ({path})', { branch: run.branch, path: project.local_clone });
+        if (project.deliver_branch === 'current') {
+          const why = await advanceClone(project.local_clone, run.branch, base);
+          if (why) log(t("Your clone's branch was not moved forward ({why}): the work stays on {branch}", { why, branch: run.branch }));
+          else {
+            onto = base;
+            where = t('your branch {branch}, moved forward in your clone ({path})', { branch: base, path: project.local_clone });
+          }
+        }
       }
       const result = failed
         ? t('Ready on {where}, but {count} check(s) failed. Nothing was sent to GitHub.', { where, count: failed })
         : t('Ready on {where}. Nothing was sent to GitHub.', { where });
-      Object.assign(run, { status: 'done', ended: now(), result, delivered: project.local_clone ?? dir });
+      Object.assign(run, {
+        status: 'done', ended: now(), result, delivered: project.local_clone ?? dir,
+        // Already on your branch: nothing is left to merge.
+        ...(onto ? { merged: { at: now(), by: 'owner', how: 'local' } } : {}),
+      });
       saveRun(run);
       notify(t('Ready for your review'), t('{title}: {result}', { title: run.title, result: [outcomeLine(run.outcome), result].filter(Boolean).join(' ') }), 'chiefmate:log');
       reportEvent('run_finished', `${aboutRun(run)} finished and was delivered locally, waiting for the owner's review: ${result}`);
