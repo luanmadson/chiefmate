@@ -153,6 +153,8 @@ try {
     expect((await post('/api/planning', { action: 'triage', id: p, agent: 'someone' })).status === 400, 'a triage without a recommendation was not refused');
     const triaged = await itemOf(await post('/api/planning', { action: 'triage', id: p, recommend: 'fazer agora', priority: 'alta', note: 'Small and useful.', order: 1 }));
     expect(triaged?.status === 'triaged' && triaged.recommend === 'now' && triaged.priority === 'high' && triaged.rank === 1 && triaged.recommend_note === 'Small and useful.', `a proposal was not triaged: ${JSON.stringify(triaged)}`);
+    const deciding = (await (await fetch(`${base}/api/state`)).json()).attention.items.find(i => i.id === `decide:${p}`);
+    expect(deciding?.level === 'important' && deciding.kind === 'decision' && deciding.view === 'planning', `a triaged proposal is not an important notice: ${JSON.stringify(deciding)}`);
     expect((await post('/api/planning', { action: 'approve', id: p })).status === 400, 'an item of a project not in the settings was approved');
     const dropped = await itemOf(await post('/api/planning', { action: 'discard', id: p, reason: 'Not now.' }));
     expect(dropped?.status === 'discarded' && dropped.discard_reason === 'Not now.' && dropped.rank === null, `a proposal was not discarded with its reason: ${JSON.stringify(dropped)}`);
