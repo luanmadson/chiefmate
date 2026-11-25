@@ -9,7 +9,7 @@ import path from 'node:path';
 import { markSeen } from './attention.mjs';
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
-import { discardRun, mergeRun, verdict } from './merge.mjs';
+import { discardRun, mergeRun, prNumber, verdict } from './merge.mjs';
 import { reportEvent } from './news.mjs';
 import { decideItem } from './planning.mjs';
 import { readRun } from './store.mjs';
@@ -70,7 +70,6 @@ function closeQuestion(id, answer) {
 // ---------- The cards ----------
 
 const projectName = (config, id) => config.projects?.[id]?.name ?? id ?? '';
-const prNumber = url => /\/pull\/(\d+)/.exec(String(url ?? ''))?.[1] ?? null;
 const firstLine = text => String(text ?? '').split('\n').map(l => l.trim()).find(Boolean) ?? '';
 const plainVerdict = text => String(text ?? '').replace(/[*_`>#]/g, '').replace(/\s+/g, ' ').trim();
 const verdicts = new Map(); // run id -> the final review's verdict, read once (the file doesn't change after the run)

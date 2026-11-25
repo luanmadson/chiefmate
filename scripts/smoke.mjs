@@ -1728,6 +1728,28 @@ try {
     refused = /never merges/.test(String(error.stderr));
   }
   expect(refused, 'the merge command ran inside a step');
+  // Closing a replaced pull request (closeReplaced): only when a newer run's pull request replaces it, shown first.
+  const { previewClose } = await import(pathToFileURL(path.join(root, 'src', 'merge.mjs')).href);
+  const pr = (id, extra) => writeFileSync(path.join(data, 'runs', `${id}.json`), JSON.stringify({ id, kind: 'task', project: 'p', title: id, status: 'done', created: new Date().toISOString(), steps: [], ...extra }));
+  pr('pr-old', { pullRequest: 'https://github.com/o/r/pull/51', branch: 'chiefmate/old', plan: 3 });
+  pr('pr-same-item', { pullRequest: 'https://github.com/o/r/pull/53', plan: 3 });
+  pr('pr-names-it', { pullRequest: 'https://github.com/o/r/pull/54', instruction: 'Bring the branch chiefmate/old into this one and solve the conflicts.' });
+  pr('pr-unrelated', { pullRequest: 'https://github.com/o/r/pull/55', instruction: 'Something else.' });
+  pr('pr-other-project', { project: 'q', pullRequest: 'https://github.com/o/q/pull/9', plan: 3 });
+  pr('pr-discarded', { pullRequest: 'https://github.com/o/r/pull/56', plan: 3, discarded: { by: 'owner' } });
+  const shown = previewClose('pr-old', 'pr-same-item');
+  expect(shown.url.endsWith('/51') && shown.newUrl.endsWith('/53') && /board item/.test(shown.why), `the close preview is wrong: ${JSON.stringify(shown)}`);
+  expect(/chiefmate\/old/.test(previewClose('pr-old', 'pr-names-it').why), 'a newer run naming the old branch was not taken as its replacement');
+  for (const other of ['pr-unrelated', 'pr-other-project', 'pr-discarded', 'pr-old']) {
+    expect((() => { try { previewClose('pr-old', other); return false; } catch { return true; } })(), `a pull request would be closed as replaced by ${other}`);
+  }
+  let closeRefused = false;
+  try {
+    execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'close-pr', 'pr-old', '--replaced-by', 'pr-same-item', '--yes'], { env: { ...process.env, CHIEFMATE_RUN: 'x', CHIEFMATE_MANAGER: '' }, stdio: 'pipe', windowsHide: true });
+  } catch (error) {
+    closeRefused = /never closes/.test(String(error.stderr));
+  }
+  expect(closeRefused, 'the close-pr command ran inside a step');
 } catch (error) {
   failures.push(`merge checks: ${error.message}`);
 }
