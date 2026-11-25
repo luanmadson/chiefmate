@@ -267,10 +267,25 @@ Below, the tabs (`#project/<id>/<tab>`):
 - **Crew** (`crew`): its crew, with its team lead above it when it has one, each with what it is doing (a click on a member at work opens its panel); and its live sessions, those open with **End** and its profiles with **Open**.
 - **Tasks and history** (`tasks`): its runs going on and in the queue, each with a button to cancel it, the form for a new task, and its recent history: the latest runs, with their result, the pull request and a **Reports** button that opens each step's report in the Log.
 - **Planning** (`planning`): its open items on the planning board, with a button that opens Planning filtered by the project.
+- **Files** (`files`): the project's folders, to browse and open in the viewer (see "Viewing files"): the crew's working copy, your clone, the libraries and the extra folders of `viewer`.
 - **Context** (`context`): see below.
 - **Builder** (`builder`, when `prompt_builder` is set): the prompt builder with the project chosen (see "The prompt builder in the app").
 
 Without your own clone of the project, the buttons that need it are disabled and the page says to set `local_clone`.
+
+### Viewing files
+
+The app opens documents itself, read only, on this computer and through the remote access alike, so you don't need the computer at hand to see what a task made:
+
+- **Images** (PNG, JPEG, WebP, GIF, SVG and others) fill the screen, with **Actual size** for zoom and a gallery of the folder's images (or the run's): the arrows, the keyboard's arrows, or a swipe on the phone.
+- **PDF** opens in the browser's own reader (on a phone, in a tab of its own).
+- **Markdown** shows formatted, and **text** files as they are.
+- **CSV and XLSX** show as a table, with one tab per sheet, a fixed header and the row numbers; a preview shows at most 5,000 rows, and says so. The workbook is read with Node.js itself (an XLSX file is a zip of XML parts): no dependency.
+- **Any other file** shows its name, size and date, with **Download**.
+
+Where it opens from: the file paths in the conversation with the manager, the news, the steps' reports and the runs' summaries become links (a relative path is looked for in the run's files, then in the project's folders); each run in the Log has **Files**, what it created or changed on its branch (with thumbnails of its images), read from its branch even after the crew moved on; and each project's **Files** tab browses its folders.
+
+What it may open (its roots): each project's working copy (`workspaces/<id>`), your own clone of it, the reference libraries (`workspaces/.library`) and the folders you add in `viewer.extra_roots`. Nothing else, and never, even inside them, Chiefmate's `data/` and `config/chiefmate.json`, `.git`, `node_modules`, `.env` files, keys (`*.pem`, `*.key`, `id_rsa`…) or anything named for secrets. Each file is at most 50 MB. See "Security".
 
 ### The Context tab
 
@@ -372,6 +387,7 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `quick_model` | The model of the short calls that write the runs' titles, summaries and final summaries (`"haiku"` by default, with no tools); `false` turns them off, and the instruction's first sentence and the steps' own summaries are used instead |
 | `attribution` | `false` keeps the crew's commits and pull requests from crediting Claude (they are credited to you alone); always off in a project with `no_trace` |
 | `backup_dir` | A folder of your own, such as one in a private repository, where Chiefmate keeps an up-to-date copy of these settings |
+| `viewer` | The file viewer: `extra_roots`, a list of more folders (absolute paths) it may open besides the projects' folders and the libraries. Empty by default |
 | `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. Optional: `crew` (its own crew), `lead` (its team lead, see "The crew"), `mcp` (external tools it releases), `prompt_block`, `prompt_modules` and `prompt_exclude` (the prompt builder), `dev_start` (the command that starts its development environment from its page, such as `npm run dev`), `merge_by_owner: false` when someone else reviews and merges its work (its cards then have no Approve). See also "Local delivery" below |
 | `missions` | For each mission: the `project`, the `steps` (an agent and its part, in order), the final `review`, the `schedule` (`days` such as `["mon"]` and a `time` such as `"09:00"`) and the `eve_reminder` time |
 | `crew` | Settings for one agent in this installation only, such as `{ "writer": { "model": "claude-opus-5-5", "max_minutes": 90, "extra_instructions": "..." } }` |
@@ -556,6 +572,7 @@ The self-update only touches Chiefmate's own files. Your settings, the history a
 - **The short calls have no tools.** The titles, summaries and final summaries come from `quick_model` with every tool off (`--tools ""`), in a folder of Chiefmate's data, without your configuration: they only read the text they are given and write a few lines.
 - **Sign-ins are yours.** Agents never type passwords: they ask for you with `needs-you`, and the address opens in your browser. The address comes from the agent (only `http` and `https`), so look at it before you act on it. With `browser_cdp`, remote debugging leaves that browser open to any local program: use a profile of its own.
 - **Your data stays home.** Your settings, the history and the working copies (`config/chiefmate.json`, `data/`, `workspaces/`) never go to git.
+- **The file viewer only reads.** No route of it writes, moves or deletes a file. It opens only what is inside its roots (see "Viewing files"), checked on the real path once links and Windows junctions are followed, with `..`, other letter cases, streams and network paths refused; `data/`, `config/chiefmate.json`, `.git`, `node_modules`, `.env` files, keys and secrets are refused even inside them. Its answers are never cached (you may open the app on someone else's computer), can't be used by another website, nor by another port of this computer, and never run in the app: HTML and SVG opened on their own are downloads, an SVG is an image only inside the viewer, and everything else is sandboxed. The remote access asks for your login here too.
 - **Stopping processes asks first.** The Projects section and `stop-project` show what will stop and end only those processes. They never stop Chiefmate, what started it, the crew at work (cancel the run for that) or a live session (end it in Operations).
 - **Live sessions** run Claude Code without your own configuration, like the steps; Codex keeps its own (`~/.codex`). A session works in your own folders, with you present: the crew's rules (no push, no pull requests) are not imposed on it. In the app, Claude Code edits and runs commands without asking, but pushing, pull requests and changing remotes wait for your permission; Codex works in its `workspace-write` sandbox. In a window, the tool asks before it acts, as usual.
 - **The optional claude.ai reading** keeps a signed-in browser profile in `data/browser-profile`. See its risks above.
@@ -656,6 +673,7 @@ English is the source. The app, the notifications and the reports follow `langua
 ## Development
 
 - `npm run check` checks the syntax of every script and lists any text without a translation.
+- `npm test` runs the unit tests (`scripts/unit.mjs`, with `node:test`): the file viewer's checks of paths and its CSV and XLSX readers.
 - `npm run smoke` starts a temporary Chiefmate on a spare port, with no queue, schedule or updates and with records of its own in a temporary folder (`CHIEFMATE_DATA`), and checks that the app and the API answer. It never starts a real answer of the manager.
 - [docs/playbook.md](docs/playbook.md) has the rules for changing Chiefmate, for the crew and for people alike.
 
