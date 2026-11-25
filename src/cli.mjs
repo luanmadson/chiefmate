@@ -104,12 +104,15 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 and goes with the others, in order, when the answer ends
   node src/cli.mjs chat edit <id> "<message>"   changes a message still in the queue (chat remove <id> takes it out)
   node src/cli.mjs chat interrupt               ends the current answer (the conversation goes on); the queue goes next
-  node src/cli.mjs session [<profile>] [--dry-run]
+  node src/cli.mjs session [<profile>] [--window] [--dry-run]
                                                 opens a live session (the profiles are in "sessions" in the settings):
-                                                a window with Claude Code or Codex, started with the prompt builder's
-                                                blocks; with no profile, lists the profiles and the sessions open;
-                                                --dry-run shows the folder, the command and the first message only
-  node src/cli.mjs session end <id>             ends a live session (its window closes)
+                                                a conversation in the app with Claude Code or Codex (--window: in a
+                                                window of its own), started with the prompt builder's blocks; with no
+                                                profile, lists the profiles and the sessions open; --dry-run shows the
+                                                folder, the command and the first message only
+  node src/cli.mjs session log <id> [n]         a session's history: the last n entries (40), messages and actions
+  node src/cli.mjs session say <id> "<message>" writes to a session in the app (queued while the agent works)
+  node src/cli.mjs session end <id>             ends a live session (its turn stops, or its window closes)
   node src/cli.mjs dev <project> [--dry-run]    starts the project's development environment ("dev_start" in its settings)
                                                 in a window of its own, in your clone; --dry-run shows what would run
   node src/cli.mjs dev stop <project>           stops it, with everything it started
@@ -354,12 +357,34 @@ async function sessionCommand() {
     console.log(`Session ${s.id} ended.`);
     return;
   }
+  if (first === 'log') {
+    // A session's history (data/sessions/<id>.jsonl): what the owner wrote, what the agent said and did.
+    if (!second) throw new Error('Which session? node src/cli.mjs session log <id> [n]');
+    const record = sessions.readSession(second);
+    if (!record) throw new Error(`Session not found: ${second}`);
+    const count = Number(rest.filter(x => !x.startsWith('--'))[2]) || 40;
+    const { items } = sessions.sessionHistory(second, null, count);
+    console.log(`${record.name} [${record.id}] (${record.tool}, ${record.mode === 'app' ? 'in the app' : 'in a window'}), ${record.status}, in ${record.cwd}`);
+    if (record.mode !== 'app') console.log('A session in a window: its conversation stays in the tool itself, not in Chiefmate.');
+    const who = { owner: 'Owner', say: 'Agent', action: '  >', note: '  *', permission: '  !' };
+    for (const e of items) console.log(`${formatDateTime(e.at)} ${who[e.kind] ?? e.kind}${e.first ? ' (first message)' : ''}${e.failed ? ' (failed)' : ''}${e.kind === 'permission' ? ` [${e.status}]` : ''}: ${e.first ? `${e.text.length} characters, in data/sessions/${record.id}.md` : e.text}`);
+    if (!items.length) console.log('No history yet.');
+    return;
+  }
+  if (first === 'say') {
+    if (process.env.CHIEFMATE_MANAGER) throw new Error("The manager doesn't write to the owner's live sessions.");
+    const text = rest.filter(x => !x.startsWith('--')).slice(2).join(' ');
+    if (!second || !text.trim()) throw new Error('Use: node src/cli.mjs session say <id> "<message>"');
+    const m = await api('/api/session/say', { id: second, text });
+    console.log(m.queued ? `Queued (${m.position} waiting): it goes when the agent finishes its turn.` : `Sent. Follow it with: node src/cli.mjs session log ${second}`);
+    return;
+  }
   if (!first) {
     // Through the running Chiefmate, which knows the processes (alive, memory); else from the records alone.
     const { profiles, open } = (await apiOr('/api/state', null, () => ({ sessions: sessions.sessionsState(loadConfig()) }))).sessions;
     for (const p of profiles) console.log(`Profile ${p.id}: ${p.name} (${p.tool}, ${p.project ? `project ${p.project}` : p.folder ? `library folder ${p.folder}` : 'its own folder'})${p.blocks.length ? `, blocks: ${p.blocks.join(', ')}` : ''}`);
     if (!profiles.length) console.log('No session profiles. Add them under "sessions" in config/chiefmate.json (see the README).');
-    for (const x of open) console.log(`Open: ${x.name} [${x.id}] (${x.tool}), ${x.status}${x.alive ? `, ${machineBytes(x.ram)}` : ''}, since ${formatDateTime(x.started)}`);
+    for (const x of open) console.log(`Open: ${x.name} [${x.id}] (${x.tool}, ${x.mode === 'app' ? 'in the app' : 'in a window'}), ${x.phase ?? x.status}${x.ram ? `, ${machineBytes(x.ram)}` : ''}, since ${formatDateTime(x.started)}`);
     return;
   }
   if (has('--dry-run')) {
@@ -372,7 +397,11 @@ async function sessionCommand() {
     } catch (error) {
       command = `(not found: ${error.message})`;
     }
-    const args = sessions.sessionArgs({ ...profile, cwd: folder.dir }, config, prompt.blocksGiven ? '<first message>' : null);
+    const window = has('--window');
+    const args = window ? sessions.sessionArgs({ ...profile, cwd: folder.dir }, config, prompt.blocksGiven ? '<first message>' : null)
+      : profile.tool === 'codex' ? sessions.codexArgs({ ...profile, cwd: folder.dir })
+      : ['-p', '--output-format', 'stream-json', '--session-id', '<new>', '--setting-sources', 'project,local', '--strict-mcp-config', '--allowedTools', '(reading, editing, terminal)', '--disallowedTools', ...sessions.ASK_FIRST];
+    console.log(window ? 'In a window of its own.' : 'In the app: each message is one turn of the tool, resuming the same session; the message goes through standard input.');
     console.log(`Folder: ${folder.dir}${folder.copy ? " (Chiefmate's read-only copy of the library)" : ''}`);
     console.log(`Command: ${command} ${args.map(a => (/[\s"{}]/.test(a) ? JSON.stringify(a) : a)).join(' ')}`);
     if (prompt.missing.length) console.log(`Not found in the prompt builder: ${prompt.missing.join(', ')}`);
@@ -380,8 +409,13 @@ async function sessionCommand() {
     console.log(prompt.blocksGiven ? `\nFirst message (${prompt.text.length} characters):\n\n${prompt.text}` : '\nNo first message: the profile has no "prompt_blocks".');
     return;
   }
-  const s = await apiOr('/api/session', { profile: first, origin: 'cli' }, () => sessions.openSession(first, { origin: 'cli' }));
+  const window = has('--window');
+  // In the app, the turns run inside Chiefmate: it must be running.
+  const s = window ? await apiOr('/api/session', { profile: first, origin: 'cli', window }, () => sessions.openSession(first, { origin: 'cli', window }))
+    : await api('/api/session', { profile: first, origin: 'cli' });
   if (s.status === 'login') console.log(`Codex is not signed in: run "codex login" in a terminal. The session ${s.id} opens by itself once you are signed in (with Chiefmate running).`);
+  else if (s.existing) console.log(`This profile already has a session open in the app: ${s.id}. Write to it with: node src/cli.mjs session say ${s.id} "<message>"`);
+  else if (s.mode === 'app') console.log(`Session ${s.id} opened in the app, in ${s.cwd}. Follow it in the app, or with: node src/cli.mjs session log ${s.id}`);
   else console.log(`Session ${s.id} opened (${s.window === 'terminal' ? 'Windows Terminal' : 'PowerShell'}), in ${s.cwd}. First message: data/sessions/${s.id}.md`);
   if (s.missing?.length) console.log(`Not found in the prompt builder: ${s.missing.join(', ')}`);
 }

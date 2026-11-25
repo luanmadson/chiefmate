@@ -18,7 +18,8 @@ const SCRIPT = [
 
 export function notify(title, text, target = 'chiefmate:operations') {
   recordNotification(title, text);
-  if (process.platform !== 'win32') return;
+  // The smoke test shows nothing on the owner's screen.
+  if (process.platform !== 'win32' || process.env.CHIEFMATE_SMOKE) return;
   const toast = `<toast activationType="protocol" launch="${xml(target)}"><visual><binding template="ToastGeneric"><text>${xml(title)}</text><text>${xml(text)}</text></binding></visual></toast>`;
   const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', SCRIPT], {
     env: { ...process.env, CHIEFMATE_TOAST: toast },

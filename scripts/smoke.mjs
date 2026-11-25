@@ -1,7 +1,7 @@
 // Starts a temporary Chiefmate on a spare port (only the app and the API: no queue, no schedule, no updates)
 // and checks that everything answers. Usage: npm run smoke
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -118,6 +118,8 @@ try {
     // Live sessions: an unknown profile or session is refused, and nothing opens.
     expect((await post('/api/session', { profile: 'no-such-profile' })).status === 400, 'opening a session of an unknown profile was not refused');
     expect((await post('/api/session/end', { id: 'no-such-session' })).status === 400, 'ending a session that does not exist was not refused');
+    expect((await post('/api/session/say', { id: 'no-such-session', text: 'Hello' })).status === 400, 'a message to a session that does not exist was not refused');
+    expect((await fetch(`${base}/api/session/no-such-session`)).status >= 400, 'the conversation of a session that does not exist was given');
     // The planning board: imported from the old Markdown board, then changed through the API.
     const items = state.planning?.items ?? [];
     const imported = Object.fromEntries(items.map(i => [i.id, `${i.priority}/${i.status}`]));
@@ -792,6 +794,118 @@ try {
   }
 } catch (error) {
   failures.push(`unit checks: ${error.message}`);
+}
+
+// Live sessions in the app, in this process, with stand-ins for Claude Code and Codex (no real tool, no window): the
+// first message is the first turn; the text and the actions go to the history as they happen; a message sent while
+// the agent works waits in the queue and goes next, in the same session; a refused push becomes a request that the
+// owner allows; an interrupted or ended session carries on in the same conversation; Codex resumes its thread.
+try {
+  const sessions = await import(pathToFileURL(path.join(root, 'src', 'sessions.mjs')).href);
+  const liveDir = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-live-'));
+  const calls = path.join(liveDir, 'calls.jsonl');
+  const fakeClaude = path.join(liveDir, 'fake-claude.mjs');
+  writeFileSync(fakeClaude, [
+    "import { appendFileSync } from 'node:fs';",
+    "const args = process.argv.slice(2);",
+    "const id = args.includes('--resume') ? args[args.indexOf('--resume') + 1] : args[args.indexOf('--session-id') + 1];",
+    "let prompt = ''; process.stdin.on('data', d => (prompt += d)); process.stdin.on('end', () => {",
+    `  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ tool: 'claude', args, prompt }) + '\\n');`,
+    "  const say = e => process.stdout.write(JSON.stringify(e) + '\\n');",
+    "  say({ type: 'system', subtype: 'init', session_id: id, model: 'm' });",
+    "  say({ type: 'assistant', message: { content: [{ type: 'text', text: (args.includes('--resume') ? 'Again: ' : 'First: ') + prompt.split('\\n')[0] }, { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'git status' } }] } });",
+    "  say({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } });",
+    "  const denials = prompt.includes('push it') ? [{ tool_name: 'Bash', tool_use_id: 't2', tool_input: { command: 'git push origin main' } }] : [];",
+    "  setTimeout(() => say({ type: 'result', subtype: 'success', result: 'done', session_id: id, num_turns: 1, permission_denials: denials }), prompt.includes('take long') ? 20000 : 300);",
+    "});",
+  ].join('\n'));
+  const fakeCodex = path.join(liveDir, 'fake-codex.mjs');
+  writeFileSync(fakeCodex, [
+    "import { appendFileSync } from 'node:fs';",
+    "const args = process.argv.slice(2);",
+    "if (args[0] === 'login') process.exit(0);",
+    "const thread = args.includes('resume') ? args[args.length - 2] : 'thread-1';",
+    "let prompt = ''; process.stdin.on('data', d => (prompt += d)); process.stdin.on('end', () => {",
+    `  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ tool: 'codex', args, prompt }) + '\\n');`,
+    "  const say = e => process.stdout.write(JSON.stringify(e) + '\\n');",
+    "  say({ type: 'thread.started', thread_id: thread });",
+    "  say({ type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'pwsh.exe -Command \"npm test\"', status: 'in_progress' } });",
+    "  say({ type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: 'pwsh.exe -Command \"npm test\"', aggregated_output: 'blocked', exit_code: 1, status: 'failed' } });",
+    "  say({ type: 'item.completed', item: { id: 'i2', type: 'file_change', changes: [{ path: 'a.txt', kind: 'add' }], status: 'completed' } });",
+    "  say({ type: 'item.completed', item: { id: 'i3', type: 'agent_message', text: 'Codex: ' + prompt.split('\\n')[0] } });",
+    "  say({ type: 'turn.completed', usage: {} });",
+    "});",
+  ].join('\n'));
+  Object.assign(process.env, { CHIEFMATE_CLAUDE: fakeClaude, CHIEFMATE_CODEX: fakeCodex });
+  const liveConfig = {
+    owner: 'Owner', language: 'en', default_model: 'm', projects: {},
+    sessions: { pair: { name: 'Pair', tool: 'claude', cwd: liveDir, model: 'm' }, cx: { name: 'Cx', tool: 'codex', cwd: liveDir } },
+  };
+  const idle = async id => {
+    for (let i = 0; i < 150 && (sessions.turnOf(id) || (sessions.readSession(id)?.queue ?? []).length); i++) await new Promise(r => setTimeout(r, 100));
+  };
+  const called = () => readFileSync(calls, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
+  const kinds = id => sessions.sessionHistory(id).items.map(e => e.kind).join();
+  try {
+    const s = await sessions.openSession('pair', { config: liveConfig, prompt: 'Start here' });
+    expect(s.mode === 'app' && s.status === 'open' && !s.window, `a live session did not open in the app: ${JSON.stringify(s).slice(0, 200)}`);
+    const queued = sessions.sayToSession(s.id, 'Second message');
+    expect(queued.queued && queued.position === 1, "a message sent while the agent works did not wait in the session's queue");
+    await idle(s.id);
+    const [first, second] = called();
+    const sid = first.args[first.args.indexOf('--session-id') + 1];
+    expect(first.prompt === 'Start here' && second?.args[second.args.indexOf('--resume') + 1] === sid && second.prompt.includes('Second message'), 'the second turn did not resume the same Claude Code session with the queued message');
+    expect(first.args[first.args.indexOf('--setting-sources') + 1] === 'project,local' && first.args.includes('--strict-mcp-config') && first.args.includes('Bash') && first.args.includes('Bash(git push:*)'), "a session in the app would load the user's own configuration, lack the terminal, or push without asking");
+    expect(kinds(s.id) === 'owner,say,action,owner,say,action', `the history of a session in the app is wrong: ${kinds(s.id)}`);
+    const { items, next } = sessions.sessionHistory(s.id);
+    expect(items[0].first && items[1].text === 'First: Start here' && items[2].text.includes('git status') && sessions.sessionHistory(s.id, next).items.length === 0, "the session's history does not keep the first message, the text and the actions in order");
+
+    sessions.sayToSession(s.id, 'Now push it');
+    await idle(s.id);
+    const ask = sessions.readSession(s.id).requests.find(r => r.kind === 'permission' && r.status === 'open');
+    expect(ask?.rule === 'Bash(git push:*)' && sessions.sessionRequests().some(r => r.id === ask.id && r.session === s.id), 'a refused push did not become a request for the owner');
+    const noMachine = { sessions: [], supported: false };
+    expect(sessions.sessionsState(liveConfig, noMachine).open.find(x => x.id === s.id)?.phase === 'permission', 'a session waiting for a permission is not shown as such');
+    sessions.answerPermission(s.id, ask.id, true);
+    await idle(s.id);
+    const allowed = called().at(-1);
+    expect(allowed.prompt.includes('allowed this') && !allowed.args.includes('Bash(git push:*)'), 'the permission given did not reach the agent, or the push is still refused');
+
+    sessions.sayToSession(s.id, 'Please take long');
+    for (let i = 0; i < 50 && !sessions.turnOf(s.id)?.last; i++) await new Promise(r => setTimeout(r, 100));
+    expect(sessions.interruptSession(s.id), 'a turn going on could not be interrupted');
+    await idle(s.id);
+    sessions.sayToSession(s.id, 'Go on');
+    await idle(s.id);
+    expect(called().at(-1).prompt.includes('interrupted your previous turn') && sessions.readSession(s.id).status === 'open', 'after an interruption, the next message did not tell the agent');
+    const line = sessions.sessionsLine(liveConfig, noMachine);
+    expect(line.includes(`[${s.id}]`) && line.includes('session log') && line.includes('Last said'), `the manager's line about the sessions is incomplete: ${line}`);
+
+    await sessions.endSession(s.id);
+    expect(sessions.readSession(s.id).status === 'ended', 'a session in the app did not end');
+    sessions.sayToSession(s.id, 'Back again');
+    await idle(s.id);
+    expect(sessions.readSession(s.id).status === 'open' && called().at(-1).args.includes('--resume'), 'a message to an ended session did not resume it in the same conversation');
+    expect((await sessions.openSession('pair', { config: liveConfig })).id === s.id, 'a profile opened a second session in the app while one was open');
+    await sessions.endSession(s.id);
+
+    const c = await sessions.openSession('cx', { config: liveConfig, prompt: 'Hi codex' });
+    await idle(c.id);
+    sessions.sayToSession(c.id, 'And then');
+    await idle(c.id);
+    const [cx1, cx2] = called().filter(x => x.tool === 'codex');
+    expect(cx1.args.slice(0, 2).join() === 'exec,--json' && cx1.args.includes('-C') && cx2?.args.slice(0, 3).join() === 'exec,resume,--json' && cx2.args.includes('thread-1'), `Codex was not resumed in its thread: ${JSON.stringify(cx2?.args)}`);
+    const said = sessions.sessionHistory(c.id).items;
+    expect(said.some(e => e.kind === 'say' && e.text === 'Codex: Hi codex') && said.some(e => e.kind === 'action' && e.failed && e.text.includes('npm test')) && said.some(e => e.kind === 'action' && e.text.includes('a.txt')), "Codex's text and actions did not reach the history");
+    expect(sessions.sessionView(c.id).session.turns === 2, "a Codex session's view is wrong");
+    await sessions.endSession(c.id);
+  } finally {
+    process.env.CHIEFMATE_CLAUDE = path.join(data, 'no-claude.exe');
+    delete process.env.CHIEFMATE_CODEX;
+    rmSync(liveDir, { recursive: true, force: true, maxRetries: 5 });
+  }
+} catch (error) {
+  failures.push(`live session checks: ${error.message}`);
 }
 
 try {

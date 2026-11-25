@@ -462,6 +462,33 @@ details summary { cursor: pointer; }
 /* What waits for the owner in this project: brass, above the tabs */
 .project-needs { margin-bottom: 16px; padding: 10px 16px; background: var(--accent-bg); border: 1px solid var(--accent); border-left-width: 4px; }
 .project-needs .label { color: var(--accent); margin-bottom: 6px; }
+
+/* A live session's conversation in the app (a project's Live tab, or its own view) */
+.live-list, .live-earlier { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin-bottom: 12px; }
+.live-earlier .label { flex-basis: 100%; margin: 0; }
+.live-card { display: grid; grid-template-columns: auto auto; gap: 2px 12px; align-items: baseline; padding: 8px 12px; border: 1px solid var(--line); background: var(--panel); color: var(--text); text-decoration: none; }
+.live-card .hint { grid-column: 1 / -1; }
+.live-card:hover { border-color: var(--line-strong); }
+.live-card.active { border-color: var(--accent); border-left-width: 3px; }
+.live-session[hidden] { display: none; }
+.live-session .chat-column { height: 62vh; min-height: 380px; }
+.live-head { padding: 10px 0 12px; }
+.live-title .primary { color: var(--strong); font-weight: 600; margin-right: 10px; }
+.live-title .secondary { font: 11.5px var(--mono); color: var(--faint); word-break: break-all; }
+.live-facts { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; margin-top: 6px; color: var(--muted); }
+.live-facts .compose-buttons { margin-left: auto; }
+.live-phase { margin-top: 8px; padding: 6px 12px; border-left: 2px solid var(--line-strong); color: var(--muted); }
+.live-phase.warn { border-left-color: var(--accent); background: var(--accent-bg); color: var(--strong); }
+.live-actions { padding: 6px 18px 8px 30px; border-bottom: 1px solid var(--line); }
+.live-action { display: flex; gap: 10px; font: 12px/1.6 var(--mono); color: var(--muted); }
+.live-action time { flex: none; color: var(--faint); }
+.live-action span { min-width: 0; overflow-wrap: anywhere; }
+.live-action.failed span { color: var(--error); }
+.msg.first summary { cursor: pointer; list-style: none; margin: 0; }
+.msg.first summary::-webkit-details-marker { display: none; }
+.msg.first[open] summary { margin-bottom: 6px; }
+.msg.system.ask { color: var(--accent); }
+.live-ask { padding: 9px 18px; border-bottom: 1px solid var(--accent); }
 .project-need { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 6px 0; border-top: 1px solid rgba(201, 164, 93, 0.25); }
 .project-need:first-of-type { border-top: 0; }
 .project-need .primary { display: block; color: var(--strong); }

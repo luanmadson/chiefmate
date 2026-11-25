@@ -305,9 +305,9 @@ const toolName = tool => (tool === 'codex' ? 'Codex' : 'Claude Code');
 
 // A project's page is "#project/<id>", and each of its tabs "#project/<id>/<tab>"; the prompt builder is "#builder",
 // or "#builder/<id>" for a project (also shown in the project's "builder" tab).
-const VIEWS = ['manager', 'operations', 'planning', 'missions', 'crew', 'projects', 'builder', 'log', 'usage', 'project'];
+const VIEWS = ['manager', 'operations', 'planning', 'missions', 'crew', 'projects', 'builder', 'log', 'usage', 'project', 'session'];
 const pageProject = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length).split('/')[0]) : null);
-const PROJECT_TABS = ['overview', 'crew', 'tasks', 'planning', 'context', 'builder'];
+const PROJECT_TABS = ['overview', 'live', 'crew', 'tasks', 'planning', 'context', 'builder'];
 const pageTab = () => {
   const tab = location.hash.startsWith('#project/') ? location.hash.slice('#project/'.length).split('/')[1] : null;
   return PROJECT_TABS.includes(tab) ? tab : 'overview';
@@ -316,9 +316,14 @@ const builderHash = () => /^#builder(\/|$)/.test(location.hash);
 const builderProjectOf = () => (location.hash.startsWith('#builder/') ? decodeURIComponent(location.hash.slice('#builder/'.length)) : '');
 // The project the prompt builder is shown for: its own view's, or the project's whose "builder" tab is open (null: hidden).
 const builderTarget = () => (builderHash() ? builderProjectOf() : pageProject() && pageTab() === 'builder' ? pageProject() : null);
-const currentView = () => (pageProject() ? 'project' : builderHash() ? 'builder' : VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
+// A live session's conversation: "#project/<id>/live/<session>" for a project's, "#session/<id>" for the others.
+const pageSession = () => (location.hash.startsWith('#session/') ? decodeURIComponent(location.hash.slice('#session/'.length)) : null);
+const pageLiveSession = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length).split('/')[2] ?? '') : '');
+const currentView = () => (pageProject() ? 'project' : pageSession() ? 'session' : builderHash() ? 'builder' : VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
 function showView() {
   const view = currentView();
+  if (view !== 'session' && !(view === 'project' && pageTab() === 'live')) stopLive();
+  if (view === 'session' && state) drawSessionPage();
   for (const v of VIEWS) $(`#view-${v}`).classList.toggle('active', v === view);
   for (const a of document.querySelectorAll('.nav a')) a.classList.toggle('active', a.dataset.view === view);
   $('#project-jump').value = pageProject() ?? '';
@@ -467,6 +472,14 @@ function drawTitle() {
 }
 
 /** The band of alerts at the top: low memory, the account's usage, free resets. They warn; nothing is paused. */
+/** A request's buttons: Done (a step's, Codex to sign in), or Allow and See (a session's permission). */
+function needsButtons(n, size) {
+  if (n.kind === 'permission') {
+    return `<span class="compose-buttons"><a class="button secondary${size}" href="${esc(sessionHash({ id: n.session, project: n.project }))}">${esc(t('See'))}</a><button type="button" class="button${size}" data-needs-session="${esc(n.session)}" data-request="${esc(n.id)}">${esc(t('Allow'))}</button></span>`;
+  }
+  return `<button type="button" class="button${size}" ${n.session ? `data-needs-session="${esc(n.session)}"` : `data-needs-done="${esc(n.run)}"`} data-request="${esc(n.id)}">${esc(t('Mark as done'))}</button>`;
+}
+
 function drawAlerts() {
   const list = online ? state.alerts ?? [] : [];
   const needs = (online ? state.needs ?? [] : []).map(n => `
@@ -474,7 +487,7 @@ function drawAlerts() {
       <div class="needs-text"><span class="needs-label">${esc(t('Needs you'))}</span>${esc(t('{task}: {what}', { task: n.title, what: n.what }))}
         <span class="hint">${esc([n.agent ? agentName(n.agent, n.project) : '', projectName(n.project), relative(n.at)].filter(Boolean).join(' · '))}${n.url ? ` · <a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${n.openError ? ` · ${esc(n.openError)}` : ''}</span>
       </div>
-      <button type="button" class="button" ${n.session ? `data-needs-session="${esc(n.session)}"` : `data-needs-done="${esc(n.run)}"`} data-request="${esc(n.id)}">${esc(t('Mark as done'))}</button>
+      ${needsButtons(n, '')}
     </div>`).join('');
   const html = needs + list.map(a => `<a class="alert" href="#${esc(a.view ?? 'manager')}">${stateHtml([a.text, a.level === 'critical' ? 'error' : 'warn'])}</a>`).join('');
   draw('#alerts', html, html);
@@ -823,6 +836,11 @@ function drawOperations() {
 
 function sessionState(x) {
   if (x.status === 'login') return [t('Waiting for you to sign in'), 'warn'];
+  if (x.mode === 'app') {
+    return {
+      working: [t('Working'), 'info'], permission: [t('Asks your permission'), 'warn'], waiting: [t('Your turn'), 'ok'], ended: [t('Ended'), 'neutral'],
+    }[x.phase] ?? [t('Open'), 'ok'];
+  }
   if (x.alive) return [t('Open'), 'ok'];
   if (x.status === 'starting' || x.status === 'open') return [t('Opening…'), 'info'];
   return [t('Ended'), 'neutral'];
@@ -830,15 +848,14 @@ function sessionState(x) {
 
 const sessionWhere = x => (x.project ? projectName(x.project) : x.folder ?? x.cwd ?? '');
 
-/** The sessions open (process alive, memory, since when, End) and the profiles, each with its Open button. */
-/** The sessions open, as a table (or a line saying there is none). */
+/** The sessions open, as a table (or a line saying there is none): in the app (with its conversation) or in a window. */
 function sessionTable(open) {
   const rows = open.map(x => `<tr>
-      <td><span class="primary">${esc(x.name)}</span><span class="secondary">${esc([toolName(x.tool), sessionWhere(x), x.missing?.length ? t('not in the prompt builder: {list}', { list: x.missing.join(', ') }) : ''].filter(Boolean).join(' · '))}</span></td>
+      <td><span class="primary">${x.mode === 'app' ? `<a href="${esc(sessionHash(x))}">${esc(x.name)}</a>` : esc(x.name)}</span><span class="secondary">${esc([toolName(x.tool), x.mode === 'app' ? t('in the app') : t('in a window'), sessionWhere(x), x.missing?.length ? t('not in the prompt builder: {list}', { list: x.missing.join(', ') }) : ''].filter(Boolean).join(' · '))}</span></td>
       <td>${stateHtml(sessionState(x))}</td>
       <td class="num">${x.status === 'login' ? '—' : ticking(x.started)}</td>
-      <td class="num">${x.alive ? bytes(x.ram) : '—'}</td>
-      <td class="row-actions"><button type="button" class="button danger small" data-session-end="${esc(x.id)}">${esc(x.status === 'login' ? t('Cancel') : t('End'))}</button></td>
+      <td class="num">${x.ram ? bytes(x.ram) : '—'}</td>
+      <td class="row-actions">${x.mode === 'app' ? `<a class="button secondary small" href="${esc(sessionHash(x))}">${esc(t('Conversation'))}</a> ` : ''}<button type="button" class="button danger small" data-session-end="${esc(x.id)}">${esc(x.status === 'login' ? t('Cancel') : t('End'))}</button></td>
     </tr>`);
   return rows.length
     ? `<table class="table"><thead><tr><th>${esc(t('Session'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Open for'))}</th><th>${esc(t('Memory'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
@@ -857,11 +874,218 @@ function drawSessions() {
   const profiles = s.profiles.filter(p => !p.auto);
   const html = `<div class="label" style="margin-top:24px">${esc(t('Live sessions'))}</div>
     <div class="panel sessions">
-      <p class="hint">${esc(t('A conversation with Claude Code or Codex in a window of its own, for work you do together, while the crew works in the background. It starts with the blocks of the prompt builder its profile names.'))}</p>
+      <p class="hint">${esc(t('A conversation with Claude Code or Codex here in the app, for work you do together, while the crew works in the background. It starts with the blocks of the prompt builder its profile names.'))}</p>
       ${sessionTable(s.open)}
       ${profiles.length ? `<div class="session-profiles">${profileCards(profiles)}</div>` : `<p class="hint">${esc(t('No session profiles yet: add them under "sessions" in the settings (see the README).'))}</p>`}
     </div>`;
-  draw('#op-sessions', JSON.stringify([s.open.map(x => [x.id, x.status, x.alive, Math.round(x.ram / 1048576), x.started]), profiles]), html);
+  draw('#op-sessions', JSON.stringify([s.open.map(x => [x.id, x.status, x.phase, x.alive, Math.round(x.ram / 1048576), x.started]), profiles]), html);
+}
+
+// ---------- A live session's conversation, in the app ----------
+
+// The conversation shown: its session, its history (read in pieces, from "next" on) and the timer that follows it.
+const liveChat = { id: null, items: [], next: 0, data: null, timer: null, loading: false, scrolled: false, firstOpen: false };
+
+const sessionHash = x => (x.project && state?.projects.some(p => p.id === x.project) ? `#project/${encodeURIComponent(x.project)}/live/${encodeURIComponent(x.id)}` : `#session/${encodeURIComponent(x.id)}`);
+const allSessions = () => [...(state?.sessions?.open ?? []), ...(state?.sessions?.recent ?? [])];
+/** A project's sessions in the app: those open first, then the latest ended ones. */
+const liveSessionsOf = id => allSessions().filter(x => x.project === id && x.mode === 'app');
+
+/** The conversation lives in a project's Live tab or in the session's own view: it is moved to where it is shown. */
+function placeLive(home) {
+  const body = $('#live-body');
+  if (body.parentElement !== home) home.append(body);
+  body.hidden = false;
+}
+
+function stopLive() {
+  clearInterval(liveChat.timer);
+  Object.assign(liveChat, { id: null, items: [], next: 0, data: null, timer: null, scrolled: false, firstOpen: false });
+  $('#live-body').hidden = true;
+}
+
+/** Shows a session's conversation and follows it every 1.5 seconds. */
+function openLive(id) {
+  if (liveChat.id !== id) {
+    clearInterval(liveChat.timer);
+    Object.assign(liveChat, { id, items: [], next: 0, data: null, scrolled: false, firstOpen: false });
+    for (const part of ['#live-head', '#live-feed', '#live-asks', '#live-queue']) delete signatures[part];
+    $('#live-text').value = '';
+    liveChat.timer = setInterval(pollLive, 1500);
+    pollLive();
+  }
+  drawLive();
+}
+
+async function pollLive() {
+  const id = liveChat.id;
+  if (!id || liveChat.loading) return;
+  liveChat.loading = true;
+  try {
+    const data = await api(`/api/session/${encodeURIComponent(id)}${liveChat.data ? `?from=${liveChat.next}` : ''}`);
+    if (liveChat.id !== id) return;
+    liveChat.items = [...liveChat.items, ...data.history.items].slice(-600);
+    liveChat.next = data.history.next;
+    liveChat.data = data;
+    drawLive();
+  } catch (error) {
+    if (liveChat.id === id) liveChat.data = { error: error.message };
+    drawLive();
+  } finally {
+    liveChat.loading = false;
+  }
+}
+
+/** A session's phase, in words, for the line above the conversation. */
+function livePhaseLine(x) {
+  if (x.status === 'login') return t('Sign in to Codex ("codex login" in a terminal): the session starts by itself afterwards.');
+  return {
+    working: t('The agent is working. Your messages wait in the queue and go when it finishes this turn.'),
+    permission: t('The agent asks your permission for something: see below.'),
+    waiting: t('Your turn: the agent waits for your message.'),
+    ended: x.resumable ? t('Ended. Resume, or simply write: it carries on in the same conversation.') : t('Ended.'),
+  }[x.phase] ?? '';
+}
+
+function liveFeedHtml(x) {
+  const agent = toolName(x.tool);
+  let html = '';
+  let actions = [];
+  const flush = () => {
+    if (actions.length) html += `<div class="live-actions">${actions.join('')}</div>`;
+    actions = [];
+  };
+  for (const e of liveChat.items) {
+    if (e.kind === 'action') {
+      actions.push(`<div class="live-action${e.failed ? ' failed' : ''}"><time>${esc(clockTime(e.at))}</time><span>${esc(e.text)}</span></div>`);
+      continue;
+    }
+    flush();
+    if (e.kind === 'owner' && e.first) {
+      html += `<details class="msg you first" data-live-first${liveChat.firstOpen ? ' open' : ''}><summary class="msg-head"><span class="msg-author">${esc(t('You'))}</span><span class="msg-meta">${esc(`${clockTime(e.at)} · ${t('first message, {count} characters', { count: e.text.length })}`)}</span></summary><div class="msg-body">${md(e.text)}</div></details>`;
+    } else if (e.kind === 'owner') {
+      html += `<div class="msg you"><div class="msg-head"><span class="msg-author">${esc(t('You'))}</span><span class="msg-meta">${esc(clockTime(e.sent ?? e.at))}</span></div><div class="msg-body">${md(e.text)}</div></div>`;
+    } else if (e.kind === 'say') {
+      html += `<div class="msg manager"><div class="msg-head"><span class="msg-author">${esc(agent)}</span><span class="msg-meta">${esc(clockTime(e.at))}</span></div><div class="msg-body">${md(e.text)}</div></div>`;
+    } else if (e.kind === 'permission') {
+      const said = { open: t('The agent asked your permission: {what}', { what: e.text }), done: t('You allowed: {what}', { what: e.text }), refused: t('You refused: {what}', { what: e.text }) }[e.status] ?? e.text;
+      html += `<div class="msg system ask">${esc(said)}</div>`;
+    } else {
+      html += `<div class="msg system${e.error ? ' error' : ''}">${esc(e.text)}</div>`;
+    }
+  }
+  flush();
+  if (!liveChat.items.length) html += `<div class="msg system">${esc(liveChat.data ? t('No messages yet. Write below to start.') : t('Loading…'))}</div>`;
+  if (x.phase === 'working') {
+    const last = x.turn?.last;
+    html += `<div class="msg manager typing"><div class="msg-head"><span class="msg-author">${esc(agent)}</span><span class="msg-meta">${esc(t('working…'))} · ${ticking(x.turn?.since)}</span></div><div class="live-last"><span class="label">${esc(t('Last action'))}</span><time>${esc(last ? clockTime(last.at) : '')}</time><span class="text">${esc(last ? last.text : t('No action yet: reading your message.'))}</span></div></div>`;
+  }
+  return html;
+}
+
+function drawLive() {
+  const d = liveChat.data;
+  if (!liveChat.id) return;
+  if (d?.error) {
+    const html = `<div class="empty">${esc(d.error)}</div>`;
+    draw('#live-head', html, html);
+    return;
+  }
+  // The session from the app's state (memory, from the latest reading) or, until it has it, from the conversation.
+  const x = { ...(d?.session ?? {}), ...(allSessions().find(s => s.id === liveChat.id) ?? {}), ...(d?.session ? { phase: d.session.phase, turn: d.session.turn } : {}) };
+  if (!x.id) return;
+  const ended = x.status === 'ended';
+  const actions = [
+    ended && x.resumable ? `<button type="button" class="button small" data-live-resume="${esc(x.id)}">${esc(t('Resume'))}</button>` : '',
+    !ended ? `<button type="button" class="button danger small" data-session-end="${esc(x.id)}">${esc(t('End'))}</button>` : '',
+  ].join('');
+  const head = `<div class="live-title"><span class="primary">${esc(x.name)}</span><span class="secondary">${esc([toolName(x.tool), sessionWhere(x), x.cwd ?? '', x.model ?? ''].filter(Boolean).join(' · '))}</span></div>
+    <div class="live-facts">${stateHtml(sessionState(x))}<span>${esc(t('Memory'))} <span class="num">${x.ram ? bytes(x.ram) : '—'}</span></span><span>${esc(t('Open for'))} ${ended ? '—' : ticking(x.started)}</span><span>${esc(t('{count} turn(s)', { count: x.turns ?? 0 }))}</span><span class="compose-buttons">${actions}</span></div>
+    <div class="live-phase${['permission', 'login'].includes(x.phase) || x.status === 'login' ? ' warn' : ''}">${esc(livePhaseLine(x))}</div>`;
+  draw('#live-head', JSON.stringify([x.id, x.status, x.phase, x.ram, x.turns, x.resumable, language()]), head);
+
+  const box = $('#live-feed');
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  if (draw('#live-feed', JSON.stringify([x.id, liveChat.next, liveChat.items.length, x.phase, x.turn?.since, x.turn?.last?.at, !!d, language()]), liveFeedHtml(x))) {
+    if (atBottom || !liveChat.scrolled) {
+      box.scrollTop = box.scrollHeight;
+      liveChat.scrolled = !!d;
+    }
+  }
+
+  // What the agent asks of you: each permission, with Allow and Refuse.
+  const asks = (d?.requests ?? []).filter(r => r.kind === 'permission').map(r => `<div class="needs live-ask" role="alert">
+      <div class="needs-text"><span class="needs-label">${esc(t('Needs you'))}</span>${esc(t('The agent asks to: {what}', { what: r.what }))}<span class="hint">${esc(t('Allowed, it is told to go ahead; the permission lasts for this session.'))}</span></div>
+      <span class="compose-buttons"><button type="button" class="button secondary small" data-live-refuse="${esc(r.id)}">${esc(t('Refuse'))}</button><button type="button" class="button small" data-live-allow="${esc(r.id)}">${esc(t('Allow'))}</button></span>
+    </div>`).join('');
+  draw('#live-asks', JSON.stringify([x.id, d?.requests ?? [], language()]), asks);
+
+  const queue = d?.queue ?? [];
+  $('#live-queue').hidden = !queue.length;
+  const queued = `<div class="chat-queue-head"><span class="label">${esc(t('In the queue'))}</span><span class="hint">${esc(t('They go together, in order, when the agent finishes this turn.'))}</span></div>${queue.map(m => `<div class="queued-msg">
+      <div class="msg-head"><span class="tag">${esc(m.first ? t('first message') : t('queued'))}</span><span class="msg-meta">${esc(clockTime(m.at))}</span>
+        ${m.first ? '' : `<span class="queued-actions"><button type="button" class="button danger small" data-live-unqueue="${esc(m.id)}">${esc(t('Remove'))}</button></span>`}</div>
+      <div class="msg-body">${m.first ? esc(t('{count} characters', { count: m.text.length })) : md(m.text)}</div></div>`).join('')}`;
+  draw('#live-queue', JSON.stringify([x.id, queue, language()]), queue.length ? queued : '');
+
+  const working = x.phase === 'working';
+  $('#live-send').disabled = !online;
+  $('#live-send').textContent = working || queue.length || x.status === 'login' ? t('Add to the queue') : ended ? t('Resume and send') : t('Send');
+  $('#live-interrupt').hidden = !online || !working;
+  $('#live-hint').textContent = working ? t('Interrupt stops the agent now; the conversation goes on.') : '';
+}
+
+/** A project's Live tab: its sessions in the app, a new one with each tool, and the conversation of the one chosen. */
+function drawProjectLive(id) {
+  const sessions = liveSessionsOf(id);
+  const open = sessions.filter(x => x.status !== 'ended');
+  const earlier = sessions.filter(x => x.status === 'ended').slice(0, 4);
+  const chosen = sessions.find(x => x.id === pageLiveSession()) ?? open[0] ?? null;
+  const profiles = (state.sessions?.profiles ?? []).filter(p => p.project === id && !open.some(x => x.profile === p.id));
+  const noClone = noCloneAttr(projectPage.data?.id === id ? projectPage.data : null);
+  const card = x => `<a class="live-card${chosen?.id === x.id ? ' active' : ''}" href="${esc(sessionHash(x))}">
+      <span class="primary">${esc(toolName(x.tool))}</span>${stateHtml(sessionState(x))}
+      <span class="hint">${esc([x.status === 'ended' ? t('ended {when}', { when: relative(x.ended) }) : t('open since {time}', { time: clockTime(x.started) }), x.ram ? bytes(x.ram) : ''].filter(Boolean).join(' · '))}</span></a>`;
+  const html = `<div class="live-list">
+      ${open.map(card).join('')}
+      ${profiles.map(p => `<button type="button" class="button secondary" data-session-open="${esc(p.id)}"${noClone} title="${esc(p.name)}">${esc(t('New session: {tool}', { tool: toolName(p.tool) }))}</button>`).join('')}
+    </div>
+    ${earlier.length ? `<div class="live-earlier"><span class="label">${esc(t('Earlier'))}</span>${earlier.map(card).join('')}</div>` : ''}
+    ${sessions.length ? '' : `<p class="hint">${esc(t("A conversation with Claude Code or Codex here in the app, in your clone of the project: you see what it says and each action (commands, files read and edited) as it happens. It starts with the project's blocks of the prompt builder."))}</p>`}`;
+  draw('#project-live-list', JSON.stringify([id, sessions.map(x => [x.id, x.status, x.phase, Math.round(x.ram / 1048576)]), chosen?.id, profiles.map(p => p.id), !!noClone, language()]), html);
+  if (!chosen) {
+    stopLive();
+    return;
+  }
+  placeLive($('#project-live'));
+  openLive(chosen.id);
+}
+
+/** A session's own view ("#session/<id>"), for the sessions outside the projects (a library folder, a folder of their own). */
+function drawSessionPage() {
+  const id = pageSession();
+  const x = allSessions().find(s => s.id === id);
+  const html = `<div class="view-header"><div><h1>${esc(x?.name ?? t('Live session'))}</h1><p>${esc(t('A conversation with the agent, here in the app.'))} <a href="#operations">${esc(t('All the sessions, in Operations'))}</a></p></div></div>`;
+  draw('#session-page', JSON.stringify([id, x?.name, language()]), html);
+  placeLive($('#view-session'));
+  openLive(id);
+}
+
+async function sendLive() {
+  const text = $('#live-text').value;
+  if (!text.trim() || !liveChat.id) return;
+  $('#live-send').disabled = true;
+  try {
+    const m = await api('/api/session/say', { id: liveChat.id, text });
+    $('#live-text').value = '';
+    if (m.queued) toast(t('In the queue: it goes when the agent finishes this turn.'));
+    await pollLive();
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    $('#live-send').disabled = !online;
+  }
 }
 
 // ---------- Missions ----------
@@ -1161,9 +1385,9 @@ async function refreshProjectPage() {
   if (pageProject() === id && state) drawProjectPage();
 }
 
-const PAGE_PARTS = ['#project-title', '#project-more', '#project-status', '#project-actions', '#project-needs', '#project-tabs', '#project-summary', '#project-facts', '#project-team', '#project-runs', '#project-history', '#project-planning', '#project-computer', '#project-sessions'];
+const PAGE_PARTS = ['#project-title', '#project-more', '#project-status', '#project-actions', '#project-needs', '#project-tabs', '#project-summary', '#project-facts', '#project-team', '#project-runs', '#project-history', '#project-planning', '#project-computer', '#project-sessions', '#project-live-list'];
 // Each tab and the part of the page it shows.
-const TAB_PARTS = { overview: '#project-overview', crew: '#project-crew', tasks: '#project-tasks', planning: '#project-planning', context: '#project-context', builder: '#project-builder' };
+const TAB_PARTS = { overview: '#project-overview', live: '#project-live', crew: '#project-crew', tasks: '#project-tasks', planning: '#project-planning', context: '#project-context', builder: '#project-builder' };
 
 const projectHash = (id, tab = 'overview') => `#project/${encodeURIComponent(id)}${tab === 'overview' ? '' : `/${tab}`}`;
 const projectOpenItems = (id, p) => planItemsNow().filter(i => openItem(i) && (i.project === id || i.project === p?.name));
@@ -1191,8 +1415,9 @@ function drawProjectPage() {
   const tab = pageTab() === 'builder' && !builderOn ? 'overview' : pageTab();
   const count = n => (n ? ` <span class="counter">${n}</span>` : '');
   const working = going().filter(a => a.project === id).length + (online ? queueOrder().filter(r => r.project === id).length : 0);
+  const live = liveSessionsOf(id).filter(x => x.status !== 'ended');
   const tabs = [
-    ['overview', t('At a glance')], ['crew', t('Crew')], ['tasks', t('Tasks and history'), working], ['planning', t('Planning'), projectOpenItems(id, p).length],
+    ['overview', t('At a glance')], ['live', t('Live'), live.length], ['crew', t('Crew')], ['tasks', t('Tasks and history'), working], ['planning', t('Planning'), projectOpenItems(id, p).length],
     ['context', t('Context')], ...(builderOn ? [['builder', t('Builder')]] : []),
   ].map(([key, label, n]) => `<a href="${projectHash(id, key)}" class="tab${key === tab ? ' active' : ''}"${key === tab ? ' aria-current="page"' : ''}>${esc(label)}${count(n)}</a>`).join('');
   draw('#project-tabs', tabs, tabs);
@@ -1204,6 +1429,8 @@ function drawProjectPage() {
     placeBuilder(true);
     if (builder.project !== id || !builder.data) openBuilder(id);
     else drawBuilderTop();
+  } else if (tab === 'live') {
+    drawProjectLive(id);
   } else if (tab === 'crew') {
     drawProjectTeam(id);
     drawProjectSessions(id);
@@ -1261,15 +1488,20 @@ function drawProjectMore(id, info) {
   const profiles = (state.sessions?.profiles ?? []).filter(x => x.project === id);
   const noClone = noCloneAttr(info);
   const item = (attrs, label) => `<button type="button" class="menu-item" ${attrs}>${esc(label)}</button>`;
-  const session = tool => {
+  const session = (tool, window = false) => {
     const profile = profiles.find(x => x.tool === tool);
-    return profile ? item(`data-session-open="${esc(profile.id)}"${noClone}`, t('Live session: {tool}', { tool: toolName(tool) })) : '';
+    if (!profile) return '';
+    return window
+      ? item(`data-session-open="${esc(profile.id)}" data-window="1"${noClone}`, t('Open in an external window: {tool}', { tool: toolName(tool) }))
+      : item(`data-session-open="${esc(profile.id)}"${noClone}`, t('Live session: {tool}', { tool: toolName(tool) }));
   };
   const items = [
     item(`data-project-open="folder"${noClone}`, t('Open folder')),
     info?.vscode ? item(`data-project-open="vscode"${noClone}`, t('Open in VS Code')) : '',
     session('claude'),
     session('codex'),
+    session('claude', true),
+    session('codex', true),
   ].join('');
   const html = `<details class="menu"><summary class="button secondary">${esc(t('More'))}</summary><div class="menu-list">${items}</div></details>`;
   draw('#project-more', html, html);
@@ -1282,7 +1514,7 @@ function drawProjectNeeds(id, p) {
   const rows = [
     ...needs.map(n => `<div class="project-need">
       <div><span class="primary">${esc(n.what)}</span><span class="hint">${esc(n.title)}${n.url ? ` · <a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}</span></div>
-      <button type="button" class="button small" ${n.session ? `data-needs-session="${esc(n.session)}"` : `data-needs-done="${esc(n.run)}"`} data-request="${esc(n.id)}">${esc(t('Mark as done'))}</button></div>`),
+      ${needsButtons(n, ' small')}</div>`),
     ...items.map(i => `<div class="project-need">
       <div><span class="primary">#${i.id} ${esc(i.title)}</span><span class="hint">${esc(i.status === 'triaged' ? t('A proposal waiting for your decision') : t('On the board, waiting for you'))}</span></div>
       <a class="button secondary small" href="${i.status === 'triaged' ? '#planning' : projectHash(id, 'planning')}">${esc(i.status === 'triaged' ? t('Decide') : t('See'))}</a></div>`),
@@ -1418,11 +1650,11 @@ function drawProjectSessions(id) {
   const profiles = s.profiles.filter(x => x.project === id);
   const html = `<h2 class="section-title">${esc(t('Live sessions'))}</h2>
     <div class="panel sessions">
-      <p class="hint">${esc(t("Claude Code or Codex in a window of its own, in your clone of the project, starting with the project's block of the prompt builder and the environment."))}</p>
+      <p class="hint">${esc(t("Claude Code or Codex in your clone of the project, starting with the project's block of the prompt builder and the environment. The conversation is in the Live tab."))}</p>
       ${sessionTable(open)}
       ${profiles.length ? `<div class="session-profiles">${profileCards(profiles)}</div>` : ''}
     </div>`;
-  draw('#project-sessions', JSON.stringify([open.map(x => [x.id, x.status, x.alive, Math.round(x.ram / 1048576), x.started]), profiles]), html);
+  draw('#project-sessions', JSON.stringify([open.map(x => [x.id, x.status, x.phase, x.alive, Math.round(x.ram / 1048576), x.started]), profiles]), html);
 }
 
 // ---------- A project's Context tab ----------
@@ -2172,8 +2404,9 @@ $('#builder-session').addEventListener('click', async event => {
   button.disabled = true;
   try {
     const session = await api('/api/prompt-builder/session', { project: builder.project, tool: $('#builder-tool').value, prompt: $('#builder-text').value });
-    toast(session.status === 'login' ? t('Codex is not signed in: see the request at the top.') : t('Session opened in a window of its own.'));
-    refresh();
+    toast(session.status === 'login' ? t('Codex is not signed in: see the request at the top.') : t('Session opened here in the app.'));
+    await refresh();
+    location.hash = sessionHash(session);
   } catch (error) {
     toast(error.message);
   }
@@ -2810,6 +3043,7 @@ async function refresh() {
     if (builder.project !== builderProjectOf() || !builder.data) openBuilder(builderProjectOf());
     else drawBuilderTop();
   }
+  if (currentView() === 'session') drawSessionPage();
   tickClocks();
   if (currentView() === 'log') refreshDetail();
 }
@@ -2917,6 +3151,53 @@ $('#message').addEventListener('keydown', event => {
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
     sendMessage($('#message').value);
+  }
+});
+
+$('#live-form').addEventListener('submit', event => {
+  event.preventDefault();
+  sendLive();
+});
+$('#live-text').addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    sendLive();
+  }
+});
+$('#live-feed').addEventListener('toggle', event => {
+  if (event.target.matches?.('[data-live-first]')) liveChat.firstOpen = event.target.open;
+}, true);
+$('#live-interrupt').addEventListener('click', async () => {
+  $('#live-interrupt').disabled = true;
+  try {
+    await api('/api/session/interrupt', { id: liveChat.id });
+    await pollLive();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    $('#live-interrupt').disabled = false;
+  }
+});
+$('#live-body').addEventListener('click', async event => {
+  const target = event.target.closest('[data-live-resume],[data-live-allow],[data-live-refuse],[data-live-unqueue]');
+  if (!target || !liveChat.id) return;
+  target.disabled = true;
+  try {
+    if (target.dataset.liveResume) {
+      await api('/api/session/resume', { id: liveChat.id });
+      toast(t('Session resumed: write to carry on.'));
+    } else if (target.dataset.liveAllow || target.dataset.liveRefuse) {
+      const allow = !!target.dataset.liveAllow;
+      await api('/api/session/permission', { id: liveChat.id, request: target.dataset.liveAllow ?? target.dataset.liveRefuse, allow });
+      toast(allow ? t('Allowed: the agent is told to go ahead.') : t('Refused. Tell the agent what to do instead, if you like.'));
+    } else if (target.dataset.liveUnqueue) {
+      await api('/api/session/queue/remove', { id: liveChat.id, item: target.dataset.liveUnqueue });
+    }
+    await pollLive();
+    refresh();
+  } catch (error) {
+    toast(error.message);
+    target.disabled = false;
   }
 });
 
@@ -3083,18 +3364,26 @@ document.addEventListener('click', async event => {
       toast(t('Marked as done. The crew goes on.'));
       if (selectedRun === target.dataset.needsDone) await refreshDetail(true);
     } else if (target.dataset.needsSession) {
+      const permission = (state.needs ?? []).some(n => n.id === target.dataset.request && n.kind === 'permission');
       await api('/api/needs-you/done', { session: target.dataset.needsSession, id: target.dataset.request });
-      toast(t('Marked as done. The session opens now.'));
+      toast(permission ? t('Allowed: the agent is told to go ahead.') : t('Marked as done. The session opens now.'));
     } else if (target.dataset.sessionOpen) {
       target.disabled = true;
-      const session = await api('/api/session', { profile: target.dataset.sessionOpen });
-      toast(session.status === 'login' ? t('Codex is not signed in: see the request at the top.') : t('Session opened in a window of its own.'));
+      const window = !!target.dataset.window;
+      const session = await api('/api/session', { profile: target.dataset.sessionOpen, window });
+      if (session.status === 'login') toast(t('Codex is not signed in: see the request at the top.'));
+      else toast(window ? t('Session opened in a window of its own.') : session.existing ? t('This session was already open: here it is.') : t('Session opened here in the app.'));
+      if (!window) location.hash = sessionHash(session);
     } else if (target.dataset.sessionEnd) {
-      const x = state.sessions?.open.find(o => o.id === target.dataset.sessionEnd);
-      const ok = await confirmDialog(t('End session'), t('The window of "{name}" closes, and anything the agent is doing stops. The conversation itself stays in the history of the tool.', { name: x?.name ?? '' }), t('End'));
+      const x = allSessions().find(o => o.id === target.dataset.sessionEnd);
+      const text = x?.mode === 'app'
+        ? t('"{name}" ends, and anything the agent is doing stops. Its history stays here, and Resume carries on in the same conversation.', { name: x?.name ?? '' })
+        : t('The window of "{name}" closes, and anything the agent is doing stops. The conversation itself stays in the history of the tool.', { name: x?.name ?? '' });
+      const ok = await confirmDialog(t('End session'), text, t('End'));
       if (!ok) return;
       await api('/api/session/end', { id: target.dataset.sessionEnd });
       toast(t('Session ended.'));
+      if (liveChat.id === target.dataset.sessionEnd) pollLive();
     } else if (target.dataset.context) {
       const { text } = await api(`/api/run/${encodeURIComponent(target.dataset.context)}/context/${target.dataset.step}`);
       $('#context-text').textContent = text;

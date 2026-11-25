@@ -190,8 +190,7 @@ export function runClaude(options) {
       return;
     }
     if (event.type === 'system' && event.subtype === 'init') {
-      if (event.model) [mainModel, context.window] = [event.model, contextWindow(event.model)];
-      const { tools: loaded, mcp_servers, skills, plugins, agents, memory_paths, additional_directories } = event;
+      if (event.model) [mainModel, context.window] = [event.model, contextWindow(event.model)];      const { tools: loaded, mcp_servers, skills, plugins, agents, memory_paths, additional_directories } = event;
       onEvent({ type: 'start', model: event.model, session: event.session_id, init: { tools: loaded, mcp_servers, skills, plugins, agents, memory_paths, additional_directories } });
     } else if (event.type === 'system' && event.subtype === 'compact_boundary') {
       context.compactions++;
@@ -254,6 +253,8 @@ export function runClaude(options) {
         context: { ...context },
         subagents: final?.subagent_stats?.spawned ?? 0,
         end: final?.subtype ?? null,
+        // The tool uses refused for lack of permission: { tool_name, tool_use_id, tool_input }.
+        denials: Array.isArray(final?.permission_denials) ? final.permission_denials : [],
       };
       if (cancelReason) result.error = cancelReason;
       else if (interrupted) result.error = null;
