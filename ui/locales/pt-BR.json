@@ -1381,6 +1381,7 @@
   "Answer with approve, hold, ask-owner or reject.": "Responda com approve, hold, ask-owner ou reject.",
   "Request {id} not found.": "Pedido {id} não encontrado.",
   "Request {id} was already answered: {status}.": "O pedido {id} já foi respondido: {status}.",
+  "Request {id} waits for the owner in Decisions.": "O pedido {id} espera a decisão do dono em Decisões.",
   "Say why, with --note \"<one line>\".": "Diga o motivo, com --note \"<uma linha>\".",
   "Authorize": "Autorizar",
   "Wait": "Esperar",

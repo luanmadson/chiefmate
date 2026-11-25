@@ -1833,6 +1833,13 @@ try {
   const q = asked.question;
   expect(asked.request.status === 'owner' && q.options.join('|') === [t('Authorize'), t('Wait'), t('Refuse')].join('|') && q.recommend === t('Wait') && q.request === r1.id && q.project === 'gamma',
     `ask-owner did not become a card with Authorize, Wait and Refuse: ${JSON.stringify(q)}`);
+  let overrode = false;
+  try {
+    await charge.answerRequest(r1.id, 'approve', {}, made);
+  } catch {
+    overrode = true;
+  }
+  expect(overrode, "the manager answered a request that waits for the owner's card");
   const card = { id: `question:${q.id}`, kind: 'question', question: q.id, label: 'Question', title: q.question };
   const decided = await decide({ card: card.id, action: 'answer', option: t('Refuse') }, [card]);
   const after = charge.readRequests().find(x => x.id === r1.id);

@@ -146,6 +146,8 @@ export async function answerRequest(id, action, { note = '', by = 'manager', rec
   const r = list.find(x => x.id === Number(String(id).replace(/^#/, '')));
   if (!r) throw new Error(t('Request {id} not found.', { id }));
   if (FINAL.includes(r.status)) throw new Error(t('Request {id} was already answered: {status}.', { id: r.id, status: r.status }));
+  // Taken to the owner: their card decides it, not another answer of the manager's.
+  if (r.status === 'owner' && by !== 'owner') throw new Error(t('Request {id} waits for the owner in Decisions.', { id: r.id }));
   const why = clip(note, 600);
   if (!why && by === 'manager' && ['hold', 'reject', 'ask-owner'].includes(action)) throw new Error(t('Say why, with --note "<one line>".'));
   const owner = config.owner || 'the owner';
