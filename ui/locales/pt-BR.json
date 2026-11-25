@@ -1094,5 +1094,13 @@
   "Only {percent}% of the memory is free.": "Só {percent}% da memória está livre.",
   "{count} orphan process(es) left by the crew.": "{count} processo(s) órfão(s) deixado(s) pela equipe.",
   "Chiefmate still does not answer.": "O Chiefmate continua sem responder.",
-  "The rescuer could not act: {error}": "O Socorrista não conseguiu agir: {error}"
+  "The rescuer could not act: {error}": "O Socorrista não conseguiu agir: {error}",
+  "away mode on": "modo soneca ligado",
+  "back from away mode": "volta do modo soneca",
+  "Away mode": "Modo soneca",
+  "Away since {time}": "Soneca desde {time}",
+  "Away mode is on: notices that can wait are kept for you ({count} so far). Click when you are back: the manager writes you a summary.": "Modo soneca ligado: os avisos que podem esperar ficam guardados para você ({count} até agora). Clique quando voltar: o gerente escreve um resumo.",
+  "Stepping out or going to sleep? The manager is told, the work goes on alone, and notices that can wait come as a summary when you are back.": "Vai sair ou dormir? O gerente fica sabendo, o trabalho segue sozinho e os avisos que podem esperar chegam num resumo quando você voltar.",
+  "Away mode on: the manager knows, and notices that can wait are kept for a summary.": "Modo soneca ligado: o gerente já sabe, e os avisos que podem esperar ficam para um resumo.",
+  "Welcome back: the manager is writing the summary of the time away.": "Que bom ter você de volta: o gerente está escrevendo o resumo do tempo fora."
 }

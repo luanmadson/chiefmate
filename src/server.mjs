@@ -13,7 +13,7 @@ import { LEAD, memoryInfo } from './leads.mjs';
 import { computer, processes, stoppable, stopProject } from './machine.mjs';
 import { chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
 import { mergeRun, previewMerge } from './merge.mjs';
-import { reportEvent } from './news.mjs';
+import { awayInfo, reportEvent, setAway } from './news.mjs';
 import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { changePlan, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
@@ -330,6 +330,8 @@ function buildState() {
       messages: conversation.slice(-80), responding: chat.responding, interrupting: chat.interrupting, since: chat.since, partial: chat.partial,
       actions: chat.actions.slice(-12), lastAction: chat.actions.at(-1) ?? null, pending: readPending(), context: managerContext(),
     },
+    // The away mode (src/news.mjs): { since, held } while the owner is away, else null.
+    away: awayInfo(),
     notifications: readNotifications().slice(-8).reverse(),
   };
 }
@@ -570,6 +572,9 @@ export function startServer() {
           return reply(res, 200, await updateNow({ interruptManager: !!body.interruptManager }));
         case '/api/update-check':
           return reply(res, 200, await checkNow());
+        case '/api/away':
+          // The owner stepped out or is back: the manager is told at once (src/news.mjs).
+          return reply(res, 200, { away: setAway(!!body.on) });
         case '/api/manager/interrupt':
           return reply(res, 200, { interrupted: interruptManager() });
         case '/api/new-conversation':
