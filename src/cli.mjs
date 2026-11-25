@@ -167,6 +167,9 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 the pull request (or the branch delivered locally), the checks and the
                                                 review's verdict; with --yes, Chiefmate merges it (a pull request on
                                                 GitHub; a local branch into your clone's base branch, nothing pushed)
+  node src/cli.mjs push <folder> <branch>       for the manager: the push the owner allowed on its card (that branch,
+                                                from that folder, once, within 30 minutes; never the main branch, never
+                                                forced). Without the owner's grant it refuses and sends nothing
   node src/cli.mjs close-pr <id> --replaced-by <id> [--yes]
                                                 a run's pull request replaced by a newer run's (same board item, or the
                                                 newer instruction names the old run): shows both; with --yes, closes it
@@ -893,6 +896,26 @@ async function main() {
         return;
       }
       console.log(`Closed: ${c.url}, replaced by ${c.newUrl}. Its branch stays; it can be reopened on GitHub.`);
+      return;
+    }
+    case 'push': {
+      // Only the push the owner allowed the manager on its card (src/decisions.mjs), once: never from a step of a run.
+      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error('The crew never pushes: Chiefmate does that at the end of a run.');
+      const [dir, branch] = words();
+      if (!dir || !branch) throw new Error('Which folder and branch? node src/cli.mjs push <folder> <branch>');
+      const { pushesFile } = await import('./decisions.mjs');
+      const { grantFor, pushFacts, readPushes, samePath, takeGrant } = await import('./guard.mjs');
+      const asked = readPushes(pushesFile()).find(g => g.status === 'allowed' && Date.parse(g.expires) > Date.now() && g.branch === branch && samePath(g.dir, dir));
+      const target = asked && { dir: asked.dir, remote: asked.remote, src: asked.src, branch: asked.branch };
+      // The facts again, now: the remote may point elsewhere since the card, or the branch have become the default one.
+      const facts = target ? pushFacts(target) : null;
+      if (!target || !grantFor([asked], target, facts) || !takeGrant(pushesFile(), target, facts)) {
+        throw new Error(`The owner has not allowed a push of ${branch} from ${dir} now (or it expired, or was used). Try the push itself (git -C <folder> push <remote> <branch>): the owner gets a card to allow it once.`);
+      }
+      const { spawnSync } = await import('node:child_process');
+      const r = spawnSync('git', ['-C', target.dir, 'push', target.remote, `${target.src}:refs/heads/${target.branch}`], { stdio: 'inherit', windowsHide: true });
+      if (r.status !== 0) throw new Error(`The push failed (git exit ${r.status ?? r.error?.message}). The grant was used: try the push again to ask the owner once more.`);
+      console.log(`Pushed ${target.branch} to ${facts.repo}.`);
       return;
     }
     case 'update-check': {

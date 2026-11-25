@@ -10,7 +10,8 @@ import { processes } from './machine.mjs';
 import { autopilotLine } from './autopilot.mjs';
 import { awayInfo, awayLine } from './news.mjs';
 import { computerLine, planLine } from './plan.mjs';
-import { questionsLine } from './decisions.mjs';
+import { pushesFile, pushesLine, pushRequestsFrom, questionsLine } from './decisions.mjs';
+import { PUSH, readPushes } from './guard.mjs';
 import { requestsLine } from './charge.mjs';
 import { planningLine } from './planning.mjs';
 import { radarLine } from './radar.mjs';
@@ -37,10 +38,13 @@ const MANAGER_DIR = path.join(DATA, 'manager');
 const HANDOFF_FILE = path.join(MANAGER_DIR, 'handoff.md');
 const NOTES_FILE = path.join(MANAGER_DIR, 'notes.md');
 const conversationLog = () => path.join(ensureDir(MANAGER_DIR), 'conversation.jsonl');
+// The guard's refusals in the answer under way; once it ends, they move to guard-history.jsonl.
 const guardLog = () => path.join(ensureDir(MANAGER_DIR), 'guard.jsonl');
+const guardHistory = () => path.join(ensureDir(MANAGER_DIR), 'guard-history.jsonl');
 
 // In the conversation the manager works in Chiefmate's own folder: it never commits there, and never pushes (the guard,
-// guard.mjs, also refuses a publication written any other way; each refusal is noted in guard.jsonl).
+// guard.mjs, also refuses a publication written any other way; each refusal is kept in guard-history.jsonl). The one exception
+// is a push the owner allowed once on its card (src/decisions.mjs): while one is allowed, "git push" is left to the guard.
 const CHAT_DISALLOWED = ['Agent', 'WebSearch', 'WebFetch', 'Bash(git commit:*)', ...ALWAYS_DISALLOWED];
 
 // The manager reads every reference library; the copies are refreshed at most every 10 minutes.
@@ -141,6 +145,8 @@ export function situation(libraries = []) {
   lines.push(radarLine(config.owner || 'the owner'));
   const questions = questionsLine();
   if (questions) lines.push(questions);
+  const pushes = pushesLine();
+  if (pushes) lines.push(pushes);
   const requests = requestsLine(config);
   if (requests) lines.push(requests);
   lines.push(autopilotLine(config, usage));
@@ -285,6 +291,9 @@ export function newsMessage(owner, events, alongside = false, away = awayInfo())
   const report = events.some(e => e.kind === 'autopilot_report')
     ? `\n\nFor the autopilot_report event: the daily report of what the autopilot did alone. Tell ${owner} in a few lines, with each item's short title, where it is now and what waits for them (a pull request to approve, a branch to review).`
     : '';
+  const pushed = events.some(e => e.kind === 'push_allowed')
+    ? `\n\nFor the push_allowed events: ${owner} allowed, on its card, a push you tried. Run it now, once, exactly as the event says (the same command, or node src/cli.mjs push), then tell ${owner} in one line whether it went. It counts for that branch only, never for the main branch or a forced push.`
+    : '';
   const watchdog = events.some(e => e.kind === 'watchdog')
     ? `\n\nFor the watchdog events: the watchdog checks Chiefmate from outside every 10 minutes and, when it is stuck, its rescuer acts with a closed list of safe actions. Tell ${owner} in a few lines what was found, what was done and what needs them. Don't restart Chiefmate or stop processes yourself.`
     : '';
@@ -295,7 +304,7 @@ export function newsMessage(owner, events, alongside = false, away = awayInfo())
     : leaving || away
       ? `\n\n${owner} is away (away mode${away ? `, since ${formatDateTime(away.since)}` : ''}): they stepped out or are asleep, and will read this later. The work goes on alone. Do your own part (the triage, the autopilot) without asking ${owner} anything that can wait, and keep what is not urgent for the summary when they are back. ${leaving ? 'For the away event: reply in one or two lines with what goes on alone meanwhile (the runs, the queue, the autopilot), nothing else.' : 'Reply in a line or two.'}`
       : '';
-  return `${head}\n${lines.join('\n')}\n\n${ask}${triage}${idle}${mergeFailed}${report}${watchdog}${absence}`;
+  return `${head}\n${lines.join('\n')}\n\n${ask}${triage}${idle}${mergeFailed}${pushed}${report}${watchdog}${absence}`;
 }
 
 /** The text the manager receives: your message, or the queue in order with the time of each one, and Chiefmate's news. */
@@ -332,6 +341,14 @@ async function answer(items) {
     const libraries = await chatLibraries(config);
     await processes(60_000).catch(() => {}); // the projects running on this computer, for the situation
     const prompt = `<situation>\n${situation(libraries)}\n</situation>\n\n${composeMessage(config.owner, items, state.manager.interrupted)}`;
+    // What the guard refuses in this answer, read when it ends; and whether the owner allowed a push (the guard decides which).
+    // A log left by an answer cut short goes to the history first, with its push requests.
+    try {
+      pushRequestsFrom(guardLog(), guardHistory());
+    } catch (error) {
+      console.error('Push requests:', error.message);
+    }
+    const granted = readPushes(pushesFile()).some(g => g.status === 'allowed' && Date.parse(g.expires) > Date.now());
     const attempt = session => {
       // Interrupted while the situation was being gathered: nothing to stop.
       if (chat.interrupting) return Promise.resolve({ ok: false, canceled: true, text: '', error: t('interrupted by you') });
@@ -343,8 +360,8 @@ async function answer(items) {
         model,
         effort: manager.chat_effort ?? manager.effort,
         tools: manager.tools ?? [],
-        disallowed: CHAT_DISALLOWED,
-        hooks: crewGuard(guardLog()),
+        disallowed: granted ? CHAT_DISALLOWED.filter(r => r !== PUSH) : CHAT_DISALLOWED,
+        hooks: crewGuard(guardLog(), pushesFile()),
         addDirs: libraries.map(l => l.dir),
         // The command line refuses to write to this conversation from inside it.
         env: { CHIEFMATE_MANAGER: '1' },
@@ -407,6 +424,12 @@ async function answer(items) {
       addMessage('system', t('Claude Code compacted this conversation on its own to make room ({count} time(s) so far).', { count: state.manager.context?.compactions ?? compacted }));
     }
   } finally {
+    // A push the guard refused that the owner could allow: a card in Decisions.
+    try {
+      pushRequestsFrom(guardLog(), guardHistory());
+    } catch (error) {
+      console.error('Push requests:', error.message);
+    }
     Object.assign(chat, { responding: false, interrupting: false, partial: '', actions: [], context: null, cancel: null, since: null });
     // The messages sent meanwhile go first; the renewal waits for a quiet moment.
     if (!deliverPending()) setImmediate(() => renewIfFull().catch(error => console.error('Renewal:', error.message)));

@@ -31,7 +31,7 @@ const ago = (iso, span) => iso && Date.now() - Date.parse(iso) <= span;
  * The notices now, most urgent first: { id, level, kind, title, text, view, project, run, at, seen, seenable }.
  * "view" is the app's place that deals with it; a request of a step carries what its buttons need ("I did it", or a question's options).
  */
-export function attentionItems({ config, runs = [], needs = [], usage = {}, machine, items = [], update = {}, questions = [] }) {
+export function attentionItems({ config, runs = [], needs = [], usage = {}, machine, items = [], update = {}, questions = [], pushes = [] }) {
   const list = [];
   const add = item => list.push({ project: null, run: null, at: null, seenable: true, ...item });
   // Someone else reviews the project's work ("merge_by_owner": false): its pull requests only inform, until merged or closed.
@@ -47,6 +47,10 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
       text: t('{task}: {what}', { task: n.title, what: n.explain?.summary ?? n.what }), view: 'operations', project: n.project ?? null, run: n.run ?? null, at: n.at, seenable: false,
       request: { id: n.id, kind: n.kind ?? null, run: n.run ?? null, session: n.session ?? null, url: n.url ?? null, openError: n.openError ?? null, agent: n.agent ?? null, explain: n.explain ?? null, options: n.options ?? null, recommend: n.recommend ?? null, why: n.why ?? null },
     });
+  }
+  // Urgent: a push the manager tried, for the owner to allow once or refuse (its card, src/decisions.mjs).
+  for (const p of pushes) {
+    add({ id: `push:${p.id}`, level: 'urgent', kind: 'push', title: t('The manager asks to push'), text: t('Branch {branch} to {repo}', { branch: p.branch, repo: p.repo }), view: 'manager', at: p.at, seenable: false });
   }
   // Urgent: a run failed (until a newer run of the same work starts, or 3 days go by).
   for (const r of runs) {
