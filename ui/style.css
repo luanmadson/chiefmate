@@ -147,6 +147,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .state-warn { color: var(--warn); }
 .state-info { color: var(--info); }
 .state-neutral { color: var(--muted); }
+.state-accent { color: var(--accent); }
 
 .table { width: 100%; border-collapse: collapse; }
 .table th { text-align: left; font-size: 10.5px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); padding: 8px 10px; border-bottom: 1px solid var(--line-strong); white-space: nowrap; }
@@ -691,3 +692,50 @@ details summary { cursor: pointer; }
   .plan-table .plan-row.editing td:nth-child(2) { flex-basis: 100%; }
   .plan-decide .button { flex: 1; min-width: 0; }
 }
+
+/* The project radar: a plain summary, the potential x effort chart, then the cards, highest potential first. */
+.radar-overview p { margin: 0 0 10px; color: var(--strong); }
+.radar-counts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; }
+.radar-counts .num { margin-left: -10px; color: var(--text); }
+.radar-chart { margin-top: 12px; }
+.radar-chart svg { display: block; width: 100%; max-width: 520px; height: auto; }
+.radar-chart .grid { stroke: var(--line); stroke-width: 1; }
+.radar-chart .tick, .radar-chart .axis { fill: var(--muted); font: 11px var(--mono); }
+.radar-chart .axis { font-family: inherit; font-size: 11.5px; }
+.radar-best { fill: var(--accent-bg); }
+.radar-best-label { fill: var(--accent); font-size: 11px; letter-spacing: 0.06em; }
+.radar-point { cursor: pointer; outline: none; }
+.radar-point circle { fill: currentColor; stroke: var(--panel); stroke-width: 2; }
+.radar-point circle.hit { fill: transparent; stroke: none; }
+.radar-point text { fill: var(--on-accent); font: 600 10px var(--mono); pointer-events: none; }
+.radar-point:hover circle:not(.hit), .radar-point:focus-visible circle:not(.hit) { stroke: var(--strong); }
+.radar-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 6px 0 4px; }
+.radar-chart .hint { margin: 4px 0 0; }
+#radar-list { display: grid; gap: 12px; margin-top: 12px; }
+.radar-head { display: flex; align-items: baseline; gap: 10px; }
+.radar-head h3 { margin: 0; flex: 1; font-size: 15px; font-weight: 600; color: var(--strong); }
+.radar-head .num { color: var(--muted); }
+.radar-summary { margin: 6px 0 10px; }
+.radar-scores { display: flex; flex-wrap: wrap; gap: 6px 22px; }
+.radar-score, .radar-trend { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; }
+.radar-score-name { color: var(--muted); min-width: 58px; }
+.radar-pips { display: inline-flex; gap: 2px; }
+.radar-pips i { width: 9px; height: 9px; border: 1px solid var(--line-strong); }
+.radar-pips i.on { background: var(--accent); border-color: var(--accent); }
+.score-effort .radar-pips i.on, .score-risk .radar-pips i.on { background: var(--muted); border-color: var(--muted); }
+.radar-trend { margin-top: 8px; }
+.radar-spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+.radar-spark circle { fill: var(--accent); }
+.radar-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.radar-actions .button { padding: 9px 20px; font-size: 13px; }
+.radar-note { margin: 12px 0 0; color: var(--muted); }
+.radar-more { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+.radar-more summary { color: var(--muted); font-size: 12.5px; }
+.radar-more dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 10px 0 0; }
+.radar-more dt { color: var(--muted); font-size: 12px; }
+.radar-more dd { margin: 0; }
+.radar-more ul, .radar-discarded ul { margin: 0; padding-left: 18px; }
+.radar-discarded summary { color: var(--muted); }
+.radar-discarded ul { list-style: none; padding: 0; margin-top: 10px; }
+.radar-discarded li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 5px 0; border-top: 1px solid var(--line); }
+@media (max-width: 700px) { .radar-more dl { grid-template-columns: 1fr; } }

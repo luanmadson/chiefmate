@@ -321,7 +321,7 @@ const toolName = tool => (tool === 'codex' ? 'Codex' : 'Claude Code');
 
 // A project's page is "#project/<id>", and each of its tabs "#project/<id>/<tab>"; the prompt builder is "#builder",
 // or "#builder/<id>" for a project (also shown in the project's "builder" tab).
-const VIEWS = ['manager', 'operations', 'planning', 'missions', 'crew', 'projects', 'builder', 'log', 'usage', 'project', 'session'];
+const VIEWS = ['manager', 'operations', 'planning', 'radar', 'missions', 'crew', 'projects', 'builder', 'log', 'usage', 'project', 'session'];
 const pageProject = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length).split('/')[0]) : null);
 const PROJECT_TABS = ['overview', 'live', 'crew', 'tasks', 'planning', 'context', 'builder'];
 const pageTab = () => {
@@ -2901,6 +2901,157 @@ async function changeItem(body, done) {
   drawPlanning(true);
 }
 
+// ---------- Project radar ----------
+
+function radarState(status) {
+  switch (status) {
+    case 'new': return [t('New idea'), 'info'];
+    case 'studying': return [t('In study'), 'warn'];
+    case 'chosen': return [t('Chosen'), 'accent'];
+    case 'project': return [t('Became a project'), 'ok'];
+    case 'discarded': return [t('Idea discarded'), 'neutral'];
+    default: return [status ?? '', 'neutral'];
+  }
+}
+const RADAR_ORDER = ['new', 'studying', 'chosen', 'project', 'discarded'];
+const radarIdeasNow = () => state?.radar?.ideas ?? []; // the server's order: highest potential first
+const scoreLabel = key => ({ potential: t('Potential'), effort: t('Effort'), risk: t('Risk') })[key];
+const radarLink = l => (l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.name || l.url)}</a>` : esc(l.name));
+
+/** A score from 1 to 5 as five squares, with the number for those who don't count them. */
+function radarScore(key, value) {
+  const pips = [1, 2, 3, 4, 5].map(n => `<i${n <= value ? ' class="on"' : ''}></i>`).join('');
+  return `<span class="radar-score score-${key}" title="${esc(`${scoreLabel(key)}: ${value}/5`)}"><span class="radar-score-name">${esc(scoreLabel(key))}</span><span class="radar-pips" aria-hidden="true">${pips}</span><span class="num">${value}/5</span></span>`;
+}
+
+/** The trend series as a small line, with its first and last points written out. */
+function radarSpark(series) {
+  if (!series?.length || series.length < 2) return '';
+  const values = series.map(p => p.value);
+  const [low, high] = [Math.min(...values), Math.max(...values)];
+  const [w, h] = [120, 28];
+  const x = n => 2 + (n * (w - 4)) / (series.length - 1);
+  const y = v => (high === low ? h / 2 : h - 3 - ((v - low) * (h - 6)) / (high - low));
+  const points = series.map((p, n) => `${x(n).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ');
+  const [first, last] = [series[0], series.at(-1)];
+  const title = series.map(p => `${p.label}: ${p.value}`).join(' · ');
+  return `<div class="radar-trend" title="${esc(title)}"><span class="radar-score-name">${esc(t('Trend'))}</span>
+    <svg class="radar-spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="${esc(title)}"><polyline points="${points}"/><circle cx="${x(series.length - 1).toFixed(1)}" cy="${y(last.value).toFixed(1)}" r="2.5"/></svg>
+    <span class="hint">${esc(`${first.label}: ${first.value} → ${last.label}: ${last.value}`)}</span></div>`;
+}
+
+/** Potential (up) by effort (right): the best bets are up and to the left. Each point is an idea's number. */
+function radarChart(ideas) {
+  if (!ideas.length) return '';
+  const [w, h, left, bottom, top, right] = [420, 250, 44, 36, 12, 12];
+  const x = v => left + ((v - 0.5) * (w - left - right)) / 5;
+  const y = v => h - bottom - ((v - 0.5) * (h - bottom - top)) / 5;
+  const grid = [1, 2, 3, 4, 5].map(v => `<line class="grid" x1="${x(v)}" x2="${x(v)}" y1="${top}" y2="${h - bottom}"/><line class="grid" x1="${left}" x2="${w - right}" y1="${y(v)}" y2="${y(v)}"/>
+    <text class="tick" x="${x(v)}" y="${h - bottom + 14}" text-anchor="middle">${v}</text><text class="tick" x="${left - 8}" y="${y(v) + 4}" text-anchor="end">${v}</text>`).join('');
+  // Ideas on the same spot sit side by side.
+  const spots = new Map();
+  for (const i of ideas) {
+    const key = `${i.scores.effort}-${i.scores.potential}`;
+    spots.set(key, [...(spots.get(key) ?? []), i]);
+  }
+  const points = [...spots.values()].flatMap(group => group.map((i, n) => {
+    const [cx, cy] = [x(i.scores.effort) + (n - (group.length - 1) / 2) * 20, y(i.scores.potential)];
+    const tip = `#${i.id} ${i.title} · ${radarState(i.status)[0]} · ${t('Potential')} ${i.scores.potential} · ${t('Effort')} ${i.scores.effort} · ${t('Risk')} ${i.scores.risk}`;
+    return `<g class="radar-point state-${radarState(i.status)[1]}" data-radar-goto="${i.id}" tabindex="0"><title>${esc(tip)}</title><circle class="hit" cx="${cx}" cy="${cy}" r="12"/><circle cx="${cx}" cy="${cy}" r="8"/><text x="${cx}" y="${cy + 3.5}" text-anchor="middle">${i.id}</text></g>`;
+  })).join('');
+  const best = `<rect class="radar-best" x="${x(0.5)}" y="${y(5.5)}" width="${x(2.5) - x(0.5)}" height="${y(3.5) - y(5.5)}"/><text class="radar-best-label" x="${x(0.5) + 6}" y="${y(5.5) + 14}">${esc(t('Best bets'))}</text>`;
+  const statuses = [...new Set(ideas.map(i => i.status))];
+  const legend = statuses.map(s => stateHtml(radarState(s))).join('');
+  return `<div class="panel radar-chart"><div class="label">${esc(t('Potential × effort'))}</div>
+    <svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(t('Potential × effort'))}">${best}${grid}
+      <text class="axis" x="${(left + w - right) / 2}" y="${h - 4}" text-anchor="middle">${esc(t('Effort (1 small, 5 large)'))}</text>
+      <text class="axis" transform="translate(12 ${(top + h - bottom) / 2}) rotate(-90)" text-anchor="middle">${esc(t('Potential'))}</text>${points}</svg>
+    <div class="radar-legend">${legend}</div>
+    <p class="hint">${esc(t('Each point is an idea, by its number. Up and to the left: more potential for less effort. Click a point to see its card.'))}</p></div>`;
+}
+
+function radarCard(i) {
+  const f = i.fundamentals ?? {};
+  const field = (label, value) => (value ? `<dt>${esc(label)}</dt><dd>${esc(value)}</dd>` : '');
+  const linkList = list => list.map(l => `<li>${radarLink(l)}</li>`).join('');
+  const actions = ['new', 'studying'].includes(i.status)
+    ? `<div class="radar-actions"><button type="button" class="button" data-radar="choose">${esc(t('I want this'))}</button>${i.status === 'new' ? `<button type="button" class="button secondary" data-radar="later">${esc(t('Later'))}</button>` : ''}<button type="button" class="button danger" data-radar="discard">${esc(t('Discard'))}</button></div>`
+    : i.status === 'chosen'
+      ? `<p class="radar-note">${esc(t('Chosen: on the planning board as #{n}, for the manager to turn into a project.', { n: i.plan ?? '?' }))} <a href="#planning">${esc(t('Open the planning'))}</a></p>`
+      : `<p class="radar-note">${esc(t('It became a project.'))} ${i.project ? projectLink(i.project) : ''}</p>`;
+  return `<article class="panel radar-card" id="radar-idea-${i.id}" data-idea="${i.id}">
+    <div class="radar-head"><span class="num">#${i.id}</span><h3>${esc(i.title)}</h3>${stateHtml(radarState(i.status))}</div>
+    <p class="radar-summary">${esc(i.summary)}</p>
+    <div class="radar-scores">${['potential', 'effort', 'risk'].map(k => radarScore(k, i.scores[k])).join('')}</div>
+    ${radarSpark(i.series)}
+    ${actions}
+    <details class="radar-more"><summary>${esc(t('Fundamentals and sources'))}</summary><dl>
+      ${field(t('Problem'), i.problem)}${field(t('Audience'), i.audience)}${field(t('Market or demand'), f.market)}
+      ${f.competitors?.length ? `<dt>${esc(t('Competitors'))}</dt><dd><ul>${linkList(f.competitors)}</ul></dd>` : ''}
+      ${field(t('Search trend or interest'), f.trend)}${i.series?.length ? field(t('Trend series'), i.series.map(p => `${p.label}: ${p.value}`).join(' · ')) : ''}
+      ${field(t('Revenue model'), f.revenue)}${field(t('Advantage of {owner}', { owner: state.owner || t('the owner') }), f.advantage)}${field(t('Risks'), f.risks)}
+      <dt>${esc(t('Sources'))}</dt><dd><ul>${linkList(i.sources ?? [])}</ul></dd>
+      ${field(t('Added'), shortDate(i.created))}
+    </dl></details>
+  </article>`;
+}
+
+function drawRadar() {
+  if (!state?.radar) return;
+  const ideas = radarIdeasNow();
+  const shown = ideas.filter(i => i.status !== 'discarded');
+  const discarded = ideas.filter(i => i.status === 'discarded');
+  const fresh = ideas.filter(i => i.status === 'new').length;
+  draw('#counter-radar', String(fresh), fresh ? String(fresh) : '');
+  $('#counter-radar').parentElement.title = fresh ? t('{count} new idea(s) on the radar', { count: fresh }) : '';
+
+  // First the plain summary: how many ideas, and what is up to you.
+  const counts = RADAR_ORDER.map(s => [s, ideas.filter(i => i.status === s).length]).filter(([, n]) => n);
+  const summary = ideas.length
+    ? `<div class="panel radar-overview"><p>${esc(fresh ? t('{count} new idea(s) wait for you. Start at the top: the highest potential comes first.', { count: fresh }) : t('No new idea waiting for you. The crew adds more each week.'))}</p>
+      <div class="radar-counts">${counts.map(([s, n]) => `${stateHtml(radarState(s))}<span class="num">${n}</span>`).join('')}</div></div>`
+    : `<div class="empty">${esc(t('The radar is empty. A weekly mission researches 2 to 4 ideas, with sources; ask the manager to create it.'))}</div>`;
+  draw('#radar-summary', summary, summary);
+  const chart = radarChart(shown);
+  draw('#radar-chart', chart, chart);
+  const list = `${shown.map(radarCard).join('')}${discarded.length
+    ? `<details class="panel radar-discarded"><summary>${esc(t('Discarded ideas ({count})', { count: discarded.length }))}</summary><ul>${discarded.map(i => `<li data-idea="${i.id}"><span><span class="num">#${i.id}</span> ${esc(i.title)}${i.discard_reason ? ` <span class="hint">· ${esc(i.discard_reason)}</span>` : ''}</span><button type="button" class="button secondary small" data-radar="restore">${esc(t('Back to the radar'))}</button></li>`).join('')}</ul></details>`
+    : ''}`;
+  draw('#radar-list', list, list);
+}
+$('#radar-chart').addEventListener('click', event => {
+  const id = event.target.closest('[data-radar-goto]')?.dataset.radarGoto;
+  if (id) document.getElementById(`radar-idea-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+});
+$('#radar-chart').addEventListener('keydown', event => {
+  if (event.key === 'Enter') event.target.closest('[data-radar-goto]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+});
+
+// "I want this", "Later", "Discard" and "Back to the radar".
+$('#radar-list').addEventListener('click', async event => {
+  const button = event.target.closest('[data-radar]');
+  const row = button?.closest('[data-idea]');
+  if (!row) return;
+  const action = button.dataset.radar;
+  const id = Number(row.dataset.idea);
+  for (const b of row.querySelectorAll('button')) b.disabled = true;
+  const done = {
+    choose: t('Chosen: the manager gets it on the planning board to turn into a project.'),
+    later: t('Left in study. It stays on the radar.'),
+    discard: t('Discarded. It is at the bottom, where you can bring it back.'),
+    restore: t('Back on the radar as a new idea.'),
+  }[action];
+  try {
+    await api('/api/radar', { action, id });
+    toast(done);
+  } catch (error) {
+    toast(error.message);
+  }
+  await refresh();
+  delete signatures['#radar-list']; // the buttons come back after an error too
+  drawRadar();
+});
+
 $('#planning-list').addEventListener('change', event => {
   const field = event.target.dataset.planField;
   const row = event.target.closest('[data-item]');
@@ -3186,6 +3337,7 @@ async function refresh() {
   drawComputer();
   drawPlan();
   drawPlanning();
+  drawRadar();
   drawProjectJump();
   if (currentView() === 'project') {
     drawProjectPage();

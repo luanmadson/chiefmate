@@ -17,6 +17,7 @@ import { awayInfo, reportEvent, setAway } from './news.mjs';
 import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { changePlan, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
+import { changeRadar, RADAR_STATUSES, radarIdeas } from './radar.mjs';
 import { openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
@@ -326,6 +327,8 @@ function buildState() {
     attention: { items: attention, ...attentionSummary(attention) },
     // The owner's planning board (data/plan.json): every item, archived ones included, in the board's order.
     planning: { items, priorities: PRIORITIES, statuses: STATUSES },
+    // The project radar (data/radar.json): ideas for new projects, highest potential first.
+    radar: { ideas: radarIdeas(), statuses: RADAR_STATUSES },
     manager: {
       messages: conversation.slice(-80), responding: chat.responding, interrupting: chat.interrupting, since: chat.since, partial: chat.partial,
       actions: chat.actions.slice(-12), lastAction: chat.actions.at(-1) ?? null, pending: readPending(), context: managerContext(),
@@ -595,6 +598,8 @@ export function startServer() {
         }
         case '/api/planning':
           return reply(res, 200, { item: await changePlan(body) });
+        case '/api/radar':
+          return reply(res, 200, { idea: changeRadar(body) });
         case '/api/reset-grants':
           return reply(res, 200, { resets: changeResets(body) });
         case '/api/usage-reader': {

@@ -106,6 +106,20 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs plan approve <n> --autopilot for the manager, with the autopilot on: puts an item triaged "now" on
                                                 the queue of a project whose queue is empty, within the autopilot's limits
   node src/cli.mjs plan order <n> <n> ...       puts these items first in the owner's order, in this order
+  node src/cli.mjs radar [list] [--status <s>] [--all]
+                                                the project radar: ideas for new projects, highest potential first
+                                                (statuses: new, studying, chosen, discarded, project; --all: discarded too)
+  node src/cli.mjs radar show <n>               an idea with its fundamentals and sources
+  node src/cli.mjs radar add "<title>" --summary "<one sentence>" --potential 1-5 --effort 1-5 --risk 1-5
+                     --source "<name> <https://...>" [--source ...] [--problem ...] [--audience ...] [--market ...]
+                     [--competitor "<name> <https://...>" ...] [--trend ...] [--revenue ...] [--advantage ...]
+                     [--risks ...] [--series "2024:40,2025:55"]   or: radar add --file <idea.json>
+                                                adds an idea (refused without a source, or when its title is there)
+  node src/cli.mjs radar set <n> [the same options] [--status <s>] [--project <id>] [--file <idea.json>]
+                                                updates an idea (a step of a run can't set chosen, discarded or project)
+  node src/cli.mjs radar choose|later|discard|restore <n> [--reason "..."]
+                                                the owner's decisions: "choose" puts a proposal on the planning board
+                                                for the manager to turn it into a project; "later" leaves it in study
   node src/cli.mjs chat [n]                     the conversation with the manager: the last n messages (10), what it is
                                                 doing now and the messages waiting in the queue
   node src/cli.mjs chat say "<message>"         writes to the manager; while it answers, the message waits in the queue
@@ -372,6 +386,81 @@ async function planCommand() {
   }
 }
 
+/** "radar": the project radar (src/radar.mjs), fed by the manager and a weekly mission; the owner decides. */
+async function radarCommand() {
+  const radar = await import('./radar.mjs');
+  const keys = ['title', 'summary', 'problem', 'audience', 'market', 'trend', 'revenue', 'advantage', 'risks', 'potential', 'effort', 'risk', 'source', 'competitor', 'series', 'status', 'reason', 'project', 'file', 'by'];
+  const [action = 'list', ...args] = rest.filter((x, i) => !x.startsWith('--') && !keys.includes(rest[i - 1]?.slice(2)));
+  const all = name => rest.flatMap((x, i) => (x === name && rest[i + 1] !== undefined ? [rest[i + 1]] : []));
+  const fields = async () => {
+    const file = option('--file');
+    const given = file ? JSON.parse((await import('node:fs')).readFileSync(path.resolve(file), 'utf8')) : {};
+    for (const k of ['title', 'summary', 'problem', 'audience', 'market', 'trend', 'revenue', 'advantage', 'risks', 'potential', 'effort', 'risk', 'series', 'status', 'project']) {
+      if (option(`--${k}`) !== undefined) given[k] = option(`--${k}`);
+    }
+    if (all('--source').length) given.sources = all('--source');
+    if (all('--competitor').length) given.competitors = all('--competitor');
+    return given;
+  };
+  const which = () => {
+    if (!args[0]) throw new Error(`Which idea? node src/cli.mjs radar ${action} <n>`);
+    return Number(args[0].replace(/^#/, ''));
+  };
+  const line = i => `#${String(i.id).padEnd(3)} ${i.status.padEnd(9)} potential ${i.scores.potential} effort ${i.scores.effort} risk ${i.scores.risk}  ${i.title}: ${i.summary}${i.plan ? `  [planning #${i.plan}]` : ''}${i.project ? `  [project ${i.project}]` : ''}`;
+  const show = (verb, i) => console.log(`${verb} ${line(i)}`);
+  // Through the running Chiefmate, else here.
+  const change = async body => (await apiOr('/api/radar', body, async () => ({ idea: radar.changeRadar(body) }))).idea;
+  // The crew researches and adds; the owner decides (the manager on the owner's word).
+  if (process.env.CHIEFMATE_RUN && (['choose', 'later', 'discard', 'restore'].includes(action)
+    || (action === 'set' && option('--status') && ['chosen', 'discarded', 'project'].includes(radar.parseRadarStatus(option('--status')))))) {
+    throw new Error('A step of a run only adds and updates radar ideas: the owner decides (radar add, radar set <n>).');
+  }
+  const by = process.env.CHIEFMATE_MANAGER ? 'manager' : process.env.CHIEFMATE_RUN ? 'crew' : option('--by');
+  switch (action) {
+    case 'list': {
+      const status = option('--status') && radar.parseRadarStatus(option('--status'));
+      const ideas = radar.radarIdeas().filter(i => (status ? i.status === status : has('--all') || i.status !== 'discarded'));
+      for (const i of ideas) console.log(line(i));
+      if (!ideas.length) console.log('No ideas on the radar for this filter. Add one: node src/cli.mjs radar add "<title>" --summary ... --source ...');
+      return;
+    }
+    case 'show': {
+      const i = radar.radarIdea(which());
+      const f = i.fundamentals;
+      const links = list => list.map(l => `${l.name}${l.url ? ` ${l.url}` : ''}`).join('; ');
+      console.log([
+        line(i),
+        i.problem && `Problem: ${i.problem}`, i.audience && `Audience: ${i.audience}`, f.market && `Market: ${f.market}`,
+        f.competitors.length && `Competitors: ${links(f.competitors)}`, f.trend && `Trend: ${f.trend}`,
+        i.series.length && `Series: ${i.series.map(p => `${p.label}:${p.value}`).join(', ')}`, f.revenue && `Revenue: ${f.revenue}`,
+        f.advantage && `Advantage: ${f.advantage}`, f.risks && `Risks: ${f.risks}`, `Sources: ${links(i.sources)}`,
+        `Added ${formatDateTime(i.created)} by ${i.by}${i.discard_reason ? `. Discarded: ${i.discard_reason}` : ''}`,
+      ].filter(Boolean).join('\n      '));
+      return;
+    }
+    case 'add': {
+      const given = await fields();
+      if (args.length) given.title = args.join(' ');
+      show('Added', await change({ action: 'add', ...given, by }));
+      return;
+    }
+    case 'set':
+      show('Changed', await change({ action: 'set', id: which(), ...(await fields()), ...(option('--reason') !== undefined ? { reason: option('--reason') } : {}) }));
+      return;
+    case 'choose':
+    case 'later':
+    case 'discard':
+    case 'restore': {
+      const idea = await change({ action, id: which(), reason: option('--reason'), by: by ?? 'owner' });
+      show({ choose: 'Chosen', later: 'In study', discard: 'Discarded', restore: 'Restored' }[action], idea);
+      if (action === 'choose') console.log(`On the planning board as #${idea.plan}, for the manager to turn into a project.`);
+      return;
+    }
+    default:
+      throw new Error('Use: radar [list] | show <n> | add "<title>" --summary ... | set <n> ... | choose|later|discard|restore <n>');
+  }
+}
+
 /** "session": opens, lists or ends the live sessions. */
 async function sessionCommand() {
   const sessions = await import('./sessions.mjs');
@@ -565,6 +654,9 @@ async function main() {
       return;
     case 'plan':
       await planCommand();
+      return;
+    case 'radar':
+      await radarCommand();
       return;
     case 'cancel':
       console.log((await api('/api/cancel', { id: rest[0] })).status);
