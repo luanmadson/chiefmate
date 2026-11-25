@@ -26,7 +26,7 @@ import { openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
-import { activeRun, createRun, describeLater, doingNow, liveRuns, needsBrief, outcomeLater } from './runs.mjs';
+import { activeRun, createRun, describeLater, doingNow, liveRuns, needsBrief, outcomeLater, setRunLevel } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import {
   answerPermission, endSession, finishSessionRequest, interruptSession, listSessions, openSession, planSession, profileFor, removeQueued, resumeSession, sayToSession,
@@ -242,6 +242,8 @@ async function projectPage(id) {
 const brief = body => ({
   title: typeof body.title === 'string' && body.title.trim() ? body.title : null,
   summary: typeof body.summary === 'string' && body.summary.trim() ? body.summary : null,
+  // The manager's approval level (1 to 3) for the owner's decision card.
+  level: body.level ?? null,
 });
 
 /** A run's task, short, for "waiting for <who>: <task>". */
@@ -635,6 +637,11 @@ export function startServer() {
           return reply(res, 200, await syncPrompts());
         case '/api/cancel':
           return reply(res, 200, { status: cancel(body.id) });
+        case '/api/level': {
+          // The manager's approval level for a run (cli.mjs level), shown on the owner's decision card.
+          const run = setRunLevel(body.run, body.level);
+          return reply(res, 200, { run: run.id, title: run.title, level: run.level });
+        }
         case '/api/resume':
           return reply(res, 200, { status: resume(body.id, !!body.ignoreLimits) });
         case '/api/merge':

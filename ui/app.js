@@ -795,7 +795,8 @@ function navSections() {
   return [...document.querySelectorAll('.nav a[data-view]')].map(a => {
     const view = a.dataset.view;
     const name = a.firstElementChild?.textContent ?? '';
-    const items = view === 'decisions' ? decisionsNow().filter(c => !c.seen) : list.filter(i => i.view === view);
+    // Decisions counts what needs you: the cards of level 1 are the manager's to settle.
+    const items = view === 'decisions' ? decisionsNow().filter(c => !c.seen && !managerSettles(c)) : list.filter(i => i.view === view);
     return { a, view, name, items, level: topLevel(items), mark: attnMark(items, name, true) };
   });
 }
@@ -853,6 +854,12 @@ function drawClock() {
 
 const decisionsNow = () => (online ? state?.decisions ?? [] : []);
 const decisionKind = c => ({ merge: c.thirdParty ? t('Waiting for a third-party review') : t('Merge'), decision: t('Proposal'), question: t('Question') })[c.kind] ?? '';
+// The approval level the manager gave a card (src/decisions.mjs): 1 is the manager's to settle, 2 and 3 are yours.
+const managerSettles = c => c.approval === 1;
+const approvalBadge = c => {
+  const text = { 1: t('Level 1 · the manager settles it'), 2: t('Level 2 · needs you'), 3: t('Level 3 · only you') }[c.approval] ?? t('Level ?');
+  return `<span class="decision-approval" data-approval="${esc(c.approval ?? 'none')}">${esc(text)}</span>`;
+};
 
 function decisionCardHtml(c) {
   const facts = [
@@ -888,7 +895,7 @@ function decisionCardHtml(c) {
     links.length ? `<div class="hint">${links.join(' · ')}</div>` : '',
   ].join('');
   return `<article class="decision" data-level="${esc(c.level)}" data-card="${esc(c.id)}"${c.seen ? ' data-seen' : ''}>
-      <div class="decision-head"><span class="attn-mark" data-level="${esc(c.level)}" aria-hidden="true"></span><span class="decision-kind">${esc(decisionKind(c))}</span><span class="decision-about">${about}</span>${c.seen ? `<span class="tag">${esc(t('left for later'))}</span>` : ''}</div>
+      <div class="decision-head"><span class="attn-mark" data-level="${esc(c.level)}" aria-hidden="true"></span>${approvalBadge(c)}<span class="decision-kind">${esc(decisionKind(c))}</span><span class="decision-about">${about}</span>${c.seen ? `<span class="tag">${esc(t('left for later'))}</span>` : ''}</div>
       <div class="decision-title">${esc(c.title)}</div>
       ${verdict ? `<div class="decision-verdict">${esc(t('Recommends: {what}', { what: verdict }))}</div>` : ''}
       ${c.thirdParty ? `<p class="decision-third">${esc(t('Someone else reviews and merges the work of this project: nothing for you to approve here.'))}</p>` : ''}
@@ -897,15 +904,22 @@ function decisionCardHtml(c) {
     </article>`;
 }
 
-/** The Decisions tab: the cards not decided yet, then the ones left for later (folded). */
+/**
+ * The Decisions tab: the cards that need you not decided yet, the ones left for later (folded), then the ones of level 1,
+ * the manager's to settle (folded).
+ */
 function drawDecisions() {
   const cards = decisionsNow();
   const box = $('#decisions');
-  const fresh = cards.filter(c => !c.seen);
-  const later = cards.filter(c => c.seen);
-  const rest = later.length ? `<details class="decisions-later" data-detail="later"><summary>${esc(t('Left for later ({count})', { count: later.length }))}</summary>${later.map(decisionCardHtml).join('')}</details>` : '';
+  const yours = cards.filter(c => !managerSettles(c));
+  const fresh = yours.filter(c => !c.seen);
+  const later = yours.filter(c => c.seen);
+  const managers = cards.filter(managerSettles);
+  const fold = (key, title, list) => (list.length ? `<details class="decisions-later" data-detail="${key}"><summary>${esc(title)}</summary>${list.map(decisionCardHtml).join('')}</details>` : '');
+  const rest = fold('later', t('Left for later ({count})', { count: later.length }), later)
+    + fold('manager', t('The manager will settle it ({count})', { count: managers.length }), managers);
   const html = cards.length
-    ? `${fresh.map(decisionCardHtml).join('')}${rest}`
+    ? `${fresh.length ? '' : `<div class="panel empty">${esc(t('Nothing needs your decision now.'))}</div>`}${fresh.map(decisionCardHtml).join('')}${rest}`
     : `<div class="panel empty">${esc(t('Nothing waits for your decision. New pull requests, proposals and questions from the manager show up here.'))}</div>`;
   // What you opened stays open when the cards are drawn again.
   const opened = [...box.querySelectorAll('details[open]')].map(d => d.dataset.detail);
@@ -941,7 +955,7 @@ $('#decisions').addEventListener('click', async event => {
   try {
     const r = await api('/api/decide', { card: c.id, action, option: button.dataset.option });
     toast({
-      merged: t('Merged.'), later: c.thirdParty ? t('Hidden: it is in the archive.') : t('Left for later: the card stays at the end, faded.'), discarded: t('Discarded.'),
+      merged: [t('Merged.'), r.merge?.copiesNote].filter(Boolean).join(' '), later: c.thirdParty ? t('Hidden: it is in the archive.') : t('Left for later: the card stays at the end, faded.'), discarded: t('Discarded.'),
       approved: t('Approved: it becomes a task for its agent, in its turn.'), answered: t('Answer sent to the manager: {answer}', { answer: r.answer ?? '' }),
     }[r.done] ?? '');
   } catch (error) {
@@ -4121,8 +4135,8 @@ document.addEventListener('click', async event => {
       const checks = m.failedChecks ? ` ${t('{count} check(s) failed.', { count: m.failedChecks })}` : '';
       if (!(await confirmDialog(t('Merge'), `${where}${checks}`, t('Merge')))) return;
       target.disabled = true;
-      await api('/api/merge', { run: target.dataset.merge });
-      toast(t('Merged.'));
+      const done = await api('/api/merge', { run: target.dataset.merge });
+      toast([t('Merged.'), done.copiesNote].filter(Boolean).join(' '));
       if (selectedRun === target.dataset.merge) await refreshDetail(true);
     } else if (target.dataset.resume) {
       await api('/api/resume', { id: target.dataset.resume, ignoreLimits: target.hasAttribute('data-ignore') });
@@ -4255,7 +4269,9 @@ function drawViewer(token = viewer.token) {
   const raw = fileUrl('raw', info.ref);
   $('#viewer-name').textContent = info.name;
   $('#viewer-name').title = info.ref.path ?? info.ref.file;
-  $('#viewer-facts').textContent = [viewer.gallery.length > 1 ? `${viewer.index + 1} / ${viewer.gallery.length}` : '', fileSize(info.size), info.mtime ? shortDate(info.mtime) : '']
+  // The copy a relative path was found in: the newest, when several copies of the project have it (src/files.mjs).
+  const from = info.from ? (info.copies > 1 ? t('from {place}, the newest of {count} copies', { place: info.from.name, count: info.copies }) : t('from {place}', { place: info.from.name })) : '';
+  $('#viewer-facts').textContent = [viewer.gallery.length > 1 ? `${viewer.index + 1} / ${viewer.gallery.length}` : '', fileSize(info.size), info.mtime ? shortDate(info.mtime) : '', from]
     .filter(Boolean).join(' · ');
   $('#viewer-tools').innerHTML = [
     info.kind === 'image' ? `<button type="button" class="button secondary small" data-viewer="zoom" aria-pressed="${viewer.zoom}">${esc(viewer.zoom ? t('Fit to screen') : t('Actual size'))}</button>` : '',

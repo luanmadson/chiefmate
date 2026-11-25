@@ -253,6 +253,11 @@ textarea { resize: vertical; min-height: 64px; }
 .decision-head .tag { margin: 0; }
 .decision-kind { color: var(--attn); font-weight: 700; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; }
 .decision[data-seen] .decision-kind { color: var(--muted); }
+/* The approval level the manager gave the card: 2 and 3 stand out (yours), 1 is quiet (the manager's), none neutral. */
+.decision-approval { padding: 1px 7px; border: 1px solid var(--line-strong); color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 0.03em; white-space: nowrap; }
+.decision-approval[data-approval="2"] { background: var(--important); border-color: var(--important); color: var(--on-accent); }
+.decision-approval[data-approval="3"] { background: var(--urgent); border-color: var(--urgent); color: var(--on-accent); }
+.decision-approval[data-approval="1"] { border-color: var(--line); color: var(--faint); font-weight: 400; }
 .decision-about { color: var(--text); }
 .decision-title { margin-top: 4px; font-size: 14.5px; font-weight: 600; color: var(--strong); }
 .decision-verdict { margin-top: 2px; font-size: 13px; color: var(--accent); }

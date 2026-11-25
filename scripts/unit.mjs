@@ -1,13 +1,16 @@
-// Unit tests with no dependency (node:test): the file viewer's checks of paths and its readers of tables, and the app's dictation.
+// Unit tests with no dependency (node:test): the file viewer's checks of paths, its choice among a project's copies and
+// its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
-import { checkPath, kindOf, listFolder, rawHeaders, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
+import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
+import { parseLevel } from '../src/util.mjs';
+import { behindOrigin, fastForward, projectLibraries, sameRepository } from '../src/workspace.mjs';
 import { SAMPLE_CSV, sampleXlsx, zip } from './fixtures.mjs';
 import { compose, Dictation, nextState, recognizer, transcript } from '../ui/voice.js';
 
@@ -306,4 +309,81 @@ test('dictation: a silence stops it', async () => {
   await new Promise(resolve => setTimeout(resolve, 60));
   assert.equal(d.state, 'idle');
   assert.equal(field.value, 'hello');
+});
+
+test('approval levels: 1, 2 or 3, cleared with none, anything else refused', () => {
+  assert.deepEqual([1, '2', ' 3 ', 'level 2', 'nível 3'].map(parseLevel), [1, 2, 3, 2, 3]);
+  assert.deepEqual(['', 'none', '?', null, undefined].map(parseLevel), [null, null, null, null, null]);
+  for (const bad of ['0', '4', 'high', '1.5']) assert.throws(() => parseLevel(bad), /Unknown level/);
+});
+
+// A project's copies made up with git: its origin, your clone (left behind), a library that copies the same repository
+// and another clone that moves the origin forward.
+const gitIn = (dir, ...args) => execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd: dir, windowsHide: true, encoding: 'utf8', stdio: 'pipe' }).trim();
+const copies = path.join(temp, 'copies');
+const origin = path.join(copies, 'origin.git');
+const seed = path.join(copies, 'seed');
+const behindClone = path.join(copies, 'clone');
+const copiesWs = path.join(copies, 'workspaces');
+const library = path.join(copiesWs, '.library', 'demo-lib');
+mkdirSync(copies, { recursive: true });
+gitIn(copies, 'init', '-q', '--bare', '-b', 'main', origin);
+gitIn(copies, 'clone', '-q', origin, seed);
+gitIn(seed, 'checkout', '-q', '-b', 'main');
+write(path.join(seed, 'doc.md'), '# Doc');
+gitIn(seed, 'add', '-A');
+gitIn(seed, 'commit', '-qm', 'first');
+gitIn(seed, 'push', '-q', 'origin', 'main');
+gitIn(copies, 'clone', '-q', origin, behindClone);
+gitIn(copies, 'clone', '-q', origin, library);
+// The origin moves on: your clone doesn't have "merged.md" yet.
+write(path.join(seed, 'merged.md'), '# Merged');
+gitIn(seed, 'add', '-A');
+gitIn(seed, 'commit', '-qm', 'merged');
+gitIn(seed, 'push', '-q', 'origin', 'main');
+const copiesConfig = {
+  projects: { demo2: { name: 'Demo 2', repository: `${origin}${path.sep}`, local_clone: behindClone, main_branch: 'main' } },
+  library: { 'demo-lib': { name: 'Demo library', repository: origin.toUpperCase(), main_branch: 'main' }, other: { repository: 'https://example.com/other.git' } },
+};
+
+test("a project's reference library is the one that copies its repository", () => {
+  assert.ok(sameRepository('https://example.com/Demo.git', 'https://example.com/demo/') && !sameRepository('', ''));
+  assert.deepEqual(projectLibraries(copiesConfig, 'demo2'), windows ? ['demo-lib'] : []);
+});
+
+test('a relative path opens from the newest copy of the project, and says which', () => {
+  const config = { ...copiesConfig, library: { 'demo-lib': { name: 'Demo library', repository: origin } } };
+  const roots = viewerRoots(config, { workspaces: copiesWs });
+  const places = projectPlaces(config, 'demo2', roots, { workspaces: copiesWs });
+  assert.deepEqual(places.map(p => p.kind), ['clone', 'library']);
+  const old = new Date(Date.now() - 3_600_000);
+  utimesSync(path.join(behindClone, 'doc.md'), old, old);
+  let found = newestCopy('doc.md', places, roots, []);
+  assert.equal(found.from.kind, 'library');
+  assert.equal(found.copies, 2);
+  utimesSync(path.join(behindClone, 'doc.md'), new Date(), new Date());
+  found = newestCopy('doc.md', places, roots, []);
+  assert.equal(found.from.kind, 'clone');
+  assert.equal(newestCopy('missing.md', places, roots, []), null);
+});
+
+test('a file in no copy: where it was looked for, and the copy behind its origin', async () => {
+  assert.deepEqual(await behindOrigin(behindClone, 'main'), { branch: 'main', behind: -1 });
+  gitIn(behindClone, 'fetch', '-q', 'origin');
+  assert.deepEqual(await behindOrigin(behindClone), { branch: 'main', behind: 1 });
+  const config = { projects: { demo2: copiesConfig.projects.demo2 } };
+  await assert.rejects(viewFile('info', { path: 'merged.md', project: 'demo2' }, { config, readRun: () => null }),
+    e => e.code === 404 && e.message.includes(behindClone) && e.message.includes('origin/main'), 'the refusal does not say where nor that the clone is behind');
+});
+
+test("your clone moves forward only by a fast forward, with nothing of yours in the way", async () => {
+  gitIn(behindClone, 'fetch', '-q', 'origin', 'main');
+  write(path.join(behindClone, 'doc.md'), '# Changed by you');
+  assert.match(await fastForward(behindClone, 'FETCH_HEAD', 'main'), /\S/);
+  assert.ok(!existsSync(path.join(behindClone, 'merged.md')));
+  gitIn(behindClone, 'checkout', '-q', '--', 'doc.md');
+  assert.match(await fastForward(behindClone, 'FETCH_HEAD', 'other'), /\S/);
+  assert.equal(await fastForward(behindClone, 'FETCH_HEAD', 'main'), null);
+  assert.ok(existsSync(path.join(behindClone, 'merged.md')));
+  assert.deepEqual(await behindOrigin(behindClone, 'main'), { branch: 'main', behind: 0 });
 });
