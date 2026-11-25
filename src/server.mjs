@@ -11,7 +11,7 @@ import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
 import { agentTool, runTools, toolModel } from './tools.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
-import { addQuestion, decide, decisionCards, openPushes, openQuestions } from './decisions.mjs';
+import { addQuestion, decide, decisionCards, openPushes, openQuestions, openRepoRequests } from './decisions.mjs';
 import { listFolder, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
@@ -357,7 +357,8 @@ function buildState() {
   const items = planItems();
   const questions = openQuestions();
   const pushes = openPushes();
-  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo, questions, pushes });
+  const repos = openRepoRequests();
+  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo, questions, pushes, repos });
   const lastOf = id => runs.find(r => r.mission === id && !['queued', 'waiting'].includes(r.status));
   return {
     now: now(),
@@ -404,7 +405,7 @@ function buildState() {
     // What needs the owner, in three levels (src/attention.mjs): the band at the top, the sections, the title and the icon.
     attention: { items: attention, ...attentionSummary(attention), archived: attentionArchive().length },
     // The owner's decisions as cards (src/decisions.mjs): pull requests and branches to merge, proposals, the manager's questions.
-    decisions: decisionCards({ config, attention, items, questions, pushes }),
+    decisions: decisionCards({ config, attention, items, questions, pushes, repos }),
     // The owner's planning board (data/plan.json): every item, archived ones included, in the board's order.
     planning: { items, priorities: PRIORITIES, statuses: STATUSES },
     // The project radar (data/radar.json): ideas for new projects, highest potential first.

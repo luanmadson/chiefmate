@@ -1791,6 +1791,117 @@ try {
   rmSync(pushDir, { recursive: true, force: true });
 }
 
+// The manager's new private repository, with a stand-in for gh and a local folder as GitHub (no network): asked through
+// cli.mjs repo-create, it becomes a card and nothing is created; allowed, it is created private, becomes the folder's
+// "origin" and gets its branch, once, for that name and folder only; never public, never a name that exists, never
+// from a step of a run. The guard still refuses the manager "gh repo create" and points to repo-create.
+const repoDir = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-repo-'));
+try {
+  process.env.CHIEFMATE_SMOKE = '1';
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const { plainPush, pushFacts, readPushes } = await import(src('guard.mjs'));
+  const { crewGuard } = await import(src('runs.mjs'));
+  const { claudeArgs } = await import(src('claude.mjs'));
+  const { answerRepo, decide, decisionCards, openRepoRequests, pushesFile, reposFile } = await import(src('decisions.mjs'));
+  const { attentionItems } = await import(src('attention.mjs'));
+  const git = (dir, ...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true }).trim();
+  const folder = name => {
+    const dir = path.join(repoDir, name);
+    mkdirSync(dir);
+    git(dir, 'init', '-q', '-b', 'trunk');
+    git(dir, 'config', 'user.email', 'sample@example.com');
+    git(dir, 'config', 'user.name', 'Sample');
+    writeFileSync(path.join(dir, 'a.txt'), 'a');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'First change');
+    return dir;
+  };
+  const proj = folder('project');
+  const github = path.join(repoDir, 'github');
+  const ghLog = path.join(repoDir, 'gh.jsonl');
+  const fakeGh = path.join(repoDir, 'fake-gh.mjs');
+  writeFileSync(fakeGh, [
+    "import { execFileSync } from 'node:child_process';",
+    "import { appendFileSync, existsSync } from 'node:fs';",
+    "import path from 'node:path';",
+    'const args = process.argv.slice(2);',
+    "appendFileSync(process.env.FAKE_GH_LOG, `${JSON.stringify(args)}\\n`);",
+    'const bare = name => path.join(process.env.FAKE_GH_REMOTES, `${name}.git`);',
+    "if (args[0] === 'api' && args[1] === 'user') { console.log('sample-owner'); process.exit(0); }",
+    "if (args[1] === 'view') { if (args[2] === 'sample-owner/taken' || existsSync(bare(args[2]))) { console.log('{}'); process.exit(0); } console.error(`GraphQL: Could not resolve to a Repository with the name '${args[2]}'.`); process.exit(1); }",
+    "if (args[1] === 'create') { execFileSync('git', ['init', '-q', '--bare', bare(args[2])]); console.log(`https://github.com/${args[2]}`); process.exit(0); }",
+    'process.exit(2);',
+  ].join('\n'));
+  // GitHub's addresses lead to the local folder, for the cli.mjs processes only.
+  const ghEnv = {
+    CHIEFMATE_SMOKE: '1', CHIEFMATE_GH: fakeGh, FAKE_GH_LOG: ghLog, FAKE_GH_REMOTES: github,
+    GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.${pathToFileURL(github).href}/.insteadOf`, GIT_CONFIG_VALUE_0: 'https://github.com/',
+  };
+  const { CHIEFMATE_RUN, CHIEFMATE_STEP, ...outside } = process.env;
+  const cli = (args, env = {}) => {
+    try {
+      return { ok: true, out: execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'repo-create', ...args], { encoding: 'utf8', windowsHide: true, stdio: 'pipe', env: { ...outside, ...ghEnv, ...env } }) };
+    } catch (error) {
+      return { ok: false, out: String(error.stderr ?? error.message) };
+    }
+  };
+  const ghCalls = () => (existsSync(ghLog) ? readFileSync(ghLog, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)) : []);
+  const bare = path.join(github, 'sample-owner', 'new-thing.git');
+
+  // Never public, never a bad name or one that exists, never from a step: nothing is asked.
+  const refusals = [
+    cli(['new-thing', '--from', proj]), cli(['new-thing', '--public', '--from', proj]), cli(['new-thing', '--private', '--internal', '--from', proj]),
+    cli(['bad name', '--private', '--from', proj]), cli(['..', '--private', '--from', proj]), cli(['new-thing', '--private', '--from', path.join(repoDir, 'none')]),
+    cli(['new-thing', '--private', '--from', proj], { CHIEFMATE_RUN: 'r1' }),
+  ];
+  const taken = cli(['taken', '--private', '--from', proj]);
+  expect(!refusals.some(r => r.ok) && !taken.ok && /already exists/.test(taken.out) && !openRepoRequests().length,
+    `a public repository, a bad name, a name that exists or a step's request was not refused: ${refusals.map(r => r.ok).join()} / ${taken.out}`);
+
+  // Asked: a card, nothing created; asked again, the same card.
+  const asked = cli(['new-thing', '--private', '--from', proj, '--description', 'A sample project']);
+  expect(asked.ok && /Waiting for the owner/.test(asked.out) && !existsSync(bare) && !ghCalls().some(a => a[1] === 'create'), `asking for a repository created it, or failed: ${asked.out}`);
+  expect(cli(['new-thing', '--private', '--from', proj, '--description', 'A sample project']).ok && openRepoRequests().length === 1, 'asking again made a second request');
+  const repos = openRepoRequests();
+  const cards = decisionCards({ config: { projects: {} }, attention: attentionItems({ config: { projects: {} }, repos }), repos, pushes: [], questions: [] });
+  const card = cards.find(c => c.kind === 'repo');
+  expect(card?.approve && card.level === 'urgent' && card.title.includes('sample-owner/new-thing') && card.title.includes(proj) && card.detail.includes('A sample project') && card.detail.includes('First change'),
+    `the repository request is not a card: ${JSON.stringify(cards)}`);
+  expect((await decide({ card: card.id, action: 'approve' }, cards)).done === 'allowed', 'the owner could not allow the repository from its card');
+
+  // Allowed for that name and folder only: another folder asks again instead.
+  const otherDir = folder('other');
+  const other = cli(['new-thing', '--private', '--from', otherDir]);
+  expect(other.ok && /Waiting for the owner/.test(other.out) && !existsSync(bare), `the grant created the repository for another folder: ${other.out}`);
+  answerRepo(openRepoRequests().find(r => r.dir === otherDir).id, false);
+
+  // Created once: private, the folder's origin, its branch sent and known as the main one.
+  const made = cli(['new-thing', '--private', '--from', proj]);
+  const create = ghCalls().find(a => a[1] === 'create');
+  expect(made.ok && /Created the private repository sample-owner\/new-thing/.test(made.out) && create?.join(' ') === 'repo create sample-owner/new-thing --private --description A sample project',
+    `the repository was not created private: ${made.out} ${JSON.stringify(create)}`);
+  expect(git(bare, 'rev-parse', 'refs/heads/trunk') === git(proj, 'rev-parse', 'HEAD') && git(proj, 'config', 'remote.origin.url') === 'https://github.com/sample-owner/new-thing.git',
+    "the folder did not get the repository as origin, or its branch was not sent");
+  expect(readPushes(reposFile()).find(r => r.id === card.repoRequest)?.status === 'created' && !cli(['new-thing', '--private', '--from', proj]).ok,
+    'the grant was not used up, or the repository was created twice');
+  expect(pushFacts(plainPush('git push origin trunk', proj)).main && plainPush('git push origin main', proj).refused === 'main',
+    "the new repository's branch is not its main branch for later pushes");
+
+  // The guard: the manager's "gh repo create" is refused and points to repo-create; repo-create itself is not refused.
+  const hookOf = grants => JSON.parse(claudeArgs({ model: 'm', hooks: crewGuard(path.join(repoDir, 'guard.jsonl'), grants) }).find((a, i, all) => all[i - 1] === '--settings')).hooks.PreToolUse[0].hooks[0].command;
+  const answer = (hook, command) => execFileSync(hook, { shell: true, encoding: 'utf8', input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', tool_input: { command }, cwd: proj }) });
+  const manager = hookOf(pushesFile());
+  const ghCreate = ['gh', 'repo', 'create', 'sample-owner/x', '--public', '--source', '.', '--push'].join(' ');
+  const refused = answer(manager, ghCreate);
+  expect(/"permissionDecision":"deny"/.test(refused) && refused.includes('repo-create') && /"permissionDecision":"deny"/.test(answer(hookOf(null), ghCreate)),
+    `the guard let the manager or the crew create a repository with gh: ${refused}`);
+  expect(!/deny/.test(answer(manager, `node src/cli.mjs repo-create x --private --from "${proj}"`)), 'the guard refused the repo-create command itself');
+} catch (error) {
+  failures.push(`the manager's new repository: ${error.message}`);
+} finally {
+  rmSync(repoDir, { recursive: true, force: true });
+}
+
 // Live sessions in the app, in this process, with stand-ins for Claude Code and Codex (no real tool, no window): the
 // first message is the first turn; the text and the actions go to the history as they happen; a message sent while
 // the agent works waits in the queue and goes next, in the same session; a refused push becomes a request that the

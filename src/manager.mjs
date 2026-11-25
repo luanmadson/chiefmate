@@ -10,7 +10,7 @@ import { processes } from './machine.mjs';
 import { autopilotLine } from './autopilot.mjs';
 import { awayInfo, awayLine } from './news.mjs';
 import { computerLine, planLine } from './plan.mjs';
-import { pushesFile, pushesLine, pushRequestsFrom, questionsLine } from './decisions.mjs';
+import { pushesFile, pushesLine, pushRequestsFrom, questionsLine, reposLine } from './decisions.mjs';
 import { PUSH, readPushes } from './guard.mjs';
 import { requestsLine } from './charge.mjs';
 import { planningLine } from './planning.mjs';
@@ -147,6 +147,8 @@ export function situation(libraries = []) {
   if (questions) lines.push(questions);
   const pushes = pushesLine();
   if (pushes) lines.push(pushes);
+  const repos = reposLine();
+  if (repos) lines.push(repos);
   const requests = requestsLine(config);
   if (requests) lines.push(requests);
   lines.push(autopilotLine(config, usage));
@@ -294,6 +296,9 @@ export function newsMessage(owner, events, alongside = false, away = awayInfo())
   const pushed = events.some(e => e.kind === 'push_allowed')
     ? `\n\nFor the push_allowed events: ${owner} allowed, on its card, a push you tried. Run it now, once, exactly as the event says (the same command, or node src/cli.mjs push), then tell ${owner} in one line whether it went. It counts for that branch only, never for the main branch or a forced push.`
     : '';
+  const created = events.some(e => e.kind === 'repo_allowed')
+    ? `\n\nFor the repo_allowed events: ${owner} allowed, on its card, the private repository you asked for. Run the event's repo-create command now, once, then tell ${owner} in one line whether the repository was created and the folder sent, and that the project's "repository" setting can now point to it.`
+    : '';
   const watchdog = events.some(e => e.kind === 'watchdog')
     ? `\n\nFor the watchdog events: the watchdog checks Chiefmate from outside every 10 minutes and, when it is stuck, its rescuer acts with a closed list of safe actions. Tell ${owner} in a few lines what was found, what was done and what needs them. Don't restart Chiefmate or stop processes yourself.`
     : '';
@@ -304,7 +309,7 @@ export function newsMessage(owner, events, alongside = false, away = awayInfo())
     : leaving || away
       ? `\n\n${owner} is away (away mode${away ? `, since ${formatDateTime(away.since)}` : ''}): they stepped out or are asleep, and will read this later. The work goes on alone. Do your own part (the triage, the autopilot) without asking ${owner} anything that can wait, and keep what is not urgent for the summary when they are back. ${leaving ? 'For the away event: reply in one or two lines with what goes on alone meanwhile (the runs, the queue, the autopilot), nothing else.' : 'Reply in a line or two.'}`
       : '';
-  return `${head}\n${lines.join('\n')}\n\n${ask}${triage}${idle}${mergeFailed}${pushed}${report}${watchdog}${absence}`;
+  return `${head}\n${lines.join('\n')}\n\n${ask}${triage}${idle}${mergeFailed}${pushed}${created}${report}${watchdog}${absence}`;
 }
 
 /** The text the manager receives: your message, or the queue in order with the time of each one, and Chiefmate's news. */
