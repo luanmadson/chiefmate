@@ -181,7 +181,7 @@ function planText(idea) {
     `The owner chose radar idea #${idea.id} (node src/cli.mjs radar show ${idea.id}): ${idea.summary}`,
     idea.problem ? `Problem and audience: ${idea.problem}${idea.audience ? ` (${idea.audience})` : ''}` : '',
     `Scores: potential ${idea.scores.potential}/5, effort ${idea.scores.effort}/5, risk ${idea.scores.risk}/5.${f.revenue ? ` Revenue: ${f.revenue}` : ''}`,
-    `Turn it into a project: plan its first version with the owner, create its repository and add it to the settings; then move this item to it (plan set <n> --project <id>) and mark the idea (radar set ${idea.id} --status project --project <id>).`,
+    `Turn it into a project: plan its first version with the owner, create its repository and add it to the settings; then move this item to it (plan set <n> --project <id>), triage it with the member who will build it and mark the idea (radar set ${idea.id} --status project --project <id>).`,
   ].filter(Boolean).join('\n');
 }
 
@@ -198,7 +198,7 @@ export function decideIdea(id, decision, { reason, by = 'owner' } = {}) {
     // Its earlier item, when it is still on the board and not discarded; else a new one.
     const earlier = idea.plan && planItems().find(i => i.id === idea.plan && i.status !== 'discarded' && !i.archived);
     if (!earlier) {
-      const item = proposeItem({ project: RADAR_PROJECT, title: clip(`New project from the radar: ${idea.title}`, 200), summary: planText(idea), agent: 'manager', priority: 'high', by });
+      const item = proposeItem({ project: RADAR_PROJECT, title: clip(`New project from the radar: ${idea.title}`, 200), summary: planText(idea), priority: 'high', by });
       idea.plan = item.id;
     }
     Object.assign(idea, { status: 'chosen', chosen_at: stamp, discarded_at: null, discard_reason: '' });
