@@ -103,6 +103,22 @@ try {
       const r = await fetch(base + file);
       expect(r.ok, `${file} answered ${r.status}`);
     }
+    // Phones (the 600 px blocks of ui/style.css): 15 px text, no type under 11 px, the sections' descriptions folded,
+    // and the band at the top kept for what needs the owner (no info notices there).
+    const styles = await (await fetch(`${base}/style.css`)).text();
+    const phoneCss = [];
+    for (let at = styles.indexOf('@media (max-width: 600px)'); at >= 0; at = styles.indexOf('@media (max-width: 600px)', at + 1)) {
+      let depth = 0, end = styles.indexOf('{', at);
+      const start = end;
+      for (; end < styles.length; end++) if (styles[end] === '{') depth++; else if (styles[end] === '}' && --depth === 0) break;
+      phoneCss.push(styles.slice(start + 1, end));
+    }
+    const phone = phoneCss.join('\n');
+    const tiny = [...phone.matchAll(/font-size: ([\d.]+)px/g)].filter(m => Number(m[1]) < 11 && Number(m[1]) > 0).map(m => m[0]);
+    expect(/(^|\n)\s*body \{ font-size: 15px; \}/.test(phone) && !tiny.length, `the phone layout's type is off (15 px text, nothing under 11 px): ${tiny.join(', ')}`);
+    expect(/\.view-header p[^{]*\{ display: none; \}/.test(phone), "the phone layout shows the sections' descriptions");
+    const appJs = await (await fetch(`${base}/app.js`)).text();
+    expect(/phone && i\.level === 'info'/.test(appJs.slice(appJs.indexOf('function drawAlerts'), appJs.indexOf('function drawNavAttention'))), "a phone's band also shows the info notices");
     // A project's page: its tabs (the prompt builder's screen moves into the last one) and the prompt shown by blocks.
     const html = await (await fetch(`${base}/`)).text();
     expect(['project-status', 'project-actions', 'project-more', 'project-needs', 'project-overview', 'project-crew', 'project-tasks', 'project-planning', 'project-context', 'project-builder', 'builder-body', 'builder-view', 'builder-edit']
