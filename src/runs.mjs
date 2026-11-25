@@ -791,9 +791,10 @@ export async function execute(run) {
     if (l.pauseRequest) return pauseForUpdate();
     let dir;
     if (!run.prepared) {
-      run.base = await baseBranch(project);
       // A pause for an update stops the preparation at once (see pauseLive): it starts over when the run resumes.
       l.preparing = new AbortController();
+      run.base = await baseBranch(project);
+      l.preparing.signal.throwIfAborted();
       dir = await prepareWorkspace(run.project, project, run.base, log, { signal: l.preparing.signal });
       l.preparing = null;
       await createBranch(dir, run.branch);
