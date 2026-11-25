@@ -129,7 +129,8 @@ export function prepareBrowser(config, who) {
   return file;
 }
 
-const PLAYWRIGHT = /@playwright\/mcp|playwright-mcp|mcp-server-playwright/i;
+// Microsoft's server only (its package or its binary): others named alike, such as playwright-mcp-server, read no --config.
+const PLAYWRIGHT = /@playwright\/mcp\b|(^|[\s\\/])mcp-server-playwright\b/i;
 // Arguments with which the settings already chose the browser: those are left alone.
 const OWN_CHOICE = /^--(config|user-data-dir|isolated|cdp-endpoint|extension|storage-state)\b/;
 

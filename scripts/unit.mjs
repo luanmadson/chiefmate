@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, wr
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
-import { browserState, findBrowsers, initials, launchArgs, PALETTE, projectColor, shouldClose, themeManifest, windowName } from '../src/browsers.mjs';
+import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE, projectColor, shouldClose, themeManifest, windowName } from '../src/browsers.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
 import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
@@ -565,6 +565,11 @@ test("The crew's browsers: a color and initials per project, the window's name a
   assert.equal(windowName('Chiefmate', 'Navegadores "da equipe"\n identificados por projeto e com uma tarefa bem longa'), 'Chiefmate · Navegadores da equipe identificados por projeto…');
   assert.equal(windowName('Chiefmate', ''), 'Chiefmate');
   assert.deepEqual(themeManifest({ name: 'X', color: '#3b6ea5' }).theme.colors.frame, [59, 110, 165]);
+  assert.deepEqual(
+    [['npx', '@playwright/mcp@latest'], ['mcp-server-playwright'], ['node', 'C:/x/node_modules/.bin/mcp-server-playwright'], ['npx', '@executeautomation/playwright-mcp-server']]
+      .map(([command, ...args]) => isPlaywright({ command, args })),
+    [true, true, true, false], // only Microsoft's server reads Chiefmate's --config
+  );
   assert.deepEqual(launchArgs({ name: 'A · b', theme: 'T', owner: 'run:1' }), ['--window-name=A · b', '--disable-extensions-except=T', '--load-extension=T', '--chiefmate-browser=run:1']);
 });
 
