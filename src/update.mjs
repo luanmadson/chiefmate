@@ -17,7 +17,8 @@ import { run } from './workspace.mjs';
 /**
  * What the app shows about updates. waiting: the approved changes not installed yet; blocked: why they were not
  * ("changes", "merge", "checks" or "timeout"); installing: the update going on now ({ since, by: "owner" or "auto",
- * stage: "pausing", "manager" or "installing", paused: the runs paused for it, interruptManager }), else null.
+ * stage: "pausing", "manager" or "installing", paused: the runs paused for it, waitingFor: the runs it still waits
+ * for, while pausing ({ run, title, project, doing }), interruptManager }), else null.
  */
 export const updateInfo = { checked: null, waiting: 0, blocked: null, mode: 'pause', installing: null };
 
@@ -88,7 +89,7 @@ function checkOnce() {
 }
 
 function begin(by, interruptManager, found) {
-  updateInfo.installing = { since: now(), by, stage: 'pausing', paused: [], interruptManager, target: found.target };
+  updateInfo.installing = { since: now(), by, stage: 'pausing', paused: [], waitingFor: [], interruptManager, target: found.target };
   install(updateInfo.installing, hooks).catch(error => {
     console.error('Update:', error);
     release(updateInfo.installing, hooks);
@@ -123,8 +124,10 @@ export async function install(job, h = hooks) {
   do {
     for (const id of h.pauseRuns()) if (!job.paused.includes(id)) job.paused.push(id);
     await sleep(h.pollMs ?? 1000);
+    job.waitingFor = h.crewWaiting?.() ?? [];
     if (late()) return false;
   } while (h.crewBusy());
+  job.waitingFor = [];
   job.stage = 'manager';
   while (h.managerAnswering()) {
     if (job.interruptManager && !job.interrupted) job.interrupted = h.interruptManager();
@@ -225,7 +228,7 @@ export async function checkNow() {
 /**
  * Checks GitHub a minute after starting and every 10 minutes after that.
  * options: isBusy() (runs going on, or the manager answering or with messages waiting: "wait" mode waits for none),
- * crewBusy() (runs going on), pauseRuns() (asks every run going on to pause; returns the ids it asked), managerAnswering(),
+ * crewBusy() (runs going on), crewWaiting() (those runs, for the app: { run, title, project, doing }), pauseRuns() (asks every run going on to pause; returns the ids it asked), managerAnswering(),
  * interruptManager(), resume() (the queue and the manager's messages go on) and beforeRestart().
  */
 export function startUpdates(options) {

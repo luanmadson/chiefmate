@@ -1,36 +1,68 @@
 // Each project's working copy (workspaces/<project>): the crew works there, never in the folder you work in.
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { t } from './i18n.mjs';
 import { clip, ensureDir, WORKSPACES } from './util.mjs';
 
-/** Runs a command and returns { code, output }. With shell, it accepts "npm ci" and the like. */
-export function run(command, args, dir, { shell = false, maxMinutes = 20 } = {}) {
+/**
+ * Runs a command and returns { code, output, stopped }. With shell, it accepts "npm ci" and the like. After maxMinutes
+ * (stopped: "timeout"), or when signal aborts ("aborted"), it is stopped with every process it started.
+ */
+export function run(command, args, dir, { shell = false, maxMinutes = 20, signal } = {}) {
   return new Promise(resolve => {
+    if (signal?.aborted) return resolve({ code: -1, output: '', stopped: 'aborted' });
     const child = spawn(command, args, { cwd: dir, shell, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
     let output = '';
+    let stopped = null;
+    let grace = null;
     const collect = d => (output = (output + d).slice(-20000));
     child.stdout.on('data', collect);
     child.stderr.on('data', collect);
-    const timer = setTimeout(() => child.kill(), maxMinutes * 60_000);
-    child.on('error', error => {
+    const finish = result => {
       clearTimeout(timer);
-      resolve({ code: -1, output: error.message });
-    });
-    child.on('close', code => {
-      clearTimeout(timer);
-      resolve({ code, output });
-    });
+      clearTimeout(grace);
+      signal?.removeEventListener('abort', onAbort);
+      resolve(result);
+    };
+    const stop = why => {
+      if (stopped) return;
+      stopped = why;
+      if (why === 'timeout') output += `\n(stopped after ${maxMinutes} minutes)`;
+      killTree(child);
+      // A process left holding the output open must not keep the caller waiting.
+      grace = setTimeout(() => finish({ code: -1, output, stopped }), 10_000);
+    };
+    const timer = setTimeout(() => stop('timeout'), maxMinutes * 60_000);
+    const onAbort = () => stop('aborted');
+    signal?.addEventListener('abort', onAbort, { once: true });
+    child.on('error', error => finish({ code: -1, output: error.message, stopped }));
+    child.on('close', code => finish({ code: stopped ? -1 : code, output, stopped }));
   });
 }
 
-async function git(dir, ...args) {
-  const r = await run('git', args, dir);
+/**
+ * Ends a process and every process it started. On Windows, killing git alone leaves its helpers (git-remote-https,
+ * which does the download) running, and they keep the output open, so the command never seemed to end.
+ */
+function killTree(child) {
+  if (process.platform === 'win32' && child.pid) {
+    spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => child.kill());
+  } else {
+    child.kill();
+  }
+}
+
+/** git in dir; with signal, a command stopped by it throws its AbortError. */
+async function gitRun(dir, args, { signal } = {}) {
+  const r = await run('git', args, dir, { signal });
+  signal?.throwIfAborted();
   if (r.code !== 0) throw new Error(t('git {command} failed: {output}', { command: args.join(' '), output: clip(r.output, 500) }));
   return r.output.trim();
 }
+
+const git = (dir, ...args) => gitRun(dir, args);
 
 export const projectDir = id => path.join(WORKSPACES, id);
 
@@ -47,21 +79,37 @@ export async function baseBranch(project) {
   return branch;
 }
 
-/** Makes the working copy match the base branch of its origin, and installs dependencies when they change. */
-export async function prepareWorkspace(id, project, base, onStep = () => {}) {
+/**
+ * Makes the working copy match the base branch of its origin, and installs dependencies when they change.
+ * signal (optional) stops it at once, such as for a pause for an update: it throws its AbortError, and the next call
+ * starts over cleanly.
+ */
+export async function prepareWorkspace(id, project, base, onStep = () => {}, { signal } = {}) {
   ensureDir(WORKSPACES);
   const dir = projectDir(id);
   if (!existsSync(path.join(dir, '.git'))) {
     onStep(t('Downloading the project (first time)'));
+    // Cloned beside its place and moved there once complete: a clone cut off leaves no half copy behind.
+    const partial = `${dir}.partial`;
+    rmSync(partial, { recursive: true, force: true, maxRetries: 5 });
     const filter = project.clone_filter ? [`--filter=${project.clone_filter}`] : [];
-    const r = await run('git', ['clone', '-c', 'core.longpaths=true', ...filter, project.repository, dir], WORKSPACES, { maxMinutes: 30 });
+    // Your own clone lends the objects it has (git alternates): only what it lacks comes from the repository.
+    const lend = project.local_clone && existsSync(project.local_clone) && path.resolve(project.local_clone) !== path.resolve(project.repository);
+    const reference = lend ? ['--reference-if-able', project.local_clone] : [];
+    const r = await run('git', ['clone', '-c', 'core.longpaths=true', ...reference, ...filter, project.repository, partial], WORKSPACES, { maxMinutes: 30, signal });
+    signal?.throwIfAborted();
     if (r.code !== 0) throw new Error(t("Couldn't download the project: {output}", { output: clip(r.output, 500) }));
+    if (existsSync(dir)) rmdirSync(dir); // an empty folder only: anything in it stops the copy here
+    renameSync(partial, dir);
   }
   onStep(t('Updating the working copy'));
-  await git(dir, 'fetch', 'origin', '--prune');
-  await git(dir, 'checkout', '-f', base);
-  await git(dir, 'reset', '--hard', `origin/${base}`);
-  await git(dir, 'clean', '-fd');
+  // A git command cut off (a pause, a time limit) leaves its lock behind; no other git works in this copy meanwhile.
+  rmSync(path.join(dir, '.git', 'index.lock'), { force: true });
+  const step = (...args) => gitRun(dir, args, { signal });
+  await step('fetch', 'origin', '--prune');
+  await step('checkout', '-f', base);
+  await step('reset', '--hard', `origin/${base}`);
+  await step('clean', '-fd');
   if (project.setup) {
     const locks = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock'].map(f => path.join(dir, f)).filter(existsSync);
     // Changes when the dependency lock file or the setup command itself changes.
@@ -70,7 +118,8 @@ export async function prepareWorkspace(id, project, base, onStep = () => {}) {
     const ready = existsSync(marker) && readFileSync(marker, 'utf8') === signature;
     if (!ready) {
       onStep(t('Installing dependencies ({command})', { command: project.setup }));
-      const r = await run(project.setup, [], dir, { shell: true, maxMinutes: 20 });
+      const r = await run(project.setup, [], dir, { shell: true, maxMinutes: 20, signal });
+      signal?.throwIfAborted();
       if (r.code !== 0) throw new Error(t('"{command}" failed: {output}', { command: project.setup, output: clip(r.output, 500) }));
       if (existsSync(path.join(dir, 'node_modules'))) writeFileSync(marker, signature);
     }

@@ -210,14 +210,16 @@ export function cancelLive(id, reason) {
 /**
  * Asks a run going on to pause for an update of Chiefmate: its agent is interrupted at a safe point (once the actions
  * under way finish) and the step is kept to resume the same Claude Code session after the update; the run goes back
- * to the front of the queue. A run that is preparing its working copy, running its checks or opening its pull request
- * pauses only at its next step, or ends first. Returns false when it is not going on, or was already asked.
+ * to the front of the queue. A run preparing its working copy stops at once (a download, say) and prepares it again
+ * when it resumes; one running its checks or opening its pull request pauses only at its next step, or ends first.
+ * Returns false when it is not going on, or was already asked.
  */
 export function pauseLive(id) {
   const l = live.get(id);
   if (!l || l.cancelRequest || l.pauseRequest) return false;
   l.pauseRequest = true;
   l.process?.interrupt?.();
+  l.preparing?.abort();
   logAction(l, { type: 'action', text: t('Pausing at a safe point for an update of Chiefmate') });
   return true;
 }
@@ -748,7 +750,7 @@ export async function execute(run) {
   Object.assign(run, described.get(run.id) ?? {});
   const l = {
     run: run.id, title: run.title, summary: run.summary ?? null, doing: t('preparing the working copy'), project: run.project, step: null, agent: null, started: now(), since: now(), pid: null, context: null, actions: [],
-    heldUntil: 0, memory: run, process: null, cancelRequest: null,
+    heldUntil: 0, memory: run, process: null, cancelRequest: null, preparing: null,
   };
   live.set(run.id, l);
   const log = text => logAction(l, { type: 'action', text });
@@ -786,10 +788,14 @@ export async function execute(run) {
       if (pending) await Promise.race([pending, new Promise(resolve => setTimeout(resolve, 20_000))]);
       notify(t('Chiefmate started'), run.summary ? clip(`${run.title}. ${run.summary}`, 250) : run.title);
     }
+    if (l.pauseRequest) return pauseForUpdate();
     let dir;
     if (!run.prepared) {
       run.base = await baseBranch(project);
-      dir = await prepareWorkspace(run.project, project, run.base, log);
+      // A pause for an update stops the preparation at once (see pauseLive): it starts over when the run resumes.
+      l.preparing = new AbortController();
+      dir = await prepareWorkspace(run.project, project, run.base, log, { signal: l.preparing.signal });
+      l.preparing = null;
       await createBranch(dir, run.branch);
       run.prepared = true;
       saveRun(run);
@@ -888,6 +894,10 @@ export async function execute(run) {
     notify(t('Ready for your review'), t('{title}: {result}', { title: run.title, result: [outcomeLine(run.outcome), result].filter(Boolean).join(' ') }), run.pullRequest);
     reportEvent('pr_ready', `${aboutRun(run)} finished: pull request ${run.pullRequest} waits for the owner's approval. ${result}`);
   } catch (error) {
+    if (error?.name === 'AbortError' && l.pauseRequest && !l.cancelRequest) {
+      log(t('Preparation stopped for the update: it starts over when the run resumes'));
+      return pauseForUpdate();
+    }
     Object.assign(run, { status: 'failed', ended: now(), result: error.message });
     saveRun(run);
     notify(t('Chiefmate hit an error'), t('{title}: {error}', { title: run.title, error: clip(error.message, 180) }), 'chiefmate:log', { urgent: true });
