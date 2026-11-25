@@ -1,5 +1,5 @@
 // Unit tests with no dependency (node:test): the file viewer's checks of paths, its choice among a project's copies and
-// its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels.
+// its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -12,6 +12,7 @@ import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
 import { parseLevel } from '../src/util.mjs';
 import { behindOrigin, fastForward, projectLibraries, sameRepository } from '../src/workspace.mjs';
 import { SAMPLE_CSV, sampleXlsx, zip } from './fixtures.mjs';
+import { compose, Dictation, nextState, recognizer, transcript } from '../ui/voice.js';
 
 const windows = process.platform === 'win32';
 const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-unit-'));
@@ -201,6 +202,113 @@ test("a run's files: what its branch created or changed, never a protected one",
   for (const file of ['.env.production', 'gone.md', '../old.txt', 'C:/x.txt']) {
     await assert.rejects(viewFile('raw', { run: run.id, file }, { config: runConfig, readRun }), e => e.code === 403 || e.code === 404, `${file} was read`);
   }
+});
+
+// ---------- Dictation (ui/voice.js), with a made-up recognizer and field ----------
+
+const said = (text, isFinal) => Object.assign([{ transcript: text }], { isFinal });
+class FakeRecognition {
+  static last = null;
+  constructor() {
+    FakeRecognition.last = this;
+  }
+  start() {}
+  stop() {
+    this.onend();
+  }
+  abort() {
+    this.onerror({ error: 'aborted' });
+    this.onend();
+  }
+}
+function fakeField(value, start = value.length, end = start) {
+  const field = {
+    value, selectionStart: start, selectionEnd: end, inputs: 0,
+    setSelectionRange(a, b) { Object.assign(this, { selectionStart: a, selectionEnd: b }); },
+    dispatchEvent() { this.inputs++; },
+  };
+  field.ownerDocument = { activeElement: field };
+  return field;
+}
+
+test('dictation: the recognizer only in a secure context', () => {
+  class R {}
+  assert.equal(recognizer({ isSecureContext: true, webkitSpeechRecognition: R }), R);
+  assert.equal(recognizer({ isSecureContext: true, SpeechRecognition: R }), R);
+  assert.equal(recognizer({ isSecureContext: false, SpeechRecognition: R }), null);
+  assert.equal(recognizer({ isSecureContext: true }), null); // Firefox
+});
+
+test('dictation: the words go where the caret is, spaced from the text around', () => {
+  assert.deepEqual(compose({ value: '', start: 0, end: 0 }, ' hello  world '), { value: 'hello world', caret: 11 });
+  assert.deepEqual(compose({ value: 'Hi there', start: 2, end: 2 }, 'you'), { value: 'Hi you there', caret: 6 });
+  assert.deepEqual(compose({ value: 'Hi ', start: 3, end: 3 }, 'you'), { value: 'Hi you', caret: 6 });
+  assert.deepEqual(compose({ value: 'Hi.', start: 2, end: 2 }, 'you'), { value: 'Hi you.', caret: 6 });
+  assert.deepEqual(compose({ value: 'Hi', start: 2, end: 2 }, ', you'), { value: 'Hi, you', caret: 7 });
+  assert.deepEqual(compose({ value: 'Hi old friend', start: 3, end: 6 }, 'new'), { value: 'Hi new friend', caret: 6 }); // the selection replaced
+  assert.deepEqual(compose({ value: 'Hi old', start: 3, end: 6 }, '  '), { value: 'Hi old', caret: 6 }); // nothing heard: unchanged
+  assert.deepEqual(transcript([said('one', true), said(' two', true), said('thr', false)]), { final: 'one two', interim: 'thr' });
+  assert.deepEqual(transcript([said('one', true), said('two', false)], 1), { final: '', interim: 'two' });
+});
+
+test('dictation: its states', () => {
+  assert.equal(nextState('idle', 'toggle'), 'starting');
+  assert.equal(nextState('starting', 'start'), 'listening');
+  assert.equal(nextState('listening', 'toggle'), 'stopping');
+  assert.equal(nextState('starting', 'toggle'), 'stopping');
+  assert.equal(nextState('stopping', 'start'), 'stopping');
+  assert.equal(nextState('stopping', 'end'), 'idle');
+  assert.equal(nextState('listening', 'end'), 'idle'); // the browser stopped by itself
+});
+
+test('dictation: words shown as heard, the final ones kept, the typed text untouched', () => {
+  const field = fakeField('Note: buy', 5); // the caret after "Note:"
+  const states = [];
+  const d = new Dictation({ Recognition: FakeRecognition, field, lang: 'pt-BR', onState: s => states.push(s) });
+  d.start();
+  const rec = FakeRecognition.last;
+  assert.equal(rec.lang, 'pt-BR');
+  assert.equal(rec.interimResults, true);
+  rec.onstart();
+  assert.ok(d.listening);
+  rec.onresult({ results: [said('milk', false)] });
+  assert.equal(field.value, 'Note: milk buy');
+  rec.onresult({ results: [said('milk and', true), said('bre', false)] });
+  assert.equal(field.value, 'Note: milk and bre buy');
+  d.stop(); // the words not yet final go
+  assert.equal(field.value, 'Note: milk and buy');
+  assert.equal(field.selectionStart, 'Note: milk and'.length);
+  assert.deepEqual(states, ['starting', 'listening', 'stopping', 'idle']);
+  assert.ok(field.inputs > 0);
+});
+
+test('dictation: after a send, nothing comes back; aborted, nothing more is written', () => {
+  const field = fakeField('');
+  const d = new Dictation({ Recognition: FakeRecognition, field, lang: 'en-US' });
+  d.start();
+  const rec = FakeRecognition.last;
+  rec.onstart();
+  rec.onresult({ results: [said('first message', true)] });
+  assert.equal(field.value, 'first message');
+  Object.assign(field, { value: '', selectionStart: 0, selectionEnd: 0 }); // sent by Enter
+  rec.onresult({ results: [said('first message', true), said('second', true)] });
+  assert.equal(field.value, ''); // the results before the send are left out
+  rec.onresult({ results: [said('first message', true), said('second', true), said('next', false)] });
+  assert.equal(field.value, 'next');
+  d.abort();
+  assert.equal(field.value, 'next');
+  assert.equal(d.state, 'idle');
+});
+
+test('dictation: a silence stops it', async () => {
+  const field = fakeField('');
+  const d = new Dictation({ Recognition: FakeRecognition, field, lang: 'en-US', silenceMs: 20 });
+  d.start();
+  FakeRecognition.last.onstart();
+  FakeRecognition.last.onresult({ results: [said('hello', true)] });
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(d.state, 'idle');
+  assert.equal(field.value, 'hello');
 });
 
 test('approval levels: 1, 2 or 3, cleared with none, anything else refused', () => {

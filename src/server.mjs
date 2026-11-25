@@ -60,6 +60,9 @@ const SAFE_HEADERS = {
   'x-frame-options': 'DENY',
 };
 
+/** The app's own settings ("ui"): dictation in the message fields, on unless "voice_input" is false. */
+const uiSettings = config => ({ voice_input: config.ui?.voice_input !== false });
+
 // Answers in JSON, compressed with gzip when the browser takes it and the answer is worth it (the state is ~140 KB).
 function reply(res, code, data, headers = {}) {
   let body = Buffer.from(JSON.stringify(data));
@@ -351,6 +354,7 @@ function buildState() {
     started: STARTED,
     owner: config.owner,
     language: config.language || 'en',
+    ui: uiSettings(config),
     ai: { claude: { ...claudeInfo }, account: { status: usage.status ?? null, updated: usage.updated ?? null } },
     update: { ...updateInfo, mode: updateMode(config) },
     projects: Object.entries(config.projects ?? {}).map(([id, p]) => ({ id, name: p.name, site: p.site })),
@@ -680,6 +684,13 @@ export function startServer() {
           config.limits = { ...kept, ...validLimits(body) };
           saveConfig(config);
           return reply(res, 200, config.limits);
+        }
+        case '/api/voice-input': {
+          // Dictation's switch, from its first-use notice in the app.
+          const config = loadConfig();
+          config.ui = { ...config.ui, voice_input: !!body.enabled };
+          saveConfig(config);
+          return reply(res, 200, { ui: uiSettings(config) });
         }
         case '/api/autopilot':
           // The autopilot's switch and limits, from the Usage section (src/autopilot.mjs).

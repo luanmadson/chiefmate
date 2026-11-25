@@ -70,5 +70,8 @@
   },
   "viewer": {
     "extra_roots": []
+  },
+  "ui": {
+    "voice_input": true
   }
 }

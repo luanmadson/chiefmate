@@ -371,6 +371,18 @@
       </div>
     </form>
   </dialog>
+  <dialog id="voice-notice" class="confirm">
+    <form method="dialog">
+      <div class="label" data-t="Dictation">Dictation</div>
+      <p data-t="The audio is transcribed by the browser's voice service (Google's in Chrome, Microsoft's in Edge, Apple's in Safari), not on this computer. Nothing is sent to anyone until you press Send.">The audio is transcribed by the browser's voice service (Google's in Chrome, Microsoft's in Edge, Apple's in Safari), not on this computer. Nothing is sent to anyone until you press Send.</p>
+      <p class="hint" data-t="One tap listens, another stops; a few seconds of silence stop it too. Ctrl+M does the same in the field.">One tap listens, another stops; a few seconds of silence stop it too. Ctrl+M does the same in the field.</p>
+      <div class="actions">
+        <button value="off" class="button secondary" data-t="Turn dictation off">Turn dictation off</button>
+        <button value="no" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="yes" class="button" data-t="Dictate">Dictate</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="context-dialog" class="confirm context-dialog">
     <form method="dialog">
       <div class="label" id="context-title" data-t="Context received">Context received</div>

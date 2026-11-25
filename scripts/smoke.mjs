@@ -167,6 +167,10 @@ try {
     const awayOff = await (await post('/api/away', { on: false })).json();
     expect(awayOn.away?.since && awayState?.since === awayOn.away.since && awayOff.away === null && state.away === null, `the away mode's button did not turn it on and off: ${JSON.stringify({ awayOn, awayState, awayOff })}`);
     expect(html.includes('id="away"'), "the app's title bar has no away mode button");
+    // Dictation: its setting in the state, its first-use notice and its module (not switched here: the settings may be the installation's own).
+    const voice = await (await fetch(`${base}/voice.js`)).text();
+    expect(typeof state.ui?.voice_input === 'boolean' && html.includes('id="voice-notice"') && voice.includes('export class Dictation') && appJs.includes("from './voice.js'"),
+      `dictation lacks its setting, notice or module: ${JSON.stringify(state.ui)}`);
     // The autopilot's panel in the Usage section: its state, and limits refused before anything is saved.
     const ap = state.autopilot;
     expect(ap && typeof ap.enabled === 'boolean' && ap.stop_at_5h_window > 0 && ap.week_pace > 0 && Array.isArray(ap.queued) && Array.isArray(ap.wakes) && (ap.enabled || ap.blocked?.reason === 'off'),

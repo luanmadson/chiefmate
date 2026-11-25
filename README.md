@@ -410,6 +410,7 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `attribution` | `false` keeps the crew's commits and pull requests from crediting Claude (they are credited to you alone); always off in a project with `no_trace` |
 | `backup_dir` | A folder of your own, such as one in a private repository, where Chiefmate keeps an up-to-date copy of these settings |
 | `viewer` | The file viewer: `extra_roots`, a list of more folders (absolute paths) it may open besides the projects' folders and the libraries. Empty by default |
+| `ui` | The app's own settings: `voice_input`, the microphone for dictation in the message fields (see "Dictation"). On by default; `false` hides it |
 | `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. Optional: `crew` (its own crew), `lead` (its team lead, see "The crew"), `mcp` (external tools it releases), `prompt_block`, `prompt_modules` and `prompt_exclude` (the prompt builder), `dev_start` (the command that starts its development environment from its page, such as `npm run dev`), `merge_by_owner: false` when someone else reviews and merges its work (its cards then have no Approve). See also "Local delivery" below |
 | `missions` | For each mission: the `project`, the `steps` (an agent and its part, in order), the final `review`, the `schedule` (`days` such as `["mon"]` and a `time` such as `"09:00"`) and the `eve_reminder` time |
 | `crew` | Settings for one agent in this installation only, such as `{ "writer": { "model": "claude-opus-5-5", "max_minutes": 90, "extra_instructions": "..." } }` |
@@ -505,6 +506,16 @@ The conversation never makes you wait.
 - **Interrupt.** The **Interrupt** button ends the current answer at once. The conversation goes on in the same session: whatever the manager had written so far stays, marked "interrupted", and your next message tells it the answer was interrupted, so it checks what it may have left half done. Then the queue goes.
 - **See what it is doing.** While it answers, the conversation shows the time it has been at it and its last action (the command it ran, the file it read), updated as it happens, as Operations does for the crew.
 - **The same from the command line:** `chat say`, `chat edit`, `chat remove`, `chat interrupt` and `chat` to read the conversation, the last action and the queue (see "Command line"). The manager itself can't write to its own conversation.
+
+### Dictation
+
+Every message field (the conversation with the manager, the live sessions, the agent in charge of a project and the direct talk with an agent at work) has a microphone button beside **Send**, so you can dictate instead of typing.
+
+- **One tap listens, another stops.** While it listens, the button turns red, pulses and says "Listening…". A few seconds of silence stop it too. On a computer, **Ctrl+M** in the field does the same.
+- **The words go where the cursor is**, without erasing what you typed; those still being heard show as you speak. Nothing is sent by itself: you review the text and press **Send**.
+- **In the app's language** (`language`, Brazilian Portuguese or English).
+- **Where it works:** in browsers with speech recognition (Chrome, Edge, Safari, also on phones), on `localhost` or over https (the remote access). Elsewhere, such as Firefox, the button doesn't show.
+- **Privacy:** the browser sends the audio to its maker's voice service (Google's in Chrome, Microsoft's in Edge, Apple's in Safari) to be transcribed; Chiefmate never receives the audio, only the text you send. The first use says so once, with **Turn dictation off**; `"ui": { "voice_input": false }` in the settings does the same, and `true` brings it back.
 
 ### News from the manager
 

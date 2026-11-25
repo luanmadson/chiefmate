@@ -1,6 +1,7 @@
 // The Chiefmate app: fetches the state every 2.5 seconds (once a minute with the tab hidden) and redraws only what changed.
 import { face } from './faces.js';
 import { language, locale, setLanguage, t, translatePage } from './i18n.js';
+import { Dictation, recognizer } from './voice.js';
 
 const $ = selector => document.querySelector(selector);
 let state = null;
@@ -1532,6 +1533,7 @@ function drawSessionPage() {
 async function sendLive() {
   const text = $('#live-text').value;
   if (!text.trim() || !liveChat.id) return;
+  stopDictation($('#live-text'));
   $('#live-send').disabled = true;
   try {
     const m = await api('/api/session/say', { id: liveChat.id, text });
@@ -3577,6 +3579,7 @@ function closeAgentPanel() {
   clearInterval(agentPanel.timer);
   agentPanel.run = null;
   $('#agent-panel').hidden = true;
+  stopDictation($('#agent-form').text);
 }
 
 /** Adds what the agent did since the last reading, keeping the view at the end when it was there. */
@@ -3669,6 +3672,7 @@ async function sendToAgent() {
   const area = $('#agent-form').text;
   const text = area.value.trim();
   if (!text || !agentPanel.run) return;
+  stopDictation(area);
   try {
     const sent = await api('/api/run/talk', { run: agentPanel.run, text });
     area.value = '';
@@ -3784,6 +3788,7 @@ async function refresh() {
   drawPresence();
   drawAway();
   drawFocus();
+  drawMics();
   drawAlerts();
   drawNavAttention();
   drawCounters();
@@ -3823,6 +3828,7 @@ async function refresh() {
 async function sendMessage(text) {
   const message = text.trim();
   if (!message) return;
+  stopDictation($('#message'));
   try {
     const sent = await api('/api/manager', { message });
     $('#message').value = '';
@@ -4548,6 +4554,119 @@ function fitField(area) {
 for (const area of [$('#message'), $('#live-text')]) area.addEventListener('input', () => fitField(area));
 // While typing, Send doesn't take the focus: the keyboard stays open for the next message.
 for (const button of [$('#send'), $('#live-send')]) button.addEventListener('mousedown', event => root.classList.contains('typing') && event.preventDefault());
+
+// ---------- Dictation ----------
+// A microphone by each message field (ui/voice.js): one tap listens, another stops, a silence stops it too.
+// The browser's own voice service transcribes, so the first use says so once; "ui.voice_input": false hides it.
+const Recognition = recognizer(window);
+const VOICE_NOTICE_KEY = 'chiefmate.voice-notice';
+const MIC_ICON = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="5.5" y="1.5" width="5" height="8.5" rx="2.5"/><path d="M3 7.5a5 5 0 0 0 10 0M8 12.5V15M5.5 15h5"/></svg>';
+const dictations = new Map(); // field → { button, dictation }
+const voiceOn = () => !!Recognition && state?.ui?.voice_input !== false;
+const voiceError = code => ({
+  'not-allowed': t('The microphone is blocked for this page. Allow it in the browser to dictate.'),
+  'service-not-allowed': t('The microphone is blocked for this page. Allow it in the browser to dictate.'),
+  'audio-capture': t('No microphone was found.'),
+  network: t("The browser's voice service didn't answer. Dictation needs the internet."),
+  'no-speech': t('Nothing was heard.'),
+  'language-not-supported': t("The browser's voice service doesn't have this language."),
+})[code] ?? t('Dictation stopped ({error}).', { error: code });
+
+function drawMic(field) {
+  const { button, dictation } = dictations.get(field);
+  const on = dictation?.listening ?? false;
+  button.hidden = !voiceOn();
+  button.setAttribute('aria-pressed', String(on));
+  button.setAttribute('aria-label', on ? t('Stop dictating') : t('Dictate'));
+  button.title = on ? t('Stop dictating (Ctrl+M)') : t('Dictate (Ctrl+M)');
+  button.querySelector('.mic-state').textContent = on ? t('Listening…') : '';
+}
+
+/** Called on every refresh: the buttons follow the setting, and a dictation stops when it is turned off. */
+function drawMics() {
+  for (const [field, { dictation }] of dictations) {
+    if (!voiceOn()) dictation?.abort();
+    drawMic(field);
+  }
+}
+
+function stopDictation(field) {
+  dictations.get(field)?.dictation?.abort();
+}
+
+/** The first use only: the browser's voice service transcribes the audio. Dictate, cancel or turn dictation off. */
+async function voiceNoticeAccepted() {
+  try {
+    if (localStorage.getItem(VOICE_NOTICE_KEY)) return true;
+  } catch {
+    // no storage: asked every time
+  }
+  const dialog = $('#voice-notice');
+  dialog.returnValue = '';
+  dialog.showModal();
+  const answer = await new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue), { once: true }));
+  if (answer === 'off') {
+    try {
+      state.ui = (await api('/api/voice-input', { enabled: false })).ui;
+      drawMics();
+      toast(t('Dictation is off. To turn it back on: "ui": { "voice_input": true } in config/chiefmate.json.'));
+    } catch (error) {
+      toast(error.message);
+    }
+    return false;
+  }
+  if (answer !== 'yes') return false;
+  try {
+    localStorage.setItem(VOICE_NOTICE_KEY, '1');
+  } catch {
+    // no storage
+  }
+  return true;
+}
+
+async function toggleDictation(field) {
+  const entry = dictations.get(field);
+  if (entry.dictation?.listening) return entry.dictation.stop();
+  if (!voiceOn() || entry.dictation?.state === 'stopping' || !(await voiceNoticeAccepted())) return;
+  for (const other of dictations.keys()) if (other !== field) stopDictation(other);
+  const dictation = new Dictation({
+    Recognition,
+    field,
+    lang: locale(),
+    // Phones end on their own at a pause, and repeat words when kept listening
+    continuous: !touchScreen(),
+    onState: next => {
+      drawMic(field);
+      // Stopped by the owner or a silence: back to the field, ready to review (not on a phone: that opens the keyboard)
+      if (next === 'idle' && !dictation.aborted && !touchScreen()) field.focus();
+    },
+    onError: code => toast(voiceError(code)),
+  });
+  entry.dictation = dictation;
+  dictation.start();
+}
+
+for (const [field, place] of [[$('#message'), $('#send')], [$('#live-text'), $('#live-send')], [$('#agent-form').text, $('#agent-form button[type=submit]')]]) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'button secondary mic';
+  button.innerHTML = `${MIC_ICON}<span class="mic-state" aria-hidden="true"></span>`;
+  button.hidden = true;
+  place.before(button);
+  dictations.set(field, { button, dictation: null });
+  button.addEventListener('mousedown', event => event.preventDefault()); // the field keeps its focus and caret
+  button.addEventListener('click', () => toggleDictation(field));
+}
+// Ctrl+M in a message field starts or stops its dictation; anywhere else, it stops the one listening.
+document.addEventListener('keydown', event => {
+  if (!event.ctrlKey || event.altKey || event.shiftKey || event.metaKey || event.key.toLowerCase() !== 'm' || !voiceOn()) return;
+  const field = dictations.has(event.target) ? event.target : [...dictations].find(([, d]) => d.dictation?.listening)?.[0];
+  if (!field) return;
+  event.preventDefault();
+  toggleDictation(field);
+});
+// Another page: the dictation stops there
+window.addEventListener('hashchange', () => dictations.forEach((d, field) => stopDictation(field)));
 
 showView();
 drawClock();
