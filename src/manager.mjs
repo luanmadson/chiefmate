@@ -11,6 +11,7 @@ import { autopilotLine } from './autopilot.mjs';
 import { awayInfo, awayLine } from './news.mjs';
 import { computerLine, planLine } from './plan.mjs';
 import { questionsLine } from './decisions.mjs';
+import { requestsLine } from './charge.mjs';
 import { planningLine } from './planning.mjs';
 import { radarLine } from './radar.mjs';
 import { focus, maxParallel, queued } from './queue.mjs';
@@ -140,6 +141,8 @@ export function situation(libraries = []) {
   lines.push(radarLine(config.owner || 'the owner'));
   const questions = questionsLine();
   if (questions) lines.push(questions);
+  const requests = requestsLine(config);
+  if (requests) lines.push(requests);
   lines.push(autopilotLine(config, usage));
   const away = awayLine(config.owner || 'the owner');
   if (away) lines.push(away);
@@ -277,7 +280,7 @@ export function newsMessage(owner, events, alongside = false, away = awayInfo())
     : '';
   // An owner's merge that failed: a conflict is the crew's to solve, at once; anything else is the owner's to do.
   const mergeFailed = events.some(e => e.kind === 'merge_failed')
-    ? `\n\nFor the merge_failed events: ${owner}'s Approve (or Merge) didn't go through. When the cause is a conflict, put the fix on the queue now, without asking, unless a task for that run is already queued or running: node src/cli.mjs task <project> generalist "<instruction>" --review --title "<at most 60 characters>" --summary "<one or two sentences>" --level <the failed run's level>, with --plan <n> when the event names a board item. The instruction names the run, its branch and the base branch, and asks the crew to bring that branch into the run's own (git fetch origin <branch>, or git fetch <clone folder> <branch> for a local delivery, then git merge FETCH_HEAD), solve the conflicts keeping what both sides meant, and run the checks; the new work replaces the old, whose card settles by itself once the new one is merged. When it is not a conflict (a clone with changes or on another branch, GitHub refusing for another reason), queue nothing. Either way, tell ${owner} in one line what failed and what you did or what they must do.`
+    ? `\n\nFor the merge_failed events: ${owner}'s Approve (or Merge) didn't go through. When the cause is a conflict, put the fix on the queue now, without asking, unless a task for that run is already queued or running: node src/cli.mjs task <project> generalist "<instruction>" --review --title "<at most 60 characters>" --summary "<one or two sentences>" --level <the failed run's level>, with --plan <n> when the event names a board item. The instruction names the run, its branch and the base branch, and asks the crew to bring that branch into the run's own (git fetch origin <branch>, or git fetch <clone folder> <branch> for a local delivery, then git merge FETCH_HEAD), solve the conflicts keeping what both sides meant, and run the checks; the new work replaces the old: a local branch settles by itself once the new one is merged, and an old pull request you close then with node src/cli.mjs close-pr <old run> --replaced-by <new run> --yes. When it is not a conflict (a clone with changes or on another branch, GitHub refusing for another reason), queue nothing. Either way, tell ${owner} in one line what failed and what you did or what they must do.`
     : '';
   const report = events.some(e => e.kind === 'autopilot_report')
     ? `\n\nFor the autopilot_report event: the daily report of what the autopilot did alone. Tell ${owner} in a few lines, with each item's short title, where it is now and what waits for them (a pull request to approve, a branch to review).`

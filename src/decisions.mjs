@@ -10,9 +10,10 @@
 // cards apart and counts only the others as needing the owner.
 import path from 'node:path';
 import { markSeen } from './attention.mjs';
+import { ownerAnswered } from './charge.mjs';
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
-import { discardRun, mergeRun, verdict } from './merge.mjs';
+import { discardRun, mergeRun, prNumber, verdict } from './merge.mjs';
 import { reportEvent } from './news.mjs';
 import { decideItem } from './planning.mjs';
 import { readRun } from './store.mjs';
@@ -35,7 +36,7 @@ export const mergedByOwner = (config, project) => config?.projects?.[project]?.m
  * recommend (one of the options), project, level (the approval level, 1 to 3) }. It waits as a card until answered or
  * discarded.
  */
-export function addQuestion({ question, context, options, recommend, project, level } = {}, config = loadConfig()) {
+export function addQuestion({ question, context, options, recommend, project, level, request = null } = {}, config = loadConfig()) {
   const text = clip(question, 300);
   if (!text) throw new Error('The question is missing.');
   const list = (Array.isArray(options) ? options : String(options ?? '').split('|')).map(o => clip(o, 60)).filter(Boolean);
@@ -51,6 +52,8 @@ export function addQuestion({ question, context, options, recommend, project, le
   const q = {
     id: Math.max(0, ...questions.map(x => x.id)) + 1, question: text, context: String(context ?? '').trim().slice(0, 2000),
     options: choices, recommend: recommended ?? null, project: id || null, level: approval, at: now(), status: 'open', answer: null, answered_at: null,
+    // A request of a project's agent in charge, taken to the owner (src/charge.mjs): the answer decides it.
+    ...(request != null ? { request: Number(request) } : {}),
   };
   saveQuestions([...questions, q]);
   return q;
@@ -75,7 +78,6 @@ function closeQuestion(id, answer) {
 // ---------- The cards ----------
 
 const projectName = (config, id) => config.projects?.[id]?.name ?? id ?? '';
-const prNumber = url => /\/pull\/(\d+)/.exec(String(url ?? ''))?.[1] ?? null;
 const firstLine = text => String(text ?? '').split('\n').map(l => l.trim()).find(Boolean) ?? '';
 const plainVerdict = text => String(text ?? '').replace(/[*_`>#]/g, '').replace(/\s+/g, ' ').trim();
 const verdicts = new Map(); // run id -> the final review's verdict, read once (the file doesn't change after the run)
@@ -233,10 +235,15 @@ export async function decide({ card, action, option, reason } = {}, cards = []) 
     return { card: c.id, done: action === 'approve' ? 'approved' : 'discarded' };
   } else if (c.kind === 'question' && ['answer', 'discard'].includes(action)) {
     const q = closeQuestion(c.question, action === 'answer' ? String(option ?? '') : null);
-    tell(q.answer
+    // A request of an agent in charge follows the answer by itself: authorized, on hold or refused.
+    const followed = q.request ? await ownerAnswered(q).then(x => x.request, error => ({ error: error.message })) : null;
+    const request = !followed ? '' : followed.error
+      ? ` Request #${q.request} could not follow it (${followed.error}).`
+      : ` Chiefmate applied it to request #${q.request}: ${followed.status}${followed.run ? `, run ${followed.run} queued` : ''}; don't answer that request again.`;
+    tell((q.answer
       ? `The owner answered your question #${q.id} "${q.question}" from the app: "${q.answer}".${q.recommend ? ` (You had recommended "${q.recommend}".)` : ''}`
-      : `The owner discarded your question #${q.id} "${q.question}" from the app without answering it.`);
-    return { card: c.id, done: q.answer ? 'answered' : 'discarded', answer: q.answer };
+      : `The owner discarded your question #${q.id} "${q.question}" from the app without answering it.`) + request);
+    return { card: c.id, done: q.answer ? 'answered' : 'discarded', answer: q.answer, run: followed?.run ?? null };
   }
   throw new Error(t('This decision does not take that action.'));
 }

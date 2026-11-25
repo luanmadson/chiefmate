@@ -96,7 +96,7 @@ function workOf(run, config = loadConfig()) {
  */
 export function createRun({
   kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [], plan = null, prompt = null,
-  title: givenTitle = null, summary: givenSummary = null, level = null,
+  title: givenTitle = null, summary: givenSummary = null, level = null, request = null,
 }) {
   const config = loadConfig();
   let title, steps, finalReview, project;
@@ -158,6 +158,8 @@ export function createRun({
     ...(prompt?.trim() ? { builderPrompt: prompt.trim() } : {}),
     // The approval level the manager gave it (1, 2 or 3; src/decisions.mjs shows it on the owner's card).
     level: parseLevel(level),
+    // The request of the project's agent in charge that the manager (or the owner) authorized (src/charge.mjs).
+    ...(request != null ? { ownerRequest: Number(request) } : {}),
   });
   describeLater(run.id, run);
   return run;

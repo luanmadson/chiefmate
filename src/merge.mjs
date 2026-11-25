@@ -5,6 +5,7 @@
 // work (the owner's click on a decision card, src/decisions.mjs) closes the pull request, or leaves the branch unmerged.
 // After a merge, the copies the owner reads are brought up to date (refreshCopies): the project's reference library,
 // and the owner's clone only by a fast forward, never touching their changes.
+// A pull request replaced by a newer run's is closed with "cli.mjs close-pr <run> --replaced-by <run>" (closeReplaced).
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
@@ -175,4 +176,59 @@ export async function discardRun(id, config = loadConfig()) {
   run.discarded = { at: now(), by: 'owner', how: where.kind };
   saveRun(run);
   return { run: run.id, ...where, discarded: run.discarded };
+}
+
+/** A pull request's number, from its address. */
+export const prNumber = url => /\/pull\/(\d+)/.exec(String(url ?? ''))?.[1] ?? null;
+
+/**
+ * Why the newer run replaces the old one, or throws: both finished, of the same project, the old one's pull request
+ * neither merged nor closed, the newer one's still alive, and the newer run either works on the same board item or its
+ * instruction names the old run (its id, branch or pull request), as the fix of a conflict does.
+ */
+function replacement(old, newer) {
+  if (!old || !newer) throw new Error(t('Run not found.'));
+  if (old.id === newer.id) throw new Error(t('A run does not replace itself.'));
+  if (!old.pullRequest) throw new Error(t('The run {run} has no pull request to close.', { run: old.id }));
+  if (old.merged) throw new Error(t('This run was already merged.'));
+  if (old.discarded) throw new Error(t('The pull request of {run} was already closed.', { run: old.id }));
+  if (newer.project !== old.project) throw new Error(t('{new} is of another project: it does not replace {old}.', { new: newer.id, old: old.id }));
+  if (newer.status !== 'done' || !newer.pullRequest || newer.discarded) {
+    throw new Error(t('{new} has no pull request still open or merged: nothing replaces {old} yet.', { new: newer.id, old: old.id }));
+  }
+  if (old.plan && old.plan === newer.plan) return `the same board item, #${old.plan}`;
+  const text = String(newer.instruction ?? '');
+  const number = prNumber(old.pullRequest);
+  const named = [old.id, old.branch, old.pullRequest].filter(Boolean).find(s => text.includes(s))
+    ?? (number && new RegExp(`(PR|pull request) #${number}\\b`, 'i').test(text) ? `#${number}` : null);
+  if (named) return `its instruction names ${named}`;
+  throw new Error(t('Nothing says {new} replaces {old}: neither the same board item nor its instruction naming the old run.', { new: newer.id, old: old.id }));
+}
+
+/** What closing a replaced run's pull request would do, without doing it. */
+export function previewClose(id, replacedBy) {
+  const old = readRun(String(id ?? ''));
+  const newer = readRun(String(replacedBy ?? ''));
+  const why = replacement(old, newer);
+  return { run: old.id, title: old.title, project: old.project, url: old.pullRequest, replacedBy: newer.id, newUrl: newer.pullRequest, newTitle: newer.title, why };
+}
+
+/**
+ * Closes a run's pull request on GitHub, with a comment naming the one that replaces it, only when a newer run's pull
+ * request does (see replacement). "by" is who asked: "manager" or "owner". The branch stays and the pull request can be
+ * reopened there; the run is marked discarded, with who asked and what replaced it, so its card settles.
+ */
+export async function closeReplaced(id, replacedBy, { by = 'owner' } = {}, config = loadConfig()) {
+  const p = previewClose(id, replacedBy);
+  const who = by === 'manager' ? 'manager' : 'owner';
+  const comment = `Replaced by ${p.newUrl} (Chiefmate run ${p.replacedBy}): ${p.why}. Closed by Chiefmate at the ${who}'s request; the branch stays and this pull request can be reopened.`;
+  const dir = existsSync(projectDir(p.project)) ? projectDir(p.project) : ROOT;
+  const r = await exec('gh', ['pr', 'close', p.url, '--comment', comment], dir);
+  if (r.code !== 0 && !/already closed/i.test(r.output)) throw new Error(t("GitHub didn't close the pull request: {output}", { output: clip(r.output, 500) }));
+  const run = readRun(p.run);
+  run.discarded = { at: now(), by: who, how: 'pr', replacedBy: p.replacedBy };
+  saveRun(run);
+  // The manager knows what it closed itself: only the owner's is news to it.
+  if (who === 'owner') reportEvent('owner_decided', `The owner closed pull request ${p.url} of run ${p.run} "${p.title}" (project ${p.project}): replaced by ${p.newUrl} (run ${p.replacedBy}).`, { config });
+  return { ...p, discarded: run.discarded };
 }

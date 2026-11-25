@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { stepMcp, userClaudeExcludes } from './access.mjs';
+import { addRequest, chargeFolder, chargeProfile, chargeProject, chargeTurn, takeRequest } from './charge.mjs';
 import { describeAction, environment, executable as claudeExecutable, runClaude } from './claude.mjs';
 import { loadConfig } from './config.mjs';
 import { API, guardHooks, publishing } from './guard.mjs';
@@ -121,6 +122,8 @@ export function sessionFolder(config, profile) {
     return dir;
   };
   if (profile.cwd) return { dir: must(path.resolve(ROOT, profile.cwd)), copy: false };
+  // The agent in charge only reads: without your clone, the crew's working copy will do.
+  if (profile.charge) return { dir: chargeFolder(profile.project, projectClone(config.projects?.[profile.project])), copy: false };
   if (profile.project) {
     const project = config.projects?.[profile.project];
     if (!project) throw new Error(t('Unknown project: {id}', { id: profile.project }));
@@ -207,6 +210,13 @@ export function sessionArgs(session, config, prompt) {
   ];
 }
 
+/** A profile by id: one of sessionProfiles, or a project's conversation with its agent in charge (src/charge.mjs). */
+function findProfile(config, profileId) {
+  const project = chargeProject(profileId);
+  if (project && config.projects?.[project]) return chargeProfile(config, project);
+  return sessionProfiles(config).find(p => p.id === profileId);
+}
+
 /** A project's profile for a tool: its own in "sessions", else the automatic one. */
 export function profileFor(config, projectId, tool) {
   if (!config.projects?.[projectId]) throw new Error(t('Unknown project: {id}', { id: projectId }));
@@ -222,11 +232,13 @@ export function profileFor(config, projectId, tool) {
  * app's prompt builder), that text is the first message, as it is.
  */
 export function planSession(config, profileId, { prompt: written = null } = {}) {
-  const profile = sessionProfiles(config).find(p => p.id === profileId);
+  const profile = findProfile(config, profileId);
   if (!profile) throw new Error(t('Unknown session profile: {id}', { id: profileId }));
   if (!TOOLS.includes(profile.tool)) throw new Error(t('Session "{name}": "tool" must be "claude" or "codex".', { name: profile.name }));
   const folder = sessionFolder(config, profile);
   const text = String(written ?? '').trim();
+  // The conversation with the agent in charge starts with the owner's first message: its role comes every turn.
+  if (profile.charge) return { profile, folder, prompt: { text: `# ${profile.name}`, blocks: [], missing: [], unresolved: [], blocksGiven: false } };
   const prompt = text ? { text, blocks: [], missing: [], unresolved: [], blocksGiven: true, written: true } : sessionPrompt(config, profile, folder);
   return { profile, folder, prompt };
 }
@@ -290,6 +302,7 @@ function launch(session) {
  */
 export async function openSession(profileId, { origin = 'app', prompt: written = null, window = false, config = loadConfig() } = {}) {
   const { profile, folder, prompt } = planSession(config, profileId, { prompt: written });
+  if (profile.charge && (window || written)) throw new Error(t('The conversation with the agent in charge happens only here in the app.'));
   const mode = window ? 'window' : 'app';
   const open = mode === 'app' ? listSessions().find(s => s.profile === profile.id && s.mode === 'app' && OPEN.includes(s.status)) : null;
   if (open && written) throw new Error(t('"{name}" already has a session open in the app. Write to it, or end it before opening another one with this prompt.', { name: profile.name }));
@@ -304,7 +317,7 @@ export async function openSession(profileId, { origin = 'app', prompt: written =
   const session = {
     id, profile: profile.id, name: profile.name, tool: profile.tool, project: profile.project, library_folder: profile.library_folder,
     cwd: folder.dir, readOnlyCopy: folder.copy, model: profile.model ?? (profile.tool === 'claude' ? config.default_model ?? null : null), command, blocks: prompt.written ? ['(written in the prompt builder)'] : prompt.blocks, missing: prompt.missing, firstMessage: prompt.blocksGiven,
-    origin, created: now(), status: 'starting', requests: [], mode,
+    origin, created: now(), status: 'starting', requests: [], mode, ...(profile.charge ? { charge: true, member: profile.member } : {}),
     // The tool's own session: Claude Code's is chosen here (--session-id), Codex gives its thread id on the first turn.
     ...(mode === 'app' ? { toolSession: profile.tool === 'claude' ? randomUUID() : null, turns: 0, queue: [], allowed: [] } : {}),
   };
@@ -404,6 +417,10 @@ function remember(id, entry) {
   appendFileSync(historyFile(id), `${JSON.stringify({ at: now(), ...entry })}\n`);
 }
 const note = (id, text, extra = {}) => remember(id, { kind: 'note', text, ...extra });
+/** A note in a session's history from elsewhere in Chiefmate (the manager's answer to a request of the agent in charge). */
+export function noteSession(id, text, extra = {}) {
+  if (readSession(id)) note(id, text, extra);
+}
 
 /**
  * A session's history from entry "from" on (each entry with its number "n"); with no "from", the last "limit".
@@ -544,6 +561,7 @@ export function deliverSession(id) {
   saveSession({ ...session, queue: [], working: turn.since, interrupted: null, paused: null });
   const onEvent = event => {
     if (event.type === 'start') turn.started = true;
+    if (event.type === 'say' && session.charge) return chargeSays(id, session, event.text, config);
     if (event.type === 'say') remember(id, { kind: 'say', text: event.text });
     if (event.type === 'action') {
       turn.last = { at: now(), text: event.text };
@@ -552,13 +570,23 @@ export function deliverSession(id) {
   };
   const mcp = sessionMcp(config, session);
   rmSync(guardLog(id), { force: true });
+  // The agent in charge of a project: read only, its project alone, with no external tools (src/charge.mjs).
+  let charge = null;
+  if (session.charge) {
+    try {
+      charge = chargeTurn(config, session, { cloneOf: projectClone });
+    } catch (error) {
+      charge = { error: error.message };
+    }
+  }
   // One call of Claude Code; when its session is not where the turn count says (see SESSION_EXISTS), once more the other way.
   const claudeTurn = (resume, retried = false) => {
+    if (charge?.error) throw new Error(charge.error);
     const run = runClaude({
-      dir: session.cwd, prompt, system: appSystem(config.owner || 'the owner'), model: session.model ?? config.default_model,
-      tools: [...APP_TOOLS, ...mcp.tools, ...(session.allowed ?? []).filter(r => !ASK_FIRST.includes(r))],
-      disallowed: ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r)), mcpServers: mcp.servers,
-      hooks: guardHooks({ log: guardLog(id), allowed: session.allowed ?? [] }),
+      dir: session.cwd, prompt, system: charge?.system ?? appSystem(config.owner || 'the owner'), model: charge?.model ?? session.model ?? config.default_model,
+      tools: charge ? charge.tools : [...APP_TOOLS, ...mcp.tools, ...(session.allowed ?? []).filter(r => !ASK_FIRST.includes(r))],
+      disallowed: charge ? [...charge.disallowed, ...ASK_FIRST] : ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r)), mcpServers: charge ? {} : mcp.servers,
+      addDirs: charge?.addDirs ?? [], hooks: guardHooks({ log: guardLog(id), allowed: charge ? [] : session.allowed ?? [] }),
       attribution: config.attribution !== false, maxMinutes: TURN_MINUTES,
       session: { id: session.toolSession, resume }, log: rawLog(id), onEvent,
     });
@@ -583,6 +611,23 @@ export function deliverSession(id) {
   }
   promise.then(r => finishTurn(id, turn, r)).catch(error => finishTurn(id, turn, { ok: false, error: error.message }));
   return true;
+}
+
+/**
+ * What the agent in charge says: its text, without the request block, and the request it sends to the manager
+ * (recorded, shown in the conversation and told to the manager).
+ */
+function chargeSays(id, session, text, config) {
+  const said = takeRequest(text);
+  if (said.text) remember(id, { kind: 'say', text: said.text });
+  if (said.error) note(id, t('The agent tried to send a request to the manager, but it was not understood ({error}). Ask it to send it again.', { error: said.error }), { error: true });
+  if (!said.request) return;
+  try {
+    const r = addRequest({ ...said.request, project: session.project, session: id }, config);
+    remember(id, { kind: 'request', request: r.id, status: r.status, text: t('Request #{id} sent to the manager: {plan}', { id: r.id, plan: clip(r.plan, 300) }) });
+  } catch (error) {
+    note(id, t('The request could not be sent to the manager: {error}', { error: error.message }), { error: true });
+  }
 }
 
 /**
@@ -634,7 +679,10 @@ function finishTurn(id, turn, r) {
     }
   }) : [];
   rmSync(guardLog(id), { force: true });
-  for (const d of [...(r.denials ?? []), ...guarded]) {
+  // The agent in charge has nothing to ask permission for: it only reads, and sends requests to the manager.
+  const refused = [...(r.denials ?? []), ...guarded];
+  if (session.charge && refused.length) note(id, t('The agent in charge tried to change something, which it never does: what is to be done goes to the manager as a request.'));
+  for (const d of session.charge ? [] : refused) {
     const ask = permissionOf(d, session.cwd);
     if ((session.requests ?? []).some(x => x.kind === 'permission' && x.status === 'open' && x.rule === ask.rule)) continue;
     const request = { id: randomUUID().slice(0, 8), kind: 'permission', ...ask, status: 'open', at: now() };
@@ -1022,7 +1070,7 @@ export function sessionsState(config = loadConfig(), machine = computer(config))
     const p = seen.get(s.id);
     const app = s.mode === 'app';
     return {
-      id: s.id, profile: s.profile, name: s.name, tool: s.tool, project: s.project, folder: s.library_folder, cwd: s.cwd, model: s.model,
+      id: s.id, profile: s.profile, name: s.name, tool: s.tool, project: s.project, folder: s.library_folder, cwd: s.cwd, model: s.model, charge: !!s.charge,
       mode: app ? 'app' : 'window', status: s.status, started: s.started ?? s.created, ended: s.ended ?? null,
       alive: app ? live.has(s.id) : !!p, pid: p?.pid ?? (app ? live.get(s.id)?.pid : s.pid) ?? null, ram: p?.ram ?? 0,
       blocks: s.blocks ?? [], missing: s.missing ?? [], request: (s.requests ?? []).find(r => r.status === 'open') ?? null,
@@ -1048,7 +1096,7 @@ export function sessionView(id, from = null, config = loadConfig()) {
   if (!record) throw new Error(t('Session not found.'));
   const all = sessionsState(config);
   const session = [...all.open, ...all.recent].find(s => s.id === id)
-    ?? { id, name: record.name, tool: record.tool, project: record.project, folder: record.library_folder, mode: record.mode ?? 'window', status: record.status, started: record.started ?? record.created, ended: record.ended ?? null, phase: record.status === 'ended' ? 'ended' : 'waiting', resumable: record.mode === 'app' && record.status === 'ended' && !!record.toolSession, turns: record.turns ?? 0 };
+    ?? { id, name: record.name, tool: record.tool, project: record.project, folder: record.library_folder, charge: !!record.charge, mode: record.mode ?? 'window', status: record.status, started: record.started ?? record.created, ended: record.ended ?? null, phase: record.status === 'ended' ? 'ended' : 'waiting', resumable: record.mode === 'app' && record.status === 'ended' && !!record.toolSession, turns: record.turns ?? 0 };
   return {
     session: { ...session, cwd: record.cwd, model: record.model, blocks: record.blocks ?? [] },
     queue: record.queue ?? [],
