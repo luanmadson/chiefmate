@@ -323,6 +323,17 @@ textarea { resize: vertical; min-height: 64px; }
 .report-who { display: flex; align-items: center; gap: 10px; }
 .report-who strong { color: var(--strong); font-weight: 600; }
 .report .body p { margin: 0 0 8px; }
+/* Final summaries: what was done, what changes, whether you are needed; the full report folded below. */
+.outcome { display: grid; gap: 8px; margin: 8px 0; padding: 10px 12px; border: 1px solid var(--line); border-left: 2px solid var(--accent); background: var(--accent-bg); }
+.outcome .label { margin-bottom: 2px; }
+.outcome p, .outcome ul { margin: 0; }
+.outcome ul { padding-left: 18px; }
+.report-full { margin-top: 6px; }
+.report-full > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.report-full[open] > summary { margin-bottom: 6px; }
+.run-summary { margin: 4px 0 8px; color: var(--text); }
+.live-summary { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.table .run-line { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60ch; }
 
 /* Usage and projects */
 .usage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
