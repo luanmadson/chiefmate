@@ -7,6 +7,7 @@ import { loadAgents, loadConfig, projectCrew, projectLead } from './config.mjs';
 import { formatDateTime, formatDuration, formatNumber, formatPercent, t } from './i18n.mjs';
 import { LEAD, leadSituation } from './leads.mjs';
 import { processes } from './machine.mjs';
+import { autopilotLine } from './autopilot.mjs';
 import { computerLine, planLine } from './plan.mjs';
 import { planningLine } from './planning.mjs';
 import { focus, maxParallel, queued } from './queue.mjs';
@@ -130,6 +131,7 @@ export function situation(libraries = []) {
   lines.push(computerLine(config));
   lines.push(sessionsLine(config));
   lines.push(planningLine(config.owner || 'the owner'));
+  lines.push(autopilotLine(config, usage));
   lines.push(contextLine());
   const delivery = p => (p.deliver === 'local' ? `, local delivery: the result is a branch in ${p.local_clone ?? 'the working copy'}, nothing goes to GitHub` : ', delivered as a pull request');
   lines.push(`Projects: ${Object.entries(config.projects ?? {}).map(([id, p]) => `${id} (${p.name}, ${p.repository}${delivery(p)}${p.docs ? `, personal docs in ${p.docs}` : ''})`).join('; ') || 'none'}.`);
@@ -253,11 +255,18 @@ export function newsMessage(owner, events, alongside = false) {
   const ask = alongside
     ? `Answer ${owner}'s message(s) and, in the same reply, tell ${owner} about these events in a few lines.`
     : `Write ${owner} a short, clear notice in the conversation: what happened and, when something needs ${owner}, what to do. A few lines, no headings, no greeting. Check the records when the situation is not enough, but don't queue or change anything because of this notice alone.`;
-  // The one change a notice asks for: the triage of new proposals, which is the manager's job (the decision stays the owner's).
+  // The changes a notice asks for: the triage of new proposals, which is the manager's job (the decision stays the
+  // owner's), and, with the autopilot on, the next item of a project whose queue emptied.
   const triage = events.some(e => e.kind === 'plan_proposed')
-    ? `\n\nFor the plan_proposed events: triage those proposals first (plan triage, or plan discard with a one-line reason for duplicates and what makes no sense), then tell ${owner} in one line what now waits for their decision in Planning. Never approve for ${owner}.`
+    ? `\n\nFor the plan_proposed events: triage those proposals first (plan triage, or plan discard with a one-line reason for duplicates and what makes no sense), then tell ${owner} in one line what now waits for their decision in Planning. Never approve for ${owner}, except through the autopilot.`
     : '';
-  return `${head}\n${lines.join('\n')}\n\n${ask}${triage}`;
+  const idle = events.some(e => e.kind === 'idle')
+    ? `\n\nFor the idle events (the autopilot, which ${owner} turned on): for each project named, put on the queue the first item listed that still makes sense now (check the latest runs and what it depends on) with node src/cli.mjs plan approve <n> --autopilot. At most one per project; Chiefmate refuses it outside the autopilot's limits. Then tell ${owner} in one line what you queued and why, or why nothing.`
+    : '';
+  const report = events.some(e => e.kind === 'autopilot_report')
+    ? `\n\nFor the autopilot_report event: the daily report of what the autopilot did alone. Tell ${owner} in a few lines, with each item's short title, where it is now and what waits for them (a pull request to approve, a branch to review).`
+    : '';
+  return `${head}\n${lines.join('\n')}\n\n${ask}${triage}${idle}${report}`;
 }
 
 /** The text the manager receives: your message, or the queue in order with the time of each one, and Chiefmate's news. */

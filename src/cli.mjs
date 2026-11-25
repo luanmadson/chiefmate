@@ -103,6 +103,8 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 per project at a time, the others wait in order), "later" leaves it for
                                                 the future, "discard" sets it aside with a reason (plan restore <n> brings
                                                 it back)
+  node src/cli.mjs plan approve <n> --autopilot for the manager, with the autopilot on: puts an item triaged "now" on
+                                                the queue of a project whose queue is empty, within the autopilot's limits
   node src/cli.mjs plan order <n> <n> ...       puts these items first in the owner's order, in this order
   node src/cli.mjs chat [n]                     the conversation with the manager: the last n messages (10), what it is
                                                 doing now and the messages waiting in the queue
@@ -152,6 +154,10 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 records a free reset (expires: YYYY-MM-DD)
   node src/cli.mjs reset-grant used <n>         marks free reset number n as used (remove <n> deletes it)
   node src/cli.mjs claude-login                 opens a browser window to sign in to claude.ai, for the optional usage reading
+  node src/cli.mjs autopilot [on|off] [--week-pace 0.95] [--window-5h 0.85] [--quiet 23:00-07:00|off] [--report 08:00|off]
+                                                the autopilot: when a project's queue empties, the manager puts its next
+                                                item triaged "now" on the queue, within these limits; with no option, its
+                                                settings, whether it may act now and what it did in the last day
   node src/cli.mjs usage-reader on|off|now      turns the reading of claude.ai's usage page on or off, or reads it now
   node src/cli.mjs notify "<title>" "<text>"    tests a Windows notification`;
 
@@ -304,7 +310,7 @@ async function planCommand() {
       return;
     case 'approve':
     case 'later':
-      show(action === 'approve' ? 'Approved' : 'Later', await change({ action, id: which(), by }));
+      show(action === 'approve' ? 'Approved' : 'Later', await change({ action, id: which(), by, ...(action === 'approve' && has('--autopilot') ? { autopilot: true } : {}) }));
       return;
     case 'discard': {
       const duplicate = option('--duplicate-of');
@@ -467,9 +473,11 @@ async function main() {
         const { startSessions } = await import('./sessions.mjs');
         const { chat, deliverPending, interruptManager, managerBusy } = await import('./manager.mjs');
         const { startWatch } = await import('./plan.mjs');
+        const { startAutopilot } = await import('./autopilot.mjs');
         startQueue();
         startSchedule();
         startWatch();
+        startAutopilot();
         startSessions();
         // In "pause" mode (and on "update now") the update pauses the runs going on and waits for the manager's answer;
         // in "wait" mode, it waits for every run to end and for the manager. The sessions' windows stay open.
@@ -714,6 +722,25 @@ async function main() {
       console.log(`A browser window opened with Chiefmate's own profile (${PROFILE_DIR}).
 Sign in to claude.ai there, then close the window.
 The reading is off until you turn it on: node src/cli.mjs usage-reader on`);
+      return;
+    }
+    case 'autopilot': {
+      const autopilot = await import('./autopilot.mjs');
+      const config = loadConfig();
+      const changes = { ...config.autopilot };
+      if (rest[0] === 'on' || rest[0] === 'off') changes.enabled = rest[0] === 'on';
+      for (const [o, key] of [['--week-pace', 'week_pace'], ['--window-5h', 'stop_at_5h_window']]) if (option(o) !== undefined) changes[key] = Number(option(o));
+      if (option('--quiet') !== undefined) {
+        if (option('--quiet') !== 'off' && !autopilot.parseQuietHours(option('--quiet'))) throw new Error('Quiet hours as HH:MM-HH:MM, such as 23:00-07:00, or off.');
+        changes.quiet_hours = option('--quiet') === 'off' ? '' : option('--quiet');
+      }
+      if (option('--report') !== undefined) changes.daily_report = option('--report') === 'off' ? false : option('--report');
+      if (JSON.stringify(changes) !== JSON.stringify(config.autopilot ?? {})) {
+        config.autopilot = changes;
+        saveConfig(config); // read again on every check: no restart needed
+      }
+      console.log(JSON.stringify(config.autopilot ?? {}, null, 2));
+      console.log(autopilot.autopilotLine(config));
       return;
     }
     case 'usage-reader': {
