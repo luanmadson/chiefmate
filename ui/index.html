@@ -213,6 +213,7 @@
           <div id="project-history"></div>
         </div>
         <div id="project-planning" class="project-tab" hidden></div>
+        <div id="project-files" class="project-tab" hidden></div>
         <div id="project-context" class="project-tab" hidden></div>
         <div id="project-builder" class="project-tab" hidden></div>
         <div id="project-live" class="project-tab" hidden>
@@ -384,6 +385,14 @@
         <button value="close" class="button secondary" data-t="Close">Close</button>
       </div>
     </form>
+  </dialog>
+  <dialog id="viewer" class="viewer" aria-labelledby="viewer-name">
+    <div class="viewer-top">
+      <div class="viewer-title"><strong id="viewer-name"></strong><span id="viewer-facts" class="hint num"></span></div>
+      <div id="viewer-tools" class="viewer-tools"></div>
+      <button type="button" id="viewer-close" class="viewer-close" aria-label="Close" data-t-label="Close">&times;</button>
+    </div>
+    <div id="viewer-body" class="viewer-body"></div>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/app.js" type="module"></script>

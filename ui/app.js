@@ -45,12 +45,34 @@ function confirmDialog(title, text, yes) {
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
+// A file's path in a text, which opens the viewer: absolute (C:\… or C:/…), or relative with a folder and a known
+// extension, with an optional ":line"; inside `code`, a file's name alone too.
+const FILE_EXT = 'png|jpe?g|gif|webp|svg|bmp|avif|ico|pdf|md|markdown|txt|log|csv|tsv|xlsx|xlsm|json|jsonl|ya?ml|xml|html?|css|m?js|cjs|tsx?|jsx|py|ps1|sh|toml|ini|sql|docx?|pptx?|zip';
+const LINE = '(?::\\d+(?:-\\d+)?)?';
+const ABS_PATH = /^[A-Za-z]:[\\/](?![\\/])[^\s<>"'`|*?]*$/;
+const REL_PATH = new RegExp(`^(?:\\.[\\\\/])?(?:[\\w@.-]+[\\\\/])+[\\w@.-]+\\.(?:${FILE_EXT})${LINE}$`, 'i');
+const NAME_PATH = new RegExp(`^[\\w@.-]+\\.(?:${FILE_EXT})${LINE}$`, 'i');
+const ABS_IN_TEXT = /(^|[\s(“"'])([A-Za-z]:[\\/](?![\\/])[^\s<>"'`|*?]+)/g;
+const REL_IN_TEXT = new RegExp(`(^|[\\s(“"'])((?:\\.[\\\\/])?(?:[\\w@.-]+[\\\\/])+[\\w@.-]+\\.(?:${FILE_EXT})${LINE})(?=$|[\\s),.;:!?”"'])`, 'gi');
+const fileLink = (p, label) => `<a class="file-link" role="button" tabindex="0" data-file="${esc(p)}">${label}</a>`;
+
 function inline(s) {
-  return esc(s)
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
+  // Code and paths first, kept aside so the rest of the formatting doesn't touch them.
+  const kept = [];
+  const keep = html => `\u0000${kept.push(html) - 1}\u0000`;
+  const text = String(s ?? '').replace(/\u0000/g, '')
+    .replace(/`([^`]+)`/g, (m, c) => keep(ABS_PATH.test(c) || REL_PATH.test(c) || NAME_PATH.test(c) ? fileLink(c, `<code>${esc(c)}</code>`) : `<code>${esc(c)}</code>`))
+    .replace(ABS_IN_TEXT, (m, before, p) => {
+      const tail = p.match(/[.,;:!?)\]]+$/)?.[0] ?? '';
+      const file = p.slice(0, p.length - tail.length);
+      return `${before}${keep(fileLink(file, esc(file)))}${tail}`;
+    })
+    .replace(REL_IN_TEXT, (m, before, p) => `${before}${keep(fileLink(p, esc(p)))}`);
+  return esc(text)
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>')
+    .replace(/\u0000(\d+)\u0000/g, (m, i) => kept[Number(i)]);
 }
 
 /** Simple markdown: paragraphs, headings, lists, code and tables (shown as fixed text). */
@@ -185,8 +207,8 @@ const stateHtml = ([label, kind]) => `<span class="state state-${kind}">${esc(la
 function outcomeHtml(o) {
   if (!o) return '';
   return `<div class="outcome">
-      <div><span class="label">${esc(t('What was done'))}</span>${o.done?.length ? `<ul>${o.done.map(d => `<li>${esc(d)}</li>`).join('')}</ul>` : '<p>—</p>'}</div>
-      <div><span class="label">${esc(t('What changes for you'))}</span><p>${esc(o.change || '—')}</p></div>
+      <div><span class="label">${esc(t('What was done'))}</span>${o.done?.length ? `<ul>${o.done.map(d => `<li>${inline(d)}</li>`).join('')}</ul>` : '<p>—</p>'}</div>
+      <div><span class="label">${esc(t('What changes for you'))}</span><p>${inline(o.change || '—')}</p></div>
       <div><span class="label">${esc(t('Needs you?'))}</span><p>${o.needs ? `${stateHtml([t('Yes'), 'warn'])} ${esc(o.needs)}` : esc(t('No'))}</p></div>
     </div>`;
 }
@@ -326,7 +348,7 @@ const toolName = tool => (tool === 'codex' ? 'Codex' : 'Claude Code');
 // or "#builder/<id>" for a project (also shown in the project's "builder" tab).
 const VIEWS = ['manager', 'decisions', 'operations', 'planning', 'radar', 'missions', 'crew', 'projects', 'builder', 'log', 'usage', 'project', 'session'];
 const pageProject = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length).split('/')[0]) : null);
-const PROJECT_TABS = ['overview', 'live', 'crew', 'tasks', 'planning', 'context', 'builder'];
+const PROJECT_TABS = ['overview', 'live', 'crew', 'tasks', 'planning', 'files', 'context', 'builder'];
 const pageTab = () => {
   const tab = location.hash.startsWith('#project/') ? location.hash.slice('#project/'.length).split('/')[1] : null;
   return PROJECT_TABS.includes(tab) ? tab : 'overview';
@@ -1696,8 +1718,9 @@ async function refreshDetail(force = false) {
       ${r.status === 'paused' ? `<button type="button" class="button secondary" data-resume="${esc(r.id)}" data-ignore>${esc(t('Resume past the limit'))}</button>` : ''}
       ${canCancel ? `<button type="button" class="button danger" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button>` : ''}
     </div>
-    ${requests}${reports.join('')}${checks}`;
-  draw('#log-detail', JSON.stringify([r.id, r.updated, r.status]), html);
+    ${runFilesHtml(r)}${requests}${reports.join('')}${checks}`;
+  $('#log-detail').dataset.filesRun = r.id; // the paths in its reports are looked for in the run's files first
+  draw('#log-detail', JSON.stringify([r.id, r.updated, r.status, runFilesCache.get(r.id)?.at]), html);
 }
 
 // ---------- Usage ----------
@@ -1891,7 +1914,7 @@ async function refreshProjectPage() {
 
 const PAGE_PARTS = ['#project-title', '#project-more', '#project-status', '#project-actions', '#project-needs', '#project-tabs', '#project-summary', '#project-facts', '#project-team', '#project-runs', '#project-history', '#project-planning', '#project-computer', '#project-sessions', '#project-live-list'];
 // Each tab and the part of the page it shows.
-const TAB_PARTS = { overview: '#project-overview', live: '#project-live', crew: '#project-crew', tasks: '#project-tasks', planning: '#project-planning', context: '#project-context', builder: '#project-builder' };
+const TAB_PARTS = { overview: '#project-overview', live: '#project-live', crew: '#project-crew', tasks: '#project-tasks', planning: '#project-planning', files: '#project-files', context: '#project-context', builder: '#project-builder' };
 
 const projectHash = (id, tab = 'overview') => `#project/${encodeURIComponent(id)}${tab === 'overview' ? '' : `/${tab}`}`;
 const projectOpenItems = (id, p) => planItemsNow().filter(i => openItem(i) && (i.project === id || i.project === p?.name));
@@ -1922,11 +1945,13 @@ function drawProjectPage() {
   const live = liveSessionsOf(id).filter(x => x.status !== 'ended');
   const tabs = [
     ['overview', t('At a glance')], ['live', t('Live'), live.length], ['crew', t('Crew')], ['tasks', t('Tasks and history'), working], ['planning', t('Planning'), projectOpenItems(id, p).length],
-    ['context', t('Context')], ...(builderOn ? [['builder', t('Builder')]] : []),
+    ['files', t('Files')], ['context', t('Context')], ...(builderOn ? [['builder', t('Builder')]] : []),
   ].map(([key, label, n]) => `<a href="${projectHash(id, key)}" class="tab${key === tab ? ' active' : ''}"${key === tab ? ' aria-current="page"' : ''}>${esc(label)}${count(n)}</a>`).join('');
   draw('#project-tabs', tabs, tabs);
   for (const [key, part] of Object.entries(TAB_PARTS)) $(part).hidden = key !== tab;
-  if (tab === 'context') {
+  $('#view-project').dataset.filesProject = id; // the paths on its page are looked for in its folders
+  if (tab === 'files') drawProjectFiles(id);
+  else if (tab === 'context') {
     if (projectContext.id !== id) openProjectContext(id);
     else drawProjectContext();
   } else if (tab === 'builder') {
@@ -4107,6 +4132,260 @@ document.addEventListener('click', async event => {
     toast(error.message);
   }
 });
+
+// ---------- The file viewer ----------
+// Read only (src/files.mjs): images with zoom and a gallery, PDF in the browser's own reader, Markdown, text, and CSV
+// or XLSX as a table; any other file shows only its facts. It opens from the paths in texts (fileLink), from a run's
+// Files and from a project's Files tab. A reference is { path } on the disk or { run, file } in a run's branch, with
+// "run" and "project" as the places to look for a relative path.
+
+const viewer = { info: null, gallery: [], index: -1, zoom: false, sheet: 0, token: 0 };
+const fileUrl = (what, ref, extra = {}) =>
+  `/api/files/${what}?${new URLSearchParams(Object.entries({ ...ref, ...extra }).filter(([k, v]) => ['path', 'run', 'file', 'project', 'sheet'].includes(k) && v !== undefined && v !== null && v !== ''))}`;
+const sameRef = (a, b) => (a.file ? a.run === b.run && a.file === b.file : !b.file && String(a.path ?? '').toLowerCase() === String(b.path ?? '').toLowerCase());
+const baseName = p => String(p ?? '').split(/[\\/]/).pop();
+// Opened in a tab or downloaded: what the browser can't show safely goes as a download (see rawHeaders in src/files.mjs).
+const downloads = info => ['table', 'other'].includes(info.kind) || /\.(html?|xml|svg)$/i.test(info.name);
+
+function fileSize(n) {
+  if (n === null || n === undefined) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${Math.round(n / 1024).toLocaleString(locale())} KB`;
+  return `${(n / 1024 ** 2).toLocaleString(locale(), { maximumFractionDigits: 1 })} MB`;
+}
+
+async function openFile(ref, { gallery = null } = {}) {
+  const token = ++viewer.token;
+  let info;
+  try {
+    info = await api(fileUrl('info', ref));
+  } catch (error) {
+    toast(error.message);
+    return;
+  }
+  if (token !== viewer.token) return;
+  const list = gallery ?? (info.gallery ?? []).map(g => ({ path: g.path, name: g.name }));
+  const index = list.findIndex(g => sameRef(g, info.ref));
+  Object.assign(viewer, { info, zoom: false, sheet: 0, gallery: index < 0 ? [] : list, index });
+  if (!$('#viewer').open) $('#viewer').showModal();
+  drawViewer(token);
+}
+
+function stepGallery(by) {
+  const { gallery, index } = viewer;
+  if (gallery.length < 2) return;
+  openFile(gallery[(index + by + gallery.length) % gallery.length], { gallery });
+}
+
+function drawViewer(token = viewer.token) {
+  const { info } = viewer;
+  const raw = fileUrl('raw', info.ref);
+  $('#viewer-name').textContent = info.name;
+  $('#viewer-name').title = info.ref.path ?? info.ref.file;
+  $('#viewer-facts').textContent = [viewer.gallery.length > 1 ? `${viewer.index + 1} / ${viewer.gallery.length}` : '', fileSize(info.size), info.mtime ? shortDate(info.mtime) : '']
+    .filter(Boolean).join(' · ');
+  $('#viewer-tools').innerHTML = [
+    info.kind === 'image' ? `<button type="button" class="button secondary small" data-viewer="zoom" aria-pressed="${viewer.zoom}">${esc(viewer.zoom ? t('Fit to screen') : t('Actual size'))}</button>` : '',
+    info.dir ? '' : `<a class="button secondary small" href="${esc(raw)}" target="_blank" rel="noopener"${downloads(info) ? ' download' : ''}>${esc(downloads(info) ? t('Download') : t('Open in a tab'))}</a>`,
+  ].join('');
+  const body = $('#viewer-body');
+  body.dataset.kind = info.kind;
+  body.scrollTop = 0;
+  const loading = `<div class="empty">${esc(t('Loading…'))}</div>`;
+  const failed = error => token === viewer.token && (body.innerHTML = `<div class="empty">${esc(error.message)}</div>`);
+  if (info.dir) {
+    body.innerHTML = loading;
+    api(fileUrl('list', { path: info.ref.path })).then(data => token === viewer.token && (body.innerHTML = folderHtml(data, true)), failed);
+  } else if (info.kind === 'image') {
+    const nav = viewer.gallery.length > 1
+      ? `<button type="button" class="viewer-nav prev" data-viewer="prev" aria-label="${esc(t('Previous'))}">‹</button><button type="button" class="viewer-nav next" data-viewer="next" aria-label="${esc(t('Next'))}">›</button>`
+      : '';
+    body.innerHTML = `<div class="viewer-stage${viewer.zoom ? ' zoomed' : ''}"><img src="${esc(raw)}" alt="${esc(info.name)}" data-viewer="zoom"></div>${nav}`;
+  } else if (info.kind === 'pdf') {
+    // Phones have no PDF reader inside a page: the PDF opens in a tab of its own.
+    body.innerHTML = touchScreen()
+      ? `<div class="empty"><a class="button" href="${esc(raw)}" target="_blank" rel="noopener">${esc(t('Open the PDF'))}</a></div>`
+      : `<iframe class="viewer-pdf" src="${esc(raw)}" title="${esc(info.name)}"></iframe>`;
+  } else if (info.kind === 'markdown' || info.kind === 'text') {
+    body.innerHTML = loading;
+    api(fileUrl('text', info.ref)).then(data => {
+      if (token !== viewer.token) return;
+      const note = data.truncated ? `<p class="hint viewer-note">${esc(t('Only the beginning of this file is shown.'))}</p>` : '';
+      body.innerHTML = note + (info.kind === 'markdown' ? `<div class="viewer-doc body">${md(data.text)}</div>` : `<pre class="viewer-text">${esc(data.text)}</pre>`);
+    }, failed);
+  } else if (info.kind === 'table') {
+    body.innerHTML = loading;
+    api(fileUrl('table', info.ref, { sheet: viewer.sheet })).then(data => token === viewer.token && (body.innerHTML = tableHtml(data)), failed);
+  } else {
+    body.innerHTML = `<div class="empty">${esc(t('This kind of file is not shown here.'))}<br><span class="hint">${esc(info.ref.path ?? info.ref.file)}</span></div>`;
+  }
+}
+
+/** A table's preview: the sheets as tabs, the first row as the fixed header, a note when only the first rows are shown. */
+function tableHtml(data) {
+  const tabs = data.sheets.length > 1
+    ? `<div class="tabs viewer-sheets">${data.sheets.map((s, i) => `<button type="button" class="tab${i === data.sheet ? ' active' : ''}" data-viewer-sheet="${i}">${esc(s)}</button>`).join('')}</div>`
+    : '';
+  if (!data.rows.length) return `${tabs}<div class="empty">${esc(t('This table is empty.'))}</div>`;
+  const width = Math.max(1, ...data.rows.map(r => r.length));
+  const [head, ...rows] = data.rows;
+  const cells = (r, tag) => Array.from({ length: width }, (_, i) => `<${tag}>${esc(r[i] ?? '')}</${tag}>`).join('');
+  const note = data.truncated ? `<p class="hint viewer-note">${esc(t('Showing the first {shown} of {total} rows.', { shown: data.rows.length, total: data.total }))}</p>` : '';
+  return `${tabs}${note}<div class="viewer-table"><table><thead><tr><th class="num">1</th>${cells(head, 'th')}</tr></thead><tbody>${rows.map((r, i) => `<tr><td class="num">${i + 2}</td>${cells(r, 'td')}</tr>`).join('')}</tbody></table></div>`;
+}
+
+/** A folder's list: up to its parent, then its folders and files (images with a thumbnail). inViewer: inside the viewer. */
+function folderHtml(data, inViewer = false) {
+  const up = data.parent ? `<li><button type="button" class="file-row" data-folder="${esc(data.parent)}"><span class="file-icon">↑</span><span>${esc(t('Up one folder'))}</span></button></li>` : '';
+  const rows = data.entries.map(e => `<li><button type="button" class="file-row" ${e.dir ? 'data-folder' : 'data-file-path'}="${esc(e.path)}">
+      <span class="file-icon">${e.kind === 'image' ? `<img loading="lazy" src="${esc(fileUrl('raw', { path: e.path }))}" alt="">` : e.dir ? '▸' : ''}</span>
+      <span class="file-name">${esc(e.name)}</span><span class="hint num">${e.dir ? '' : esc(fileSize(e.size))}</span><span class="hint num file-date">${esc(shortDate(e.mtime))}</span>
+    </button></li>`).join('');
+  const empty = data.entries.length ? '' : `<li class="empty">${esc(t('This folder is empty.'))}</li>`;
+  const more = data.more ? `<li class="hint">${esc(t('Only the first {count} items are listed.', { count: data.entries.length }))}</li>` : '';
+  return `<ul class="file-browser${inViewer ? ' in-viewer' : ''}">${up}${rows}${empty}${more}</ul>`;
+}
+
+// What a run created or changed, by run: { at, status, data, loading }. Read again when its status changes, and every
+// 30 seconds while it goes on.
+const runFilesCache = new Map();
+
+async function loadRunFiles(r) {
+  const entry = runFilesCache.get(r.id) ?? {};
+  runFilesCache.set(r.id, Object.assign(entry, { loading: true }));
+  try {
+    entry.data = await api(`/api/files/run/${encodeURIComponent(r.id)}`);
+  } catch {
+    entry.data = null;
+  }
+  Object.assign(entry, { at: Date.now(), status: r.status, loading: false });
+  if (selectedRun === r.id) refreshDetail();
+}
+
+const fileStatus = s => (s === 'A' ? [t('new'), 'ok'] : s === 'D' ? [t('deleted'), 'error'] : [t('changed'), 'info']);
+
+/** A run's Files: thumbnails of its images, then every file it created or changed, each opening the viewer. */
+function runFilesHtml(r) {
+  const c = runFilesCache.get(r.id);
+  if (!c?.loading && (!c?.at || c.status !== r.status || (r.status === 'running' && Date.now() - c.at > 30_000))) loadRunFiles(r);
+  const files = c?.data?.files ?? [];
+  if (!files.length) return '';
+  const images = files.filter(f => f.kind === 'image' && f.status !== 'D');
+  const thumbs = images.length
+    ? `<div class="file-thumbs">${images.slice(0, 12).map(f => `<button type="button" class="file-thumb" data-run-file="${esc(f.file)}" title="${esc(f.file)}"><img loading="lazy" src="${esc(fileUrl('raw', { run: r.id, file: f.file }))}" alt="${esc(baseName(f.file))}"></button>`).join('')}</div>`
+    : '';
+  const row = f => {
+    const name = f.status === 'D' ? `<span class="secondary">${esc(f.file)}</span>` : `<a class="file-link" role="button" tabindex="0" data-run-file="${esc(f.file)}">${esc(f.file)}</a>`;
+    return `<li>${stateHtml(fileStatus(f.status))} ${name} <span class="hint num">${esc(fileSize(f.size))}</span></li>`;
+  };
+  const shown = files.slice(0, 15).map(row).join('');
+  const rest = files.length > 15 ? `<details><summary>${esc(t('{count} more', { count: files.length - 15 }))}</summary><ul class="file-list">${files.slice(15).map(row).join('')}</ul></details>` : '';
+  const more = c.data.more ? `<p class="hint">${esc(t('Only the first {count} files are listed.', { count: files.length }))}</p>` : '';
+  return `<div class="report run-files"><div class="report-top"><strong>${esc(t('Files'))}</strong><span class="hint">${esc(t('{count} created or changed by this run', { count: files.length }))}</span></div>${thumbs}<ul class="file-list">${shown}</ul>${rest}${more}</div>`;
+}
+
+const runImages = run => (runFilesCache.get(run)?.data?.files ?? []).filter(f => f.kind === 'image' && f.status !== 'D').map(f => ({ run, file: f.file, name: baseName(f.file) }));
+
+// A project's Files tab: its folders (the crew's working copy, your clone), the libraries and the extra folders.
+const browser = { project: null, roots: null, data: null, error: null };
+const rootLabel = r => (r.kind === 'workspace' ? t("Crew's working copy") : r.kind === 'clone' ? t('Your clone') : r.kind === 'library' ? t('Libraries') : r.label);
+
+async function browseTo(target) {
+  const id = browser.project;
+  try {
+    browser.roots ??= (await api(`/api/files/roots?project=${encodeURIComponent(id)}`)).roots;
+    const where = target ?? browser.roots[0]?.path;
+    browser.data = where ? await api(fileUrl('list', { path: where })) : null;
+    browser.error = null;
+  } catch (error) {
+    browser.error = error.message;
+  }
+  if (browser.project === id && pageProject() === id) drawProjectFiles(id);
+}
+
+function drawProjectFiles(id) {
+  if (browser.project !== id) {
+    Object.assign(browser, { project: id, roots: null, data: null, error: null });
+    browseTo();
+  }
+  const { roots, data, error } = browser;
+  const choices = (roots ?? []).map(r => `<button type="button" class="tab${data && data.root.path === r.path ? ' active' : ''}" data-browse-root="${esc(r.path)}" title="${esc(r.path)}">${esc(rootLabel(r))}</button>`).join('');
+  // Where the list is, from its root: each folder on the way opens with a click.
+  let crumbs = '';
+  if (data) {
+    const rel = data.path.slice(data.root.path.length).split(/[\\/]/).filter(Boolean);
+    const sep = data.root.path.includes('\\') ? '\\' : '/';
+    const at = i => data.root.path.replace(/[\\/]$/, '') + rel.slice(0, i).map(x => sep + x).join('');
+    crumbs = `<div class="file-crumbs hint">${[`<button type="button" class="link-button" data-folder="${esc(data.root.path)}">${esc(rootLabel(data.root))}</button>`,
+      ...rel.map((name, i) => `<button type="button" class="link-button" data-folder="${esc(at(i + 1))}">${esc(name)}</button>`)].join(' / ')}</div>`;
+  }
+  const html = `<div class="panel">
+      <div class="label">${esc(t('Files'))}</div>
+      <p class="hint">${esc(t('Read only: open images, PDFs, tables and texts. Private files (.env, keys, .git) never show.'))}</p>
+      ${roots && !roots.length ? `<div class="empty">${esc(t('No folder of this project on this computer yet.'))}</div>` : ''}
+      ${choices ? `<div class="tabs file-roots">${choices}</div>` : ''}
+      ${error ? `<div class="empty">${esc(error)}</div>` : data ? `${crumbs}${folderHtml(data)}` : roots?.length !== 0 ? `<div class="empty">${esc(t('Loading…'))}</div>` : ''}
+    </div>`;
+  draw('#project-files', html, html);
+}
+
+document.addEventListener('click', event => {
+  const el = event.target.closest('.file-link, [data-run-file], [data-folder], [data-file-path], [data-viewer], [data-viewer-sheet], [data-browse-root]');
+  if (!el) return;
+  event.preventDefault();
+  const inViewer = !!el.closest('#viewer');
+  if (el.dataset.viewer === 'prev' || el.dataset.viewer === 'next') stepGallery(el.dataset.viewer === 'next' ? 1 : -1);
+  else if (el.dataset.viewer === 'zoom') {
+    // Without drawing again: the image is not read a second time.
+    viewer.zoom = !viewer.zoom;
+    $('.viewer-stage')?.classList.toggle('zoomed', viewer.zoom);
+    const button = $('#viewer-tools [data-viewer="zoom"]');
+    button.textContent = viewer.zoom ? t('Fit to screen') : t('Actual size');
+    button.setAttribute('aria-pressed', String(viewer.zoom));
+  } else if (el.dataset.viewerSheet) {
+    viewer.sheet = Number(el.dataset.viewerSheet);
+    drawViewer();
+  } else if (el.dataset.browseRoot) browseTo(el.dataset.browseRoot);
+  else if (el.dataset.folder) {
+    if (inViewer) openFile({ path: el.dataset.folder });
+    else browseTo(el.dataset.folder);
+  } else if (el.dataset.filePath) {
+    const images = [...el.closest('.file-browser').querySelectorAll('[data-file-path]')].map(b => b.dataset.filePath).filter(p => /\.(png|jpe?g|gif|webp|svg|bmp|avif|ico)$/i.test(p));
+    openFile({ path: el.dataset.filePath }, { gallery: images.includes(el.dataset.filePath) ? images.map(p => ({ path: p, name: baseName(p) })) : null });
+  } else if (el.dataset.runFile) {
+    const run = el.closest('[data-files-run]')?.dataset.filesRun;
+    const gallery = runImages(run);
+    openFile({ run, file: el.dataset.runFile }, { gallery: gallery.some(g => g.file === el.dataset.runFile) ? gallery : null });
+  } else if (el.dataset.file) {
+    // A path in a text: looked for in the run or the project the text belongs to, if any.
+    openFile({ path: el.dataset.file, run: el.closest('[data-files-run]')?.dataset.filesRun, project: el.closest('[data-files-project]')?.dataset.filesProject });
+  }
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Enter' && event.target.matches?.('.file-link')) event.target.click();
+  if (!$('#viewer').open) return;
+  if (event.key === 'ArrowRight') stepGallery(1);
+  if (event.key === 'ArrowLeft') stepGallery(-1);
+});
+$('#viewer-close').addEventListener('click', () => $('#viewer').close());
+$('#viewer').addEventListener('close', () => {
+  viewer.token++;
+  $('#viewer-body').innerHTML = ''; // stops a PDF or a large image from staying in memory
+});
+// Phones: a swipe to the side goes to the next or previous image.
+{
+  let from = null;
+  $('#viewer-body').addEventListener('touchstart', event => {
+    from = event.touches.length === 1 && !viewer.zoom ? { x: event.touches[0].clientX, y: event.touches[0].clientY } : null;
+  }, { passive: true });
+  $('#viewer-body').addEventListener('touchend', event => {
+    if (!from || viewer.info?.kind !== 'image') return;
+    const dx = event.changedTouches[0].clientX - from.x;
+    const dy = event.changedTouches[0].clientY - from.y;
+    from = null;
+    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) stepGallery(dx < 0 ? 1 : -1);
+  }, { passive: true });
+}
 
 $('#nav-more').addEventListener('click', () => setNavMore(!$('.nav').classList.contains('open')));
 document.addEventListener('click', event => {
