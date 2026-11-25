@@ -18,7 +18,7 @@ import { libraryIds, promptParts, stepTools } from './runs.mjs';
 import { planSession, sessionProfiles } from './sessions.mjs';
 import { listRuns, stepsOf } from './store.mjs';
 import { ensureDir, now, RUNS, WORKSPACES } from './util.mjs';
-import { projectDir } from './workspace.mjs';
+import { projectDir, runBranch } from './workspace.mjs';
 
 /** About 4 characters per token: an estimate, enough to compare the parts. */
 export const tokens = text => Math.ceil(String(text ?? '').length / 4);
@@ -100,7 +100,7 @@ function memberContext({ config, id, project, team, memberId, builder, libraries
   const kind = memberId === 'manager' ? 'manager' : memberId === LEAD ? 'lead' : 'member';
   const finalReview = kind === 'manager';
   const step = kind === 'lead' ? leadReviewStep() : { agent: memberId, part: finalReview ? REVIEW_TASK : TASK, status: 'running' };
-  const run = { id: '(run id)', kind: 'task', project: id, title: RUN_TITLE, branch: 'chiefmate/(run id)', instruction: null, steps: [step], lead: null };
+  const run = { id: '(run id)', kind: 'task', project: id, title: RUN_TITLE, branch: runBranch(project, '(run id)', 'title'), instruction: null, steps: [step], lead: null };
   const access = stepAccess({ config, projectId: id, project, libraries, manager: finalReview });
   const mcp = stepMcp(config, project, agent);
   const { tools, disallowed } = stepTools(agent, mcp, { denied: [] });

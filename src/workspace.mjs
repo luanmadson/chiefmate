@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, renameSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { t } from './i18n.mjs';
-import { clip, ensureDir, WORKSPACES } from './util.mjs';
+import { clip, ensureDir, slug, WORKSPACES } from './util.mjs';
 
 /**
  * Runs a command and returns { code, output, stopped }. With shell, it accepts "npm ci" and the like. After maxMinutes
@@ -228,6 +228,71 @@ export async function runChecks(dir, commands = []) {
 
 /** Local delivery: copies the run's branch into your own clone of the project. Nothing goes to GitHub. */
 export const deliverToClone = (dir, branch, clone) => git(dir, 'push', clone, `refs/heads/${branch}:refs/heads/${branch}`);
+
+// ---------- No trace of Chiefmate ("no_trace", on by default with local delivery) ----------
+
+/** Whether the project's work must not show Chiefmate to others: its branch names, commits and files. */
+export const noTrace = project => !!(project?.no_trace ?? project?.deliver === 'local');
+
+/**
+ * The run's branch: chiefmate/<id>, or, with no trace, a neutral name from the title after the "deliver_branch"
+ * prefix ("wip/" by default; "current" delivers onto your clone's branch, through a branch with that default name).
+ */
+export function runBranch(project, id, title) {
+  if (!noTrace(project)) return `chiefmate/${id}`;
+  const given = project.deliver_branch && project.deliver_branch !== 'current' ? String(project.deliver_branch) : 'wip/';
+  const prefix = /[/_-]$/.test(given) ? given : `${given}/`;
+  return `${prefix}${slug(title) || id.slice(0, 15)}`;
+}
+
+/** The name itself, or with -2, -3... when your clone already has a branch of that name. */
+export async function freeBranch(clone, name) {
+  for (let n = 1; n < 100; n++) {
+    const candidate = n === 1 ? name : `${name}-${n}`;
+    const r = await run('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${candidate}`], clone);
+    if (r.code !== 0) return candidate;
+  }
+  return `${name}-${Date.now()}`;
+}
+
+/**
+ * "deliver_branch": "current": moves your clone's branch forward to the run's branch, never switching branches. Only
+ * when the clone still has the run's base checked out, with no changes to tracked files, and the move is a fast
+ * forward; the run's branch is then removed. Returns null when done, or why it was not.
+ */
+export async function advanceClone(clone, branch, base) {
+  const current = (await run('git', ['branch', '--show-current'], clone)).output.trim();
+  if (current !== base) return t('your clone has {current} checked out, not {base}', { current: current || '-', base });
+  const status = await run('git', ['status', '--porcelain', '--untracked-files=no'], clone);
+  if (status.code !== 0 || status.output.trim()) return t('your clone has changes not committed');
+  const r = await run('git', ['merge', '--ff-only', '-q', branch], clone);
+  if (r.code !== 0) return t('{base} moved on in your clone: not a fast forward', { base });
+  await run('git', ['branch', '-d', branch], clone);
+  return null;
+}
+
+const TRACE = /chiefmate/i;
+const TRACE_COMMIT = /chiefmate|co-authored-by:.*(claude|anthropic)|generated with.*claude/i;
+
+/** What in the run's work names Chiefmate: commit messages and authors, file names and added lines. */
+export async function traces(dir, base) {
+  const range = `origin/${base}..HEAD`;
+  const found = [];
+  const log = await git(dir, 'log', '--format=%h %an <%ae> %cn <%ce>%n%B%x00', range);
+  for (const entry of log.split('\0').map(e => e.trim()).filter(Boolean)) {
+    if (TRACE_COMMIT.test(entry) || /claude|anthropic/i.test(entry.split('\n')[0])) found.push(t('commit {commit}', { commit: entry.split(' ')[0] }));
+  }
+  const files = (await git(dir, 'diff', '--name-only', `origin/${base}...HEAD`)).split('\n').filter(f => TRACE.test(f));
+  found.push(...files.map(file => t('file {file}', { file })));
+  let file = null;
+  const lines = new Set();
+  for (const line of (await git(dir, 'diff', '-U0', '--no-color', `origin/${base}...HEAD`)).split('\n')) {
+    if (line.startsWith('+++ ')) file = line.replace(/^\+\+\+ (b\/)?/, '');
+    else if (line.startsWith('+') && TRACE.test(line) && file) lines.add(file);
+  }
+  found.push(...[...lines].map(f => t('text in {file}', { file: f })));
+  return found;
+}
 
 /** Pushes the branch and opens the pull request. Returns its address. */
 export async function openPullRequest(dir, { base, branch, title, body, bodyFile }) {
