@@ -7,7 +7,7 @@
 // in data/sessions/<id>.jsonl as they happen. With "window", it opens Windows Terminal (or PowerShell) in the folder,
 // running "node src/cli.mjs session-run <id>", which starts the tool with that message; the app finds that window's
 // processes by its command line. Ending a session stops its processes and everything under it.
-import { execFile, spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, createWriteStream, existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -15,7 +15,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { stepMcp, userClaudeExcludes } from './access.mjs';
 import { addRequest, chargeFolder, chargeProfile, chargeProject, chargeTurn, takeRequest } from './charge.mjs';
-import { describeAction, environment, executable as claudeExecutable, runClaude } from './claude.mjs';
+import { describeAction, environment, runClaude } from './claude.mjs';
 import { loadConfig } from './config.mjs';
 import { API, guardHooks, publishing } from './guard.mjs';
 import { formatDateTime, t } from './i18n.mjs';
@@ -23,8 +23,11 @@ import { computer, formatBytes, processes, refreshProcesses } from './machine.mj
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { assembleBlocks, builderSettings, parseBlocks } from './prompts.mjs';
+import { codexEnvironment, signedIn, spawnable, toolCommand, where } from './tools.mjs';
 import { updating } from './update.mjs';
 import { clip, DATA, ensureDir, languageName, now, readJson, ROOT, slug, stamp, WORKSPACES, writeJson } from './util.mjs';
+
+export { toolCommand, where };
 
 const SESSIONS = path.join(DATA, 'sessions');
 const TOOLS = ['claude', 'codex'];
@@ -167,31 +170,6 @@ export function sessionPrompt(config, profile, folder) {
   return { text: lines.join('\n'), blocks: built?.blocks ?? [], details: built?.details ?? [], missing: built?.missing ?? [], unresolved: built?.unresolved ?? [], blocksGiven: !!built || !!project };
 }
 
-/** Every path Windows finds for a command, through where.exe. */
-export function where(name) {
-  const r = spawnSync('where.exe', [name], { encoding: 'utf8', windowsHide: true });
-  return r.status === 0 ? r.stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean) : [];
-}
-
-// The script behind each tool's npm shim (codex.cmd, claude.cmd), run with Node directly so the message reaches it whole.
-const NPM_SCRIPTS = { claude: ['@anthropic-ai', 'claude-code', 'cli.js'], codex: ['@openai', 'codex', 'bin', 'codex.js'] };
-
-/** How to start a tool: { command, prefix } (prefix: the script, when it is an npm install run by Node). */
-export function toolCommand(tool) {
-  const variable = tool === 'codex' ? 'CHIEFMATE_CODEX' : 'CHIEFMATE_CLAUDE';
-  if (process.env[variable]) return { command: process.env[variable], prefix: [] };
-  if (tool === 'claude' && claudeExecutable() !== 'claude') return { command: claudeExecutable(), prefix: [] };
-  if (process.platform !== 'win32') return { command: tool, prefix: [] };
-  const found = where(tool);
-  const exe = found.find(f => /\.exe$/i.test(f));
-  if (exe) return { command: exe, prefix: [] };
-  for (const shim of found.filter(f => /\.cmd$/i.test(f))) {
-    const script = path.join(path.dirname(shim), 'node_modules', ...NPM_SCRIPTS[tool]);
-    if (existsSync(script)) return { command: process.execPath, prefix: [script] };
-  }
-  throw new Error(t("Couldn't find {tool} on this computer. Install it, or set {variable} to its program.", { tool, variable }));
-}
-
 /**
  * The tool's arguments, the first message last. Claude Code starts without the user's own configuration, as the
  * crew's steps do (no user settings, hooks, plugins, skills, ~/.claude/CLAUDE.md or MCP servers of their own), with
@@ -244,17 +222,7 @@ export function planSession(config, profileId, { prompt: written = null } = {}) 
 }
 
 /** Whether Codex is signed in ("codex login status" succeeds). */
-function codexSignedIn() {
-  return new Promise(resolve => {
-    let tool;
-    try {
-      tool = spawnable('codex');
-    } catch {
-      return resolve(false);
-    }
-    execFile(tool.command, [...tool.prefix, 'login', 'status'], { windowsHide: true, timeout: 30_000 }, error => resolve(!error));
-  });
-}
+const codexSignedIn = () => signedIn('codex');
 
 /**
  * Opens a window of its own running "node src/cli.mjs <args>" in a folder: Windows Terminal when there is one, else
@@ -348,7 +316,7 @@ export async function runSession(id) {
   console.log(`Chiefmate: ${session.name} (${session.tool}) in ${session.cwd}\n`);
   process.on('SIGINT', () => {}); // Ctrl+C belongs to the agent
   const child = spawn(tool.command, [...tool.prefix, ...sessionArgs(session, config, prompt)], {
-    cwd: session.cwd, stdio: 'inherit', env: session.tool === 'claude' ? environment() : process.env,
+    cwd: session.cwd, stdio: 'inherit', env: session.tool === 'claude' ? environment() : codexEnvironment(),
   });
   const code = await new Promise(resolve => {
     child.on('error', error => {
@@ -854,12 +822,6 @@ function explainPush(args, dir) {
 
 // ---------- Codex, headless ----------
 
-/** How to run a tool from here: an npm script or a stand-in .mjs (tests) goes through this Node.js. */
-function spawnable(tool) {
-  const { command, prefix } = toolCommand(tool);
-  return /\.m?js$/i.test(command) ? { command: process.execPath, prefix: [command, ...prefix] } : { command, prefix };
-}
-
 /**
  * Codex's arguments for a turn in the app: "codex exec" the first time, "codex exec resume <thread>" after, with the
  * events as JSON lines and the message through standard input. It may edit the session's folder and run commands
@@ -907,7 +869,8 @@ export function codexItem(event, dir) {
 /** One turn of Codex, headless. Returns { promise, cancel, pid }, as runClaude does; the result has "session" (the thread). */
 function runCodex({ session, prompt, log, onEvent }) {
   const tool = spawnable('codex');
-  const child = spawn(tool.command, [...tool.prefix, ...codexArgs(session)], { cwd: session.cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  // Without Windows' app aliases on the PATH, which Codex's sandbox can't start (see codexEnvironment).
+  const child = spawn(tool.command, [...tool.prefix, ...codexArgs(session)], { cwd: session.cwd, env: codexEnvironment(), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   const out = createWriteStream(log, { flags: 'a' });
   let thread = null;
   let failure = null;

@@ -692,7 +692,7 @@ async function main() {
       console.log(`Claude Code: ${s.ai.claude.found ? s.ai.claude.version : 'not found'}`);
       console.log(`Chiefmate ${s.version}${s.update.waiting ? `, update waiting (${s.update.waiting} change(s))` : ''}`);
       for (const m of s.missions) console.log(`Mission ${m.id} (${m.project}): ${m.schedule}${m.next ? `, next ${formatDateTime(m.next)}` : ''}`);
-      for (const a of s.crew) console.log(`Crew ${a.id}: ${a.status}${a.run ? ` (${a.run})` : ''}, ${a.model}`);
+      for (const a of s.crew) console.log(`Crew ${a.id}: ${a.status}${a.run ? ` (${a.run})` : ''}, ${a.tool && a.tool !== 'claude' ? `${a.tool}${a.model ? ` ${a.model}` : ''}` : a.model}${a.toolReason === 'expired' ? ` (${a.toolAsked} expired ${a.toolUntil})` : ''}`);
       return;
     }
     case 'mission': {

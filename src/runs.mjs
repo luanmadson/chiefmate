@@ -7,6 +7,7 @@ import { instructionFiles, stepAccess, stepMcp } from './access.mjs';
 import { contextWindow, runClaude } from './claude.mjs';
 import { loadConfig, projectCrew } from './config.mjs';
 import { guardHooks } from './guard.mjs';
+import { askOwner, finishRequest, needsSettings } from './needs.mjs';
 import {
   fullReport, generateBrief, generateOutcome, mergeOutcomes, outcomeLine, outcomeMarkdown, outcomeTemplate, parseOutcome, shortSummary, shortTitle,
   TITLE_MAX,
@@ -20,6 +21,7 @@ import { notify } from './notify.mjs';
 import { builderSettings, projectInstructions, writtenInstructions } from './prompts.mjs';
 import { readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
+import { agentTool, GROK_DENY, LOGIN_COMMAND, runTool, signedIn, TOOL_NAMES, toolModel } from './tools.mjs';
 import { clip, languageName, now, parseLevel, ROOT, slug, stamp } from './util.mjs';
 import {
   advanceClone, baseBranch, changedFiles, checkoutBranch, commitPending, createBranch, deliverToClone, discardSince, freeBranch, headCommit, newCommits, noTrace,
@@ -402,10 +404,35 @@ export function promptParts({ run, step, project, previous, finalReview, changes
     add('reports', 'The reports of the steps before', lines);
   }
   add('rules', 'Chiefmate (src/runs.mjs, crewRules)', ['', crewRules(config, project, run.project, finalReview ? prLanguage : config.language || 'en')]);
+  add('tool', 'Chiefmate (src/runs.mjs, toolLines)', toolLines(stepTool(config, agents?.[step.agent], finalReview).tool));
   return parts;
 }
 
 const stepPrompt = args => promptParts(args).flatMap(p => p.lines).join('\n');
+
+/** The tool a step runs on (src/tools.mjs): the member's, except the final review, which is always Claude Code's. */
+export const stepTool = (config, agent, finalReview = false) => (finalReview ? { tool: 'claude', asked: 'claude', until: null, reason: null } : agentTool(config, agent ?? {}));
+
+/** What a step on Codex or Grok must know of its tool, at the end of its prompt. */
+function toolLines(tool) {
+  if (tool === 'codex') {
+    return [
+      '',
+      '## Working on Codex',
+      "- You run on the Codex CLI, in its sandbox: you may write only inside the working copy, its `.git` folder is read-only and there is no network. So leave your changes uncommitted: Chiefmate commits them when your step ends. Don't install packages from the network; if the work truly needs it, say so in your report.",
+      "- Chiefmate's command line above (needs-you, plan) talks to Chiefmate on this computer and works from the sandbox.",
+    ];
+  }
+  if (tool === 'grok') {
+    return [
+      '',
+      '## Working on Grok',
+      "- You run on the Grok CLI. Commands that would publish (git push, git remote, gh pr, gh repo, gh api, requests to GitHub's API) are refused by rule, even inside a longer command line: keep those words out of your commands.",
+      "- The rules match words anywhere in a command, so a commit message or a search may be refused too (\"push\", \"remote\", or \"gh\" followed by \"pr\", as in \"high priority\"). Then reword it, or leave your changes uncommitted: Chiefmate commits them when your step ends.",
+    ];
+  }
+  return [];
+}
 
 /** What a step may use: the agent's tools and its MCP servers', and what is denied (always, by the agent, by access). */
 export function stepTools(agent, mcp, access) {
@@ -437,8 +464,15 @@ const fence = text => '`'.repeat(Math.max(3, ...(String(text).match(/`+/g) ?? []
 const fenced = (text, lang = '') => `${fence(text)}${lang}\n${text}\n${fence(text)}`;
 const bullets = items => (items.length ? items.map(i => `- \`${i}\``).join('\n') : '- (none)');
 
+// How each tool runs a step, for its context report.
+const TOOL_CONTEXT = {
+  claude: "- The user's own Claude Code configuration: none. Setting sources `project,local` (no user settings, hooks, plugins or skills), `claudeMdExcludes` for `~/.claude` (no global CLAUDE.md or rules), `--strict-mcp-config`.",
+  codex: "- Codex CLI (`codex exec`): without the owner's own Codex configuration (`--ignore-user-config`; the sign-in stays), in its `workspace-write` sandbox (it writes only the working copy, `.git` is read-only, no network), never asking, with Chiefmate's guard as a PreToolUse hook. Chiefmate commits what it leaves. No MCP server and no extra folder are given to it.",
+  grok: "- Grok CLI (`grok --prompt-file`): approving its own actions except the deny rules below (Grok takes no hook from the command line), without the owner's Claude Code and Cursor hooks, MCP servers, skills, rules and instructions (`GROK_CLAUDE_*` and `GROK_CURSOR_*` off); Grok's own settings (`~/.grok`) still apply. No MCP server and no extra folder are given to it.",
+};
+
 /** What the step received, written next to its log as data/runs/<id>/<NN>-<agent>.context.md. */
-function contextReport({ run, step, index, agent, dir, model, prompt, tools, disallowed, access, mcp, built, args }) {
+function contextReport({ run, step, index, agent, dir, model, prompt, tools, disallowed, access, mcp, built, args, tool = 'claude' }) {
   const builder = built
     ? [
       `- File: \`${built.file}\``,
@@ -452,9 +486,9 @@ function contextReport({ run, step, index, agent, dir, model, prompt, tools, dis
   return [
     `# Context received: ${step.agent} (step ${index + 1}), run ${run.id}`,
     '',
-    `- Model: \`${model}\`${agent.effort ? `, effort \`${agent.effort}\`` : ''}, time limit ${agent.max_minutes ?? 60} min`,
+    `- Tool: ${TOOL_NAMES[tool]}. Model: \`${model ?? `${TOOL_NAMES[tool]}'s default`}\`${agent.effort ? `, effort \`${agent.effort}\`` : ''}, time limit ${agent.max_minutes ?? 60} min`,
     `- Agent: \`${agent.id}\`${agent.base ? ` (based on \`${agent.base}\`, crew of ${agent.project})` : ''}, instructions from \`${agent.file}\``,
-    "- The user's own Claude Code configuration: none. Setting sources `project,local` (no user settings, hooks, plugins or skills), `claudeMdExcludes` for `~/.claude` (no global CLAUDE.md or rules), `--strict-mcp-config`.",
+    TOOL_CONTEXT[tool],
     '',
     '## Folders',
     `- Working copy (the current folder): \`${dir}\``,
@@ -479,7 +513,7 @@ function contextReport({ run, step, index, agent, dir, model, prompt, tools, dis
     '## Command line',
     fenced(args.map(a => (/[\s"{}]/.test(a) ? JSON.stringify(a) : a)).join(' ')),
     '',
-    "## System prompt (added to Claude Code's own)",
+    tool === 'claude' ? "## System prompt (added to Claude Code's own)" : "## The agent's instructions (at the top of the first prompt)",
     fenced(agent.instructions, 'markdown'),
     '',
     '## Prompt',
@@ -507,13 +541,43 @@ function appendLoaded(file, init) {
   }
 }
 
+/**
+ * Before a step on Codex or Grok: when the tool is not signed in, the owner is asked (needs-you, with the command to
+ * run) and the step waits, its clock stopped, until they click "I did it" or the sign-in is found, within the longest
+ * wait. Returns whether the tool is signed in.
+ */
+async function signInFirst(l, run, index, tool) {
+  if (await signedIn(tool)) return true;
+  const request = await askOwner({
+    run: run.id, step: index + 1, wait: true,
+    what: t('Sign in to {tool} so this step can run on it: in a terminal, run "{command}" (it opens your browser), then click "I did it". The step goes on by itself once you are signed in.', { tool: TOOL_NAMES[tool], command: LOGIN_COMMAND[tool] }),
+  });
+  logAction(l, { type: 'action', text: t('Waiting for you to sign in to {tool}', { tool: TOOL_NAMES[tool] }) });
+  const until = Date.now() + needsSettings().maxWaitMinutes * 60_000;
+  while (Date.now() < until && !l.cancelRequest) {
+    l.heldUntil = Date.now() + 20_000;
+    await new Promise(resolve => setTimeout(resolve, 10_000));
+    const done = run.requests?.find(r => r.id === request.id)?.status === 'done';
+    if (await signedIn(tool)) {
+      if (!done) finishRequest(run.id, request.id, 'check');
+      l.heldUntil = 0;
+      return true;
+    }
+    if (done) break;
+  }
+  l.heldUntil = 0;
+  return false;
+}
+
 async function runStep({ l, run, step, index, dir, project, config, agents, libraries, base, finalReview = false }) {
   const agent = agents[step.agent];
   if (!agent) throw new Error(t('Unknown agent: {id}', { id: step.agent }));
   const previous = run.steps.filter(s => s !== step && s.status !== 'pending' && s.status !== 'skipped');
   const changes = finalReview ? await changedFiles(dir, base).catch(() => '') : '';
   const found = finalReview && noTrace(project) ? await traces(dir, base).catch(() => []) : [];
-  const model = agent.model ?? config.default_model;
+  const choice = stepTool(config, agent, finalReview);
+  const { tool } = choice;
+  const model = tool === 'claude' ? agent.model ?? config.default_model : toolModel(tool, agent.model);
   const access = stepAccess({ config, projectId: run.project, project, libraries, manager: step.agent === 'manager' });
   const mcp = stepMcp(config, project, agent);
   let built = null;
@@ -524,7 +588,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   }
   for (const a of built?.adaptations ?? []) logAction(l, { type: 'action', text: t('Prompt builder: a line of "{block}" was adapted to the crew\'s rules', { block: a.block }) });
   const prompt = stepPrompt({ run, step, project, previous, finalReview, changes, traces: found, config, libraries, base, access, built, agents });
-  const { tools, disallowed } = stepTools(agent, mcp, access);
+  const { tools, disallowed } = tool === 'claude' ? stepTools(agent, mcp, access) : { tools: [], disallowed: tool === 'grok' ? GROK_DENY : [] };
   const name = `${String(index + 1).padStart(2, '0')}-${step.agent}`;
   const contextFile = path.join(runDir(run.id), `${name}.context.md`);
 
@@ -535,12 +599,20 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   // A step paused for an update of Chiefmate resumes its own Claude Code session, with its clock and its counts.
   const paused = step.paused ?? null;
   delete step.paused;
-  Object.assign(step, { status: 'running', started: paused ? step.started ?? now() : now(), error: null, model, promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
+  Object.assign(step, { status: 'running', started: paused ? step.started ?? now() : now(), error: null, model, tool, promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
   Object.assign(l, {
     step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0, talking: false, reply: null, session: null,
     doing: finalReview ? t('reviewing the work') : step.role === 'plan' ? t('planning the request') : t('getting started'),
   });
   saveRun(run);
+  if (['expired', 'off', 'unknown'].includes(choice.reason)) {
+    logAction(l, { type: 'action', text: t('{tool} is not available to the crew now: this step runs on Claude Code', { tool: TOOL_NAMES[choice.asked] ?? choice.asked }) });
+  }
+  if (tool !== 'claude' && !(await signInFirst(l, run, index, tool))) {
+    Object.assign(step, { status: 'failed', ended: now(), error: l.cancelRequest ?? t('{tool} is not signed in on this computer.', { tool: TOOL_NAMES[tool] }) });
+    saveRun(run);
+    return {};
+  }
 
   // Every step keeps its Claude Code session, so a message from the owner can resume it (src/talk.mjs).
   let session = paused ? { id: paused.session, resume: true } : { id: randomUUID() };
@@ -554,6 +626,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     addDirs: access.addDirs,
     mcpServers: mcp.servers,
     hooks: crewGuard(path.join(runDir(run.id), `${name}.guard.jsonl`)),
+    guardLog: path.join(runDir(run.id), `${name}.guard.jsonl`),
     // For "needs-you": which run and step is asking, and where Chiefmate answers.
     env: { CHIEFMATE_RUN: run.id, CHIEFMATE_STEP: String(index + 1), CHIEFMATE_PORT: String(Number(process.env.CHIEFMATE_PORT) || config.port || 4747) },
     // With no trace, commits never credit Claude, whatever the installation's setting.
@@ -591,10 +664,10 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   let pausedNow = false;
   l.talking = true;
   for (;;) {
-    const proc = runClaude({ ...common, prompt: turn, session, spentMs });
+    const proc = tool === 'claude' ? runClaude({ ...common, prompt: turn, session, spentMs }) : runTool(tool, { ...common, prompt: turn, session, spentMs });
     if (!session.resume) {
       try {
-        writeFileSync(contextFile, contextReport({ run, step, index, agent, dir, model, prompt, tools, disallowed, access, mcp, built, args: proc.args }));
+        writeFileSync(contextFile, contextReport({ run, step, index, agent, dir, model, prompt, tools, disallowed, access, mcp, built, args: proc.args, tool }));
       } catch (error) {
         logAction(l, { type: 'action', text: t("Couldn't write the context report: {error}", { error: error.message }) });
       }

@@ -14,9 +14,10 @@ import { t } from './i18n.mjs';
 import { LEAD, leadReviewStep, memoryFile } from './leads.mjs';
 import { projectOf } from './projects.mjs';
 import { builderSettings, builderStatus, projectInstructions, readBuilder } from './prompts.mjs';
-import { libraryIds, promptParts, stepTools } from './runs.mjs';
+import { libraryIds, promptParts, stepTool, stepTools } from './runs.mjs';
 import { planSession, sessionProfiles } from './sessions.mjs';
 import { listRuns, stepsOf } from './store.mjs';
+import { toolModel } from './tools.mjs';
 import { ensureDir, now, RUNS, WORKSPACES } from './util.mjs';
 import { projectDir, runBranch } from './workspace.mjs';
 
@@ -123,9 +124,11 @@ function memberContext({ config, id, project, team, memberId, builder, libraries
   const sum = list => list.reduce((n, p) => n + p.tokens, 0);
   const repo = repository.files.filter(f => f.kind === 'start');
   const total = { system: sum(system), repository: sum(repo), prompt: sum(prompt) };
+  const { tool } = stepTool(config, agent, finalReview);
   return {
     id: memberId, name: agent.name ?? memberId, base: agent.base ?? null, kind, role: kind === 'lead' ? 'review' : finalReview ? 'final review' : 'task',
-    model: agent.model ?? config.default_model ?? null, effort: agent.effort ?? null, maxMinutes: agent.max_minutes ?? 60,
+    tool,
+    model: tool === 'claude' ? agent.model ?? config.default_model ?? null : toolModel(tool, agent.model), effort: agent.effort ?? null, maxMinutes: agent.max_minutes ?? 60,
     system, repository, prompt,
     access: {
       workingCopy: projectDir(id), addDirs: access.addDirs, deniedPaths: access.denied, docs: access.docs,

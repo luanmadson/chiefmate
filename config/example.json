@@ -38,6 +38,7 @@
     }
   },
   "crew": {},
+  "tools": {},
   "max_parallel": 3,
   "sessions": {},
   "limits": {

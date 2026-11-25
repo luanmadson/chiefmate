@@ -9,6 +9,7 @@ import { autopilotStatus, changeAutopilot } from './autopilot.mjs';
 import { answerRequest, chargeProfileId, inCharge, projectRequests } from './charge.mjs';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
+import { agentTool, toolModel } from './tools.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
 import { addQuestion, decide, decisionCards, openPushes, openQuestions } from './decisions.mjs';
 import { listFolder, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
@@ -298,8 +299,12 @@ function crew(agents, config, runs, going, queue, conversation) {
         if (new Date(m.at).getTime() >= since) week.answers++;
       }
     }
+    // The tool its steps run on (src/tools.mjs): the one asked, unless it is not available (then Claude Code).
+    const choice = agentTool(config, agent);
     return {
-      id: agent.id, name: agent.name, title: agent.title, role: agent.role, model: agent.model ?? config.default_model,
+      id: agent.id, name: agent.name, title: agent.title, role: agent.role,
+      model: choice.tool === 'claude' ? agent.model ?? config.default_model : toolModel(choice.tool, agent.model),
+      tool: choice.tool, toolAsked: choice.asked, toolUntil: choice.until, toolReason: choice.reason,
       effort: agent.effort ?? null, maxMinutes: agent.max_minutes ?? null,
       color: agent.color ?? null, face: agent.face ?? null, status, run, last, week, waitingFor,
       // The runs this member is at work on now: a click on it opens its panel.
