@@ -2,7 +2,8 @@
 #  1. starts Chiefmate in the background when you sign in to Windows;
 #  2. wakes the computer from sleep 3 minutes before each scheduled mission (config/chiefmate.json);
 #  3. creates the "Chiefmate" app shortcuts on the desktop and in the Start menu;
-#  4. registers the chiefmate: address, which the notifications use to open the app.
+#  4. registers the chiefmate: address, which the notifications use to open the app;
+#  5. checks Chiefmate from outside it every 10 minutes (the watchdog: node src\cli.mjs watch).
 # Run it again after changing the missions' schedules.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -69,3 +70,10 @@ Set-ItemProperty -Path "$key\DefaultIcon" -Name '(Default)' -Value "$icon,0"
 New-Item -Path "$key\shell\open\command" -Force | Out-Null
 Set-ItemProperty -Path "$key\shell\open\command" -Name '(Default)' -Value "`"$wscript`" `"$openApp`" `"%1`""
 Write-Host 'Address chiefmate: registered.'
+
+# 5. The watchdog: every 10 minutes, while you are signed in, a check of Chiefmate from outside its process
+$watchAction = New-ScheduledTaskAction -Execute $wscript -Argument "`"$(Join-Path $root 'scripts\watch.vbs')`"" -WorkingDirectory $root
+$every = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 10)
+$watchSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskPath '\Chiefmate\' -TaskName 'Watchdog' -Action $watchAction -Trigger $every -Settings $watchSettings -Description 'Checks Chiefmate from outside it every 10 minutes and calls the rescuer when it is stuck.' -Force | Out-Null
+Write-Host 'Task created: the watchdog checks Chiefmate every 10 minutes.'

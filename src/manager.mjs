@@ -266,7 +266,10 @@ export function newsMessage(owner, events, alongside = false) {
   const report = events.some(e => e.kind === 'autopilot_report')
     ? `\n\nFor the autopilot_report event: the daily report of what the autopilot did alone. Tell ${owner} in a few lines, with each item's short title, where it is now and what waits for them (a pull request to approve, a branch to review).`
     : '';
-  return `${head}\n${lines.join('\n')}\n\n${ask}${triage}${idle}${report}`;
+  const watchdog = events.some(e => e.kind === 'watchdog')
+    ? `\n\nFor the watchdog events: the watchdog checks Chiefmate from outside every 10 minutes and, when it is stuck, its rescuer acts with a closed list of safe actions. Tell ${owner} in a few lines what was found, what was done and what needs them. Don't restart Chiefmate or stop processes yourself.`
+    : '';
+  return `${head}\n${lines.join('\n')}\n\n${ask}${triage}${idle}${report}${watchdog}`;
 }
 
 /** The text the manager receives: your message, or the queue in order with the time of each one, and Chiefmate's news. */

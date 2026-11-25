@@ -332,7 +332,8 @@ The installer:
 - starts Chiefmate in the background when you sign in to Windows;
 - creates the task that wakes the computer before scheduled missions;
 - creates the **Chiefmate** shortcuts on the desktop and in the Start menu;
-- registers the `chiefmate:` address that the notifications use.
+- registers the `chiefmate:` address that the notifications use;
+- creates the watchdog's task, which checks Chiefmate every 10 minutes from outside it (see "The watchdog").
 
 Run it again whenever you change a mission's schedule. To remove everything it created, run `scripts\uninstall.ps1`.
 
@@ -364,6 +365,7 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `autopilot` | The optional autopilot (see "Planning"): `{ "enabled": false, "week_pace": 0.95, "stop_at_5h_window": 0.85, "quiet_hours": "", "daily_report": "08:00" }`. `quiet_hours` such as `"23:00-07:00"`; `daily_report: false` turns the report off. Read on every check, with no restart |
 | `manager_updates` | The manager's news in the conversation (see "News from the manager"): `true` (the default, every event), `false` (none) or a list of the events that wake it, such as `["run_failed", "pr_ready", "needs_you"]` |
 | `usage_reader` | The optional reading of your usage page on claude.ai (see below): `{ "enabled": false, "every_hours": 4 }`, and `browser` with the path to Edge or Chrome if it isn't found |
+| `watchdog` | The watchdog (see "The watchdog"): `{ "rescuer": true, "model": null, "max_minutes": 15, "every_minutes": 60 }`. `rescuer: false` keeps Claude out of it (you are only told); `model` is the rescuer's (`default_model` when null); `every_minutes`, the shortest time between two rescues |
 | `remote_access` | The optional use from your laptop and phone through Tailscale Serve (see "Remote access" below): `{ "enabled": false, "host": "<pc>.<tailnet>.ts.net", "logins": ["<your Tailscale login>"], "port": 4748 }`. Off by default; read when Chiefmate starts |
 
 The libraries are read from a copy that Chiefmate refreshes from GitHub before use, in `workspaces/.library/`, so the crew can read them but never change the original. To have the crew change a library, add its repository as a project too: the changes then arrive as pull requests, like everything else.
@@ -433,7 +435,7 @@ The conversation never makes you wait.
 
 The manager doesn't only answer: when something you should know about happens, it tells you in the conversation on its own.
 
-- **The events**, by the names `manager_updates` uses: a run finished (`run_finished`), failed (`run_failed`) or paused (`run_paused`); a pull request ready and waiting for your approval (`pr_ready`); a run's work you merged from the app (`merged`); a step or a live session that needs you (`needs_you`); an update installed (`update_installed`) or blocked (`update_blocked`); a memory alert (`memory_alert`) or an alert about the account's usage or the plan's free resets (`usage_alert`); a live session that ended on its own (`session_ended`; not one you ended from Chiefmate); a new proposal on the planning board (`plan_proposed`), which the manager triages before telling you what waits for your decision; with the autopilot on, a project's queue that emptied with items triaged "do now" (`idle`), which the manager may put on the queue, and the autopilot's daily report (`autopilot_report`).
+- **The events**, by the names `manager_updates` uses: a run finished (`run_finished`), failed (`run_failed`) or paused (`run_paused`); a pull request ready and waiting for your approval (`pr_ready`); a run's work you merged from the app (`merged`); a step or a live session that needs you (`needs_you`); an update installed (`update_installed`) or blocked (`update_blocked`); a memory alert (`memory_alert`) or an alert about the account's usage or the plan's free resets (`usage_alert`); a live session that ended on its own (`session_ended`; not one you ended from Chiefmate); a new proposal on the planning board (`plan_proposed`), which the manager triages before telling you what waits for your decision; what the watchdog found and did (`watchdog`); with the autopilot on, a project's queue that emptied with items triaged "do now" (`idle`), which the manager may put on the queue, and the autopilot's daily report (`autopilot_report`).
 - **How it goes.** Chiefmate wakes the manager with a short system message that describes the events and is marked as not coming from you; the manager reads the situation, as with any message, and writes a short, clear notice: what happened and, when something needs you, what to do. It doesn't queue or change anything because of a notice alone.
 - **Grouped.** Events within a minute of the first one go together, as one message. If the manager is answering, they wait in the queue under the conversation ("news for the manager", which you can remove but not edit) and go with your queued messages; then the manager answers you and mentions them in the same reply. The news survives a restart, such as the one after an update; news older than an hour when Chiefmate starts is dropped.
 - **In the conversation**, a notice has a look of its own: a brass rule on the left, a "notice" tag and the events it is about.
@@ -461,6 +463,21 @@ From then on, the server (never an agent) opens only the usage page, with no win
 - Automated access to claude.ai may go against its terms of use, and the site may block it, ask you to sign in again or change the page. The reading is kept to one page and a few times a day, but the choice is yours.
 - The page has no fixed format: the values are found by their words, in English and Portuguese, and may be missed or misread. The Usage section shows the lines it relied on.
 
+## The watchdog
+
+Chiefmate can stop, hang or get stuck, and then it can't tell you so itself. The watchdog checks it from outside: a Windows task (`\Chiefmate\Watchdog`, created by the installer) runs `node src/cli.mjs watch` every 10 minutes while you are signed in, in a process of its own, apart from Chiefmate and its updates.
+
+1. **The check uses no AI.** It looks at whether Chiefmate answers (for about a minute, so a restart after an update isn't taken for a problem), a queue that doesn't start a run ready to go for two checks in a row, a run with no new action for an hour (unless it waits for you), an update installing for over 75 minutes or approved and not installed for over two hours, a live session that doesn't start or whose last turn failed, the computer's free memory and Chiefmate's own, and orphan processes: git, Claude Code (headless) or Codex left alive for over half an hour after what started them ended.
+2. **The rescuer, only when it is stuck.** When Chiefmate doesn't answer, the queue, a run or an update is stuck, or there are orphans, the watchdog calls the rescuer: Claude Code, without your configuration, that may read Chiefmate's files and logs and run a closed list of safe actions, and nothing else (it can't change a file):
+   - `rescue restart`: stops Chiefmate's server (only the process on its port, and only if it is Chiefmate) with the crew's processes under it, never a live session's or a development environment's window, and starts it as the sign-in does. The runs going on start their step over. Refused while an update installs;
+   - `rescue stop-orphans [<pid> ...]`: stops orphan processes, as the watchdog finds them;
+   - `rescue resume <run>`: resumes a paused or failed run, at most once a day per run.
+
+   What needs more (code to fix, settings, a decision, a sign-in) is left for you: the rescuer says what to do. It runs at most once an hour (`every_minutes`), for at most 15 minutes.
+3. **You and the manager hear of it.** A Windows notification (urgent when something needs you or Chiefmate is stuck) and a notice in the manager's conversation (the `watchdog` news). When Chiefmate doesn't answer, the notice waits for its next start, within the hour. A warning that doesn't need the rescuer (memory, a session, a blocked update) is told once, and again only after six hours.
+
+`node src/cli.mjs watch --dry-run` shows what the watchdog sees, without saving, telling or doing anything. Its state and log are in `data/watch/`, with the rescuers' logs. Turn the rescuer off with `"watchdog": { "rescuer": false }`; to stop the checks, disable the task in the Task Scheduler.
+
 ## Chiefmate improves itself
 
 Chiefmate can be one of its own projects. Its crew then works on Chiefmate the same way it works on any project, and you stay in charge of what goes in.
@@ -485,6 +502,7 @@ The self-update only touches Chiefmate's own files. Your settings, the history a
 
 - **Only you reach the app.** It listens on this computer only, and it refuses commands sent by other websites open in your browser. Its answers can't be framed by other sites. With the optional remote access, your other devices reach it only through Tailscale Serve, with your Tailscale login (see "Remote access"). Any program on this computer can reach that second listener and claim a login, as it can already reach the app itself.
 - **Agents have limits.** They cannot push to GitHub, open or merge pull requests, or change the repository's address.
+- **The watchdog's rescuer has a closed list.** It runs without your configuration, may read Chiefmate's folder (not the claude.ai browser profile) and run only the `rescue` actions and a few read-only commands; it can't change files. The `rescue` actions refuse to run inside a crew's step or the manager's answer.
 - **Merging needs you.** Chiefmate merges a run's work only with your authorization (see "Merging with your authorization"). The crew never merges; the manager only asks.
 - **Each step sees only its project.** Other projects' working copies and documentation, the libraries a project doesn't list and Chiefmate's `data/` are denied to the file tools by permission rules (see "What each step sees"). A shell command can still read them: this is not a sandbox.
 - **None of your own configuration.** Agents run without your Claude Code settings, hooks, plugins, skills, `~/.claude/CLAUDE.md` and MCP servers, and without the variables of your own Claude session. The only external tools are those in `mcp_servers`, released by project or agent.
@@ -560,6 +578,10 @@ node src/cli.mjs limits --window-5h 0.85 --plan-week 0.9
 node src/cli.mjs autopilot [on|off] [--week-pace 0.95] [--window-5h 0.85] [--quiet 23:00-07:00|off] [--report 08:00|off]
                                               the autopilot's settings, whether it may act now and what it did in the last day
 node src/cli.mjs ram                          the projects running on this computer and their memory
+node src/cli.mjs watch [--dry-run] [--json]   the watchdog's check (the Windows task runs it every 10 minutes); --dry-run only
+                                              shows what it sees
+node src/cli.mjs rescue restart|stop-orphans|resume <run> [--dry-run]
+                                              the rescuer's safe actions, yours too (see "The watchdog")
 node src/cli.mjs stop-project <id> [--yes]    lists a project's processes; with --yes, stops them
 node src/cli.mjs reset-grant [list]           the plan's free resets (add <YYYY-MM-DD> "<note>", used <n>, remove <n>)
 node src/cli.mjs claude-login                 signs in to claude.ai, for the optional usage reading
@@ -586,7 +608,7 @@ English is the source. The app, the notifications and the reports follow `langua
 | `agents/` | The crew, one file per agent |
 | `config/` | `example.json`, and your `chiefmate.json` (not in git) |
 | `scripts/` | Installation on Windows, launchers and checks |
-| `data/` (not in git) | Runs, each step's log and context, the live sessions' first messages and records, the prompt builder's last choice per project, the planning board (`plan.json`), the team leads' project memories (`projects/<id>/memory.md`), the history of the changes made in each project's Context tab (`projects/<id>/context-history.jsonl`), the conversation with the manager, your account's usage, the schedule's and the alerts' state and, if you use the claude.ai reading, its browser profile |
+| `data/` (not in git) | Runs, each step's log and context, the live sessions' first messages and records, the prompt builder's last choice per project, the planning board (`plan.json`), the team leads' project memories (`projects/<id>/memory.md`), the history of the changes made in each project's Context tab (`projects/<id>/context-history.jsonl`), the conversation with the manager, your account's usage, the schedule's and the alerts' state, the watchdog's state and logs (`watch/`) and, if you use the claude.ai reading, its browser profile |
 | `workspaces/` (not in git) | The projects' working copies |
 
 Chiefmate has no dependencies besides Node.js. It drives Claude Code (`claude -p`), which uses your account's login and plan. The only optional one is `playwright-core`, for copying the prompt builder from Google Docs (and, if present, for the browser that opens for sign-ins): Chiefmate loads it only when needed and says how to install it when it is missing.
