@@ -1146,5 +1146,13 @@
   "Back on the radar as a new idea.": "De volta ao radar como ideia nova.",
   "Radar": "Radar",
   "Project radar": "Radar de projetos",
-  "Ideas for new systems and sites with high potential, researched by the crew with sources. They belong to no project: you choose when to turn one into a project.": "Ideias de sistemas e sites novos com alto potencial, pesquisadas pela equipe com fontes. Não pertencem a nenhum projeto: você escolhe quando transformar uma delas em projeto."
+  "Ideas for new systems and sites with high potential, researched by the crew with sources. They belong to no project: you choose when to turn one into a project.": "Ideias de sistemas e sites novos com alto potencial, pesquisadas pela equipe com fontes. Não pertencem a nenhum projeto: você escolhe quando transformar uma delas em projeto.",
+  "Archived ({count})": "Arquivados ({count})",
+  "Archived notices": "Avisos arquivados",
+  "Nothing archived yet.": "Nada arquivado ainda.",
+  "Pull request merged": "Pull request integrado",
+  "Pull request closed": "Pull request fechado",
+  "Branch already merged": "Branch já integrada",
+  "A day went by": "Passou um dia",
+  "No longer needed": "Não precisa mais de você"
 }
