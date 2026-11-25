@@ -934,7 +934,7 @@ function sessionState(x) {
   if (x.status === 'login') return [t('Waiting for you to sign in'), 'warn'];
   if (x.mode === 'app') {
     return {
-      working: [t('Working'), 'info'], permission: [t('Asks your permission'), 'warn'], waiting: [t('Your turn'), 'ok'], ended: [t('Ended'), 'neutral'],
+      working: [t('Working'), 'info'], paused: [t('Paused for an update'), 'info'], permission: [t('Asks your permission'), 'warn'], waiting: [t('Your turn'), 'ok'], ended: [t('Ended'), 'neutral'],
     }[x.phase] ?? [t('Open'), 'ok'];
   }
   if (x.alive) return [t('Open'), 'ok'];
@@ -1037,6 +1037,7 @@ function livePhaseLine(x) {
   if (x.status === 'login') return t('Sign in to Codex ("codex login" in a terminal): the session starts by itself afterwards.');
   return {
     working: t('The agent is working. Your messages wait in the queue and go when it finishes this turn.'),
+    paused: t('Paused at a safe point for an update of Chiefmate: the agent carries on by itself after the restart. Your messages wait in the queue.'),
     permission: t('The agent asks your permission for something: see below.'),
     waiting: t('Your turn: the agent waits for your message.'),
     ended: x.resumable ? t('Ended. Resume, or simply write: it carries on in the same conversation.') : t('Ended.'),
@@ -1060,7 +1061,7 @@ function liveFeedHtml(x) {
     if (e.kind === 'owner' && e.first) {
       html += `<details class="msg you first" data-live-first${liveChat.firstOpen ? ' open' : ''}><summary class="msg-head"><span class="msg-author">${esc(t('You'))}</span><span class="msg-meta">${esc(`${clockTime(e.at)} · ${t('first message, {count} characters', { count: e.text.length })}`)}</span></summary><div class="msg-body">${md(e.text)}</div></details>`;
     } else if (e.kind === 'owner') {
-      html += `<div class="msg you"><div class="msg-head"><span class="msg-author">${esc(t('You'))}</span><span class="msg-meta">${esc(clockTime(e.sent ?? e.at))}</span></div><div class="msg-body">${md(e.text)}</div></div>`;
+      html += `<div class="msg you"><div class="msg-head"><span class="msg-author">${esc(e.by === 'manager' ? t('Manager, at your request') : t('You'))}</span><span class="msg-meta">${esc(clockTime(e.sent ?? e.at))}</span></div><div class="msg-body">${md(e.text)}</div></div>`;
     } else if (e.kind === 'say') {
       html += `<div class="msg manager"><div class="msg-head"><span class="msg-author">${esc(agent)}</span><span class="msg-meta">${esc(clockTime(e.at))}</span></div><div class="msg-body">${md(e.text)}</div></div>`;
     } else if (e.kind === 'permission') {

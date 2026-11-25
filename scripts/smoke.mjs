@@ -971,6 +971,7 @@ try {
     "const id = args.includes('--resume') ? args[args.indexOf('--resume') + 1] : args[args.indexOf('--session-id') + 1];",
     "let prompt = ''; process.stdin.on('data', d => (prompt += d)); process.stdin.on('end', () => {",
     `  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ tool: 'claude', args, prompt }) + '\\n');`,
+    "  if (prompt.includes('already there') && args.includes('--session-id')) { process.stderr.write('Error: Session ID ' + id + ' is already in use.'); process.exit(1); }",
     "  const say = e => process.stdout.write(JSON.stringify(e) + '\\n');",
     "  say({ type: 'system', subtype: 'init', session_id: id, model: 'm' });",
     "  say({ type: 'assistant', message: { content: [{ type: 'text', text: (args.includes('--resume') ? 'Again: ' : 'First: ') + prompt.split('\\n')[0] }, { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'git status' } }] } });",
@@ -998,10 +999,9 @@ try {
   ].join('\n'));
   Object.assign(process.env, { CHIEFMATE_CLAUDE: fakeClaude, CHIEFMATE_CODEX: fakeCodex });
   const liveConfig = {
-    owner: 'Owner', language: 'en', default_model: 'm', projects: {},
-    sessions: { pair: { name: 'Pair', tool: 'claude', cwd: liveDir, model: 'm' }, cx: { name: 'Cx', tool: 'codex', cwd: liveDir } },
-  };
-  const idle = async id => {
+    owner: 'Owner', language: 'en', default_model: 'm', projects: {}, mcp_servers: { pw: { command: 'npx', args: ['pw'] }, other: { command: 'x' } },
+    sessions: { pair: { name: 'Pair', tool: 'claude', cwd: liveDir, model: 'm', mcp: ['pw'] }, cx: { name: 'Cx', tool: 'codex', cwd: liveDir } },
+  };  const idle = async id => {
     for (let i = 0; i < 150 && (sessions.turnOf(id) || (sessions.readSession(id)?.queue ?? []).length); i++) await new Promise(r => setTimeout(r, 100));
   };
   const called = () => readFileSync(calls, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
@@ -1040,6 +1040,41 @@ try {
     expect(called().at(-1).prompt.includes('interrupted your previous turn') && sessions.readSession(s.id).status === 'open', 'after an interruption, the next message did not tell the agent');
     const line = sessions.sessionsLine(liveConfig, noMachine);
     expect(line.includes(`[${s.id}]`) && line.includes('session log') && line.includes('Last said'), `the manager's line about the sessions is incomplete: ${line}`);
+
+    // An update pauses the turn at a safe point; it carries on by itself, in the same session (here at once: no update runs).
+    sessions.sayToSession(s.id, 'Please take long again');
+    for (let i = 0; i < 50 && !sessions.turnOf(s.id)?.last; i++) await new Promise(r => setTimeout(r, 100));
+    expect(sessions.pauseSessionTurns().includes(s.id) && sessions.sessionTurnsGoingOn(), 'a turn going on was not asked to pause for an update');
+    await idle(s.id);
+    await idle(s.id);
+    const carried = called().at(-1);
+    expect(carried.prompt.includes('to install an update') && carried.args.includes('--resume') && !sessions.readSession(s.id).paused, `a turn paused for an update did not carry on by itself: ${carried.prompt.slice(0, 120)}`);
+
+    // The manager writes only at the owner's request, and the agent and the history say so.
+    sessions.sayToSession(s.id, 'Hello from the manager', { by: 'manager' });
+    await idle(s.id);
+    expect(called().at(-1).prompt.includes("written by Chiefmate's manager") && sessions.sessionHistory(s.id).items.some(e => e.kind === 'owner' && e.by === 'manager'), "a message written by the manager doesn't say so");
+    let blocked = '';
+    try {
+      execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'session', 'say', s.id, 'hi'], { env: { ...process.env, CHIEFMATE_MANAGER: '1' }, stdio: 'pipe', windowsHide: true });
+    } catch (error) {
+      blocked = String(error.stderr);
+    }
+    expect(blocked.includes('--owner-asked'), 'the manager could write to a live session without the owner asking');
+
+    // Claude Code already has the session that Chiefmate would start anew (a turn cut off by a restart): it is resumed.
+    const record = path.join(data, 'sessions', `${s.id}.json`);
+    writeFileSync(record, JSON.stringify({ ...JSON.parse(readFileSync(record, 'utf8')), turns: 0 }));
+    sessions.sayToSession(s.id, 'Is it already there?');
+    await idle(s.id);
+    const [inUse, retried] = called().slice(-2);
+    expect(inUse.args.includes('--session-id') && retried.args.includes('--resume') && retried.prompt.includes('already there') && sessions.readSession(s.id).lastTurn?.ok, '"Session ID ... is already in use" was not resumed');
+
+    // The external tools released to the profile and to the project, and no other.
+    const both = sessions.sessionMcp({ ...liveConfig, projects: { p: { mcp: ['other'] } } }, { profile: 'pair', project: 'p' });
+    const windowArgs = sessions.sessionArgs({ tool: 'claude', profile: 'pair', cwd: liveDir }, liveConfig, null);
+    const servers = Object.keys(JSON.parse(windowArgs[windowArgs.indexOf('--mcp-config') + 1]).mcpServers);
+    expect(both.names.join() === 'other,pw' && both.tools.includes('mcp__pw') && servers.join() === 'pw', `a live session's external tools are wrong: ${both.names} / ${servers}`);
 
     await sessions.endSession(s.id);
     expect(sessions.readSession(s.id).status === 'ended', 'a session in the app did not end');
