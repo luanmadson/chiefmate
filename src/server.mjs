@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { attentionItems, attentionSummary, markSeen } from './attention.mjs';
+import { attentionArchive, attentionItems, attentionSummary, markSeen } from './attention.mjs';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
@@ -323,7 +323,7 @@ function buildState() {
     },
     alerts: alerts(config, usage, machine),
     // What needs the owner, in three levels (src/attention.mjs): the band at the top, the sections, the title and the icon.
-    attention: { items: attention, ...attentionSummary(attention) },
+    attention: { items: attention, ...attentionSummary(attention), archived: attentionArchive().length },
     // The owner's planning board (data/plan.json): every item, archived ones included, in the board's order.
     planning: { items, priorities: PRIORITIES, statuses: STATUSES },
     manager: {
@@ -404,6 +404,8 @@ export function startServer() {
       if (req.method === 'GET') {
         if (url.pathname === '/api/health') return reply(res, 200, { ok: true, version: VERSION });
         if (url.pathname === '/api/state') return replyState(req, res);
+        // The notices that no longer need the owner, most recent first (the app's "Archived").
+        if (url.pathname === '/api/attention/archived') return reply(res, 200, { items: attentionArchive() });
         if (url.pathname === '/api/computer') {
           await processes(5000);
           return reply(res, 200, computer());
@@ -487,7 +489,7 @@ export function startServer() {
           if (body.session) return reply(res, 200, finishSessionRequest(String(body.session), String(body.id ?? '')));
           return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner'));
         case '/api/attention/seen':
-          // Marks notices as seen: they fade (an info notice goes away).
+          // Marks notices as seen: they fade (an info notice goes to the archive).
           return reply(res, 200, { seen: markSeen(Array.isArray(body.ids) ? body.ids : [body.id]) });
         case '/api/run/talk':
           return reply(res, 200, talkTo(body.run, body.text));

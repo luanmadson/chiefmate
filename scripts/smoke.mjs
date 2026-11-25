@@ -122,6 +122,8 @@ try {
       const after = (await (await fetch(`${base}/api/state`)).json()).attention;
       const faded = after.items.find(i => i.id === proposal.id);
       expect(faded?.seen && after.counts.important === state.attention.counts.important - 1, 'a notice marked as seen did not fade');
+      const archived = await (await fetch(`${base}/api/attention/archived`)).json();
+      expect(typeof after.archived === 'number' && Array.isArray(archived.items) && archived.items.length === after.archived, `the archive's count or list is missing: ${JSON.stringify([after.archived, archived])}`);
     }
     // Away mode from the app's button: on, in /api/state, then off (the smoke test's server tells no manager).
     const awayOn = await (await post('/api/away', { on: true })).json();
@@ -1123,8 +1125,15 @@ try {
 // info, the seen marks (an info notice goes away), and the urgent Windows notification that stays until seen.
 try {
   const src = file => pathToFileURL(path.join(root, 'src', file)).href;
-  const { attentionItems, attentionSummary, markSeen } = await import(src('attention.mjs'));
+  const { attentionArchive, attentionItems, attentionSummary, checkPullRequests, markSeen, pullRequestTargets } = await import(src('attention.mjs'));
   const { toastXml } = await import(src('notify.mjs'));
+  // gh and git stand-ins; a check done now also keeps the background check (real gh) away for its 5 minutes.
+  const checked = [];
+  const ask = {
+    pr: async url => (checked.push(url), url.endsWith('/1') ? 'merged' : url.endsWith('/2') ? 'closed' : 'open'),
+    branch: async r => (checked.push(r.branch), r.branch === 'cm/merged'),
+  };
+  await checkPullRequests([], {}, ask);
   const at = new Date(Date.now() - 3600_000).toISOString();
   const later = new Date(Date.now() + 2 * 3600_000).toISOString();
   const runs = [
@@ -1155,6 +1164,37 @@ try {
   const again = attentionItems(input);
   expect(!again.some(i => i.id === 'done:a-done') && again.find(i => i.id === 'failed:a-failed')?.seen, 'a seen info notice did not go away, or a seen urgent one did not fade');
   expect(attentionItems({ ...input, runs: [...runs, { id: 'a-redo', project: 'p', title: 'Broke', status: 'running', created: new Date().toISOString() }] }).every(i => i.id !== 'failed:a-failed'), 'a failed run redone still asks for attention');
+
+  // The archive: a pull request merged or closed on GitHub, a branch merged in the owner's clone, a board item done,
+  // an info notice seen or a day old, and a cause that ended (and came back). Nothing is lost.
+  const why = id => attentionArchive().find(i => i.id.startsWith(id))?.reason;
+  expect(why('done:a-done') === 'seen', `a seen info notice did not go to the archive: ${JSON.stringify(attentionArchive())}`);
+  const local = { id: 'a-local', project: 'p', title: 'Local', status: 'done', created: at, ended: at, branch: 'cm/merged', delivered: 'C:/clone' };
+  const more = {
+    ...input, runs: [...runs, local],
+    items: [...input.items, { id: 4, title: 'Local branch', status: 'waiting_owner', project: 'p', run: 'a-local' }, { id: 5, title: 'Still waiting', status: 'waiting_owner', project: 'p' }],
+  };
+  const before = attentionItems(more);
+  expect(['pr:a-pr', 'plan:3:', 'plan:4:', 'plan:5:', 'done:a-local'].every(id => before.some(i => i.id.startsWith(id))), `a notice to archive later is missing: ${JSON.stringify(before.map(i => i.id))}`);
+  const targets = pullRequestTargets(before, more.runs, more.items);
+  await checkPullRequests(targets, {}, ask);
+  const askedOnce = checked.length;
+  await checkPullRequests(targets, {}, ask);
+  expect(askedOnce >= 3 && checked.length === askedOnce, `the pull requests were asked again within 5 minutes, or not at all: ${JSON.stringify(checked)}`);
+  const settled = attentionItems(more);
+  expect(!settled.some(i => /^(pr:a-pr|plan:3:|plan:4:)/.test(i.id)) && why('pr:a-pr') === 'merged' && why('plan:3:') === 'closed' && why('plan:4:') === 'branch',
+    `a merged or closed pull request, or a merged branch, is still waiting for the owner: ${JSON.stringify(attentionArchive())}`);
+  expect(settled.some(i => i.id.startsWith('plan:5:')), 'a board item still waiting for the owner left the list');
+  const twoDays = new Date(Date.now() - 2 * 86400_000).toISOString();
+  attentionItems({
+    ...more, machine: { memory: { free: 9, total: 10 }, projects: [] },
+    items: more.items.map(i => (i.id === 5 ? { ...i, status: 'done' } : i)), runs: more.runs.map(r => (r.id === 'a-local' ? { ...r, ended: twoDays } : r)),
+  });
+  expect(why('plan:5:') === 'resolved' && why('memory:low') === 'resolved' && why('done:a-local') === 'expired',
+    `a board item done, a cause ended or a day-old info notice did not go to the archive: ${JSON.stringify(attentionArchive().map(i => [i.id, i.reason]))}`);
+  const back = attentionItems(more);
+  expect(back.some(i => i.id === 'memory:low') && !why('memory:low') && !back.some(i => i.id === 'done:a-local'), 'a cause back did not return to the list, or an expired info notice came back');
+  expect(attentionArchive().every(i => i.archived && i.title), 'an archived notice lost what it said');
   const urgent = toastXml('Needs you', 'Sign in', 'chiefmate:operations', { urgent: true });
   expect(urgent.includes('scenario="reminder"') && urgent.includes('activationType="system"') && !toastXml('Done', 'x').includes('scenario'), 'an urgent Windows notification does not stay until seen');
 } catch (error) {
