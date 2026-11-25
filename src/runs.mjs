@@ -201,7 +201,7 @@ function applyBrief(id, brief) {
   if (by.title === 'auto') Object.assign(fields, { title: brief.title, briefBy: { ...fields.briefBy, title: 'model' } });
   if (by.summary === 'auto') Object.assign(fields, { summary: brief.summary, briefBy: { ...fields.briefBy, summary: 'model' } });
   Object.assign(run, fields);
-  described.set(id, fields);
+  described.set(id, { ...described.get(id), ...fields });
   saveRun(run);
   const l = live.get(id);
   if (l) Object.assign(l, { title: run.title, summary: run.summary });
