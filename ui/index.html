@@ -213,8 +213,12 @@
           <div id="project-history"></div>
         </div>
         <div id="project-planning" class="project-tab" hidden></div>
+        <div id="project-files" class="project-tab" hidden></div>
         <div id="project-context" class="project-tab" hidden></div>
         <div id="project-builder" class="project-tab" hidden></div>
+        <div id="project-charge" class="project-tab" hidden>
+          <div id="project-charge-top"></div>
+        </div>
         <div id="project-live" class="project-tab" hidden>
           <div id="project-live-list"></div>
           <div id="live-body" class="live-session" hidden>
@@ -367,6 +371,18 @@
       </div>
     </form>
   </dialog>
+  <dialog id="voice-notice" class="confirm">
+    <form method="dialog">
+      <div class="label" data-t="Dictation">Dictation</div>
+      <p data-t="The audio is transcribed by the browser's voice service (Google's in Chrome, Microsoft's in Edge, Apple's in Safari), not on this computer. Nothing is sent to anyone until you press Send.">The audio is transcribed by the browser's voice service (Google's in Chrome, Microsoft's in Edge, Apple's in Safari), not on this computer. Nothing is sent to anyone until you press Send.</p>
+      <p class="hint" data-t="One tap listens, another stops; a few seconds of silence stop it too. Ctrl+M does the same in the field.">One tap listens, another stops; a few seconds of silence stop it too. Ctrl+M does the same in the field.</p>
+      <div class="actions">
+        <button value="off" class="button secondary" data-t="Turn dictation off">Turn dictation off</button>
+        <button value="no" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="yes" class="button" data-t="Dictate">Dictate</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="context-dialog" class="confirm context-dialog">
     <form method="dialog">
       <div class="label" id="context-title" data-t="Context received">Context received</div>
@@ -384,6 +400,14 @@
         <button value="close" class="button secondary" data-t="Close">Close</button>
       </div>
     </form>
+  </dialog>
+  <dialog id="viewer" class="viewer" aria-labelledby="viewer-name">
+    <div class="viewer-top">
+      <div class="viewer-title"><strong id="viewer-name"></strong><span id="viewer-facts" class="hint num"></span></div>
+      <div id="viewer-tools" class="viewer-tools"></div>
+      <button type="button" id="viewer-close" class="viewer-close" aria-label="Close" data-t-label="Close">&times;</button>
+    </div>
+    <div id="viewer-body" class="viewer-body"></div>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/app.js" type="module"></script>

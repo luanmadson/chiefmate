@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { SAMPLE_CSV, SAMPLE_PNG, sampleXlsx } from './fixtures.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const port = 47000 + Math.floor(Math.random() * 900);
@@ -35,9 +36,18 @@ const feedWhole = `${feedLines}\n`;
 writeFileSync(path.join(data, 'runs', 'smoke-feed', '01-generalist.jsonl'), `${feedWhole}{"type":"assistant","message":{"content":[{"type":"text","text":"half`);
 // The remote access through Tailscale Serve, made up: a second listener, with a tailnet name and a login of its own.
 const remote = { enabled: true, host: 'pc.smoke-tailnet.ts.net', logins: ['owner@example.com'], port: port + 1 };
+// The file viewer's extra folder, made up: an image, a CSV, a workbook, and files it must never open.
+const files = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-files-'));
+mkdirSync(path.join(files, 'designs'));
+writeFileSync(path.join(files, 'designs', 'proposal-1.png'), SAMPLE_PNG);
+writeFileSync(path.join(files, 'designs', 'proposal-2.png'), SAMPLE_PNG);
+writeFileSync(path.join(files, 'sales.csv'), SAMPLE_CSV);
+writeFileSync(path.join(files, 'budget.xlsx'), sampleXlsx());
+writeFileSync(path.join(files, 'page.html'), '<script>alert(1)</script>');
+writeFileSync(path.join(files, '.env'), 'TOKEN=made-up');
 const child = spawn(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'server'], {
   cwd: root,
-  env: { ...process.env, CHIEFMATE_PORT: String(port), CHIEFMATE_SMOKE: '1', CHIEFMATE_REMOTE_ACCESS: JSON.stringify(remote) },
+  env: { ...process.env, CHIEFMATE_PORT: String(port), CHIEFMATE_SMOKE: '1', CHIEFMATE_REMOTE_ACCESS: JSON.stringify(remote), CHIEFMATE_VIEWER: JSON.stringify({ extra_roots: [files] }) },
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });
@@ -119,6 +129,10 @@ try {
     expect(/\.view-header p[^{]*\{ display: none; \}/.test(phone), "the phone layout shows the sections' descriptions");
     const appJs = await (await fetch(`${base}/app.js`)).text();
     expect(/phone && i\.level === 'info'/.test(appJs.slice(appJs.indexOf('function drawAlerts'), appJs.indexOf('function drawNavAttention'))), "a phone's band also shows the info notices");
+    // Each decision card shows its approval level; those of level 1 fold apart and don't count in the menu's mark.
+    const navCode = appJs.slice(appJs.indexOf('function navSections'), appJs.indexOf('function drawNavAttention'));
+    expect(/approvalBadge\(c\)/.test(appJs) && /managerSettles\(c\)/.test(navCode) && /fold\('manager'/.test(appJs) && /\.decision-approval\[data-approval="3"\]/.test(styles),
+      'the decision cards lack their approval level, or the level 1 cards still count as needing the owner');
     // A project's page: its tabs (the prompt builder's screen moves into the last one) and the prompt shown by blocks.
     const html = await (await fetch(`${base}/`)).text();
     // The decisions in a tab of their own, and the focus mode: the conversation alone, nothing over it or beside it;
@@ -153,6 +167,10 @@ try {
     const awayOff = await (await post('/api/away', { on: false })).json();
     expect(awayOn.away?.since && awayState?.since === awayOn.away.since && awayOff.away === null && state.away === null, `the away mode's button did not turn it on and off: ${JSON.stringify({ awayOn, awayState, awayOff })}`);
     expect(html.includes('id="away"'), "the app's title bar has no away mode button");
+    // Dictation: its setting in the state, its first-use notice and its module (not switched here: the settings may be the installation's own).
+    const voice = await (await fetch(`${base}/voice.js`)).text();
+    expect(typeof state.ui?.voice_input === 'boolean' && html.includes('id="voice-notice"') && voice.includes('export class Dictation') && appJs.includes("from './voice.js'"),
+      `dictation lacks its setting, notice or module: ${JSON.stringify(state.ui)}`);
     // The autopilot's panel in the Usage section: its state, and limits refused before anything is saved.
     const ap = state.autopilot;
     expect(ap && typeof ap.enabled === 'boolean' && ap.stop_at_5h_window > 0 && ap.week_pace > 0 && Array.isArray(ap.queued) && Array.isArray(ap.wakes) && (ap.enabled || ap.blocked?.reason === 'off'),
@@ -333,20 +351,58 @@ try {
     expect((await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder', dryRun: true })).status !== 403, 'a dry run of opening a folder was refused through the remote access');
     expect((await ask(port, '/api/state', tailnet)).status === 403, "the app's own port answered the tailnet name");
 
+    // The file viewer: an image, a CSV and a workbook open, read only, with the safety headers; what is outside its
+    // folders, protected or asked by another site is refused; the remote access asks for its login here too.
+    const fileUrl = (what, p, extra = '') => `/api/files/${what}?path=${encodeURIComponent(p)}${extra}`;
+    const image = await fetch(`${base}${fileUrl('raw', path.join(files, 'designs', 'proposal-1.png'))}`);
+    const imageBytes = Buffer.from(await image.arrayBuffer());
+    expect(image.status === 200 && image.headers.get('content-type') === 'image/png' && imageBytes.equals(SAMPLE_PNG)
+      && image.headers.get('x-content-type-options') === 'nosniff' && image.headers.get('cache-control') === 'no-store'
+      && /sandbox/.test(image.headers.get('content-security-policy') ?? '') && image.headers.get('cross-origin-resource-policy') === 'same-origin',
+    `the viewer did not send the image with its safety headers: ${image.status} ${[...image.headers].join('; ')}`);
+    const imageInfo = await (await fetch(`${base}${fileUrl('info', path.join(files, 'designs', 'proposal-2.png'))}`)).json();
+    expect(imageInfo.kind === 'image' && imageInfo.size === SAMPLE_PNG.length && imageInfo.gallery?.length === 2, `an image's facts or its gallery are wrong: ${JSON.stringify(imageInfo)}`);
+    const csv = await (await fetch(`${base}${fileUrl('table', path.join(files, 'sales.csv'))}`)).json();
+    expect(csv.rows?.length === 3 && csv.rows[1][1] === 'Porto Alegre' && csv.truncated === false, `the CSV did not open as a table: ${JSON.stringify(csv).slice(0, 300)}`);
+    const book = await (await fetch(`${base}${fileUrl('table', path.join(files, 'budget.xlsx'))}`)).json();
+    expect(book.sheets?.join('|') === 'Sales|Notes & more' && book.rows?.[1]?.[2] === '2026-03-01', `the workbook did not open as a table: ${JSON.stringify(book).slice(0, 300)}`);
+    const sheet2 = await (await fetch(`${base}${fileUrl('table', path.join(files, 'budget.xlsx'), '&sheet=1')}`)).json();
+    expect(sheet2.sheet === 1 && sheet2.rows?.[0]?.[0] === 'Only note', "the workbook's second sheet did not open");
+    const listed = await (await fetch(`${base}${fileUrl('list', files)}`)).json();
+    expect(listed.entries?.map(e => e.name).join('|') === 'designs|budget.xlsx|page.html|sales.csv', `the folder's list is wrong, or shows a protected file: ${JSON.stringify(listed.entries?.map(e => e.name))}`);
+    const htmlFile = await fetch(`${base}${fileUrl('raw', path.join(files, 'page.html'))}`);
+    expect(/^attachment/.test(htmlFile.headers.get('content-disposition') ?? '') && htmlFile.headers.get('content-type') === 'application/octet-stream', 'an HTML file was not sent as a download');
+    expect((await fetch(`${base}${fileUrl('raw', path.join(files, '.env'))}`)).status === 403, 'the viewer opened a .env file');
+    expect((await fetch(`${base}${fileUrl('raw', path.join(files, '..', path.basename(data), 'state.json'))}`)).status === 403, 'the viewer opened a file outside its folders');
+    expect((await fetch(`${base}${fileUrl('raw', path.join(root, 'package.json'))}`)).status === 403, "the viewer opened a file outside its folders (Chiefmate's own)");
+    expect((await ask(port, fileUrl('raw', path.join(files, 'sales.csv')), { host: `localhost:${port}`, 'sec-fetch-site': 'cross-site' })).status === 403, 'the viewer answered another site');
+    expect((await ask(port, fileUrl('raw', path.join(files, 'sales.csv')), { host: `localhost:${port}`, 'sec-fetch-site': 'same-site' })).status === 403, 'the viewer answered another port of this computer');
+    expect((await ask(remote.port, fileUrl('info', path.join(files, 'sales.csv')), { host: remote.host })).status === 403, 'the viewer answered the remote access without a Tailscale login');
+    expect((await ask(remote.port, fileUrl('info', path.join(files, 'sales.csv')), tailnet)).status === 200, 'the viewer refused the remote access with an allowed login');
+    expect((await fetch(`${base}/api/files/run/smoke-feed`)).ok, "a run's files did not answer");
+    expect((await fetch(`${base}/api/files/run/..%2Fsmoke-feed`)).status === 404, "a run's files answered a made-up id");
+
     // The watchdog: its news for the manager (never delivered here), a look that changes nothing, and the rescue
     // actions refused inside a step.
     expect((await post('/api/watchdog', { text: 'smoke' })).status === 200, "the watchdog's news was refused");
     const cli = (args, env = {}) => execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), ...args], { env: { ...process.env, CHIEFMATE_PORT: String(port), ...env }, stdio: 'pipe', windowsHide: true, encoding: 'utf8' });
     // The manager's question with buttons (ask-owner): a card with one button per option; the answer closes it (the
     // news never reaches a manager here; CHIEFMATE_RUN emptied, as when the crew runs this). A step asks with needs-you.
-    const askedOut = cli(['ask-owner', 'Ship it?', '--context', 'Two lines of why.', '--options', 'Yes|No|Wait', '--recommend', 'wait'], { CHIEFMATE_RUN: '' });
+    const askedOut = cli(['ask-owner', 'Ship it?', '--context', 'Two lines of why.', '--options', 'Yes|No|Wait', '--recommend', 'wait', '--level', '2'], { CHIEFMATE_RUN: '' });
     const cardsNow = async () => (await (await fetch(`${base}/api/state`)).json()).decisions ?? [];
     const questionCard = (await cardsNow()).find(c => c.kind === 'question' && c.title === 'Ship it?');
-    expect(askedOut.includes('Question #') && questionCard?.options?.join('|') === 'Yes|No|Wait' && questionCard.recommend === 'Wait' && questionCard.what === 'Two lines of why.',
+    expect(askedOut.includes('Question #') && questionCard?.options?.join('|') === 'Yes|No|Wait' && questionCard.recommend === 'Wait' && questionCard.what === 'Two lines of why.' && questionCard.approval === 2,
       `the manager's question is not a card with its options: ${askedOut} ${JSON.stringify(questionCard)}`);
     expect((await post('/api/decide', { card: questionCard?.id, action: 'answer', option: 'Maybe' })).status !== 200, 'an answer that is not one of the options was accepted');
     expect((await post('/api/decide', { card: questionCard?.id, action: 'answer', option: 'no' })).ok && !(await cardsNow()).some(c => c.id === questionCard?.id),
       'answering a question from its card failed, or the card stayed');
+    // The manager's approval level for a run (cli.mjs level, through the running Chiefmate): kept in the run's record.
+    const runLevel = () => JSON.parse(readFileSync(path.join(data, 'runs', 'smoke-feed.json'), 'utf8')).level;
+    const leveled = cli(['level', 'smoke-feed', '1']);
+    expect(/Level 1/.test(leveled) && runLevel() === 1, `the run's approval level was not set: ${leveled}`);
+    expect((await post('/api/level', { run: 'smoke-feed', level: '7' })).status !== 200, 'an unknown approval level was accepted');
+    cli(['level', 'smoke-feed', 'none']);
+    expect(runLevel() === null, "the run's approval level was not cleared");
     let askRefused = false;
     try {
       cli(['ask-owner', 'From a step?'], { CHIEFMATE_RUN: 'x' });
@@ -1420,7 +1476,7 @@ try {
   const config = { projects: { 'zz-p': { name: 'Proj', local_clone: path.join(data, 'no-clone') }, 'zz-q': { name: 'Shared', merge_by_owner: false } } };
   const at = new Date(Date.now() - 3600_000).toISOString();
   const made = [
-    { id: 'd-pr', project: 'zz-p', title: 'Better cards', summary: 'Cards with buttons.', status: 'done', created: at, ended: at, pullRequest: 'https://github.com/o/r/pull/34', checks: [{ ok: true }, { ok: false }], outcome: { done: ['Cards'], change: 'You decide with one click.', needs: 'No' } },
+    { id: 'd-pr', project: 'zz-p', title: 'Better cards', summary: 'Cards with buttons.', status: 'done', created: at, ended: at, pullRequest: 'https://github.com/o/r/pull/34', checks: [{ ok: true }, { ok: false }], outcome: { done: ['Cards'], change: 'You decide with one click.', needs: 'No' }, level: 1 },
     { id: 'd-shared', project: 'zz-q', title: 'Shared fix', status: 'done', created: at, ended: at, pullRequest: 'https://github.com/o/s/pull/9' },
     { id: 'd-local', project: 'zz-p', title: 'Local work', status: 'done', created: at, ended: at, branch: 'cm/local', delivered: path.join(data, 'no-clone') },
   ];
@@ -1435,10 +1491,18 @@ try {
       return true;
     }
   }), 'a question without text, with one option or too many, a recommendation outside them or an unknown project was accepted');
-  const q = addQuestion({ question: 'Publish now?', context: 'It goes live.', options: 'Sim|Não|Esperar', recommend: 'esperar', project: 'zz-p' }, config);
+  const q = addQuestion({ question: 'Publish now?', context: 'It goes live.', options: 'Sim|Não|Esperar', recommend: 'esperar', project: 'zz-p', level: '2' }, config);
   expect(q.recommend === 'Esperar' && addQuestion({ question: 'Plain?' }, config).options.length === 2, 'a question lost its recommendation, or one without options has no Yes and No');
   const item = proposeItem({ project: 'zz-p', title: 'Decision card check', summary: 'First line.\nMore detail.', agent: 'designer', by: 'smoke' });
-  triageItem(item.id, { recommend: 'now', note: 'Quick win', risk: 'Touches the menu' });
+  expect((() => {
+    try {
+      triageItem(item.id, { recommend: 'now', level: '5' });
+      return false;
+    } catch {
+      return true;
+    }
+  })(), 'a triage with an unknown approval level was accepted');
+  triageItem(item.id, { recommend: 'now', note: 'Quick win', risk: 'Touches the menu', level: 3 });
   const cardsFor = () => {
     const items = planItems();
     const questions = openQuestions();
@@ -1472,6 +1536,9 @@ try {
   const proposal = card(`decide:${item.id}`);
   expect(proposal?.risk === 'Touches the menu' && proposal.recommend.includes('Quick win') && proposal.what === 'First line.' && proposal.detail.includes('More detail.')
     && proposal.label === t('Item #{number} of {project}', { number: item.id, project: 'Proj' }), `a proposal's card is wrong: ${JSON.stringify(proposal)}`);
+  // The approval level the manager gave each one: on the run, the question and the board's item; none, "?" in the app.
+  expect(pr.approval === 1 && asked.approval === 2 && proposal.approval === 3 && local.approval === null && shared.approval === null,
+    `the cards' approval levels are wrong: ${JSON.stringify(cards.map(c => [c.id, c.approval]))}`);
   // "Not now" fades the card to the end; it stays pending.
   expect((await decide({ card: 'pr:d-pr', action: 'later' }, cards)).done === 'later', '"not now" failed');
   const faded = cardsFor();
@@ -1792,7 +1859,7 @@ try {
 // made-up clone's base branch (a git repository in the temporary folder; nothing goes to GitHub), only once, and the
 // command refuses to run inside a step.
 try {
-  const { mergeRun, previewMerge } = await import(pathToFileURL(path.join(root, 'src', 'merge.mjs')).href);
+  const { mergeRun, previewMerge, refreshCopies } = await import(pathToFileURL(path.join(root, 'src', 'merge.mjs')).href);
   const { readRun } = await import(pathToFileURL(path.join(root, 'src', 'store.mjs')).href);
   const clone = path.join(data, 'merge-clone');
   mkdirSync(clone);
@@ -1825,6 +1892,62 @@ try {
     refused = /never merges/.test(String(error.stderr));
   }
   expect(refused, 'the merge command ran inside a step');
+  // After a pull request's merge: the project's library is updated (a made-up update here) and the owner's clone moves
+  // forward by a fast forward only; with a change of the owner's in the way, it is left alone and the owner is told.
+  const origin = path.join(data, 'refresh-origin.git');
+  const ownerClone = path.join(data, 'refresh-clone');
+  const pusher = path.join(data, 'refresh-pusher');
+  const ws = path.join(data, 'refresh-ws');
+  mkdirSync(path.join(ws, '.library', 'refresh-lib', '.git'), { recursive: true });
+  git('init', '-q', '--bare', '-b', 'main', origin);
+  git('clone', '-q', origin, pusher);
+  const inPusher = (...args) => execFileSync('git', ['-c', 'user.name=smoke', '-c', 'user.email=smoke@example.com', ...args], { cwd: pusher, encoding: 'utf8', windowsHide: true, stdio: 'pipe' });
+  inPusher('checkout', '-q', '-b', 'main');
+  writeFileSync(path.join(pusher, 'a.txt'), 'a\n');
+  inPusher('add', '.');
+  inPusher('commit', '-q', '-m', 'start');
+  inPusher('push', '-q', 'origin', 'main');
+  git('clone', '-q', origin, ownerClone);
+  const refreshConfig = { projects: { refresh: { repository: origin, local_clone: ownerClone, main_branch: 'main' } }, library: { 'refresh-lib': { name: 'Refresh library', repository: `${origin}/` } } };
+  const pushMerged = file => {
+    writeFileSync(path.join(pusher, file), 'merged\n');
+    inPusher('add', '.');
+    inPusher('commit', '-q', '-m', `merged ${file}`);
+    inPusher('push', '-q', 'origin', 'main');
+  };
+  const updated = [];
+  const fakeLibrary = async id => updated.push(id);
+  pushMerged('merged.txt');
+  const done = await refreshCopies({ id: 'r1', project: 'refresh', base: 'main' }, { kind: 'pr' }, refreshConfig, { library: fakeLibrary, workspaces: ws });
+  expect(updated.join() === 'refresh-lib' && done.done.length === 2 && !done.skipped.length && existsSync(path.join(ownerClone, 'merged.txt')),
+    `the library or the owner's clone was not brought up to date after a merge: ${JSON.stringify(done)}`);
+  pushMerged('second.txt');
+  writeFileSync(path.join(ownerClone, 'a.txt'), 'a change of the owner\n');
+  const held = await refreshCopies({ id: 'r2', project: 'refresh', base: 'main' }, { kind: 'pr' }, refreshConfig, { library: fakeLibrary, workspaces: ws });
+  expect(held.skipped.length === 1 && held.skipped[0].includes(ownerClone) && !existsSync(path.join(ownerClone, 'second.txt'))
+    && readFileSync(path.join(ownerClone, 'a.txt'), 'utf8') === 'a change of the owner\n', `the owner's clone was touched with a change of theirs in it: ${JSON.stringify(held)}`);
+  // Closing a replaced pull request (closeReplaced): only when a newer run's pull request replaces it, shown first.
+  const { previewClose } = await import(pathToFileURL(path.join(root, 'src', 'merge.mjs')).href);
+  const pr = (id, extra) => writeFileSync(path.join(data, 'runs', `${id}.json`), JSON.stringify({ id, kind: 'task', project: 'p', title: id, status: 'done', created: new Date().toISOString(), steps: [], ...extra }));
+  pr('pr-old', { pullRequest: 'https://github.com/o/r/pull/51', branch: 'chiefmate/old', plan: 3 });
+  pr('pr-same-item', { pullRequest: 'https://github.com/o/r/pull/53', plan: 3 });
+  pr('pr-names-it', { pullRequest: 'https://github.com/o/r/pull/54', instruction: 'Bring the branch chiefmate/old into this one and solve the conflicts.' });
+  pr('pr-unrelated', { pullRequest: 'https://github.com/o/r/pull/55', instruction: 'Something else.' });
+  pr('pr-other-project', { project: 'q', pullRequest: 'https://github.com/o/q/pull/9', plan: 3 });
+  pr('pr-discarded', { pullRequest: 'https://github.com/o/r/pull/56', plan: 3, discarded: { by: 'owner' } });
+  const shown = previewClose('pr-old', 'pr-same-item');
+  expect(shown.url.endsWith('/51') && shown.newUrl.endsWith('/53') && /board item/.test(shown.why), `the close preview is wrong: ${JSON.stringify(shown)}`);
+  expect(/chiefmate\/old/.test(previewClose('pr-old', 'pr-names-it').why), 'a newer run naming the old branch was not taken as its replacement');
+  for (const other of ['pr-unrelated', 'pr-other-project', 'pr-discarded', 'pr-old']) {
+    expect((() => { try { previewClose('pr-old', other); return false; } catch { return true; } })(), `a pull request would be closed as replaced by ${other}`);
+  }
+  let closeRefused = false;
+  try {
+    execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'close-pr', 'pr-old', '--replaced-by', 'pr-same-item', '--yes'], { env: { ...process.env, CHIEFMATE_RUN: 'x', CHIEFMATE_MANAGER: '' }, stdio: 'pipe', windowsHide: true });
+  } catch (error) {
+    closeRefused = /never closes/.test(String(error.stderr));
+  }
+  expect(closeRefused, 'the close-pr command ran inside a step');
 } catch (error) {
   failures.push(`merge checks: ${error.message}`);
 }
@@ -1885,8 +2008,134 @@ try {
   failures.push(`no trace checks: ${error.message}`);
 }
 
+// The project's agent in charge, in this process with made-up settings and records: who is in charge, a conversation
+// that only reads and sees only its project, a request sent from it (its block taken out of the text), the manager's
+// answers back in the conversation (hold, ask-owner decided on the owner's card, reject), what the manager, the agent
+// and the app see; and an approval that queues a run linked to the request, only with a project of this installation's
+// settings (read only). Nothing starts: the queue is never nudged here, and nothing is told to a manager.
+try {
+  process.env.CHIEFMATE_SMOKE = '1';
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const charge = await import(src('charge.mjs'));
+  const { loadAgents, loadConfig } = await import(src('config.mjs'));
+  const { saveMemory } = await import(src('leads.mjs'));
+  const { openSession, planSession, sessionHistory } = await import(src('sessions.mjs'));
+  const { decide } = await import(src('decisions.mjs'));
+  const { rulePath } = await import(src('access.mjs'));
+  const { NEWS_EVENTS } = await import(src('news.mjs'));
+  const { readRun } = await import(src('store.mjs'));
+  const { WORKSPACES } = await import(src('util.mjs'));
+  const { t } = await import(src('i18n.mjs'));
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-charge-'));
+  const made = {
+    owner: 'Owner', language: 'en', default_model: 'some-model',
+    projects: {
+      gamma: { name: 'Gamma', about: 'A made-up site.', notes: 'Gamma notes.', local_clone: temp, lead: { name: 'Gamma lead' }, crew: { generalist: {} } },
+      alpha: { name: 'Alpha', crew: { builder: { agent: 'generalist', name: 'Builder' } } },
+      beta: { name: 'Beta' },
+    },
+  };
+  const agents = loadAgents(made);
+  expect(charge.inCharge(made, 'gamma', agents)?.lead && charge.inCharge(made, 'alpha', agents)?.member.id === 'builder' && charge.inCharge(made, 'beta', agents)?.member.id === 'generalist',
+    'the wrong agent is in charge of a project (the lead, else the first of its own crew, else the generalist)');
+  const planned = planSession(made, 'project-gamma-charge');
+  expect(planned.profile.charge && planned.folder.dir === path.resolve(temp) && !planned.prompt.blocksGiven, 'the conversation with the agent in charge opens elsewhere, or starts a turn by itself');
+  let windowRefused = false;
+  try {
+    await openSession('project-gamma-charge', { window: true, config: made });
+  } catch {
+    windowRefused = true;
+  }
+  expect(windowRefused, 'the conversation with the agent in charge opened in a window, outside the app');
+
+  // What the agent says: the request's block taken out of the text, its size and risk read in either language.
+  const said = charge.takeRequest('Agreed: I will send it.\n\n~~~manager-request\n{"asked": "Fix the menu", "plan": "The generalist fixes the menu in header.html", "size": "G", "risk": "alto", "urgency": "now"}\n~~~');
+  expect(said.text === 'Agreed: I will send it.' && said.request?.size === 'L' && said.request.risk === 'high' && said.request.urgency === 'now', `a request was not read from the agent's message: ${JSON.stringify(said)}`);
+  expect(charge.takeRequest('~~~manager-request\n{nope}\n~~~').error && charge.takeRequest('Just talking.').request === null, 'a broken request was taken, or plain talk became one');
+
+  // Each turn: its own instructions (not the manager's work), its role, the project, the memory; it only reads, and
+  // other projects (their working copies and their own clones) and Chiefmate's data/ are out of reach.
+  saveMemory('gamma', '# Gamma memory\n- The owner likes short pages.');
+  const system = charge.chargeSystem(made, 'gamma');
+  expect(system.includes('manager-request') && system.includes('short pages') && system.includes('Gamma notes.') && !system.includes('You are **Chiefmate**') && !system.includes('In this run you work only as the team lead'),
+    "the agent in charge does not get its role, the project's notes and memory, or gets the manager's own work");
+  const turn = charge.chargeTurn(made, { project: 'gamma', cwd: temp }, { cloneOf: p => (p === made.projects.alpha ? path.join(temp, 'alpha-clone') : null) });
+  expect(!turn.tools.some(x => ['Bash', 'Edit', 'Write', 'Agent'].includes(x)) && ['Bash', 'Edit', 'Write', 'Agent'].every(x => turn.disallowed.includes(x)), 'the agent in charge may change things or run commands');
+  const denied = dir => turn.disallowed.includes(`Read(${rulePath(dir)}/**)`);
+  expect(denied(path.join(WORKSPACES, 'alpha')) && denied(path.join(temp, 'alpha-clone')) && denied(data), "the agent in charge may read other projects or Chiefmate's data/");
+
+  // A request from the conversation: recorded once, for the manager; the answers go back to the conversation.
+  const sessionId = 'smoke-charge';
+  mkdirSync(path.join(data, 'sessions'), { recursive: true });
+  writeFileSync(path.join(data, 'sessions', `${sessionId}.json`), JSON.stringify({ id: sessionId, profile: 'project-gamma-charge', name: 'Gamma', tool: 'claude', project: 'gamma', mode: 'app', status: 'open', charge: true, cwd: temp, created: new Date().toISOString() }));
+  const r1 = charge.addRequest({ ...said.request, project: 'gamma', session: sessionId }, made);
+  expect(r1.status === 'pending' && r1.member === 'lead' && charge.addRequest({ ...said.request, project: 'gamma', session: sessionId }, made).id === r1.id, 'a request was not recorded, or the same one was recorded twice');
+  expect(NEWS_EVENTS.includes('owner_request') && charge.requestsLine(made).includes(`#${r1.id} (gamma, waiting for you, large, risk high, the owner said "now")`), `the manager does not hear of the request: ${charge.requestsLine(made)}`);
+  let noReason = false;
+  try {
+    await charge.answerRequest(r1.id, 'hold', {}, made);
+  } catch {
+    noReason = true;
+  }
+  const held = (await charge.answerRequest(r1.id, 'hold', { note: 'The 5-hour window is at 80%.' }, made)).request;
+  const answers = () => sessionHistory(sessionId).items.filter(e => e.kind === 'request').map(e => e.text);
+  expect(noReason && held.status === 'waiting' && answers().some(x => x.includes(`#${r1.id}`) && x.includes('80%')), 'a hold without a reason was taken, or the hold did not reach the conversation');
+  expect(charge.chargeSystem(made, 'gamma').includes(`- #${r1.id}`) && charge.chargeSystem(made, 'gamma').includes(': waiting (the manager: The 5-hour window'), "the agent in charge does not see its request's state");
+  const asked = await charge.answerRequest(r1.id, 'ask-owner', { note: 'Large and risky: your call.', recommend: 'hold' }, made);
+  const q = asked.question;
+  expect(asked.request.status === 'owner' && q.options.join('|') === [t('Authorize'), t('Wait'), t('Refuse')].join('|') && q.recommend === t('Wait') && q.request === r1.id && q.project === 'gamma',
+    `ask-owner did not become a card with Authorize, Wait and Refuse: ${JSON.stringify(q)}`);
+  let overrode = false;
+  try {
+    await charge.answerRequest(r1.id, 'approve', {}, made);
+  } catch {
+    overrode = true;
+  }
+  expect(overrode, "the manager answered a request that waits for the owner's card");
+  const card = { id: `question:${q.id}`, kind: 'question', question: q.id, label: 'Question', title: q.question };
+  const decided = await decide({ card: card.id, action: 'answer', option: t('Refuse') }, [card]);
+  const after = charge.readRequests().find(x => x.id === r1.id);
+  expect(decided.done === 'answered' && after.status === 'rejected' && after.by === 'owner' && !decided.run, `the owner's answer on the card did not decide the request: ${JSON.stringify(after)}`);
+  let again = false;
+  try {
+    await charge.answerRequest(r1.id, 'approve', {}, made);
+  } catch {
+    again = true;
+  }
+  expect(again, 'a request already answered was answered again');
+  const r2 = charge.addRequest({ asked: 'Rename the site', plan: 'Rename every page', size: 'L', risk: 'high', project: 'gamma', session: sessionId }, made);
+  expect((await charge.answerRequest(r2.id, 'reject', { note: 'Out of scope.' }, made)).request.status === 'rejected' && answers().length === 4, 'a refusal did not reach the conversation');
+  const listed = charge.projectRequests('gamma');
+  expect(listed[0].id === r2.id && listed.length === 2 && listed.every(x => !x.history), "the project's page does not get its requests, newest first");
+  const cliOut = execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'request', 'list', '--all'], { env: process.env, stdio: 'pipe', windowsHide: true, encoding: 'utf8' });
+  expect(cliOut.includes(`#${r2.id}`) && cliOut.includes('rejected'), `the command line does not list the requests: ${cliOut}`);
+  let stepRefused = false;
+  try {
+    execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'request', String(r2.id), 'approve'], { env: { ...process.env, CHIEFMATE_RUN: 'x' }, stdio: 'pipe', windowsHide: true, encoding: 'utf8' });
+  } catch {
+    stepRefused = true;
+  }
+  expect(stepRefused, 'a step of a run answered a request of an agent in charge');
+
+  // Approved: a run for the project, linked to the request: an "ask" for a team lead, else a task with the review.
+  const config = loadConfig();
+  const real = Object.keys(config.projects ?? {}).find(id => charge.inCharge(config, id));
+  if (real) {
+    const r3 = charge.addRequest({ asked: 'Smoke ask', plan: 'Smoke: change nothing', size: 'S', risk: 'low', project: real }, config);
+    const approved = await charge.answerRequest(r3.id, 'approve', { note: 'Small and safe.', title: 'Smoke request', summary: 'Made up.' }, config);
+    const run = readRun(approved.run?.id);
+    const lead = charge.inCharge(config, real).lead;
+    expect(approved.request.status === 'approved' && approved.request.run === run?.id && run.ownerRequest === r3.id && run.status === 'queued' && run.kind === (lead ? 'ask' : 'task')
+      && (lead || run.review) && run.instruction.includes('Smoke ask') && run.instruction.includes('Small and safe.'), `an approved request did not queue its run: ${JSON.stringify(run)}`);
+  }
+  rmSync(temp, { recursive: true, force: true, maxRetries: 5 });
+} catch (error) {
+  failures.push(`agent in charge checks: ${error.message}`);
+}
+
 try {
   rmSync(data, { recursive: true, force: true, maxRetries: 5 });
+  rmSync(files, { recursive: true, force: true, maxRetries: 5 });
 } catch {
   // a temporary folder left behind is harmless
 }

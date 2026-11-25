@@ -37,6 +37,7 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
 - **What needs you, by level.** Every notice has one of three levels, drawn the same way everywhere (see "What needs you" below).
 - **Focus mode.** **Focus on the conversation**, at the top of the Conversation, leaves only the conversation on the whole window: no title bar, menu, notices, cards nor panels. One thin line stays on top, with the manager's state, the sections that need you (each with its count, in its level's color) and **Leave focus** (or Esc). A click on a section opens it, with everything back. The app remembers the mode until you leave it.
 - **One-off tasks** for any agent, at any time.
+- **A direct talk with each project's agent in charge** (its team lead, or the main member of its crew), from the project's page: it answers and plans with you, and what is to be done goes to the manager as a request, which the manager authorizes, holds or brings to you (see "Talking to the agent in charge" below).
 - **A queue that runs one run per project at a time**, with runs of different projects going on side by side (three at most by default), so agents never set off other agents.
 - **Live sessions** with Claude Code or Codex, opened from the app or the command line, each in its own folder and conversation inside the app (or, if you prefer, in a window of its own), started with the blocks of the prompt builder you choose (see "Live sessions" below).
 - **A prompt builder screen** for your document of blocks (kept in a library, or in a file): choose the blocks and see each one come into the prompt, edit the prompt, then open a live session with it, send it with a task or copy it (see "The prompt builder in the app" below).
@@ -157,7 +158,8 @@ What needs you shows up as a notice with one of three levels, the same component
 
 What only you can decide waits as a card in **Decisions**, a section of its own (its mark in the menu counts the cards), so you decide with one click instead of writing "yes" or "no":
 - **What a card says.** Compact, the essentials first: what it is, with the project beside its number ("PR #34 of Chiefmate", "Item #12 of Riffdex"), its title, the manager's recommendation in a few words ("Recommends: Approve with caveats", read after "Recommendation:" in the final review's verdict) and the buttons. The rest (what changes if you approve, what to watch out for, such as checks that failed or no final review, the recommendation's reason, the review's full verdict, what was done and the links) is folded under **Details**. The card's color is its notice's level.
-- **The cards.** A pull request or a branch delivered locally, ready to merge; a crew proposal the manager triaged (its risk comes from `plan triage --risk`); a question the manager asked you, with one button per option (`ask-owner`, below); and a push the manager tried, for you to allow once or refuse (below).
+- **Whose decision it is.** Each card carries a badge with the approval level the manager gave its run, item or question: **Level 2 · needs you** and **Level 3 · only you** stand out; **Level 1 · the manager settles it** is quiet, and those cards fold under **The manager will settle it (N)**, below what needs you; a card with no level shows a neutral **Level ?**. The menu's mark counts the cards of levels 2, 3 and ?, never those of level 1. The manager sets the level when it queues the work (`--level 1|2|3` on `task`, `ask` and `mission`, or later with `level <run id> <1|2|3>`), triages a proposal (`plan triage --level`, `plan set --level`) or asks (`ask-owner --level`). Level 1 is low-risk work within what you already approved or told the manager to handle alone; level 2, what you approve (new features that go live, money, personal data, security, new accounts, a change of direction, a new project); level 3, what is never done without you. A level 1 merge still follows the rule below: the manager merges only with your authorization, which may be a standing one you gave it for level 1 work.
+- **The cards.** A pull request or a branch delivered locally, ready to merge; a crew proposal the manager triaged (its risk comes from `plan triage --risk`); a question the manager asked you, with one button per option (`ask-owner`, below); a push the manager tried, for you to allow once or refuse (below); and a request of a project's agent in charge that the manager brought to you, with **Authorize**, **Wait** and **Refuse** (see "Talking to the agent in charge").
 - **The buttons.** **Approve** merges the work (confirmed first, through the same path as `merge <id> --yes`) or turns the proposal into a task; a question has its options instead, the one the manager recommends in brass. **Not now** fades the card to the end, under "Left for later", where it stays pending. **Discard** closes the pull request on GitHub (it can be reopened there; the branch stays), leaves a local branch unmerged, discards the proposal (restorable in Planning) or drops the question. **Talk about this** starts your message to the manager with the item quoted.
 - **On a phone.** The same cards, with the buttons' short labels (**Approve**, **Later**, **Discard**, **Talk**), each as wide as its label.
 - **The manager hears of it.** Every click reaches the manager as news (`owner_decided`; a merge as `merged`), so it doesn't ask again. A notice with a card has **Decide** where it is listed, which opens Decisions.
@@ -171,7 +173,8 @@ A finished run's work goes in only when you say so. Chiefmate merges it itself, 
 - **From the app.** Its card's **Approve** (see above), or **Merge** on the run's page in Operations: a finished run with a pull request (or a branch delivered locally) has it. It shows what is merged and how many checks failed; your confirmation is the authorization.
 - **Through the manager.** When a run is ready and reviewed, the manager tells you its card is waiting, naming the pull request or branch with its project (`node src/cli.mjs merge <id>` shows them). If you tell it "yes" for that run in the conversation, it runs `merge <id> --yes`. Without it, never; an answer to one of its questions is never a merge's yes.
 - **What a merge does.** A pull request is merged on GitHub (`gh pr merge --merge`); a merged pull request of Chiefmate itself is installed at once, as with `update-check`. A branch delivered locally is merged into the branch it started from in your clone (`local_clone`), with nothing sent to GitHub: the clone must have that branch checked out and no changes left to commit, and a merge with conflicts is undone.
-- **When it fails.** The error shows in the app, and the manager hears of it at once (`merge_failed`). A conflict with the main branch is the crew's to solve: the manager queues a task that brings the run's branch up to date and solves it, and tells you in one line; its new pull request (or branch) replaces the old one, which settles by itself once the new one is merged. Anything else (your clone on another branch or with changes, GitHub refusing for another reason), the manager tells you what to do.
+- **The copies you read.** After a merge, the project's reference library (a library whose `repository` is the project's own) is brought up to date, and, for a pull request, your own clone moves forward to the merged branch, only by a fast forward: when it has another branch checked out, changes not committed, or commits of its own, it is left as it is and the app (and the manager) tell you to update it yourself. Chiefmate's own installation updates itself.
+- **When it fails.** The error shows in the app, and the manager hears of it at once (`merge_failed`). A conflict with the main branch is the crew's to solve: the manager queues a task that brings the run's branch up to date and solves it, and tells you in one line; its new pull request (or branch) replaces the old one. A branch settles by itself once the new one is merged; the old pull request is closed by the manager (or by you) with `node src/cli.mjs close-pr <old run> --replaced-by <new run> --yes`, which comments on it naming the new one and records who asked. It refuses unless the new run, of the same project and with its pull request open or merged, works on the same board item or names the old run (its id, branch or pull request) in its instruction. Anything else (your clone on another branch or with changes, GitHub refusing for another reason), the manager tells you what to do.
 - **After it.** The run shows "Merged", by you or by the manager; its item on the board becomes done, and its pull request notice goes away. A merge from the app is news to the manager (`merged`). The crew can never merge: the command refuses to run inside a step.
 
 ### Talking to an agent at work
@@ -254,7 +257,8 @@ Each project has a page of its own in the app (`#project/<id>`): pick it in the 
 At the top:
 
 - **The name**, the sentence `about` it, and **one line of status**: whether the crew is working on it (and on what), it is in the queue or stopped; its memory on this computer; and the branch checked out in your clone.
-- **Three main actions**:
+- **The main actions**:
+  - **Talk to the agent in charge** opens the **In charge** tab, with the conversation with the project's agent in charge (see "Talking to the agent in charge" below).
   - **Work live** opens the project's **Builder** tab with its usual blocks (its block, the environment and its modules), ready for a live session, a task or the clipboard. Without a prompt builder, it opens a live session with Claude Code in the **Live** tab.
   - **New task for the crew** goes to the form in **Tasks and history**: who does it (a member of the project's crew or, when the project has a team lead, a request for the lead to plan), what to do and whether the manager reviews it.
   - **Start environment** / **Stop environment**, for a project with `dev_start` in its settings (such as `"dev_start": "npm run dev"`): runs that command in your clone, in a window of its own (Windows Terminal, or PowerShell), through `node src/cli.mjs dev-run <project>`. Its processes count in the project's memory, marked "development environment", and stopping it closes the window with everything it started. From the command line: `node src/cli.mjs dev <project>` (`--dry-run` shows what would run) and `dev stop <project>`.
@@ -264,14 +268,30 @@ At the top:
 Below, the tabs (`#project/<id>/<tab>`):
 
 - **At a glance**: the crew now, the last run and the open items on the board, each opening its tab; **the project** (your own clone, `local_clone` or `Documents/GitHub/<repository name>`, and its branch; how its work is delivered, a pull request or a branch handed to your clone with `"deliver": "local"`; the repository, the site, the personal documentation and the development environment's command); and **the project on this computer**: its state, its memory and its processes, with the button to stop them, and its development environment.
+- **In charge** (`charge`): the project's agent in charge, its requests to the manager with their state, and your conversation with it (see below). Its mark counts the requests still open.
 - **Live** (`live`): the project's live sessions in the app and their conversation (see "Live sessions"): those open, with their state and memory, a **New session** button per tool, the latest ended ones (to read or resume) and, below, the conversation of the one chosen (`#project/<id>/live/<session>`).
 - **Crew** (`crew`): its crew, with its team lead above it when it has one, each with what it is doing (a click on a member at work opens its panel); and its live sessions, those open with **End** and its profiles with **Open**.
 - **Tasks and history** (`tasks`): its runs going on and in the queue, each with a button to cancel it, the form for a new task, and its recent history: the latest runs, with their result, the pull request and a **Reports** button that opens each step's report in the Log.
 - **Planning** (`planning`): its open items on the planning board, with a button that opens Planning filtered by the project.
+- **Files** (`files`): the project's folders, to browse and open in the viewer (see "Viewing files"): the crew's working copy, your clone, the libraries and the extra folders of `viewer`.
 - **Context** (`context`): see below.
 - **Builder** (`builder`, when `prompt_builder` is set): the prompt builder with the project chosen (see "The prompt builder in the app").
 
 Without your own clone of the project, the buttons that need it are disabled and the page says to set `local_clone`.
+
+### Viewing files
+
+The app opens documents itself, read only, on this computer and through the remote access alike, so you don't need the computer at hand to see what a task made:
+
+- **Images** (PNG, JPEG, WebP, GIF, SVG and others) fill the screen, with **Actual size** for zoom and a gallery of the folder's images (or the run's): the arrows, the keyboard's arrows, or a swipe on the phone.
+- **PDF** opens in the browser's own reader (on a phone, in a tab of its own).
+- **Markdown** shows formatted, and **text** files as they are.
+- **CSV and XLSX** show as a table, with one tab per sheet, a fixed header and the row numbers; a preview shows at most 5,000 rows, and says so. The workbook is read with Node.js itself (an XLSX file is a zip of XML parts): no dependency.
+- **Any other file** shows its name, size and date, with **Download**.
+
+Where it opens from: the file paths in the conversation with the manager, the news, the steps' reports and the runs' summaries become links (a relative path is looked for in the run's files, then in the project's copies: your clone, its reference library and the crew's working copy; when several have it, the newest wins and the viewer says which copy it came from; when none has it, the message says where it looked and which copy is behind its origin's main branch, such as a clone without a merge done on GitHub; a full path that no longer exists is looked for the same way in the project's other copies); each run in the Log has **Files**, what it created or changed on its branch (with thumbnails of its images), read from its branch even after the crew moved on; and each project's **Files** tab browses its folders.
+
+What it may open (its roots): each project's working copy (`workspaces/<id>`), your own clone of it, the reference libraries (`workspaces/.library`) and the folders you add in `viewer.extra_roots`. Nothing else, and never, even inside them, Chiefmate's `data/` and `config/chiefmate.json`, `.git`, `node_modules`, `.env` files, keys (`*.pem`, `*.key`, `id_rsa`…) or anything named for secrets. Each file is at most 50 MB. See "Security".
 
 ### The Context tab
 
@@ -285,6 +305,23 @@ The page's **Context** tab (`#project/<id>/context`) shows everything that is pa
 Below, **Change the context**: turn the prompt builder's optional modules on (`prompt_modules`) and its automatic blocks off for the project (`prompt_exclude`), and edit the project's `notes` and, for each member, its extra instructions (the team lead's and a project crew member's stay in the project; a member of the general crew's are the agent's notes for the whole installation, `crew.<id>.extra_instructions`) and its `agent_notes`. **Preview** shows each setting that changes and what each member and live session would get (the lines that leave and come in, and the size before and after); **Save** writes the settings and records the change in `data/projects/<id>/context-history.jsonl`, shown as the tab's history. Nothing is saved without a preview of the same changes.
 
 From the command line: `node src/cli.mjs project-context <project> [member]` prints the same, with the texts (`--short` leaves them out, `--json` gives the data).
+
+### Talking to the agent in charge
+
+Each project has an agent in charge: its team lead when it has one (`lead`), else the first member of its own crew, or the generalist of the general crew. **Talk to the agent in charge**, on the project's page, opens your conversation with it in the **In charge** tab (`#project/<id>/charge`). It is one conversation per project, kept: the next time, it carries on where it stopped (a conversation that ended resumes when you write).
+
+- **It talks, answers and plans, and changes nothing.** It is a live session in the app (see "Live sessions" below) with a profile of its own, `project-<id>-charge`, never written to the settings: it opens in your clone of the project (or in the crew's working copy, when there is no clone), reads the project's files, its own documentation and the web, and has no shell and no editing. It never publishes anything. It sees only its project: other projects' working copies and clones, the libraries the project doesn't list and Chiefmate's `data/` are out of reach, as for a step. It has no external tools (MCP).
+- **It carries the project's context, and only this project's**, given again with every message: its own instructions (a team lead based on the manager doesn't bring the manager's work), its role in this conversation, the project's sentence, site and `notes`, the project's memory kept by the team lead (`data/projects/<id>/memory.md`, read only here) and its requests with their state.
+- **A request to the manager.** When there is something to do, the agent agrees on it with you and sends it to the manager: what you asked, what it intends to do, its size (S, M or L, shown as P, M and G in Portuguese), its risk and, when you said so, that it can be done now. The conversation shows "Request #N sent to the manager"; the manager hears of it as news (`owner_request`) and in its situation.
+- **The manager's answer**, with `node src/cli.mjs request <id> approve|hold|ask-owner|reject --note "<why>"`:
+  - **approve** queues the work for the project, linked to the request: an `ask` for its team lead, else a task for the agent in charge with the manager's review. It goes the usual way: the crew, the reviews and a pull request (or a local branch) that you approve;
+  - **hold** leaves it waiting, with the reason;
+  - **ask-owner** brings it to you as a card in Decisions, with **Authorize**, **Wait** and **Refuse**: your click decides the request at once;
+  - **reject** refuses it and says why.
+- **Where you see it.** Each answer comes back to the conversation as a line ("The manager authorized request #3…"), and the agent reads its requests' state with every message. The **In charge** tab lists the requests with their state: **With the manager**, **Authorized** (with its run and the run's state; **Done** once merged), **Waiting**, **With you** (with **Decide**, which opens Decisions) and **Refused**; the answered ones fold under "Answered".
+- **What still holds.** The manager answers within its usual rules (the account's usage, the size of what it queues, your authorization for what is big or risky), and nothing goes live without your approval.
+
+The requests are kept in `data/manager/owner-requests.json`; the conversation, as any live session's, in `data/sessions/`.
 
 ## Live sessions
 
@@ -373,6 +410,8 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `quick_model` | The model of the short calls that write the runs' titles, summaries and final summaries (`"haiku"` by default, with no tools); `false` turns them off, and the instruction's first sentence and the steps' own summaries are used instead |
 | `attribution` | `false` keeps the crew's commits and pull requests from crediting Claude (they are credited to you alone); always off in a project with `no_trace` |
 | `backup_dir` | A folder of your own, such as one in a private repository, where Chiefmate keeps an up-to-date copy of these settings |
+| `viewer` | The file viewer: `extra_roots`, a list of more folders (absolute paths) it may open besides the projects' folders and the libraries. Empty by default |
+| `ui` | The app's own settings: `voice_input`, the microphone for dictation in the message fields (see "Dictation"). On by default; `false` hides it |
 | `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. Optional: `crew` (its own crew), `lead` (its team lead, see "The crew"), `mcp` (external tools it releases), `prompt_block`, `prompt_modules` and `prompt_exclude` (the prompt builder), `dev_start` (the command that starts its development environment from its page, such as `npm run dev`), `merge_by_owner: false` when someone else reviews and merges its work (its cards then have no Approve). See also "Local delivery" below |
 | `missions` | For each mission: the `project`, the `steps` (an agent and its part, in order), the final `review`, the `schedule` (`days` such as `["mon"]` and a `time` such as `"09:00"`) and the `eve_reminder` time |
 | `crew` | Settings for one agent in this installation only, such as `{ "writer": { "model": "claude-opus-5-5", "max_minutes": 90, "extra_instructions": "..." } }` |
@@ -469,11 +508,21 @@ The conversation never makes you wait.
 - **See what it is doing.** While it answers, the conversation shows the time it has been at it and its last action (the command it ran, the file it read), updated as it happens, as Operations does for the crew.
 - **The same from the command line:** `chat say`, `chat edit`, `chat remove`, `chat interrupt` and `chat` to read the conversation, the last action and the queue (see "Command line"). The manager itself can't write to its own conversation.
 
+### Dictation
+
+Every message field (the conversation with the manager, the live sessions, the agent in charge of a project and the direct talk with an agent at work) has a microphone button beside **Send**, so you can dictate instead of typing.
+
+- **One tap listens, another stops.** While it listens, the button turns red, pulses and says "Listening…". A few seconds of silence stop it too. On a computer, **Ctrl+M** in the field does the same.
+- **The words go where the cursor is**, without erasing what you typed; those still being heard show as you speak. Nothing is sent by itself: you review the text and press **Send**.
+- **In the app's language** (`language`, Brazilian Portuguese or English).
+- **Where it works:** in browsers with speech recognition (Chrome, Edge, Safari, also on phones), on `localhost` or over https (the remote access). Elsewhere, such as Firefox, the button doesn't show.
+- **Privacy:** the browser sends the audio to its maker's voice service (Google's in Chrome, Microsoft's in Edge, Apple's in Safari) to be transcribed; Chiefmate never receives the audio, only the text you send. The first use says so once, with **Turn dictation off**; `"ui": { "voice_input": false }` in the settings does the same, and `true` brings it back.
+
 ### News from the manager
 
 The manager doesn't only answer: when something you should know about happens, it tells you in the conversation on its own.
 
-- **The events**, by the names `manager_updates` uses: a run finished (`run_finished`), failed (`run_failed`) or paused (`run_paused`); a pull request ready and waiting for your approval (`pr_ready`); a run's work you merged from the app (`merged`), or a merge of yours that failed (`merge_failed`, told at once: the manager queues the fix of a conflict and tells you in one line); a step or a live session that needs you (`needs_you`); an update installed (`update_installed`) or blocked (`update_blocked`); a memory alert (`memory_alert`) or an alert about the account's usage or the plan's free resets (`usage_alert`); a live session that ended on its own (`session_ended`; not one you ended from Chiefmate); a new proposal on the planning board (`plan_proposed`), which the manager triages before telling you what waits for your decision; what the watchdog found and did (`watchdog`); with the autopilot on, a project's queue that emptied with items triaged "do now" (`idle`), which the manager may put on the queue, and the autopilot's daily report (`autopilot_report`); you stepping out or coming back (`away`, `back`; see "Away mode"); your click on a decision card (`owner_decided`: an answer, an approval, "not now" or a discard; see "Waiting for your decision").
+- **The events**, by the names `manager_updates` uses: a run finished (`run_finished`), failed (`run_failed`) or paused (`run_paused`); a pull request ready and waiting for your approval (`pr_ready`); a run's work you merged from the app (`merged`), or a merge of yours that failed (`merge_failed`, told at once: the manager queues the fix of a conflict and tells you in one line); a step or a live session that needs you (`needs_you`); an update installed (`update_installed`) or blocked (`update_blocked`); a memory alert (`memory_alert`) or an alert about the account's usage or the plan's free resets (`usage_alert`); a live session that ended on its own (`session_ended`; not one you ended from Chiefmate); a new proposal on the planning board (`plan_proposed`), which the manager triages before telling you what waits for your decision; what the watchdog found and did (`watchdog`); with the autopilot on, a project's queue that emptied with items triaged "do now" (`idle`), which the manager may put on the queue, and the autopilot's daily report (`autopilot_report`); you stepping out or coming back (`away`, `back`; see "Away mode"); your click on a decision card (`owner_decided`: an answer, an approval, "not now" or a discard; see "Waiting for your decision"); a request a project's agent in charge sent from its talk with you (`owner_request`; see "Talking to the agent in charge"), which the manager answers.
 - **How it goes.** Chiefmate wakes the manager with a short system message that describes the events and is marked as not coming from you; the manager reads the situation, as with any message, and writes a short, clear notice: what happened and, when something needs you, what to do. It doesn't queue or change anything because of a notice alone.
 - **Grouped.** Events within a minute of the first one go together, as one message. If the manager is answering, they wait in the queue under the conversation ("news for the manager", which you can remove but not edit) and go with your queued messages; then the manager answers you and mentions them in the same reply. The news survives a restart, such as the one after an update; news older than an hour when Chiefmate starts is dropped.
 - **In the conversation**, a notice has a look of its own: a brass rule on the left, a "notice" tag and the events it is about.
@@ -549,7 +598,7 @@ The self-update only touches Chiefmate's own files. Your settings, the history a
 ## Security
 
 - **Only you reach the app.** It listens on this computer only, and it refuses commands sent by other websites open in your browser. Its answers can't be framed by other sites. With the optional remote access, your other devices reach it only through Tailscale Serve, with your Tailscale login (see "Remote access"). Any program on this computer can reach that second listener and claim a login, as it can already reach the app itself.
-- **Agents have limits.** They cannot push to GitHub, open or merge pull requests, or change the repository's address. Claude Code's rules (`git push`, `gh pr`, `gh repo`, `git remote`) only match a command's first words, so Chiefmate's own guard (`src/guard.mjs`) checks each command of the crew's steps and the manager's conversation before it runs, and refuses any publication however it is written: `git -C <folder> push`, inside `bash -c`, after `cd x &&`, or a change on GitHub through its API (`gh api`, or a web request opening a pull request). Each refusal is noted in `data/runs/<run>/<step>.guard.jsonl` (a step) or `data/manager/guard-history.jsonl` (the manager). The one exception is yours, for the manager only: a plain push of one branch you allow on its card (see "Waiting for your decision"), once, for that repository, branch and folder, within 30 minutes; never the main branch, never a forced push. The requests and grants are kept in `data/manager/pushes.json`.
+- **Agents have limits.** A project's agent in charge, in its talk with you, only reads: no shell, no editing, no external tools. The crew cannot push to GitHub, open or merge pull requests, or change the repository's address. Claude Code's rules (`git push`, `gh pr`, `gh repo`, `git remote`) only match a command's first words, so Chiefmate's own guard (`src/guard.mjs`) checks each command of the crew's steps and the manager's conversation before it runs, and refuses any publication however it is written: `git -C <folder> push`, inside `bash -c`, after `cd x &&`, or a change on GitHub through its API (`gh api`, or a web request opening a pull request). Each refusal is noted in `data/runs/<run>/<step>.guard.jsonl` (a step) or `data/manager/guard-history.jsonl` (the manager). The one exception is yours, for the manager only: a plain push of one branch you allow on its card (see "Waiting for your decision"), once, for that repository, branch and folder, within 30 minutes; never the main branch, never a forced push. The requests and grants are kept in `data/manager/pushes.json`.
 - **The watchdog's rescuer has a closed list.** It runs without your configuration, may read Chiefmate's folder (not the claude.ai browser profile) and run only the `rescue` actions and a few read-only commands; it can't change files. The `rescue` actions refuse to run inside a crew's step or the manager's answer.
 - **Merging needs you.** Chiefmate merges a run's work only with your authorization (see "Merging with your authorization"). The crew never merges; the manager only asks.
 - **Each step sees only its project.** Other projects' working copies and documentation, the libraries a project doesn't list and Chiefmate's `data/` are denied to the file tools by permission rules (see "What each step sees"). A shell command can still read them: this is not a sandbox.
@@ -557,6 +606,7 @@ The self-update only touches Chiefmate's own files. Your settings, the history a
 - **The short calls have no tools.** The titles, summaries and final summaries come from `quick_model` with every tool off (`--tools ""`), in a folder of Chiefmate's data, without your configuration: they only read the text they are given and write a few lines.
 - **Sign-ins are yours.** Agents never type passwords: they ask for you with `needs-you`, and the address opens in your browser. The address comes from the agent (only `http` and `https`), so look at it before you act on it. With `browser_cdp`, remote debugging leaves that browser open to any local program: use a profile of its own.
 - **Your data stays home.** Your settings, the history and the working copies (`config/chiefmate.json`, `data/`, `workspaces/`) never go to git.
+- **The file viewer only reads.** No route of it writes, moves or deletes a file. It opens only what is inside its roots (see "Viewing files"), checked on the real path once links and Windows junctions are followed, with `..`, other letter cases, streams and network paths refused; `data/`, `config/chiefmate.json`, `.git`, `node_modules`, `.env` files, keys and secrets are refused even inside them. Its answers are never cached (you may open the app on someone else's computer), can't be used by another website, nor by another port of this computer, and never run in the app: HTML and SVG opened on their own are downloads, an SVG is an image only inside the viewer, and everything else is sandboxed. The remote access asks for your login here too.
 - **Stopping processes asks first.** The Projects section and `stop-project` show what will stop and end only those processes. They never stop Chiefmate, what started it, the crew at work (cancel the run for that) or a live session (end it in Operations).
 - **Live sessions** run Claude Code without your own configuration, like the steps; Codex keeps its own (`~/.codex`). A session works in your own folders, with you present: the crew's rules (no push, no pull requests) are not imposed on it. In the app, Claude Code edits and runs commands without asking, but pushing, pull requests and changing remotes wait for your permission; Codex works in its `workspace-write` sandbox. In a window, the tool asks before it acts, as usual.
 - **The optional claude.ai reading** keeps a signed-in browser profile in `data/browser-profile`. See its risks above.
@@ -574,17 +624,19 @@ node src/cli.mjs task <project> <agent> "..." queues a one-off task (--review: t
 node src/cli.mjs ask <project> "..."          queues a request for the project's team lead, who plans it into at most
                                               3 tasks for the crew and reviews them first (--plan <n>)
                                               mission, task and ask take --title "..." (at most about 60 characters) and
-                                              --summary "..." (one or two sentences): nothing is generated for them
+                                              --summary "..." (one or two sentences): nothing is generated for them;
+                                              and --level 1|2|3, the approval level its decision card shows
+node src/cli.mjs level <run id> <1|2|3|none>  sets (or clears) a run's approval level
 node src/cli.mjs plan [list]                  the planning board's open items (--project, --status, --priority; --all)
 node src/cli.mjs plan add <project> "..."     adds an item (--priority high|medium|low, --status, --description)
 node src/cli.mjs plan set <n> --status ...    changes an item (--title, --description, --project, --priority, --agent, --run,
-                                              --pr, --archive, --restore)
+                                              --pr, --level, --archive, --restore)
 node src/cli.mjs plan done <n>                marks an item as completed
 node src/cli.mjs plan propose <project> "..." for the crew: proposes an item (--summary "<1-2 sentences>", --agent <member>,
                                               --priority); the manager triages it, you decide
 node src/cli.mjs plan triage <n> --recommend now|later|discard
                                               for the manager: the item waits for your decision (--agent, --priority,
-                                              --note "<why>", --risk "<what to watch>", --order <position>)
+                                              --note "<why>", --risk "<what to watch>", --order <position>, --level 1|2|3)
 node src/cli.mjs plan approve|later|discard <n>
                                               your decision: "approve" makes it a task for its agent, one per project
                                               at a time, in your order (discard: --reason "...", --duplicate-of <m>;
@@ -618,11 +670,22 @@ node src/cli.mjs dev <project>                starts the project's development e
                                               its own (--dry-run shows what would run); dev stop <project> stops it
 node src/cli.mjs cancel <id>                  cancels a run
 node src/cli.mjs resume <id>                  resumes a run (--ignore-limits goes past the limits this one time)
-node src/cli.mjs ask-owner "<question>" --options "Yes|No|Wait" [--context "..."] [--recommend <option>] [--project <id>]
+node src/cli.mjs ask-owner "<question>" --options "Yes|No|Wait" [--context "..."] [--recommend <option>] [--project <id>] [--level 1|2|3]
                                               for the manager: a question for you, as a card with one button per option
+node src/cli.mjs request [list] [--project <id>] [--all]
+                                              the requests of the projects' agents in charge (--all: answered ones too);
+                                              request show <id> shows one whole
+node src/cli.mjs request <id> approve|hold|ask-owner|reject [--note "..."] [--recommend approve|hold|reject]
+                                              the manager's answer: approve queues the work (an ask for a team lead, else
+                                              a task with the review; --title and --summary as above), hold leaves it
+                                              waiting, ask-owner makes it a card for you, reject refuses it; --note is
+                                              required except to approve
 node src/cli.mjs merge <id> [--yes]           a finished run's merge: shows the pull request (or the local branch), the checks and
                                               the review's verdict; with --yes, merges it (only with your authorization)
 node src/cli.mjs push <folder> <branch>       for the manager: the push you allowed on its card, once (refused without it)
+node src/cli.mjs close-pr <id> --replaced-by <id> [--yes]
+                                              a pull request replaced by a newer run's: shows both; with --yes, closes
+                                              it on GitHub with a comment naming the new one (the branch stays)
 node src/cli.mjs update-check                 looks for an approved update now (after a merge), instead of within 10 minutes
 node src/cli.mjs update-now [--yes]           installs the approved update now, pausing the work going on and resuming it
                                               after the restart (--interrupt-manager: doesn't wait for the manager's answer)
@@ -658,6 +721,7 @@ English is the source. The app, the notifications and the reports follow `langua
 ## Development
 
 - `npm run check` checks the syntax of every script and lists any text without a translation.
+- `npm test` runs the unit tests (`scripts/unit.mjs`, with `node:test`): the file viewer's checks of paths and its CSV and XLSX readers.
 - `npm run smoke` starts a temporary Chiefmate on a spare port, with no queue, schedule or updates and with records of its own in a temporary folder (`CHIEFMATE_DATA`), and checks that the app and the API answer. It never starts a real answer of the manager.
 - [docs/playbook.md](docs/playbook.md) has the rules for changing Chiefmate, for the crew and for people alike.
 

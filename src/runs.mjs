@@ -20,9 +20,9 @@ import { notify } from './notify.mjs';
 import { builderSettings, projectInstructions, writtenInstructions } from './prompts.mjs';
 import { readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
-import { clip, languageName, now, ROOT, slug, stamp } from './util.mjs';
+import { clip, languageName, now, parseLevel, ROOT, slug, stamp } from './util.mjs';
 import {
-  advanceClone, baseBranch, changedFiles, checkoutBranch, commitPending, createBranch, deliverToClone, freeBranch, newCommits, noTrace,
+  advanceClone, baseBranch, changedFiles, checkoutBranch, commitPending, createBranch, deliverToClone, discardSince, freeBranch, headCommit, newCommits, noTrace,
   openPullRequest, prepareLibrary, prepareWorkspace, projectDir, runBranch, runChecks, traces,
 } from './workspace.mjs';
 
@@ -99,7 +99,7 @@ function workOf(run, config = loadConfig()) {
  */
 export function createRun({
   kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [], plan = null, prompt = null,
-  title: givenTitle = null, summary: givenSummary = null,
+  title: givenTitle = null, summary: givenSummary = null, level = null, request = null,
 }) {
   const config = loadConfig();
   let title, steps, finalReview, project;
@@ -159,6 +159,10 @@ export function createRun({
     ...(plan != null && plan !== '' ? { plan: Number(String(plan).replace(/^#/, '')) } : {}),
     // The prompt written in the app's prompt builder: the steps get it instead of the one put together from the document.
     ...(prompt?.trim() ? { builderPrompt: prompt.trim() } : {}),
+    // The approval level the manager gave it (1, 2 or 3; src/decisions.mjs shows it on the owner's card).
+    level: parseLevel(level),
+    // The request of the project's agent in charge that the manager (or the owner) authorized (src/charge.mjs).
+    ...(request != null ? { ownerRequest: Number(request) } : {}),
   });
   describeLater(run.id, run);
   return run;
@@ -168,7 +172,7 @@ export function createRun({
 
 const describing = new Map(); // run id: the call going on
 const describeTried = new Set(); // asked once per start of Chiefmate: a failure is not retried in a loop
-const described = new Map(); // run id: the fields applied, for a copy of the run read before they were
+const described = new Map(); // run id: the fields applied (title, summary, level), for a copy of the run read before they were
 
 /** Whether a run still has a title or summary to generate (old runs have neither). */
 export const needsBrief = run => (run.briefBy
@@ -202,10 +206,21 @@ function applyBrief(id, brief) {
   if (by.title === 'auto') Object.assign(fields, { title: brief.title, briefBy: { ...fields.briefBy, title: 'model' } });
   if (by.summary === 'auto') Object.assign(fields, { summary: brief.summary, briefBy: { ...fields.briefBy, summary: 'model' } });
   Object.assign(run, fields);
-  described.set(id, fields);
+  described.set(id, { ...described.get(id), ...fields });
   saveRun(run);
   const l = live.get(id);
   if (l) Object.assign(l, { title: run.title, summary: run.summary });
+}
+
+/** The manager's approval level for a run (1, 2, 3, or null to clear it), kept also for a copy already in memory. */
+export function setRunLevel(id, value) {
+  const level = parseLevel(value);
+  const run = activeRun(String(id ?? '')) ?? readRun(String(id ?? ''));
+  if (!run) throw new Error(t('Run not found.'));
+  run.level = level;
+  described.set(run.id, { ...described.get(run.id), level });
+  saveRun(run);
+  return run;
 }
 
 /** Cancels a run going on: its agent stops now, and the run ends as canceled. Returns false when it is not going on. */
@@ -823,6 +838,8 @@ export async function execute(run) {
       if (noTrace(project) && project.deliver === 'local' && project.local_clone && existsSync(project.local_clone)) {
         run.branch = await freeBranch(project.local_clone, run.branch);
       }
+      // Where the run starts: what it created or changed is read against it (the app's "Files", src/files.mjs).
+      run.baseCommit = await headCommit(dir);
       await createBranch(dir, run.branch);
       run.prepared = true;
       saveRun(run);

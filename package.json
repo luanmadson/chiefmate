@@ -12,6 +12,7 @@
     "start": "node src/cli.mjs server",
     "status": "node src/cli.mjs status",
     "check": "node scripts/check.mjs",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "test": "node --test scripts/unit.mjs"
   }
 }

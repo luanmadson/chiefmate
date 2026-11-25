@@ -67,5 +67,11 @@
     "host": "",
     "logins": [],
     "port": 4748
+  },
+  "viewer": {
+    "extra_roots": []
+  },
+  "ui": {
+    "voice_input": true
   }
 }

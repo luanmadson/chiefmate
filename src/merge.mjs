@@ -3,15 +3,19 @@
 // "gh pr" and "git push" stay denied to the crew and the manager: a pull request through "gh pr merge"; a branch
 // delivered locally, into the branch it started from in the owner's clone, with nothing sent to GitHub. Discarding the
 // work (the owner's click on a decision card, src/decisions.mjs) closes the pull request, or leaves the branch unmerged.
+// After a merge, the copies the owner reads are brought up to date (refreshCopies): the project's reference library,
+// and the owner's clone only by a fast forward, never touching their changes.
+// A pull request replaced by a newer run's is closed with "cli.mjs close-pr <run> --replaced-by <run>" (closeReplaced).
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { reportEvent } from './news.mjs';
 import { readRun, runDir, saveRun } from './store.mjs';
+import { projectClone } from './sessions.mjs';
 import { checkNow } from './update.mjs';
-import { clip, now, ROOT } from './util.mjs';
-import { baseBranch, projectDir, run as exec } from './workspace.mjs';
+import { clip, now, ROOT, WORKSPACES } from './util.mjs';
+import { baseBranch, fastForward, prepareLibrary, projectDir, projectLibraries, run as exec } from './workspace.mjs';
 
 /** What a finished run would merge: its pull request, or its branch in the owner's clone. Throws when there is nothing. */
 async function target(run, config) {
@@ -80,8 +84,40 @@ function reportFailure(run, where, error, config) {
   const what = where?.kind === 'pr' ? `pull request ${where.url} (branch ${run.branch ?? '?'})`
     : `branch ${run.branch ?? '?'} into ${base} in ${where?.dir ?? run.delivered ?? '?'} (a local delivery, nothing on GitHub)`;
   const why = error.conflict ? `a conflict with ${base}. ${error.detail ?? ''}` : clip(error.detail ?? error.message, 500);
-  const item = run.plan ? ` Board item #${run.plan}.` : '';
+  const item = `${run.plan ? ` Board item #${run.plan}.` : ''} Level ${run.level ?? '?'}.`;
   return reportEvent('merge_failed', `The owner's Approve of run ${run.id} "${run.title}" (project ${run.project}) failed: ${what}. Cause: ${error.conflict ? '' : 'not a conflict: '}${why.trim()}${item}`, { config, urgent: true });
+}
+
+/**
+ * After a merge, the copies the owner reads: each reference library that copies the project's repository is updated
+ * (it only follows its origin), and, for a pull request, the owner's clone moves forward to the merged base branch when
+ * it is a fast forward with nothing of theirs in the way. Chiefmate's own installation updates itself (src/update.mjs).
+ * Returns { done: [what was updated], skipped: [why something was not] }; it never throws.
+ */
+export async function refreshCopies(run, where, config = loadConfig(), { library = prepareLibrary, workspaces = WORKSPACES } = {}) {
+  const result = { done: [], skipped: [] };
+  const project = config.projects?.[run.project];
+  if (!project) return result;
+  for (const id of projectLibraries(config, run.project)) {
+    const name = config.library[id].name ?? id;
+    if (!existsSync(path.join(workspaces, '.library', id, '.git'))) continue;
+    try {
+      await library(id, config.library[id]);
+      result.done.push(t('the library {name}', { name }));
+    } catch (error) {
+      result.skipped.push(t('the library {name} was not updated: {error}', { name, error: clip(error.message, 200) }));
+    }
+  }
+  const clone = where.kind === 'pr' ? projectClone(project) : null;
+  // A local delivery was merged in the clone itself; the installation and the crew's copy are not the owner's to read.
+  if (clone && ![ROOT, projectDir(run.project)].some(d => path.resolve(d).toLowerCase() === clone.toLowerCase())) {
+    const base = run.base ?? (project.main_branch && project.main_branch !== 'current' ? project.main_branch : null);
+    const fetched = base ? await exec('git', ['fetch', '-q', 'origin', base], clone, { maxMinutes: 2 }) : { code: 1, output: 'no base branch' };
+    const why = fetched.code !== 0 ? t("couldn't fetch {base}: {output}", { base: base ?? '-', output: clip(fetched.output, 200) }) : await fastForward(clone, 'FETCH_HEAD', base);
+    if (why) result.skipped.push(t('Your clone ({path}) was not updated: {why}. Update it yourself when you can.', { path: clone, why }));
+    else result.done.push(t('your clone'));
+  }
+  return result;
 }
 
 /**
@@ -111,13 +147,14 @@ export async function mergeRun(id, { by = 'owner' } = {}, config = loadConfig())
   }
   run.merged = { at: now(), by: by === 'manager' ? 'manager' : 'owner', how: where.kind };
   saveRun(run);
+  if (where.kind === 'pr') checkNow().catch(error => console.error('Update check:', error.message));
+  const copies = await refreshCopies(run, where, config);
   // The manager knows what it merged itself: only a merge from the app is news to it.
   if (run.merged.by === 'owner') {
     const what = where.kind === 'pr' ? `pull request ${where.url}` : `branch ${where.branch} into ${where.base} in ${where.dir} (nothing sent to GitHub)`;
-    reportEvent('merged', `The owner merged run ${run.id} "${run.title}" (project ${run.project}) from the app: ${what}.`);
+    reportEvent('merged', `The owner merged run ${run.id} "${run.title}" (project ${run.project}) from the app: ${what}.${copies.skipped.length ? ` Not updated after it: ${copies.skipped.join(' ')}` : ''}`);
   }
-  if (where.kind === 'pr') checkNow().catch(error => console.error('Update check:', error.message));
-  return { run: run.id, ...where, merged: run.merged };
+  return { run: run.id, ...where, merged: run.merged, copies, copiesNote: copies.skipped.join(' ') };
 }
 
 /**
@@ -139,4 +176,59 @@ export async function discardRun(id, config = loadConfig()) {
   run.discarded = { at: now(), by: 'owner', how: where.kind };
   saveRun(run);
   return { run: run.id, ...where, discarded: run.discarded };
+}
+
+/** A pull request's number, from its address. */
+export const prNumber = url => /\/pull\/(\d+)/.exec(String(url ?? ''))?.[1] ?? null;
+
+/**
+ * Why the newer run replaces the old one, or throws: both finished, of the same project, the old one's pull request
+ * neither merged nor closed, the newer one's still alive, and the newer run either works on the same board item or its
+ * instruction names the old run (its id, branch or pull request), as the fix of a conflict does.
+ */
+function replacement(old, newer) {
+  if (!old || !newer) throw new Error(t('Run not found.'));
+  if (old.id === newer.id) throw new Error(t('A run does not replace itself.'));
+  if (!old.pullRequest) throw new Error(t('The run {run} has no pull request to close.', { run: old.id }));
+  if (old.merged) throw new Error(t('This run was already merged.'));
+  if (old.discarded) throw new Error(t('The pull request of {run} was already closed.', { run: old.id }));
+  if (newer.project !== old.project) throw new Error(t('{new} is of another project: it does not replace {old}.', { new: newer.id, old: old.id }));
+  if (newer.status !== 'done' || !newer.pullRequest || newer.discarded) {
+    throw new Error(t('{new} has no pull request still open or merged: nothing replaces {old} yet.', { new: newer.id, old: old.id }));
+  }
+  if (old.plan && old.plan === newer.plan) return `the same board item, #${old.plan}`;
+  const text = String(newer.instruction ?? '');
+  const number = prNumber(old.pullRequest);
+  const named = [old.id, old.branch, old.pullRequest].filter(Boolean).find(s => text.includes(s))
+    ?? (number && new RegExp(`(PR|pull request) #${number}\\b`, 'i').test(text) ? `#${number}` : null);
+  if (named) return `its instruction names ${named}`;
+  throw new Error(t('Nothing says {new} replaces {old}: neither the same board item nor its instruction naming the old run.', { new: newer.id, old: old.id }));
+}
+
+/** What closing a replaced run's pull request would do, without doing it. */
+export function previewClose(id, replacedBy) {
+  const old = readRun(String(id ?? ''));
+  const newer = readRun(String(replacedBy ?? ''));
+  const why = replacement(old, newer);
+  return { run: old.id, title: old.title, project: old.project, url: old.pullRequest, replacedBy: newer.id, newUrl: newer.pullRequest, newTitle: newer.title, why };
+}
+
+/**
+ * Closes a run's pull request on GitHub, with a comment naming the one that replaces it, only when a newer run's pull
+ * request does (see replacement). "by" is who asked: "manager" or "owner". The branch stays and the pull request can be
+ * reopened there; the run is marked discarded, with who asked and what replaced it, so its card settles.
+ */
+export async function closeReplaced(id, replacedBy, { by = 'owner' } = {}, config = loadConfig()) {
+  const p = previewClose(id, replacedBy);
+  const who = by === 'manager' ? 'manager' : 'owner';
+  const comment = `Replaced by ${p.newUrl} (Chiefmate run ${p.replacedBy}): ${p.why}. Closed by Chiefmate at the ${who}'s request; the branch stays and this pull request can be reopened.`;
+  const dir = existsSync(projectDir(p.project)) ? projectDir(p.project) : ROOT;
+  const r = await exec('gh', ['pr', 'close', p.url, '--comment', comment], dir);
+  if (r.code !== 0 && !/already closed/i.test(r.output)) throw new Error(t("GitHub didn't close the pull request: {output}", { output: clip(r.output, 500) }));
+  const run = readRun(p.run);
+  run.discarded = { at: now(), by: who, how: 'pr', replacedBy: p.replacedBy };
+  saveRun(run);
+  // The manager knows what it closed itself: only the owner's is news to it.
+  if (who === 'owner') reportEvent('owner_decided', `The owner closed pull request ${p.url} of run ${p.run} "${p.title}" (project ${p.project}): replaced by ${p.newUrl} (run ${p.replacedBy}).`, { config });
+  return { ...p, discarded: run.discarded };
 }

@@ -6,15 +6,17 @@ import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { attentionArchive, attentionItems, attentionSummary, markSeen } from './attention.mjs';
 import { autopilotStatus, changeAutopilot } from './autopilot.mjs';
+import { answerRequest, chargeProfileId, inCharge, projectRequests } from './charge.mjs';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
 import { addQuestion, decide, decisionCards, openPushes, openQuestions } from './decisions.mjs';
+import { listFolder, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
 import { computer, processes, stoppable, stopProject } from './machine.mjs';
 import { chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
-import { mergeRun, previewMerge } from './merge.mjs';
+import { closeReplaced, mergeRun, previewClose, previewMerge } from './merge.mjs';
 import { awayInfo, reportEvent, setAway } from './news.mjs';
 import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
@@ -24,10 +26,10 @@ import { openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
-import { activeRun, createRun, describeLater, doingNow, liveRuns, needsBrief, outcomeLater } from './runs.mjs';
+import { activeRun, createRun, describeLater, doingNow, liveRuns, needsBrief, outcomeLater, setRunLevel } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import {
-  answerPermission, endSession, finishSessionRequest, interruptSession, openSession, planSession, profileFor, removeQueued, resumeSession, sayToSession,
+  answerPermission, endSession, finishSessionRequest, interruptSession, listSessions, openSession, planSession, profileFor, removeQueued, resumeSession, sayToSession,
   sessionRequests, sessionsState, sessionView,
 } from './sessions.mjs';
 import { talkTo } from './talk.mjs';
@@ -57,6 +59,9 @@ const SAFE_HEADERS = {
   'content-security-policy': "frame-ancestors 'none'",
   'x-frame-options': 'DENY',
 };
+
+/** The app's own settings ("ui"): dictation in the message fields, on unless "voice_input" is false. */
+const uiSettings = config => ({ voice_input: config.ui?.voice_input !== false });
 
 // Answers in JSON, compressed with gzip when the browser takes it and the answer is worth it (the state is ~140 KB).
 function reply(res, code, data, headers = {}) {
@@ -184,6 +189,42 @@ function runFeed(id, params) {
   };
 }
 
+/** A run's record by its id from the address, or null for an id that is not one. */
+const runById = id => (/^[\w.-]+$/.test(id) && !id.includes('..') ? activeRun(id) ?? readRun(id) : null);
+
+/**
+ * The file viewer, read only (src/files.mjs): GET /api/files/run/<id> (what a run created or changed), roots (a
+ * project's folders), list (a folder), info, raw, text and table (a file, by "path", or by "run" and "file"). Refused
+ * when another site asks, even one on another port of this computer (Sec-Fetch-Site).
+ */
+async function filesRoute(req, res, url) {
+  const site = req.headers['sec-fetch-site'];
+  if (site && site !== 'same-origin' && site !== 'none') return reply(res, 403, { error: 'request refused' });
+  const config = loadConfig();
+  const params = Object.fromEntries(url.searchParams);
+  const route = url.pathname.slice('/api/files/'.length);
+  try {
+    const runPath = route.match(/^run\/([^/]+)$/);
+    if (runPath) {
+      const run = runById(decodeURIComponent(runPath[1]));
+      if (!run) return reply(res, 404, { error: t('Run not found.') });
+      const { dir: _, ...files } = await runFiles(run, config);
+      return reply(res, 200, files);
+    }
+    if (route === 'roots') return reply(res, 200, { roots: rootsFor(config, params.project ?? '') });
+    if (route === 'list') return reply(res, 200, listFolder(params.path, viewerRoots(config)));
+    if (['info', 'text', 'table'].includes(route)) return reply(res, 200, await viewFile(route, params, { config, readRun: runById }));
+    if (route === 'raw') {
+      const { body, headers } = await viewFile('raw', params, { config, readRun: runById, dest: req.headers['sec-fetch-dest'] ?? '' });
+      res.writeHead(200, { ...headers, 'content-length': body.length });
+      return res.end(body);
+    }
+    return reply(res, 404, { error: 'not found' });
+  } catch (error) {
+    return reply(res, typeof error.code === 'number' ? error.code : 400, { error: error.message });
+  }
+}
+
 /**
  * A project's page: its facts, your clone and its branch, its development environment, and its recent runs (the ones
  * neither waiting nor going on, newest first). The rest of the page (crew, runs going on, planning, memory, sessions)
@@ -201,6 +242,8 @@ async function projectPage(id) {
 const brief = body => ({
   title: typeof body.title === 'string' && body.title.trim() ? body.title : null,
   summary: typeof body.summary === 'string' && body.summary.trim() ? body.summary : null,
+  // The manager's approval level (1 to 3) for the owner's decision card.
+  level: body.level ?? null,
 });
 
 /** A run's task, short, for "waiting for <who>: <task>". */
@@ -268,6 +311,20 @@ function crew(agents, config, runs, going, queue, conversation) {
 // When this Chiefmate started. The app loads itself again when it changes, after an update or a restart.
 const STARTED = now();
 
+/** Per project: { agent, name, lead, profile, session (its conversation: the open one, else the latest), requests }. */
+function chargeState(config, agents) {
+  const sessions = listSessions().filter(s => s.charge && s.mode === 'app');
+  return Object.fromEntries(Object.keys(config.projects ?? {}).map(id => {
+    const who = inCharge(config, id, agents);
+    const own = sessions.filter(s => s.project === id);
+    const session = own.find(s => s.status !== 'ended') ?? own[0] ?? null;
+    return [id, who ? {
+      agent: who.member.id, name: who.member.name ?? who.member.id, base: who.member.base ?? who.member.id, lead: who.lead, profile: chargeProfileId(id),
+      session: session?.id ?? null, requests: projectRequests(id, 8),
+    } : null];
+  }));
+}
+
 function buildState() {
   const config = loadConfig();
   const agents = loadAgents(config);
@@ -298,9 +355,12 @@ function buildState() {
     started: STARTED,
     owner: config.owner,
     language: config.language || 'en',
+    ui: uiSettings(config),
     ai: { claude: { ...claudeInfo }, account: { status: usage.status ?? null, updated: usage.updated ?? null } },
     update: { ...updateInfo, mode: updateMode(config) },
     projects: Object.entries(config.projects ?? {}).map(([id, p]) => ({ id, name: p.name, site: p.site })),
+    // Each project's agent in charge (src/charge.mjs): who it is, its conversation and its requests to the manager.
+    charge: chargeState(config, agents),
     missions: Object.entries(config.missions ?? {}).map(([id, m]) => ({
       id, name: m.name, description: m.description, project: m.project,
       crew: [...(m.steps ?? []).map(s => s.agent), ...(m.review ? [m.review.agent] : [])],
@@ -431,6 +491,7 @@ export function startServer() {
           const data = runFeed(decodeURIComponent(feed[1]), url.searchParams);
           return data ? reply(res, 200, data) : reply(res, 404, { error: t('Run not found.') });
         }
+        if (url.pathname.startsWith('/api/files/')) return await filesRoute(req, res, url);
         // The app's prompt builder: the document and the project's last choice ("?project=<id>").
         if (url.pathname === '/api/prompt-builder') {
           const config = loadConfig();
@@ -499,9 +560,19 @@ export function startServer() {
         case '/api/needs-you/done':
           if (body.session) return reply(res, 200, finishSessionRequest(String(body.session), String(body.id ?? '')));
           return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner', body.answer ?? null));
-        case '/api/decide':
+        case '/api/decide': {
           // The owner's click on a decision card: approve (a merge goes through src/merge.mjs), later, discard or answer.
-          return reply(res, 200, await decide({ card: body.card, action: body.action, option: body.option, reason: body.reason }, buildState().decisions));
+          const decided = await decide({ card: body.card, action: body.action, option: body.option, reason: body.reason }, buildState().decisions);
+          // A request of an agent in charge, authorized on its card, has its run queued: the queue looks at once.
+          if (decided.run) nudgeQueue();
+          return reply(res, 200, decided);
+        }
+        case '/api/request': {
+          // The manager's answer to a request of a project's agent in charge (cli.mjs request <id> approve|hold|ask-owner|reject).
+          const answered = await answerRequest(body.id, String(body.action ?? ''), { note: body.note, recommend: body.recommend, ...brief(body) });
+          if (answered.run) nudgeQueue();
+          return reply(res, 200, answered);
+        }
         case '/api/ask-owner':
           // The manager's question for the owner, shown as a card with one button per option.
           return reply(res, 200, { question: addQuestion(body) });
@@ -567,12 +638,21 @@ export function startServer() {
           return reply(res, 200, await syncPrompts());
         case '/api/cancel':
           return reply(res, 200, { status: cancel(body.id) });
+        case '/api/level': {
+          // The manager's approval level for a run (cli.mjs level), shown on the owner's decision card.
+          const run = setRunLevel(body.run, body.level);
+          return reply(res, 200, { run: run.id, title: run.title, level: run.level });
+        }
         case '/api/resume':
           return reply(res, 200, { status: resume(body.id, !!body.ignoreLimits) });
         case '/api/merge':
           // Merges a finished run's work with the owner's authorization (src/merge.mjs): "preview" only shows it.
           if (body.preview) return reply(res, 200, await previewMerge(body.run));
           return reply(res, 200, await mergeRun(body.run, { by: body.by === 'manager' ? 'manager' : 'owner' }));
+        case '/api/close-pr':
+          // Closes a run's pull request replaced by a newer run's (src/merge.mjs): "preview" only shows it.
+          if (body.preview) return reply(res, 200, previewClose(body.run, body.replacedBy));
+          return reply(res, 200, await closeReplaced(body.run, body.replacedBy, { by: body.by === 'manager' ? 'manager' : 'owner' }));
         case '/api/manager':
           // Accepted at any time: while the manager answers, the message waits in the queue.
           return reply(res, 202, { ok: true, ...sendToManager(body.message) });
@@ -605,6 +685,13 @@ export function startServer() {
           config.limits = { ...kept, ...validLimits(body) };
           saveConfig(config);
           return reply(res, 200, config.limits);
+        }
+        case '/api/voice-input': {
+          // Dictation's switch, from its first-use notice in the app.
+          const config = loadConfig();
+          config.ui = { ...config.ui, voice_input: !!body.enabled };
+          saveConfig(config);
+          return reply(res, 200, { ui: uiSettings(config) });
         }
         case '/api/autopilot':
           // The autopilot's switch and limits, from the Usage section (src/autopilot.mjs).
