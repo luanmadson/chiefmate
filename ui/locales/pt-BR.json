@@ -1528,5 +1528,21 @@
   "to run on {tool}": "vai rodar no {tool}",
   "Unknown tool \"{tool}\". Use: {list}.": "Ferramenta desconhecida \"{tool}\". Use: {list}.",
   "{tool} was chosen, but this project is marked sensitive: this step runs on Claude Code": "{tool} foi escolhido, mas este projeto é marcado como sensível: este passo roda no Claude Code",
-  "{tool} is not signed in on this computer: this step runs on Claude Code": "{tool} não está conectado neste computador: este passo roda no Claude Code"
+  "{tool} is not signed in on this computer: this step runs on Claude Code": "{tool} não está conectado neste computador: este passo roda no Claude Code",
+  "Task running": "Tarefa em andamento",
+  "Kept: a request waits for you": "Mantido: um pedido espera você",
+  "Task over: may close": "Tarefa encerrada: pode fechar",
+  "Not identified": "Sem identificação",
+  "Opened before the projects had browsers of their own": "Aberto antes de os projetos terem navegador próprio",
+  "Bring to front": "Trazer para a frente",
+  "For how long": "Há quanto tempo",
+  "No browser of the crew open.": "Nenhum navegador da equipe aberto.",
+  "Open browsers": "Navegadores abertos",
+  "Each project's browser has its own profile, its color on the frame and its name in the window's title. Chiefmate closes it when its task ends, unless a request waits for you, such as a sign-in.": "O navegador de cada projeto tem perfil próprio, a cor do projeto na moldura e o nome no título da janela. O Chiefmate o fecha quando a tarefa termina, a menos que um pedido espere você, como um login.",
+  "Close the browser": "Fechar o navegador",
+  "The task of this browser is still running: the agent loses the pages it has open. The sign-ins stay in the project's profile.": "A tarefa deste navegador ainda está em andamento: o agente perde as páginas abertas. Os logins ficam no perfil do projeto.",
+  "Browser closing.": "Fechando o navegador.",
+  "The browsers are listed on Windows only.": "Os navegadores são listados só no Windows.",
+  "This browser is no longer open.": "Este navegador já não está aberto.",
+  "This browser has no window to show.": "Este navegador não tem janela para mostrar."
 }

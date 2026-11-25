@@ -1894,6 +1894,32 @@ function processTable(p) {
 
 const processRows = p => `<tr class="processes"><td colspan="4">${processTable(p)}</td></tr>`;
 
+// The crew's browsers: what each state says, and its color.
+const BROWSER_STATES = {
+  running: () => [t('Task running'), 'info'],
+  kept: () => [t('Kept: a request waits for you'), 'warn'],
+  done: () => [t('Task over: may close'), 'warn'],
+  unknown: () => [t('Not identified'), 'neutral'],
+};
+
+/** The crew's browsers open: project (its color and initials), task, since when, state, Bring to front and Close. */
+function browsersHtml() {
+  const list = state.browsers ?? [];
+  const rows = list.map(b => `<tr class="${b.state === 'done' ? 'may-close' : ''}">
+      <td><span class="browser-badge" style="--project:${esc(b.color)}">${esc(b.initials)}</span><span class="primary">${b.id ? projectLink(b.id, b.name) : esc(b.name)}</span></td>
+      <td>${esc(b.task ?? t('Opened before the projects had browsers of their own'))}</td>
+      <td class="num">${elapsed(b.since)}</td>
+      <td>${stateHtml(BROWSER_STATES[b.state]?.() ?? BROWSER_STATES.unknown())}</td>
+      <td class="row-actions"><button type="button" class="button small" data-browser-focus="${b.pid}">${esc(t('Bring to front'))}</button> <button type="button" class="button ${b.state === 'running' ? 'danger ' : ''}small" data-browser-close="${b.pid}">${esc(t('Close'))}</button></td>
+    </tr>`);
+  const table = list.length
+    ? `<table class="table"><thead><tr><th>${esc(t('Project'))}</th><th>${esc(t('Task'))}</th><th>${esc(t('For how long'))}</th><th>${esc(t('Status'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
+    : `<div class="empty">${esc(t('No browser of the crew open.'))}</div>`;
+  return `<h2 class="section-title">${esc(t('Open browsers'))}</h2>
+    <p class="hint">${esc(t("Each project's browser has its own profile, its color on the frame and its name in the window's title. Chiefmate closes it when its task ends, unless a request waits for you, such as a sign-in."))}</p>
+    ${table}`;
+}
+
 function drawComputer() {
   const c = state.computer;
   const notes = [
@@ -1927,7 +1953,8 @@ function drawComputer() {
         <p class="hint">${esc(t('Stop ends the processes of a project after you confirm the list. Chiefmate and the crew at work are never stopped: to stop the crew, cancel the run.'))}</p>
       </div>
     </div>
-    <table class="table" style="margin-top:20px"><thead><tr><th>${esc(t('Project'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Memory'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+    <table class="table" style="margin-top:20px"><thead><tr><th>${esc(t('Project'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Memory'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>
+    ${c.supported ? browsersHtml() : ''}`;
   draw('#computer', html, html);
 }
 
@@ -4072,7 +4099,7 @@ document.addEventListener('click', event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-browser-focus],[data-browser-close]');
   if (!target) return;
   // A project's name inside a row that opens on a click (Projects) goes to its page, and nothing else.
   if (event.target.closest('a.project-link') && !target.matches('a')) return;
@@ -4166,6 +4193,14 @@ document.addEventListener('click', async event => {
       toast(t('Back in the queue.'));
     } else if (target.dataset.suggestion) {
       sendMessage(target.dataset.suggestion);
+    } else if (target.dataset.browserFocus) {
+      await api('/api/browser', { action: 'focus', pid: Number(target.dataset.browserFocus) });
+    } else if (target.dataset.browserClose) {
+      const b = (state.browsers ?? []).find(x => String(x.pid) === target.dataset.browserClose);
+      if (b?.state === 'running' && !(await confirmDialog(t('Close the browser'), t("The task of this browser is still running: the agent loses the pages it has open. The sign-ins stay in the project's profile."), t('Close')))) return;
+      target.disabled = true;
+      await api('/api/browser', { action: 'close', pid: Number(target.dataset.browserClose) });
+      toast(t('Browser closing.'));
     } else if (target.dataset.stop) {
       await stopProject(target.dataset.stop);
     } else if (target.dataset.expand) {

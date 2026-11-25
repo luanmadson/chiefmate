@@ -1172,6 +1172,25 @@ try {
     rmSync(temp, { recursive: true, force: true });
   }
 
+  // Playwright's browser: the project's own profile in data/browsers, the window's name, the theme and Chiefmate's mark.
+  const { browserServers, BROWSERS } = await import(src('browsers.mjs'));
+  const servers = {
+    playwright: { command: 'npx', args: ['@playwright/mcp@latest'] },
+    chosen: { command: 'npx', args: ['@playwright/mcp@latest', '--user-data-dir', 'x'] },
+    other: { command: 'node', args: ['tool.js'] },
+  };
+  const browserTask = browserServers(config, servers, { project: 'alpha', owner: 'run:smoke-1', task: 'Fix the "contact" page' });
+  const browserArgs = browserTask.playwright.args;
+  const launch = JSON.parse(readFileSync(browserArgs[browserArgs.indexOf('--config') + 1], 'utf8'));
+  const profileDir = path.join(BROWSERS, 'alpha', 'profile');
+  expect(launch.browser.userDataDir === profileDir && existsSync(profileDir), "the project's browser has no profile of its own in data/browsers");
+  expect(launch.browser.launchOptions.args.includes(`--window-name=${config.projects.alpha.name ?? 'alpha'} · Fix the contact page`), "the browser's window is not named after the project and the task");
+  expect(launch.browser.launchOptions.args.includes('--chiefmate-browser=run:smoke-1'), "the browser does not carry its task's mark");
+  expect(JSON.parse(readFileSync(path.join(BROWSERS, 'alpha', 'theme', 'manifest.json'), 'utf8')).theme.colors.frame.length === 3, 'the theme of the project was not written');
+  expect(Number.isInteger(JSON.parse(readFileSync(path.join(profileDir, 'Default', 'Preferences'), 'utf8')).browser.theme.user_color), "the profile's color was not seeded");
+  expect(browserTask.chosen === servers.chosen && browserTask.other === servers.other, 'a browser chosen in the settings (or another server) was changed');
+  expect(JSON.stringify(browserServers(config, { other: servers.other }, { project: 'beta', owner: 'run:smoke-2', task: 'x' })) === JSON.stringify({ other: servers.other }) && !existsSync(path.join(BROWSERS, 'beta')), 'a step without Playwright got a browser profile');
+
   const args = claudeArgs({ model: 'm', attribution: false, mcpServers: mcp.servers, disallowed: ['Read(//x/**)'], tools: ['Bash'] });
   const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
   const userFolder = `${path.join(os.homedir(), '.claude').replaceAll('\\', '/')}/**`;

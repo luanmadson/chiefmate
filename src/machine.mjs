@@ -16,7 +16,7 @@ const MAX_AGE = 15_000;
 
 const LIST_SCRIPT =
   '[Console]::OutputEncoding = [Text.Encoding]::UTF8; ' +
-  'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,WorkingSetSize | ConvertTo-Json -Compress';
+  'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,WorkingSetSize,CreationDate | ConvertTo-Json -Compress';
 
 function powershell(script, timeout = 30_000) {
   return new Promise((resolve, reject) => {
@@ -26,12 +26,20 @@ function powershell(script, timeout = 30_000) {
   });
 }
 
+/** When a process started, from Windows PowerShell's JSON ("/Date(1732560000000)/") or a date's text. */
+export function startedAt(value) {
+  const ms = String(value?.value ?? value ?? '').match(/Date\((\d+)/)?.[1];
+  const date = ms ? new Date(Number(ms)) : typeof value === 'string' ? new Date(value) : null;
+  return date && !Number.isNaN(date.getTime()) ? date.toISOString() : null;
+}
+
 async function listProcesses() {
   const raw = JSON.parse((await powershell(LIST_SCRIPT)) || '[]');
   return (Array.isArray(raw) ? raw : [raw])
     .filter(p => !String(p.CommandLine ?? '').includes('Get-CimInstance Win32_Process')) // this reading itself
     .map(p => ({
       pid: p.ProcessId, parent: p.ParentProcessId, name: p.Name ?? '', exe: p.ExecutablePath ?? '', cmd: p.CommandLine ?? '', ram: Number(p.WorkingSetSize) || 0,
+      started: startedAt(p.CreationDate),
     }));
 }
 
@@ -47,6 +55,9 @@ export function refreshProcesses() {
     .finally(() => (pending = null));
   return pending;
 }
+
+/** The latest reading of the processes ({ at, list }), without reading them again; null before the first. */
+export const latestProcesses = () => cache;
 
 /** The processes, read again when older than maxAge. */
 export async function processes(maxAge = MAX_AGE) {

@@ -7,7 +7,9 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, wr
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
+import { browserState, findBrowsers, initials, launchArgs, PALETTE, projectColor, shouldClose, themeManifest, windowName } from '../src/browsers.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
+import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
 import { askedTool, stepTool } from '../src/runs.mjs';
 import {
@@ -551,4 +553,54 @@ test("Codex's and Grok's events become the step's text and actions", () => {
   const end = grokEvents({ type: 'end', stopReason: 'end_turn', sessionId: 's1', usage: { input_tokens: 3, output_tokens: 2 }, num_turns: 4 });
   assert.deepEqual(end.map(e => e.kind), ['start', 'usage', 'end']);
   assert.equal(grokEvents({ type: 'end', stopReason: 'max_tokens' }).at(-1).kind, 'fail');
+});
+
+test("The crew's browsers: a color and initials per project, the window's name and the theme", () => {
+  const config = { projects: { one: { name: 'Atlas Público' }, two: { name: 'Chiefmate', color: '#123ABC' }, three: { name: 'x', color: 'blue' } } };
+  assert.equal(projectColor(config, 'one'), PALETTE[0]);
+  assert.equal(projectColor(config, 'two'), '#123abc');
+  assert.equal(projectColor(config, 'three'), PALETTE[2]); // an invalid color falls back to the palette
+  assert.equal(projectColor(config, 'gone'), '#6b7280');
+  assert.deepEqual([initials('Atlas Público'), initials('Chiefmate'), initials('riffdex'), initials('')], ['AP', 'CH', 'RI', '?']);
+  assert.equal(windowName('Chiefmate', 'Navegadores "da equipe"\n identificados por projeto e com uma tarefa bem longa'), 'Chiefmate · Navegadores da equipe identificados por projeto…');
+  assert.equal(windowName('Chiefmate', ''), 'Chiefmate');
+  assert.deepEqual(themeManifest({ name: 'X', color: '#3b6ea5' }).theme.colors.frame, [59, 110, 165]);
+  assert.deepEqual(launchArgs({ name: 'A · b', theme: 'T', owner: 'run:1' }), ['--window-name=A · b', '--disable-extensions-except=T', '--load-extension=T', '--chiefmate-browser=run:1']);
+});
+
+test("The crew's browsers: closed when the task is over and left nothing open for the owner", () => {
+  assert.equal(shouldClose({ known: true, running: false, request: false }), true);
+  assert.equal(shouldClose({ known: true, running: true, request: false }), false);
+  assert.equal(shouldClose({ known: true, running: false, request: true }), false); // a sign-in under way
+  assert.equal(shouldClose({ known: false, running: false, request: false }), false); // never a browser it can't place
+  assert.deepEqual(
+    [{ known: true, running: true }, { known: true, request: true }, { known: true }, { known: false }].map(browserState),
+    ['running', 'kept', 'done', 'unknown'],
+  );
+});
+
+test("The crew's browsers among the processes: the main process of each, its project, task and state", () => {
+  const config = { projects: { demo: { name: 'Demo' } } };
+  const dir = String.raw`C:\chiefmate\data\browsers\demo\profile`;
+  const list = [
+    { pid: 10, name: 'chrome.exe', cmd: `chrome.exe --user-data-dir=${dir} "--window-name=Demo · Task" --chiefmate-browser=run:r1 about:blank`, started: '2026-01-01T10:00:00.000Z' },
+    { pid: 11, name: 'chrome.exe', cmd: `chrome.exe --type=renderer --user-data-dir=${dir}` },
+    { pid: 12, name: 'msedge.exe', cmd: String.raw`msedge.exe --user-data-dir=C:\Users\u\AppData\Local\ms-playwright\mcp-msedge-abc about:blank` },
+    { pid: 13, name: 'chrome.exe', cmd: String.raw`chrome.exe --user-data-dir=C:\Users\u\Chrome` },
+    { pid: 14, name: 'chrome.exe', cmd: `chrome.exe "--user-data-dir=${dir}" --chiefmate-browser=session:s1` },
+    { pid: 15, name: 'bash.exe', cmd: 'bash -c "grep -- --chiefmate-browser=run:r1 notes.txt"' }, // only mentions the mark
+  ];
+  const states = { 'run:r1': { known: true, running: false, request: false, title: 'Run one' }, 'session:s1': { known: true, running: true, request: false, title: 'Live' } };
+  const found = findBrowsers(config, list, { launches: { 'run:r1': { project: 'demo', task: 'Task' } }, state: owner => states[owner] });
+  assert.deepEqual(found.map(b => b.pid), [10, 12, 14]);
+  assert.deepEqual(found.map(b => [b.id, b.task, b.state, b.close]), [['demo', 'Task', 'done', true], [null, null, 'unknown', false], ['demo', 'Live', 'running', false]]);
+  assert.equal(found[0].initials, 'DE');
+  assert.equal(found[0].since, '2026-01-01T10:00:00.000Z');
+});
+
+test("A process's start, as Windows PowerShell writes it", () => {
+  assert.equal(startedAt('/Date(1795645561244)/'), new Date(1795645561244).toISOString());
+  assert.equal(startedAt({ value: '/Date(0)/' }), new Date(0).toISOString());
+  assert.equal(startedAt(null), null);
+  assert.equal(startedAt('nonsense'), null);
 });
