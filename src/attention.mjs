@@ -1,10 +1,14 @@
 // What needs the owner, in three levels, for the whole app: urgent (act now), important (decide soon) and info
-// (good to know). Each notice goes away when the owner acts (its cause ends) and fades when marked as seen; a seen
-// info notice goes away. The seen marks are kept in data/state.json ("attention_seen").
+// (good to know). A notice fades when marked as seen and goes to the archive when it no longer needs the owner: its
+// cause ended, its pull request was merged or closed (or its branch merged in the owner's clone), or, for an info
+// notice, once seen or a day old. Nothing is lost: the archive keeps the last ARCHIVE_MAX. In data/state.json: the
+// seen marks ("attention_seen"), the notices shown last time ("attention_shown") and the archive ("attention_archive").
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
 import { RAM_LOW, availableResets, current } from './plan.mjs';
 import { readState, saveState } from './store.mjs';
 import { readerSettings, readerStatus } from './usagepage.mjs';
+import { ROOT } from './util.mjs';
+import { baseBranch, run as exec } from './workspace.mjs';
 
 export const LEVELS = ['urgent', 'important', 'info'];
 const HOUR = 3600_000;
@@ -12,6 +16,8 @@ const DAY = 24 * HOUR;
 const FAILED_FOR = 3 * DAY; // a failed run asks for attention for 3 days...
 const PR_FOR = 7 * DAY; // ...a pull request for a week...
 const DONE_FOR = DAY; // ...a finished task and an installed update for a day
+const ARCHIVE_MAX = 500;
+const CHECK_EVERY = 5 * 60_000; // a pull request's state on GitHub is asked at most every 5 minutes
 const WINDOWS = [
   ['five_hour', () => t('The 5-hour window')],
   ['seven_day', () => t("The plan's week")],
@@ -118,16 +124,131 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
     add({ id: `updated:${installed.at}`, level: 'info', kind: 'updated', title: t('Update installed'), text: installed.changes?.length ? installed.changes.join('; ') : t('The improvements you approved are installed.'), view: 'manager', at: installed.at });
   }
 
-  // The seen marks: a seen info notice goes away, the others fade. Marks of notices gone are forgotten.
+  // The archive: what no longer needs the owner leaves the list. A seen notice fades; the marks of notices gone are forgotten.
   const seen = state.attention_seen ?? {};
+  const shown = state.attention_shown ?? {};
+  const archive = { ...(state.attention_archive ?? {}) };
   const ids = new Set(list.map(i => i.id));
-  const kept = Object.fromEntries(Object.entries(seen).filter(([id]) => ids.has(id)));
-  if (Object.keys(kept).length !== Object.keys(seen).length) saveState({ ...state, attention_seen: kept });
+  let changed = false;
+  const toArchive = (i, reason) => {
+    archive[i.id] = { ...compact(i), archived: new Date().toISOString(), reason };
+    changed = true;
+  };
+  const active = [];
+  for (const i of list) {
+    const kept = archive[i.id];
+    if (kept?.reason === 'resolved') {
+      // Archived because its cause ended, and back: it needs the owner again.
+      delete archive[i.id];
+      changed = true;
+    } else if (kept) continue;
+    const settled = resolution(i, runs, items);
+    if (settled) toArchive(i, settled);
+    else if (i.level === 'info' && (seen[i.id] || (i.at && !ago(i.at, DONE_FOR)))) toArchive(i, seen[i.id] ? 'seen' : 'expired');
+    else active.push(i);
+  }
+  // Shown last time and gone now: its cause ended (for an info notice, its day).
+  for (const [id, i] of Object.entries(shown)) if (!ids.has(id) && !archive[id]) toArchive(i, i.level === 'info' ? 'expired' : 'resolved');
+  const keptSeen = Object.fromEntries(Object.entries(seen).filter(([id]) => ids.has(id) && !archive[id]));
+  const nowShown = Object.fromEntries(active.map(i => [i.id, compact(i)]));
+  if (changed || Object.keys(keptSeen).length !== Object.keys(seen).length || !sameKeys(nowShown, shown)) {
+    const newest = Object.values(archive).sort((a, b) => b.archived.localeCompare(a.archived)).slice(0, ARCHIVE_MAX);
+    saveState({ ...readState(), attention_seen: keptSeen, attention_shown: nowShown, attention_archive: Object.fromEntries(newest.map(i => [i.id, i])) });
+  }
+  if (!process.env.CHIEFMATE_SMOKE) checkLater(pullRequestTargets(active, runs, items), config);
   const rank = i => LEVELS.indexOf(i.level);
-  return list
-    .map(i => ({ ...i, seen: !!kept[i.id] && i.seenable }))
-    .filter(i => !(i.seen && i.level === 'info'))
+  return active
+    .map(i => ({ ...i, seen: !!keptSeen[i.id] && i.seenable }))
     .sort((a, b) => a.seen - b.seen || rank(a) - rank(b) || String(b.at ?? '').localeCompare(String(a.at ?? '')));
+}
+
+const compact = ({ id, level, kind, title, text, view, project, run, url, at }) => ({ id, level, kind, title, text, view, project, run, url: url ?? null, at });
+const sameKeys = (a, b) => Object.keys(a).length === Object.keys(b).length && Object.keys(a).every(k => k in b);
+
+/** The archive, the most recently archived first: { id, level, kind, title, text, ..., archived, reason }. */
+export function attentionArchive() {
+  return Object.values(readState().attention_archive ?? {}).sort((a, b) => String(b.archived).localeCompare(String(a.archived)));
+}
+
+// ---------- The pull requests and branches already merged ----------
+// Asked in the background (gh and git), at most every CHECK_EVERY, and kept in memory: "merged" and "closed" are final.
+
+const prStates = new Map(); // url -> { state: 'open' | 'merged' | 'closed' | null, checked }
+const branchStates = new Map(); // "project branch" -> { merged, checked }
+let checking = null;
+let lastCheck = 0;
+
+const branchKey = r => `${r.project} ${r.branch}`;
+const final = state => state === 'merged' || state === 'closed';
+
+/** The run behind a pull request or board notice ("pr:<run>", or "plan:<n>:<url>" with the item's run). */
+function noticeRun(i, runs, items) {
+  if (i.id.startsWith('pr:')) return runs.find(r => r.id === i.run) ?? null;
+  if (!i.id.startsWith('plan:')) return null;
+  const item = items.find(x => i.id.startsWith(`plan:${x.id}:`));
+  return item?.run ? (runs.find(r => r.id === item.run) ?? null) : null;
+}
+
+/** Why a pull request or board notice no longer needs the owner, from what was checked: "merged", "closed" or "branch". */
+function resolution(i, runs, items) {
+  if (!i.id.startsWith('pr:') && !i.id.startsWith('plan:')) return null;
+  const state = i.url ? prStates.get(i.url)?.state : null;
+  if (final(state)) return state;
+  const r = noticeRun(i, runs, items);
+  return r?.branch && branchStates.get(branchKey(r))?.merged ? 'branch' : null;
+}
+
+/** What to check for the notices shown: the pull requests' addresses and the runs whose branch may be merged. */
+export function pullRequestTargets(list, runs, items) {
+  return list
+    .filter(i => i.id.startsWith('pr:') || i.id.startsWith('plan:'))
+    .map(i => ({ url: i.url ?? null, run: noticeRun(i, runs, items) }))
+    .filter(x => x.url || x.run?.branch);
+}
+
+function checkLater(targets, config) {
+  if (!targets.length || checking || Date.now() - lastCheck < CHECK_EVERY) return;
+  checking = checkPullRequests(targets, config)
+    .catch(error => console.error('Pull requests:', error.message))
+    .finally(() => (checking = null));
+}
+
+/** A pull request's state on GitHub ("open", "merged", "closed"), or null when gh can't tell. */
+async function ghState(url) {
+  const r = await exec('gh', ['pr', 'view', url, '--json', 'state', '-q', '.state'], ROOT, { maxMinutes: 1 });
+  // stdout and stderr come together: gh may add an upgrade notice after the state.
+  const state = r.code === 0 ? (r.output.trim().split(/\s+/)[0] ?? '').toLowerCase() : '';
+  return ['open', 'merged', 'closed'].includes(state) ? state : null;
+}
+
+/** Whether the run's branch is already in the base branch of the owner's clone (null when there is no way to tell). */
+async function branchMerged(run, config) {
+  const project = config?.projects?.[run.project];
+  if (!project?.local_clone || !run.branch) return null;
+  const git = (...args) => exec('git', args, project.local_clone, { maxMinutes: 1 });
+  const base = await baseBranch(project).catch(() => null);
+  if (!base) return null;
+  for (const ref of [run.branch, `origin/${run.branch}`]) {
+    if ((await git('rev-parse', '--verify', '--quiet', `${ref}^{commit}`)).code !== 0) continue;
+    for (const into of [base, `origin/${base}`]) if ((await git('merge-base', '--is-ancestor', ref, into)).code === 0) return true;
+    return false;
+  }
+  return null;
+}
+
+/**
+ * Checks the pull requests and branches of the notices ("targets": { url, run }), one at a time, skipping what is
+ * final or was checked in the last CHECK_EVERY. "ask" stands in for gh and git in the tests.
+ */
+export async function checkPullRequests(targets, config, ask = { pr: ghState, branch: branchMerged }) {
+  lastCheck = Date.now();
+  const fresh = entry => entry && (final(entry.state) || entry.merged || Date.now() - entry.checked < CHECK_EVERY);
+  for (const { url, run } of targets) {
+    if (url && !fresh(prStates.get(url))) prStates.set(url, { state: await ask.pr(url), checked: Date.now() });
+    if (final(url ? prStates.get(url)?.state : null) || !run?.branch) continue;
+    const key = branchKey(run);
+    if (!fresh(branchStates.get(key))) branchStates.set(key, { merged: (await ask.branch(run, config)) === true, checked: Date.now() });
+  }
 }
 
 /** The summary the app draws first: how many of each level are not seen yet, and the highest of them. */

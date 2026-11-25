@@ -582,11 +582,40 @@ function attnNotice(i) {
     </div>`;
 }
 
-/** A list of notices under a label ("Waiting for you"), for a section or a project; empty when there are none. */
-function attnList(list, label) {
-  if (!list.length) return '';
-  const head = `<div class="attn-head">${attnMark(list)}<span class="label">${esc(t('{label} ({count})', { label, count: unseen(list).length }))}</span></div>`;
+/** The small link to what no longer needs you ("Archived (N)"), opening the archive; empty with nothing archived. */
+const attnArchivedLink = () => {
+  const n = online ? state?.attention?.archived ?? 0 : 0;
+  return n ? `<button type="button" class="attn-archived" data-attn-archived>${esc(t('Archived ({count})', { count: n }))}</button>` : '';
+};
+
+/**
+ * A list of notices under a label ("Waiting for you"), for a section or a project; empty when there are none, unless
+ * "archived" asks for the link to the archive even then.
+ */
+function attnList(list, label, { archived = false } = {}) {
+  const link = archived ? attnArchivedLink() : '';
+  if (!list.length) return link ? `<div class="attn-archived-only">${link}</div>` : '';
+  const head = `<div class="attn-head">${attnMark(list)}<span class="label">${esc(t('{label} ({count})', { label, count: unseen(list).length }))}</span>${link}</div>`;
   return `<div class="attn-list"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>${head}${list.map(attnNotice).join('')}</div>`;
+}
+
+/** Why a notice went to the archive (src/attention.mjs). */
+const archivedWhy = reason => ({
+  merged: t('Pull request merged'), closed: t('Pull request closed'), branch: t('Branch already merged'),
+  seen: t('Seen'), expired: t('A day went by'), resolved: t('No longer needed'),
+})[reason] ?? '';
+
+/** The archive's notices: what each was, where, when it was archived and why. */
+function archiveHtml(items) {
+  if (!items.length) return `<div class="attn" data-level="info"><div class="attn-text">${esc(t('Nothing archived yet.'))}</div></div>`;
+  return items.map(i => {
+    const hint = [i.project ? projectName(i.project) : '', i.at ? relative(i.at) : '', `${archivedWhy(i.reason)} · ${t('archived {when}', { when: relative(i.archived) })}`].filter(Boolean).map(esc);
+    if (i.url) hint.push(`<a href="${esc(i.url)}" target="_blank" rel="noopener">${esc(t('Open the pull request'))}</a>`);
+    return `<div class="attn" data-level="${esc(i.level)}" data-seen>
+      <span class="attn-level"><span class="attn-mark" data-level="${esc(i.level)}" aria-hidden="true"></span>${esc(levelName(i.level))}</span>
+      <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}<span class="hint">${hint.join(' · ')}</span></div>
+    </div>`;
+  }).join('');
 }
 
 let attnOpen = false; // the band shows every notice, not only the most urgent
@@ -603,7 +632,7 @@ function drawAlerts() {
   const shown = attnOpen ? list : fresh.slice(0, 1);
   const html = `<div class="attn-band" data-level="${topLevel(list) ?? 'info'}"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>
       ${shown.map(attnNotice).join('') || `<div class="attn" data-level="info"><div class="attn-text">${esc(t('Nothing needs you now.'))}</div></div>`}
-      ${toggle || (attnOpen && all) ? `<div class="attn-more">${toggle}${attnOpen ? all : ''}</div>` : ''}
+      ${toggle || (attnOpen && all) ? `<div class="attn-more">${attnOpen ? attnArchivedLink() : ''}${toggle}${attnOpen ? all : ''}</div>` : ''}
     </div>`;
   draw('#alerts', html, html);
 }
@@ -956,7 +985,7 @@ function drawOperations() {
     for (const key of Object.keys(signatures)) if (key.startsWith('#op-')) delete signatures[key];
   }
   // What needs you in the crew's work (requests, failed runs, pull requests, finished tasks), above the runs.
-  const notices = attnList(attnItems().filter(i => ['operations', 'log'].includes(i.view)), t('Waiting for you'));
+  const notices = attnList(attnItems().filter(i => ['operations', 'log'].includes(i.view)), t('Waiting for you'), { archived: true });
   draw('#op-attention', notices, notices);
   drawQueue();
   drawSessions();
@@ -3578,7 +3607,7 @@ document.addEventListener('click', event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live]');
   if (!target) return;
   // A project's name inside a row that opens on a click (Projects) goes to its page, and nothing else.
   if (event.target.closest('a.project-link') && !target.matches('a')) return;
@@ -3685,6 +3714,11 @@ document.addEventListener('click', async event => {
     } else if (target.dataset.attnSeen) {
       await api('/api/attention/seen', { ids: target.dataset.attnSeen.split(' ') });
       await refresh();
+    } else if (target.hasAttribute('data-attn-archived')) {
+      const { items } = await api('/api/attention/archived');
+      $('#archive-list').innerHTML = archiveHtml(items ?? []);
+      $('#archive-dialog').showModal();
+      return;
     } else if (target.hasAttribute('data-attn-more')) {
       attnOpen = !attnOpen;
       drawAlerts();
