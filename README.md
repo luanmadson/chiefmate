@@ -337,10 +337,16 @@ The libraries are read from a copy that Chiefmate refreshes from GitHub before u
 
 The Planning section is your board: what is to be done in each project, kept by you and by the manager.
 
-- **Each item** has a number, a project, a title, an optional description, a priority (high, medium or low), a status (future, to do, queued, in progress, waiting for you, completed), when it was created and last updated, and an optional link to a run (its id) or a pull request.
+- **Each item** has a number, a project, a title, an optional description, a priority (high, medium or low), a status (proposed, waiting for your decision, approved, future, to do, queued, in progress, waiting for you, completed, discarded), when it was created and last updated, an optional agent to do it and an optional link to a run (its id) or a pull request.
 - **In the app:** filter by project, priority and status (open items by default, or all, or the archived ones), sort by priority (then what is waiting for you first), by the latest updated or by number, change the priority and the status right in the list, edit the rest with **Edit**, add items with the form below the list, and archive what you no longer want to see (**Restore** brings it back). The items waiting for you are highlighted at the top.
 - **Items follow their runs.** Queue a task or a mission with `--plan <n>` (or link a run to an item with `plan set <n> --run <id>`) and the item changes by itself: queued while the run waits, in progress while it runs, waiting for you when it ends with a pull request to approve (the link to the pull request is kept) or a branch delivered locally, completed when it ends with nothing to approve, and back to "to do" if it fails or is canceled. You can still change the status by hand: the item only moves again when its run does.
-- **The manager keeps it too**, with the `plan` commands (see "Command line"), and gets a short summary with each of your messages: the open high-priority items and the ones waiting for you.
+- **The manager keeps it too**, with the `plan` commands (see "Command line"), and gets a short summary with each of your messages: the proposals waiting for its triage, your decisions pending, the approved items waiting their turn, the open high-priority items and the ones waiting for you.
+- **Proposals from the crew, decided by you.** The work the crew finds along the way doesn't get done on the side, nor flood the queue:
+  1. **Propose.** Any agent or team lead, during or at the end of its step, proposes an item with `plan propose <project> "<short title>" --summary "<1-2 sentences>" --agent <member> --priority ...`. It comes in as "proposed", with its author (the step's agent) and run. The crew's rules ask for proposals with a clear gain only, one per idea, checking the board first so nothing is repeated, and never for fixes within a task already approved or the next run of a mission (those are just done).
+  2. **Triage, by the manager.** New proposals wake the manager (the `plan_proposed` news, grouped within a minute). It merges duplicates and discards what makes no sense (`plan discard <n> --reason "..."` or `--duplicate-of <m>`; nothing is lost), sets the priority, the agent and the order, and writes a short recommendation: do now, later or discard (`plan triage <n> --recommend now|later|discard --agent ... --note "..."`). The team leads don't triage; the manager never decides for you.
+  3. **Your decision.** At the top of Planning, **Decide** lists the triaged items in order, each with its title, a one-line summary, the manager's recommendation and the agent's face and name, and three large buttons: **Do**, **Later** and **Discard** (which asks for an optional reason). Drag the items to change their order. "Do" turns the item into a task for its agent, with the manager's review, linked to the item; "Later" leaves it for the future; "Discard" sets it aside under "Discarded items", where **Restore** brings it back. On the command line: `plan approve|later|discard <n>` and `plan order <n> <n> ...`.
+  4. **No flooding.** At most one task coming from these approvals waits or goes on per project at a time; the other approved items wait their turn, in your order, and the next one starts when the one before ends.
+  - The quick filters above the list show the **Proposed items**, what **Needs you** (decisions and pull requests) and the **Discarded items**, with their counts; a project's page shows its decisions pending under what waits for you.
 - **Where it lives:** `data/plan.json`, outside the repository. The first time, if the manager kept a board in `data/manager/plan.md` (a Markdown table with the columns #, Projeto, Item, Prioridade, Situação), Chiefmate imports it, keeping the numbers; a status it doesn't recognize goes into the description, and the item stays "to do" or the closest status.
 
 ## Usage and limits
@@ -367,7 +373,7 @@ The conversation never makes you wait.
 
 The manager doesn't only answer: when something you should know about happens, it tells you in the conversation on its own.
 
-- **The events**, by the names `manager_updates` uses: a run finished (`run_finished`), failed (`run_failed`) or paused (`run_paused`); a pull request ready and waiting for your approval (`pr_ready`); a step or a live session that needs you (`needs_you`); an update installed (`update_installed`) or blocked (`update_blocked`); a memory alert (`memory_alert`) or an alert about the account's usage or the plan's free resets (`usage_alert`); a live session that ended on its own (`session_ended`; not one you ended from Chiefmate).
+- **The events**, by the names `manager_updates` uses: a run finished (`run_finished`), failed (`run_failed`) or paused (`run_paused`); a pull request ready and waiting for your approval (`pr_ready`); a step or a live session that needs you (`needs_you`); an update installed (`update_installed`) or blocked (`update_blocked`); a memory alert (`memory_alert`) or an alert about the account's usage or the plan's free resets (`usage_alert`); a live session that ended on its own (`session_ended`; not one you ended from Chiefmate); a new proposal on the planning board (`plan_proposed`), which the manager triages before telling you what waits for your decision.
 - **How it goes.** Chiefmate wakes the manager with a short system message that describes the events and is marked as not coming from you; the manager reads the situation, as with any message, and writes a short, clear notice: what happened and, when something needs you, what to do. It doesn't queue or change anything because of a notice alone.
 - **Grouped.** Events within a minute of the first one go together, as one message. If the manager is answering, they wait in the queue under the conversation ("news for the manager", which you can remove but not edit) and go with your queued messages; then the manager answers you and mentions them in the same reply. The news survives a restart, such as the one after an update; news older than an hour when Chiefmate starts is dropped.
 - **In the conversation**, a notice has a look of its own: a brass rule on the left, a "notice" tag and the events it is about.
@@ -440,9 +446,19 @@ node src/cli.mjs ask <project> "..."          queues a request for the project's
                                               3 tasks for the crew and reviews them first (--plan <n>)
 node src/cli.mjs plan [list]                  the planning board's open items (--project, --status, --priority; --all)
 node src/cli.mjs plan add <project> "..."     adds an item (--priority high|medium|low, --status, --description)
-node src/cli.mjs plan set <n> --status ...    changes an item (--title, --description, --project, --priority, --run,
+node src/cli.mjs plan set <n> --status ...    changes an item (--title, --description, --project, --priority, --agent, --run,
                                               --pr, --archive, --restore)
 node src/cli.mjs plan done <n>                marks an item as completed
+node src/cli.mjs plan propose <project> "..." for the crew: proposes an item (--summary "<1-2 sentences>", --agent <member>,
+                                              --priority); the manager triages it, you decide
+node src/cli.mjs plan triage <n> --recommend now|later|discard
+                                              for the manager: the item waits for your decision (--agent, --priority,
+                                              --note "<why>", --order <position>)
+node src/cli.mjs plan approve|later|discard <n>
+                                              your decision: "approve" makes it a task for its agent, one per project
+                                              at a time, in your order (discard: --reason "...", --duplicate-of <m>;
+                                              plan restore <n> brings it back)
+node src/cli.mjs plan order <n> <n> ...       puts these items first in your order
 node src/cli.mjs chat [n]                     the conversation with the manager: the last n messages, what it is doing, the queue
 node src/cli.mjs chat say "..."               writes to the manager; while it answers, the message waits in the queue
 node src/cli.mjs chat edit <id> "..."         changes a message still in the queue (chat remove <id> takes it out)
