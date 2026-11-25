@@ -1254,6 +1254,8 @@
   "the pull request of this branch": "pull request desta branch",
   "Nothing in the code changes.": "Nada muda no código.",
   "Open a pull request on {repo}": "Abrir um pull request em {repo}",
+  "Open a pull request on {repo} through GitHub's API": "Abrir um pull request em {repo} pela API do GitHub",
+  "Change something on GitHub through its API ({address})": "Mudar algo no GitHub pela API dele ({address})",
   "A proposal of change appears there, with a title and a description, and whoever follows the repository is notified.": "Aparece lá uma proposta de mudança, com título e descrição, e quem acompanha o repositório é avisado.",
   "Partly: it can be closed, but it stays visible.": "Em parte: dá para fechá-lo, mas ele continua visível.",
   "Nothing goes into the code until someone merges it.": "Nada entra no código até alguém fazer o merge.",

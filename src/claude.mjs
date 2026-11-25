@@ -143,7 +143,7 @@ function stop(child) {
 }
 
 /** The command line of a step (see runClaude below). */
-export function claudeArgs({ model, effort, tools = [], disallowed = [], addDirs = [], mcpServers = {}, attribution = true, systemFile, session, noTools = false }) {
+export function claudeArgs({ model, effort, tools = [], disallowed = [], addDirs = [], mcpServers = {}, attribution = true, systemFile, session, noTools = false, hooks = null }) {
   const args = [
     '-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--permission-mode', 'dontAsk',
     '--setting-sources', 'project,local', '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers }),
@@ -151,6 +151,7 @@ export function claudeArgs({ model, effort, tools = [], disallowed = [], addDirs
   if (effort) args.push('--effort', String(effort));
   const settings = { claudeMdExcludes: userClaudeExcludes() };
   if (!attribution) Object.assign(settings, { includeCoAuthoredBy: false, attribution: { commit: '', pr: '' } });
+  if (hooks) settings.hooks = hooks;
   args.push('--settings', JSON.stringify(settings));
   if (systemFile) args.push('--append-system-prompt-file', systemFile);
   if (session?.resume) args.push('--resume', session.id);
@@ -168,7 +169,8 @@ export function claudeArgs({ model, effort, tools = [], disallowed = [], addDirs
 /**
  * Runs one step. Returns { promise, cancel }. The time limit is the only cap: there is no spending cap.
  * options: dir, prompt, system (the agent's instructions), model, effort, tools, disallowed, addDirs (more folders
- * the agent may read), mcpServers (the external tools from Chiefmate's settings, by name), env (more environment
+ * the agent may read), mcpServers (the external tools from Chiefmate's settings, by name), hooks (Chiefmate's own, such
+ * as the guard of a live session: see guard.mjs), env (more environment
  * variables), attribution (false: commits and pull requests don't credit Claude), maxMinutes, isHeld() (true while
  * the agent waits for the owner: that time doesn't count against maxMinutes), session ({ id, resume }),
  * log (a .jsonl file), onEvent(event).

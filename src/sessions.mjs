@@ -9,13 +9,14 @@
 // processes by its command line. Ending a session stops its processes and everything under it.
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, createWriteStream, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, createWriteStream, existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { stepMcp, userClaudeExcludes } from './access.mjs';
 import { describeAction, environment, executable as claudeExecutable, runClaude } from './claude.mjs';
 import { loadConfig } from './config.mjs';
+import { API, guardHooks, publishing } from './guard.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { computer, formatBytes, processes, refreshProcesses } from './machine.mjs';
 import { reportEvent } from './news.mjs';
@@ -381,12 +382,16 @@ export async function endSession(id) {
 // Claude Code's tools in a session in the app: reading, editing and the terminal, with no prompt to ask first.
 const APP_TOOLS = ['Read', 'Glob', 'Grep', 'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'Bash', 'TodoWrite', 'WebSearch', 'WebFetch', 'Agent', 'Task'];
 // What leaves this computer or changes where it goes: refused until the owner allows it in the app (a permission request).
+// These rules catch the commands that start with them; the guard (guard.mjs) catches the rest, however they are written
+// (git -C dir push, bash -c "git push", a pull request opened through GitHub's API), and refuses them the same way.
 export const ASK_FIRST = ['Bash(git push:*)', 'Bash(gh pr:*)', 'Bash(gh repo:*)', 'Bash(git remote:*)'];
 // The longest a turn may work before it is stopped.
 const TURN_MINUTES = 180;
 
 export const historyFile = id => path.join(SESSIONS, `${id}.jsonl`);
 const rawLog = id => path.join(SESSIONS, `${id}.raw.jsonl`);
+// What the guard refused in the turn going on, one tool call a line, read when the turn ends.
+const guardLog = id => path.join(SESSIONS, `${id}.guard.jsonl`);
 
 // The turns going on: id -> { since, pid, cancel, last: { at, text }, ending }.
 const live = new Map();
@@ -546,12 +551,14 @@ export function deliverSession(id) {
     }
   };
   const mcp = sessionMcp(config, session);
+  rmSync(guardLog(id), { force: true });
   // One call of Claude Code; when its session is not where the turn count says (see SESSION_EXISTS), once more the other way.
   const claudeTurn = (resume, retried = false) => {
     const run = runClaude({
       dir: session.cwd, prompt, system: appSystem(config.owner || 'the owner'), model: session.model ?? config.default_model,
       tools: [...APP_TOOLS, ...mcp.tools, ...(session.allowed ?? []).filter(r => !ASK_FIRST.includes(r))],
       disallowed: ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r)), mcpServers: mcp.servers,
+      hooks: guardHooks({ log: guardLog(id), allowed: session.allowed ?? [] }),
       attribution: config.attribution !== false, maxMinutes: TURN_MINUTES,
       session: { id: session.toolSession, resume }, log: rawLog(id), onEvent,
     });
@@ -618,8 +625,16 @@ function finishTurn(id, turn, r) {
   } else if (!r.ok && !turn.ending && r.error) {
     note(id, t('The turn ended with an error: {error}', { error: clip(r.error, 600) }), { error: true });
   }
-  // What Claude Code was refused for lack of permission: one request each, for the owner to allow or refuse.
-  for (const d of r.denials ?? []) {
+  // What Claude Code or the guard refused for lack of permission: one request each, for the owner to allow or refuse.
+  const guarded = existsSync(guardLog(id)) ? readFileSync(guardLog(id), 'utf8').split('\n').filter(Boolean).flatMap(line => {
+    try {
+      return [JSON.parse(line)];
+    } catch {
+      return [];
+    }
+  }) : [];
+  rmSync(guardLog(id), { force: true });
+  for (const d of [...(r.denials ?? []), ...guarded]) {
     const ask = permissionOf(d, session.cwd);
     if ((session.requests ?? []).some(x => x.kind === 'permission' && x.status === 'open' && x.rule === ask.rule)) continue;
     const request = { id: randomUUID().slice(0, 8), kind: 'permission', ...ask, status: 'open', at: now() };
@@ -637,11 +652,11 @@ function permissionOf(denial, dir) {
   const input = denial?.tool_input ?? {};
   if (tool === 'Bash') {
     const command = String(input.command ?? '');
-    // Any part of a compound command ("cd x && git push") may be the one refused.
-    const parts = command.split(/&&|\|\||[;|\n]/).map(p => p.trim());
-    const rule = ASK_FIRST.find(r => parts.some(p => p.startsWith(r.slice(5, -3)))) ?? `Bash(${command.trim().split(/\s+/).slice(0, 2).join(' ')}:*)`;
-    const part = parts.find(p => p.startsWith(rule.slice(5, -3))) ?? command;
-    return { tool, rule, what: t('Ran: {command}', { command: clip(command, 200) }), explain: { ...explainCommand(part, dir), command: clip(command, 2000) } };
+    // Any part of the command may be the one refused ("cd x && git push", "git -C x push", "bash -c '...'").
+    const found = publishing(command)[0];
+    const rule = found?.rule ?? `Bash(${command.trim().split(/\s+/).slice(0, 2).join(' ')}:*)`;
+    const where = found?.dir && dir ? path.resolve(dir, found.dir) : dir;
+    return { tool, rule, what: t('Ran: {command}', { command: clip(command, 200) }), explain: { ...explainCommand(found?.part ?? command, where), command: clip(command, 2000) } };
   }
   const what = describeAction(tool, input, dir);
   return { tool, rule: tool, what, explain: { summary: what, where: dir ?? '', ...unknownEffect(), command: clip(JSON.stringify(input), 2000) } };
@@ -678,6 +693,15 @@ function explainCommand(command, dir) {
   };
   const plain = args.filter(a => !a.startsWith('-'));
   if (program === 'git' && group === 'push') return explainPush(args, dir);
+  if (publishing(command)[0]?.rule === API) {
+    // A change on GitHub through its API: the address says where; a POST to ".../pulls" opens a pull request.
+    const address = words(command).find(a => /^(https:\/\/api\.github\.com)?\/?(repos|user|orgs|gists|graphql)\b/i.test(a)) ?? '';
+    const repo = /repos\/([^/\s]+\/[^/\s?]+)/.exec(address)?.[1] ?? origin();
+    const opening = /repos\/[^/]+\/[^/]+\/pulls\/?$/.test(address) && !/\b(PATCH|PUT|DELETE)\b/i.test(command);
+    return opening
+      ? { summary: t("Open a pull request on {repo} through GitHub's API", { repo }), where: repo, change: t('A proposal of change appears there, with a title and a description, and whoever follows the repository is notified.'), undo: t('Partly: it can be closed, but it stays visible.'), risk: 'low', why: t('Nothing goes into the code until someone merges it.') }
+      : { summary: t('Change something on GitHub through its API ({address})', { address: address || '?' }), where: repo, ...unknownEffect() };
+  }
   if (program === 'gh' && group === 'pr') {
     const [action = 'status', ...rest] = plain;
     // The number, given alone (12, #12) or in its address (…/pull/12), wherever it comes among the options.
