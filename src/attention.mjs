@@ -27,12 +27,12 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
   const list = [];
   const add = item => list.push({ project: null, run: null, at: null, seenable: true, ...item });
 
-  // Urgent: a step or a live session waits for the owner.
+  // Urgent: a step or a live session waits for the owner (a session's permission asked included).
   for (const n of needs) {
     add({
-      id: `needs:${n.run ?? n.session}:${n.id}`, level: 'urgent', kind: 'needs', title: t('Needs you'), text: t('{task}: {what}', { task: n.title, what: n.what }),
-      view: 'operations', project: n.project ?? null, run: n.run ?? null, at: n.at, seenable: false,
-      request: { id: n.id, run: n.run ?? null, session: n.session ?? null, url: n.url ?? null, openError: n.openError ?? null, agent: n.agent ?? null },
+      id: `needs:${n.run ?? n.session}:${n.id}`, level: 'urgent', kind: 'needs', title: n.kind === 'permission' ? t('Asks your permission') : t('Needs you'),
+      text: t('{task}: {what}', { task: n.title, what: n.what }), view: 'operations', project: n.project ?? null, run: n.run ?? null, at: n.at, seenable: false,
+      request: { id: n.id, kind: n.kind ?? null, run: n.run ?? null, session: n.session ?? null, url: n.url ?? null, openError: n.openError ?? null, agent: n.agent ?? null },
     });
   }
   // Urgent: a run failed (until a newer run of the same work starts, or 3 days go by).

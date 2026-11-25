@@ -303,6 +303,8 @@ export function runClaude(options) {
         context: { ...context },
         subagents: final?.subagent_stats?.spawned ?? 0,
         end: final?.subtype ?? null,
+        // The tool uses refused for lack of permission: { tool_name, tool_use_id, tool_input }.
+        denials: Array.isArray(final?.permission_denials) ? final.permission_denials : [],
       };
       if (cancelReason) result.error = cancelReason;
       else if (interrupted) result.error = null;

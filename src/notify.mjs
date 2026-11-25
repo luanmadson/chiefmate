@@ -27,7 +27,8 @@ export function toastXml(title, text, target = 'chiefmate:operations', { urgent 
 
 export function notify(title, text, target = 'chiefmate:operations', { urgent = false } = {}) {
   recordNotification(title, text, urgent ? 'urgent' : null);
-  if (process.platform !== 'win32') return;
+  // The smoke test shows nothing on the owner's screen.
+  if (process.platform !== 'win32' || process.env.CHIEFMATE_SMOKE) return;
   const toast = toastXml(title, text, target, { urgent });
   const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', SCRIPT], {
     env: { ...process.env, CHIEFMATE_TOAST: toast },

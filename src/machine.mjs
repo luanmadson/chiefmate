@@ -8,7 +8,7 @@ import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { queued } from './queue.mjs';
 import { liveRuns } from './runs.mjs';
-import { readSession, sessionIdOf } from './sessions.mjs';
+import { appSessionPids, readSession, sessionIdOf } from './sessions.mjs';
 import { clip, WORKSPACES } from './util.mjs';
 
 export const SUPPORTED = process.platform === 'win32';
@@ -120,12 +120,14 @@ function group(config, list) {
       crewProject.set(pid, l.project);
     }
   }
-  // The live sessions: each one's window process ("cli.mjs session-run <id>") and everything under it.
+  // The live sessions in a window: each one's window process ("cli.mjs session-run <id>") and everything under it.
   const sessionOf = new Map();
   for (const p of list) {
     const id = sessionIdOf(p.cmd);
     if (id) for (const pid of subtree(p.pid, children)) sessionOf.set(pid, id);
   }
+  // The sessions in the app: the tool of each turn going on (started by Chiefmate) and everything under it.
+  for (const [root, id] of appSessionPids()) if (byPid.has(root)) for (const pid of subtree(root, children)) sessionOf.set(pid, id);
   // The projects' development environments started from the app: each one's window process and everything under it.
   const devOf = new Map();
   for (const p of list) {
@@ -173,7 +175,8 @@ function group(config, list) {
   const chiefmate = [...mine].map(pid => byPid.get(pid)?.ram ?? 0).reduce((a, b) => a + b, 0);
   const sessionList = [...sessions.values()].map(s => {
     const items = s.pids.map(pid => describe(byPid.get(pid))).sort((a, b) => b.ram - a.ram);
-    const window = s.pids.find(pid => sessionIdOf(byPid.get(pid)?.cmd) === s.id);
+    const roots = new Set(appSessionPids().filter(([, id]) => id === s.id).map(([pid]) => pid));
+    const window = s.pids.find(pid => sessionIdOf(byPid.get(pid)?.cmd) === s.id || roots.has(pid));
     return { id: s.id, name: s.record?.name ?? s.id, project: s.record?.project ?? null, pid: window ?? null, ram: sum(items), processes: items };
   });
   // Each development environment: its window process and its memory, all it started included.
