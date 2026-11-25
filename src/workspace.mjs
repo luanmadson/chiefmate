@@ -274,23 +274,43 @@ export async function advanceClone(clone, branch, base) {
 const TRACE = /chiefmate/i;
 const TRACE_COMMIT = /chiefmate|co-authored-by:.*(claude|anthropic)|generated with.*claude/i;
 
-/** What in the run's work names Chiefmate: commit messages and authors, file names and added lines. */
+/**
+ * What in the run's work names Chiefmate: commit messages and authors, file names and added lines. Only the run's own
+ * work counts: commits already on a branch of origin (such as the main branch's, merged in during the run) and the
+ * lines they brought are someone else's.
+ */
 export async function traces(dir, base) {
-  const range = `origin/${base}..HEAD`;
+  const branch = await git(dir, 'branch', '--show-current');
+  // The run's branch itself may already be on origin (a pull request that failed after the push).
+  const own = ['HEAD', '--not', ...(branch ? [`--exclude=refs/remotes/origin/${branch}`] : []), '--remotes', `origin/${base}`];
   const found = [];
-  const log = await git(dir, 'log', '--format=%h %an <%ae> %cn <%ce>%n%B%x00', range);
+  const log = await git(dir, 'log', '--format=%h %an <%ae> %cn <%ce>%n%B%x00', ...own);
   for (const entry of log.split('\0').map(e => e.trim()).filter(Boolean)) {
     if (TRACE_COMMIT.test(entry) || /claude|anthropic/i.test(entry.split('\n')[0])) found.push(t('commit {commit}', { commit: entry.split(' ')[0] }));
   }
-  const files = (await git(dir, 'diff', '--name-only', `origin/${base}...HEAD`)).split('\n').filter(f => TRACE.test(f));
+  const ownCommits = new Set((await git(dir, 'rev-list', ...own)).split('\n').filter(Boolean));
+  const ownFiles = new Set((await git(dir, 'log', '--name-only', '--format=', ...own)).split('\n').filter(Boolean));
+  const files = (await git(dir, 'diff', '--name-only', `origin/${base}...HEAD`)).split('\n').filter(f => TRACE.test(f) && ownFiles.has(f));
   found.push(...files.map(file => t('file {file}', { file })));
+  // Added lines naming Chiefmate, by file and line number in HEAD.
   let file = null;
-  const lines = new Set();
+  let number = 0;
+  const lines = new Map();
   for (const line of (await git(dir, 'diff', '-U0', '--no-color', `origin/${base}...HEAD`)).split('\n')) {
-    if (line.startsWith('+++ ')) file = line.replace(/^\+\+\+ (b\/)?/, '');
-    else if (line.startsWith('+') && TRACE.test(line) && file) lines.add(file);
+    const hunk = line.match(/^@@ -\S+ \+(\d+)/);
+    if (hunk) number = Number(hunk[1]);
+    else if (line.startsWith('+++ ')) file = line === '+++ /dev/null' ? null : line.replace(/^\+\+\+ (b\/)?/, '');
+    else if (line.startsWith('+') && file) {
+      if (TRACE.test(line)) lines.set(file, [...(lines.get(file) ?? []), number]);
+      number++;
+    }
   }
-  found.push(...[...lines].map(f => t('text in {file}', { file: f })));
+  // Only those the run's own commits wrote (git blame), not those merged in from elsewhere.
+  for (const [f, numbers] of lines) {
+    const blame = await git(dir, 'blame', '-s', '-l', ...numbers.flatMap(n => ['-L', `${n},${n}`]), 'HEAD', '--', f).catch(() => '');
+    const authors = blame.split('\n').map(l => l.split(' ')[0].replace(/^\^/, '')).filter(Boolean);
+    if (!blame || authors.some(c => ownCommits.has(c))) found.push(t('text in {file}', { file: f }));
+  }
   return found;
 }
 
