@@ -101,11 +101,15 @@ export async function checkAutopilot({ config = loadConfig(), usage = readUsage(
     const items = planItems();
     const idle = idleProjects(config, runs);
     // Approved items normally start by themselves when the run before them ends; this catches any left behind.
-    if (items.some(i => open(i) && i.status === 'approved' && idle.has(i.project))) {
+    const waiting = new Set(items.filter(i => open(i) && i.status === 'approved' && idle.has(i.project)).map(i => i.project));
+    if (waiting.size) {
       await startApproved();
       done.started = true;
-    } else if (!blockReason(settings, usage, at)) {
+    }
+    if (!blockReason(settings, usage, at)) {
       for (const project of idle) {
+        // a project with an approved item waiting gets that one, not the manager
+        if (waiting.has(project)) continue;
         const next = candidates(project, items);
         if (!next.length) continue;
         const last = runs.find(r => r.project === project);
@@ -119,7 +123,8 @@ export async function checkAutopilot({ config = loadConfig(), usage = readUsage(
     }
   }
   done.report = dailyReport(settings, a, at, config);
-  if (JSON.stringify(a) !== before) saveState(state);
+  // read again: others may have saved the state meanwhile (startApproved is awaited)
+  if (JSON.stringify(a) !== before) saveState({ ...readState(), autopilot: a });
   return done;
 }
 
