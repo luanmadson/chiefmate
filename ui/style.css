@@ -510,7 +510,7 @@ details summary { cursor: pointer; }
 .agent-head .hint { overflow: hidden; text-overflow: ellipsis; }
 .agent-section { margin: 12px 0 6px; }
 .agent-feed { flex: 1 1 60%; min-height: 120px; overflow-y: auto; font: 12px/1.6 var(--mono); background: var(--bg); border: 1px solid var(--line); padding: 8px 10px; }
-.agent-feed .feed-action { display: grid; grid-template-columns: 70px 1fr; gap: 8px; color: var(--text); }
+.agent-feed .feed-action { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 8px; color: var(--text); overflow-wrap: anywhere; }
 .agent-feed .feed-tool { color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-feed .feed-say { margin: 6px 0; padding-left: 10px; border-left: 2px solid var(--line-strong); font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; font-size: 12.5px; color: var(--muted); }
 .agent-feed .feed-say p, .agent-feed .feed-say ul, .agent-feed .feed-say ol { margin: 2px 0; }
@@ -829,7 +829,7 @@ details summary { cursor: pointer; }
     border: 0; border-top: 2px solid transparent; background: transparent; color: var(--muted); font: inherit; font-size: 11.5px; white-space: nowrap; cursor: pointer;
   }
   .nav > a > span:first-child, .nav-more > span:first-child { grid-column: 1 / -1; max-width: 100%; overflow: hidden; text-overflow: ellipsis; line-height: 22px; }
-  .nav .counter { grid-area: 2 / 2; font-size: 10.5px; }
+  .nav .counter { grid-area: 2 / 2; font-size: 11px; }
   .nav .nav-attn { grid-area: 2 / 3; }
   .nav > a.active, .nav-more.active { color: var(--strong); background: var(--raised); border-top-color: var(--accent); border-bottom: 0; }
   .nav-more[aria-expanded="true"] { color: var(--strong); }
@@ -840,17 +840,13 @@ details summary { cursor: pointer; }
   .nav.open > a.nav-extra.active { border-left-color: var(--accent); }
   .nav.open > a.nav-extra > span:first-child { flex: 1; }
 
-  /* The notices: closed, two lines of text with no "where and when", so the band keeps its height; open, it scrolls.
+  /* The notices: closed, one row of two lines of text with no "where and when" (below); open, it scrolls.
      On the manager's page, the notices with a decision card are left to the cards (drawAlerts in ui/app.js). */
   .attn-band { position: relative; max-height: 40dvh; overflow-y: auto; }
   .attn-band > .attn:first-child { padding-top: 7px; padding-bottom: 7px; }
   .attn-band:not(:has([data-attn-more][aria-expanded="true"])) .attn-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
   .attn-band:not(:has([data-attn-more][aria-expanded="true"])) .attn-text .hint { display: none; }
-  .attn-band .attn-level { font-size: 10.5px; }
   .attn-band .attn-actions .button, .attn-more .button { min-width: 44px; }
-  /* Closed, "+N more" sits beside the notice's buttons instead of a row of its own */
-  .attn-band:has(> .attn-more):not(:has([data-attn-more][aria-expanded="true"])) .attn-actions { min-height: 44px; padding-right: 118px; }
-  .attn-band:not(:has([data-attn-more][aria-expanded="true"])) > .attn-more { position: absolute; right: 14px; bottom: 9px; padding: 0; }
 
   /* The toasts above the bottom bar; an agent's panel from the title bar down to the visible bottom (above the keyboard) */
   .toast { bottom: calc(68px + env(safe-area-inset-bottom)); }
@@ -942,4 +938,88 @@ details summary { cursor: pointer; }
   .table:not(.inner) > tbody > tr > td.num { font-size: 12px; color: var(--muted); }
   .table .run-line { max-width: 100%; white-space: normal; }
   .table.inner { display: block; overflow-x: auto; }
+  /* A touch keeps :hover on the row tapped: the whole card lights up, not patches of its cells */
+  .table:not(.inner) > tbody > tr.clickable:hover > td { background: transparent; }
+  .table:not(.inner) > tbody > tr.clickable:hover { background: var(--hover); }
+
+  /* Type: 15 px for reading, as in a phone's own apps; hints, states and buttons a step below */
+  body { font-size: 15px; }
+  .hint, .table .secondary, .live-step, .project-status, .crew-now, .crew-role, .decision-third, .decision-detail, .decision-facts { font-size: 13.5px; }
+  .attn-text .hint, .plan-recommend, .plan-reason, .plan-turn, .autopilot-today .secondary, .form label, .plan-filters label { font-size: 13px; }
+  .state, .live-summary, .radar-score, .radar-trend, .report-full > summary { font-size: 13px; }
+  .label, .table th, .msg-author, .attn-level, .context-heading { font-size: 11px; }
+  .button { font-size: 14px; }
+  .button.small, .suggestion, .tab, .plan-quick .tab, .menu-item, .decision-line, .decisions-bar, .decision-what, .autopilot-today li, .facts, .crew-card .facts { font-size: 14px; }
+  .nav > a, .nav-more { font-size: 12px; }
+  .live-title, .mission h2, .crew-card h2, .radar-head h3, .detail h2 { font-size: 16px; }
+
+  /* Headers: the title only (the bottom bar already says where you are); the description is for wider screens */
+  .view-header { margin-bottom: 12px; padding-bottom: 10px; align-items: center; }
+  .view-header p, #view-session .view-header { display: none; }
+  .view-header h1, .project-head h1 { font-size: 18px; }
+  .section-title { margin: 22px 0 10px; }
+  .panel { padding: 14px; }
+
+  /* The title bar: the away button without a box, so the bar reads as one line */
+  .titlebar .away { border-color: transparent; }
+
+  /* The band: one compact row (the mark, two lines of text, the action and "+N more"); the level is the mark's color */
+  .attn-level { font-size: 0; gap: 0; }
+  .attn { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 6px 10px; }
+  .attn > .attn-level { padding-top: 6px; }
+  .attn > .attn-actions { grid-column: 2; }
+  .attn > .attn-actions:empty { display: none; }
+  .attn-band:not(:has([data-attn-more][aria-expanded="true"])) { display: flex; align-items: center; }
+  .attn-band:not(:has([data-attn-more][aria-expanded="true"])) > .attn { flex: 1; min-width: 0; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; padding: 6px 8px 6px 12px; border-bottom: 0; background: transparent; }
+  .attn-band:not(:has([data-attn-more][aria-expanded="true"])) > .attn > .attn-level { padding-top: 0; }
+  .attn-band:not(:has([data-attn-more][aria-expanded="true"])) > .attn > .attn-actions { grid-column: 3; min-height: 0; padding-right: 0; }
+  .attn-band:not(:has([data-attn-more][aria-expanded="true"])) .attn-text { font-size: 14px; line-height: 1.4; }
+  .attn-band:not(:has([data-attn-more][aria-expanded="true"])) > .attn-more { position: static; flex: none; padding: 0 12px 0 0; }
+  .attn-band { background: var(--attn-bg); border-left: 3px solid var(--attn); }
+  .attn-band .attn { border-left: 0; }
+
+  /* The running work: the face smaller, the title on up to two lines */
+  .live { grid-template-columns: 40px minmax(0, 1fr) auto; padding: 12px; }
+  .live .face { width: 40px; height: 40px; }
+  .live-title { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+  .live-clock .label { display: none; }
+
+  /* The manager's conversation from edge to edge, as in a messaging app */
+  #view-manager .chat-column, .live-session .chat-column { margin: 0 -12px; border-left: 0; border-right: 0; }
+  /* Long values (addresses, usage lines) wrap instead of widening the page */
+  .facts dd, .project-facts dd { overflow-wrap: anywhere; }
+  .meter-top .num { white-space: normal; text-align: right; }
+  .msg.news { border-left-width: 3px; }
+  /* A message's head wraps between its parts, never inside a word ("MANAGER", the time, "NOTICE") */
+  .msg-head { flex-wrap: wrap; row-gap: 2px; }
+  .msg-head > * { flex: none; white-space: nowrap; }
+  .msg-head > .msg-events { flex: 1 1 100%; min-width: 0; white-space: normal; }
+
+  /* An agent's panel: its head in fewer lines */
+  .agent-panel-head { padding-bottom: 8px; }
+  .agent-section { margin: 8px 0 4px; }
+
+  /* Crew and teams: smaller faces, states that wrap instead of widening the page */
+  .crew-card { grid-template-columns: 48px minmax(0, 1fr); gap: 12px; padding: 12px; }
+  .crew-card .face { width: 48px; height: 48px; }
+  .crew-card .state, .team-member .state { white-space: normal; }
+  .crew-card .facts { grid-template-columns: 92px minmax(0, 1fr); }
+
+  /* A project's page: "More" beside the name, the description in two lines */
+  .project-head-top { flex-wrap: nowrap; }
+  .project-head-top > :first-child { min-width: 0; }
+  .project-head-top p { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+  .project-main-actions { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .action-big { padding: 10px 14px; }
+
+  /* Fields in the app's own look (Safari draws a gray bubble otherwise); tabs scroll without a bar */
+  select, select.inline-select { appearance: none; -webkit-appearance: none; padding-right: 30px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238a93a0'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; text-overflow: ellipsis; }
+  select.inline-select { min-width: 0; font-size: 14px; }
+  .tabs { scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+
+  /* The bottom bar: the info marks stay off it (each section lists them); the marks that matter stand out */
+  .nav .attn-mark[data-level="info"] { display: none; }
+  .nav.open { box-shadow: 0 -12px 28px rgba(0, 0, 0, 0.45); }
+  .nav.open > a.nav-extra { color: var(--text); }
 }

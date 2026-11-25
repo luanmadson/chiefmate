@@ -638,9 +638,11 @@ function archiveHtml(items) {
 let attnOpen = false; // the band shows every notice, not only the most urgent
 /** The band at the top: the most urgent notice and how many others, opening into all of them. Nothing is paused. */
 function drawAlerts() {
-  // On a phone's manager page, the notices that have a decision card are left to the cards, right below.
-  const carded = phoneQuery.matches && currentView() === 'manager' ? new Set(decisionsNow().map(c => c.id)) : new Set();
-  const list = attnItems().filter(i => !carded.has(i.id));
+  // On a phone's manager page, the notices that have a decision card are left to the cards, right below. On a phone,
+  // the band keeps its room for what needs the owner: the info notices stay in each section's list.
+  const phone = phoneQuery.matches;
+  const carded = phone && currentView() === 'manager' ? new Set(decisionsNow().map(c => c.id)) : new Set();
+  const list = attnItems().filter(i => !carded.has(i.id) && !(phone && i.level === 'info'));
   const fresh = unseen(list);
   if (!fresh.length && !attnOpen) return draw('#alerts', '', '');
   const others = fresh.length - 1;
