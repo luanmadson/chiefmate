@@ -220,7 +220,7 @@ function follow(item, run) {
     if (status) item.status = status;
     changed = true;
   }
-  // Its work discarded (from the app, or its pull request closed on GitHub without a merge, src/attention.mjs):
+  // Its work discarded (from the app, a closed pull request, or a deleted local branch without a known merge):
   // nothing waits for the owner's approval; the item is theirs to decide again (to do, without an agent to do it).
   // A "now" becomes "later": the autopilot does not redo work the owner turned down.
   if (run.discarded && item.status === 'waiting_owner') {

@@ -901,6 +901,10 @@ async function main() {
         return;
       }
       const m = await api('/api/merge', { run: id, by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' });
+      if (m.discarded || m.merged.by === 'outside') {
+        console.log(m.discarded ? `Local branch deleted: ${m.branch}.` : `Branch already merged: ${m.branch}.`);
+        return;
+      }
       console.log(m.kind === 'pr' ? `Merged: ${m.url}.` : `Merged: ${m.branch} into ${m.base}, in ${m.dir}. Nothing was sent to GitHub.`);
       if (m.copies?.done?.length) console.log(`Updated after the merge: ${m.copies.done.join(', ')}.`);
       if (m.copiesNote) console.log(`Not updated: ${m.copiesNote}`);

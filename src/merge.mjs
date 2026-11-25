@@ -11,11 +11,11 @@ import path from 'node:path';
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { reportEvent } from './news.mjs';
-import { readRun, runDir, saveRun } from './store.mjs';
+import { readRun, runDir, saveRun, settleRunOutside } from './store.mjs';
 import { projectClone } from './sessions.mjs';
 import { checkNow } from './update.mjs';
 import { clip, now, ROOT, WORKSPACES } from './util.mjs';
-import { baseBranch, fastForward, prepareLibrary, projectDir, projectLibraries, run as exec } from './workspace.mjs';
+import { baseBranch, fastForward, localBranchState, localDeliveryClone, prepareLibrary, projectDir, projectLibraries, run as exec } from './workspace.mjs';
 
 /** What a finished run would merge: its pull request, or its branch in the owner's clone. Throws when there is nothing. */
 async function target(run, config) {
@@ -26,10 +26,11 @@ async function target(run, config) {
   if (!run.delivered) throw new Error(t('This run has nothing to merge: no pull request and no branch delivered.'));
   const project = config.projects?.[run.project];
   // Without a clone of the owner's, the branch stays in the crew's working copy, which is reset before every run.
-  if (!project?.local_clone || path.resolve(project.local_clone) !== path.resolve(run.delivered)) {
+  const dir = localDeliveryClone(run, config);
+  if (!dir) {
     throw new Error(t('The branch {branch} is not in a clone of yours (local_clone): merge it by hand.', { branch: run.branch }));
   }
-  return { kind: 'local', dir: project.local_clone, branch: run.branch, base: await baseBranch(project) };
+  return { kind: 'local', dir, branch: run.branch, base: run.base ?? await baseBranch(project) };
 }
 
 /** The final review's verdict, from the pull request text Chiefmate wrote (in either language). */
@@ -57,13 +58,26 @@ export async function previewMerge(id, config = loadConfig()) {
 
 const git = (dir, ...args) => exec('git', args, dir);
 
+/** The delivery may have settled since the app last drew its Approve button. */
+async function resolveLocal(run, config) {
+  if (run?.status !== 'done' || run.pullRequest || !run.delivered) return null;
+  if (!run.merged && !run.discarded) {
+    const state = await localBranchState(run, config);
+    if (!state) return null;
+    run = settleRunOutside(run, state);
+  }
+  const outcome = run?.merged ?? run?.discarded;
+  if (outcome?.by !== 'outside' || outcome.how !== 'local') return null;
+  return { run: run.id, kind: 'local', branch: run.branch, merged: run.merged, discarded: run.discarded };
+}
+
 /** Merges the run's branch into the base branch checked out in the owner's clone, refusing anything unclear. */
 async function mergeLocal({ dir, branch, base }) {
   const current = (await git(dir, 'branch', '--show-current')).output.trim();
   if (current !== base) throw new Error(t('Check out {base} in {path} first: it has {current} checked out now.', { base, path: dir, current: current || '-' }));
   const status = await git(dir, 'status', '--porcelain', '--untracked-files=no');
   if (status.code !== 0 || status.output.trim()) throw new Error(t('{path} has changes not committed: commit them or put them aside first.', { path: dir }));
-  const r = await git(dir, 'merge', '--no-ff', '--no-edit', branch);
+  const r = await git(dir, 'merge', '--no-ff', '--no-edit', `refs/heads/${branch}`);
   if (r.code !== 0) {
     await git(dir, 'merge', '--abort');
     throw Object.assign(new Error(t("The branch {branch} doesn't merge cleanly into {base}: nothing was changed. {output}", { branch, base, output: clip(r.output, 400) })), { conflict: true, detail: clip(r.output, 400) });
@@ -127,6 +141,8 @@ export async function refreshCopies(run, where, config = loadConfig(), { library
  */
 export async function mergeRun(id, { by = 'owner' } = {}, config = loadConfig()) {
   const run = readRun(String(id ?? ''));
+  const settled = await resolveLocal(run, config);
+  if (settled) return settled;
   const where = await target(run, config);
   try {
     if (where.kind === 'pr') {
@@ -139,6 +155,10 @@ export async function mergeRun(id, { by = 'owner' } = {}, config = loadConfig())
       await mergeLocal(where);
     }
   } catch (error) {
+    if (where.kind === 'local') {
+      const settled = await resolveLocal(run, config);
+      if (settled) return settled;
+    }
     // The manager knows when its own merge fails: only the owner's is news to it.
     if (by !== 'manager' && reportFailure(run, where, error, config)) {
       error.message += ` ${error.conflict ? t('The manager was told and queues the fix.') : t('The manager was told and will say what to do.')}`;

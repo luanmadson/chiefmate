@@ -235,6 +235,29 @@ export async function runChecks(dir, commands = []) {
 /** Local delivery: copies the run's branch into your own clone of the project. Nothing goes to GitHub. */
 export const deliverToClone = (dir, branch, clone) => git(dir, 'push', clone, `refs/heads/${branch}:refs/heads/${branch}`);
 
+/** The owner's clone in which this run was delivered. */
+export function localDeliveryClone(run, config) {
+  const clone = config?.projects?.[run.project]?.local_clone;
+  return !run.pullRequest && clone && run.delivered && path.resolve(clone) === path.resolve(run.delivered) ? clone : null;
+}
+
+/** The local delivery's state, using the base it started from even when another branch is checked out. */
+export async function localBranchState(delivery, config) {
+  const clone = localDeliveryClone(delivery, config);
+  if (!clone || !delivery.branch || !existsSync(path.join(clone, '.git'))) return null;
+  const git = (...args) => run('git', args, clone, { maxMinutes: 1 });
+  const ref = `refs/heads/${delivery.branch}`;
+  const refs = await git('for-each-ref', '--format=%(refname)', ref);
+  if (refs.code !== 0) return null;
+  const exists = refs.output.split(/\r?\n/).includes(ref);
+  const tip = exists ? ref : delivery.deliveredCommit;
+  if (tip) {
+    const base = delivery.base ?? await baseBranch(config.projects[delivery.project]).catch(() => null);
+    if (base && base !== delivery.branch && (await git('merge-base', '--is-ancestor', tip, `refs/heads/${base}`)).code === 0) return 'branch';
+  }
+  return exists ? null : 'deleted';
+}
+
 // ---------- No trace of Chiefmate ("no_trace", on by default with local delivery) ----------
 
 /** Whether the project's work must not show Chiefmate to others: its branch names, commits and files. */

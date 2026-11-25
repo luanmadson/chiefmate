@@ -1,16 +1,16 @@
 // What needs the owner, in three levels, for the whole app: urgent (act now), important (decide soon) and info
 // (good to know). A notice fades when marked as seen and goes to the archive when it no longer needs the owner: its
-// cause ended, its pull request was merged or closed (or its branch merged in the owner's clone), or, for an info
+// cause ended, its pull request was merged or closed (or its local branch merged or deleted), or, for an info
 // notice, once seen or a day old. Work merged outside Chiefmate marks its run as merged, so its board item is done;
-// a pull request closed without a merge marks its run as discarded, and its item goes back to the owner's decision.
+// a pull request closed or a local branch deleted without a known merge sends its item back to the owner's decision.
 // Nothing is lost: the archive keeps the last ARCHIVE_MAX. In data/state.json: the seen marks ("attention_seen"), the
 // notices shown last time ("attention_shown") and the archive ("attention_archive").
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
 import { RAM_LOW, availableResets, current } from './plan.mjs';
-import { readRun, readState, saveRun, saveState } from './store.mjs';
+import { readState, saveState, settleRunOutside } from './store.mjs';
 import { readerSettings, readerStatus } from './usagepage.mjs';
-import { now, ROOT } from './util.mjs';
-import { baseBranch, run as exec } from './workspace.mjs';
+import { ROOT } from './util.mjs';
+import { baseBranch, localBranchState, run as exec } from './workspace.mjs';
 
 export const LEVELS = ['urgent', 'important', 'info'];
 const HOUR = 3600_000;
@@ -103,10 +103,12 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
   // or a crew proposal the manager triaged ("decision": the Planning view decides it in its Decide block).
   const waiting = items.filter(i => !i.archived && i.status === 'waiting_owner');
   for (const i of waiting) {
+    const delivery = runs.find(r => r.id === i.run && r.delivered && !r.pullRequest);
+    const url = delivery ? null : i.pr ?? null;
     add({
-      id: `plan:${i.id}:${i.pr ?? ''}`, level: 'important', kind: i.pr ? 'pr' : 'proposal', title: i.pr ? t('Pull request waiting for your approval') : t('Waiting for your action'),
-      text: `#${i.id} ${i.title}`, view: 'planning', project: i.project || null, at: i.updated ?? null, url: i.pr ?? null,
-      ...(i.pr || i.run ? prNotice(i.project, i.pr ? t('Pull request waiting for your approval') : t('Waiting for your action')) : {}),
+      id: `plan:${i.id}:${delivery?.id ?? url ?? ''}`, level: 'important', kind: url ? 'pr' : 'proposal', title: url ? t('Pull request waiting for your approval') : t('Waiting for your action'),
+      text: `#${i.id} ${i.title}`, view: 'planning', project: i.project || null, at: i.updated ?? null, url, run: delivery?.id ?? null,
+      ...(url || i.run ? prNotice(i.project, url ? t('Pull request waiting for your approval') : t('Waiting for your action')) : {}),
     });
   }
   for (const i of items.filter(i => !i.archived && i.status === 'triaged')) {
@@ -164,14 +166,18 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
     else if (i.level === 'info' && (seen[i.id] || (!i.lasting && i.at && !ago(i.at, DONE_FOR)))) toArchive(i, seen[i.id] ? 'seen' : 'expired');
     else active.push(i);
   }
-  // Settled outside Chiefmate: merged (on GitHub, or in the owner's clone), the run is merged and its board item done;
-  // closed on GitHub without a merge, the run is discarded and its item back to the owner's decision.
   for (const i of list) {
     const reason = archive[i.id]?.reason;
-    if (['merged', 'closed', 'branch'].includes(reason)) settledOutside(noticeRun(i, runs, items), reason, i.url);
+    if (final(reason)) settleRunOutside(noticeRun(i, runs, items), reason, i.url);
   }
   // Shown last time and gone now: its cause ended (for an info notice, its day).
-  for (const [id, i] of Object.entries(shown)) if (!ids.has(id) && !archive[id]) toArchive(i, i.level === 'info' ? 'expired' : 'resolved');
+  for (const [id, i] of Object.entries(shown)) {
+    if (ids.has(id) || archive[id]) continue;
+    const run = i.run && runs.find(r => r.id === i.run);
+    const reason = run?.merged?.by === 'outside' && run.merged.how === 'local' ? 'branch'
+      : run?.discarded?.by === 'outside' && run.discarded.how === 'local' ? 'deleted' : null;
+    toArchive(i, reason ?? (i.level === 'info' ? 'expired' : 'resolved'));
+  }
   const keptSeen = Object.fromEntries(Object.entries(seen).filter(([id]) => ids.has(id) && !archive[id]));
   const nowShown = Object.fromEntries(active.map(i => [i.id, compact(i)]));
   if (changed || Object.keys(keptSeen).length !== Object.keys(seen).length || !sameKeys(nowShown, shown)) {
@@ -194,17 +200,16 @@ export function attentionArchive() {
 }
 
 // ---------- The pull requests and branches already merged ----------
-// Asked in the background (gh and git), at most every CHECK_EVERY, and kept in memory: "merged" and "closed" are final.
+// Asked in the background (gh and git), at most every CHECK_EVERY, and kept in memory.
 
 const prStates = new Map(); // url -> { state: 'open' | 'merged' | 'closed' | null, checked }
-const branchStates = new Map(); // "project branch" -> { merged, checked }
+const branchStates = new Map(); // run id -> { state: 'branch' | 'deleted' | null, checked }
 let checking = null;
 let lastCheck = 0;
 
-const branchKey = r => `${r.project} ${r.branch}`;
-const final = state => state === 'merged' || state === 'closed';
+const final = state => ['merged', 'closed', 'branch', 'deleted'].includes(state);
 
-/** The run behind a pull request or board notice ("pr:<run>", or "plan:<n>:<url>" with the item's run). */
+/** The run behind a pull request or board notice. */
 function noticeRun(i, runs, items) {
   if (i.id.startsWith('pr:')) return runs.find(r => r.id === i.run) ?? null;
   if (!i.id.startsWith('plan:')) return null;
@@ -212,26 +217,13 @@ function noticeRun(i, runs, items) {
   return item?.run ? (runs.find(r => r.id === item.run) ?? null) : null;
 }
 
-/** Why a pull request or board notice no longer needs the owner, from what was checked: "merged", "closed" or "branch". */
+/** Why a pull request or board notice no longer needs the owner, from what was checked. */
 function resolution(i, runs, items) {
   if (!i.id.startsWith('pr:') && !i.id.startsWith('plan:')) return null;
   const state = i.url ? prStates.get(i.url)?.state : null;
   if (final(state)) return state;
   const r = noticeRun(i, runs, items);
-  return r?.branch && branchStates.get(branchKey(r))?.merged ? 'branch' : null;
-}
-
-/**
- * Records on a run what happened to its work outside Chiefmate ("by": "outside"): its pull request ("url") merged or
- * closed on GitHub ("merged", "closed": run.merged or run.discarded), or its branch merged in the owner's clone
- * ("branch"). Read from disk: the listed run may be a summary.
- */
-function settledOutside(listed, reason, url) {
-  const run = listed && readRun(listed.id);
-  if (!run || run.merged || run.discarded || run.status !== 'done') return;
-  if (reason === 'branch' ? !run.branch : run.pullRequest !== url) return;
-  run[reason === 'closed' ? 'discarded' : 'merged'] = { at: now(), by: 'outside', how: reason === 'branch' ? 'local' : 'pr' };
-  saveRun(run);
+  return r?.branch ? branchStates.get(r.id)?.state ?? null : null;
 }
 
 /** What to check for the notices shown: the pull requests' addresses and the runs whose branch may be merged. */
@@ -257,8 +249,9 @@ async function ghState(url) {
   return ['open', 'merged', 'closed'].includes(state) ? state : null;
 }
 
-/** Whether the run's branch is already in the base branch of the owner's clone (null when there is no way to tell). */
-async function branchMerged(run, config) {
+/** A pull request's branch can also be merged in the owner's clone. */
+async function branchState(run, config) {
+  if (!run.pullRequest) return localBranchState(run, config);
   const project = config?.projects?.[run.project];
   if (!project?.local_clone || !run.branch) return null;
   const git = (...args) => exec('git', args, project.local_clone, { maxMinutes: 1 });
@@ -266,8 +259,8 @@ async function branchMerged(run, config) {
   if (!base) return null;
   for (const ref of [run.branch, `origin/${run.branch}`]) {
     if ((await git('rev-parse', '--verify', '--quiet', `${ref}^{commit}`)).code !== 0) continue;
-    for (const into of [base, `origin/${base}`]) if ((await git('merge-base', '--is-ancestor', ref, into)).code === 0) return true;
-    return false;
+    for (const into of [base, `origin/${base}`]) if ((await git('merge-base', '--is-ancestor', ref, into)).code === 0) return 'branch';
+    return null;
   }
   return null;
 }
@@ -276,14 +269,13 @@ async function branchMerged(run, config) {
  * Checks the pull requests and branches of the notices ("targets": { url, run }), one at a time, skipping what is
  * final or was checked in the last CHECK_EVERY. "ask" stands in for gh and git in the tests.
  */
-export async function checkPullRequests(targets, config, ask = { pr: ghState, branch: branchMerged }) {
+export async function checkPullRequests(targets, config, ask = { pr: ghState, branch: branchState }) {
   lastCheck = Date.now();
-  const fresh = entry => entry && (final(entry.state) || entry.merged || Date.now() - entry.checked < CHECK_EVERY);
+  const fresh = entry => entry && (final(entry.state) || Date.now() - entry.checked < CHECK_EVERY);
   for (const { url, run } of targets) {
     if (url && !fresh(prStates.get(url))) prStates.set(url, { state: await ask.pr(url), checked: Date.now() });
     if (final(url ? prStates.get(url)?.state : null) || !run?.branch) continue;
-    const key = branchKey(run);
-    if (!fresh(branchStates.get(key))) branchStates.set(key, { merged: (await ask.branch(run, config)) === true, checked: Date.now() });
+    if (!fresh(branchStates.get(run.id))) branchStates.set(run.id, { state: await ask.branch(run, config), checked: Date.now() });
   }
 }
 

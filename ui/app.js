@@ -754,7 +754,7 @@ function attnList(list, label, { archived = false } = {}) {
 
 /** Why a notice went to the archive (src/attention.mjs). */
 const archivedWhy = reason => ({
-  merged: t('Pull request merged'), closed: t('Pull request closed'), branch: t('Branch already merged'),
+  merged: t('Pull request merged'), closed: t('Pull request closed'), branch: t('Branch already merged'), deleted: t('Local branch deleted'),
   seen: t('Seen'), expired: t('A day went by'), resolved: t('No longer needed'),
 })[reason] ?? '';
 
@@ -972,6 +972,7 @@ $('#decisions').addEventListener('click', async event => {
     const r = await api('/api/decide', { card: c.id, action, option: button.dataset.option });
     toast({
       merged: [t('Merged.'), r.merge?.copiesNote].filter(Boolean).join(' '), later: c.thirdParty ? t('Hidden: it is in the archive.') : t('Left for later: the card stays at the end, faded.'), discarded: t('Discarded.'),
+      already_merged: t('Branch already merged'), branch_deleted: t('Local branch deleted'),
       approved: t('Approved: it becomes a task for its agent, in its turn.'), allowed: t('Allowed: the manager may send it once now.'), refused: t('Refused: the manager is told.'), answered: t('Answer sent to the manager: {answer}', { answer: r.answer ?? '' }),
     }[r.done] ?? '');
   } catch (error) {
@@ -1740,6 +1741,7 @@ async function refreshDetail(force = false) {
   const checks = r.checks?.length
     ? `<div class="report"><div class="report-top"><strong>${esc(t('Checks'))}</strong></div>${r.checks.map(c => `<div>${stateHtml(c.ok ? [t('Passed'), 'ok'] : [t('Failed'), 'error'])} <code>${esc(c.command)}</code></div>`).join('')}</div>`
     : '';
+  const branchDeleted = r.discarded?.by === 'outside' && r.discarded.how === 'local';
   const html = `
     <h2>${esc(r.title)}</h2>
     ${r.summary ? `<p class="run-summary">${esc(r.summary)}</p>` : ''}
@@ -1749,7 +1751,8 @@ async function refreshDetail(force = false) {
     ${r.instruction ? `<details class="report-full"><summary>${esc(t('Full instruction'))}</summary><p class="hint">${esc(r.instruction)}</p></details>` : ''}
     <div class="actions left">
       ${r.pullRequest ? `<a class="button" href="${esc(r.pullRequest)}" target="_blank" rel="noopener">${esc(t('Open pull request'))}</a>` : ''}
-      ${r.status === 'done' && (r.pullRequest || r.delivered) && !r.merged ? `<button type="button" class="button secondary" data-merge="${esc(r.id)}">${esc(t('Merge'))}</button>` : ''}
+      ${r.status === 'done' && (r.pullRequest || r.delivered) && !r.merged && !branchDeleted ? `<button type="button" class="button secondary" data-merge="${esc(r.id)}">${esc(t('Merge'))}</button>` : ''}
+      ${branchDeleted ? `<span class="hint">${esc(t('Local branch deleted'))}</span>` : ''}
       ${r.merged ? `<span class="hint">${stateHtml([t('Merged'), 'ok'])} <span class="num">${shortDate(r.merged.at)}</span> · ${esc(r.merged.by === 'manager' ? t('by the manager, with your authorization') : r.merged.by === 'outside' ? (r.merged.how === 'pr' ? t('on GitHub') : t('in your clone')) : t('by you'))}</span>` : ''}
       ${canResume ? `<button type="button" class="button secondary" data-resume="${esc(r.id)}">${esc(t('Resume'))}</button>` : ''}
       ${r.status === 'paused' ? `<button type="button" class="button secondary" data-resume="${esc(r.id)}" data-ignore>${esc(t('Resume past the limit'))}</button>` : ''}
@@ -4155,7 +4158,8 @@ document.addEventListener('click', async event => {
       if (!(await confirmDialog(t('Merge'), `${where}${checks}`, t('Merge')))) return;
       target.disabled = true;
       const done = await api('/api/merge', { run: target.dataset.merge });
-      toast([t('Merged.'), done.copiesNote].filter(Boolean).join(' '));
+      const message = done.discarded ? t('Local branch deleted') : done.merged.by === 'outside' ? t('Branch already merged') : t('Merged.');
+      toast([message, done.copiesNote].filter(Boolean).join(' '));
       if (selectedRun === target.dataset.merge) await refreshDetail(true);
     } else if (target.dataset.resume) {
       await api('/api/resume', { id: target.dataset.resume, ignoreLimits: target.hasAttribute('data-ignore') });

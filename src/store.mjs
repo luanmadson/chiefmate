@@ -33,6 +33,17 @@ export function saveRun(run) {
   return run;
 }
 
+/** Records a merge or closure observed outside Chiefmate using the latest run on disk. */
+export function settleRunOutside(listed, reason, url) {
+  const run = listed && readRun(listed.id);
+  if (!run || run.status !== 'done' || run.merged || run.discarded) return run;
+  const local = reason === 'branch' || reason === 'deleted';
+  if (local ? !run.branch || run.branch !== listed.branch || (reason === 'deleted' && run.pullRequest) : run.pullRequest !== url) return null;
+  const discarded = reason === 'closed' || reason === 'deleted';
+  run[discarded ? 'discarded' : 'merged'] = { at: now(), by: 'outside', how: local ? 'local' : 'pr' };
+  return saveRun(run);
+}
+
 export function listRuns() {
   return readdirSync(RUNS)
     .filter(f => f.endsWith('.json'))
