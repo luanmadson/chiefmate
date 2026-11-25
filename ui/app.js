@@ -191,10 +191,10 @@ function outcomeHtml(o) {
     </div>`;
 }
 
-/** A run's title for a link (the planning board's items), from the runs the app knows; else its id. */
 /** A run's summary, one line under its title in the lists (whole on hover). */
 const summaryLine = r => (r.summary ? `<span class="secondary run-line" title="${esc(r.summary)}">${esc(r.summary)}</span>` : '');
 
+/** A run's title for a link (the planning board's items), from the runs the app knows; else its id. */
 const runTitle = id => allRuns().find(r => r.id === id)?.title ?? id;
 
 function originLabel(origin) {
