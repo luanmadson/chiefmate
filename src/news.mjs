@@ -1,9 +1,10 @@
 // The manager's news: when something the owner should know happens (a run ends, fails or pauses, a pull request
-// waits for approval or the owner merges a run's work from the app, a step needs the owner, an update is installed or blocked, a memory or usage alert, a live
-// session ends, the crew proposes items for the planning board, the autopilot finds a project's queue empty or sends
-// its daily report), Chiefmate tells the manager in a short system
-// message, and the manager writes the owner a notice in the conversation (and triages the proposals). Events close together (within WINDOW_MS) go as one message; while the manager answers, they wait
-// in the conversation's queue. The setting "manager_updates" turns this off or picks the events.
+// waits for approval or the owner merges a run's work from the app, a step needs the owner, an update is installed or
+// blocked, a memory or usage alert, a live session ends, the crew proposes items for the planning board, the autopilot
+// finds a project's queue empty or sends its daily report), Chiefmate tells the manager in a short system message, and
+// the manager writes the owner a notice in the conversation (and triages the proposals). Events close together (within
+// WINDOW_MS) go as one message; while the manager answers, they wait in the conversation's queue. The setting
+// "manager_updates" turns this off or picks the events.
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
 import { DATA, ensureDir, now, readJson, writeJson } from './util.mjs';
