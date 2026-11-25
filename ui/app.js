@@ -70,8 +70,9 @@ function inline(s) {
     .replace(REL_IN_TEXT, (m, before, p) => `${before}${keep(fileLink(p, esc(p)))}`);
   return esc(text)
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>')
+    // A web address never takes in a kept piece: its HTML would land inside the href.
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)\u0000]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/(^|[\s(])(https?:\/\/[^\s<)\u0000]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>')
     .replace(/\u0000(\d+)\u0000/g, (m, i) => kept[Number(i)]);
 }
 
