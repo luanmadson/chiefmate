@@ -498,7 +498,7 @@ export function startServer() {
           return reply(res, 200, await openSession(String(body.profile ?? ''), { origin: body.origin ?? 'app', window: !!body.window }));
         }
         case '/api/session/say':
-          return reply(res, 200, sayToSession(String(body.id ?? ''), body.text));
+          return reply(res, 200, sayToSession(String(body.id ?? ''), body.text, { by: body.by === 'manager' ? 'manager' : 'owner' }));
         case '/api/session/interrupt':
           return reply(res, 200, { interrupted: interruptSession(String(body.id ?? '')) });
         case '/api/session/resume':

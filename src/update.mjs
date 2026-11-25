@@ -1,6 +1,7 @@
 // Self-update: when a pull request to Chiefmate is merged on GitHub, this installation updates itself.
-// "auto_update_mode" decides how: "pause" (the default) pauses the work going on at a safe point, installs and resumes
-// it right after the restart; "wait" installs only once the crew and the manager are free. The owner can also update
+// "auto_update_mode" decides how: "pause" (the default) pauses the work going on (the crew's runs and the turns of the
+// live sessions) at a safe point, installs and resumes it right after the restart; "wait" installs only once the crew,
+// the manager and the live sessions are free. The owner can also update
 // now ("update now" in the app, or "node src/cli.mjs update-now"), which pauses the same way. The new version is
 // checked first and, if anything fails, Chiefmate stays on the current one and resumes the work paused for it.
 import { spawn } from 'node:child_process';
@@ -17,7 +18,8 @@ import { run } from './workspace.mjs';
 /**
  * What the app shows about updates. waiting: the approved changes not installed yet; blocked: why they were not
  * ("changes", "merge", "checks" or "timeout"); installing: the update going on now ({ since, by: "owner" or "auto",
- * stage: "pausing", "manager" or "installing", paused: the runs paused for it, interruptManager }), else null.
+ * stage: "pausing", "manager" or "installing", paused: the runs paused for it, sessions: the live sessions paused for
+ * it, interruptManager }), else null.
  */
 export const updateInfo = { checked: null, waiting: 0, blocked: null, mode: 'pause', installing: null };
 
@@ -88,14 +90,17 @@ function checkOnce() {
 }
 
 function begin(by, interruptManager, found) {
-  updateInfo.installing = { since: now(), by, stage: 'pausing', paused: [], interruptManager, target: found.target };
+  updateInfo.installing = { since: now(), by, stage: 'pausing', paused: [], sessions: [], interruptManager, target: found.target };
   install(updateInfo.installing, hooks).catch(error => {
     console.error('Update:', error);
     release(updateInfo.installing, hooks);
   });
 }
 
-const resumeNote = job => (job.paused.length ? ` The ${job.paused.length} run(s) paused for it resume now.` : '');
+const resumeNote = job => [
+  job.paused.length ? ` The ${job.paused.length} run(s) paused for it resume now.` : '',
+  job.sessions?.length ? ` The ${job.sessions.length} live session(s) paused for it carry on now.` : '',
+].join('');
 
 /** Ends an update that did not go in: the runs paused for it and the manager's queue go on. */
 function release(job, h) {
@@ -105,12 +110,14 @@ function release(job, h) {
 
 /**
  * Installs the approved update: pauses the runs going on at a safe point (their step resumes the same Claude Code
- * session after the restart), waits for the manager's answer to end (or interrupts it, when the owner asked), then
+ * session after the restart), and the turns of the live sessions in the app the same way (a turn of Codex is awaited:
+ * it carries on by itself after the restart), waits for the manager's answer to end (or interrupts it, when the owner asked), then
  * fast-forwards, checks the new version and restarts. If the checks fail, it goes back to the version it had and the
  * paused work resumes the same way. h: the hooks (see startUpdates); exported, with them, for the smoke test.
  */
 export async function install(job, h = hooks) {
   const deadline = Date.now() + MAX_WAIT_MS;
+  job.sessions ??= [];
   const late = () => {
     if (Date.now() < deadline) return false;
     updateInfo.blocked = 'timeout';
@@ -122,9 +129,10 @@ export async function install(job, h = hooks) {
   // A run being started when the update began goes on for a moment: it is paused as soon as it is going on.
   do {
     for (const id of h.pauseRuns()) if (!job.paused.includes(id)) job.paused.push(id);
+    for (const id of h.pauseSessions?.() ?? []) if (!job.sessions.includes(id)) job.sessions.push(id);
     await sleep(h.pollMs ?? 1000);
     if (late()) return false;
-  } while (h.crewBusy());
+  } while (h.crewBusy() || h.sessionsBusy?.());
   job.stage = 'manager';
   while (h.managerAnswering()) {
     if (job.interruptManager && !job.interrupted) job.interrupted = h.interruptManager();
@@ -164,7 +172,10 @@ async function apply(job) {
   const changes = (await git('log', '--format=%s', '--no-merges', `${before}..HEAD`)).output.trim().split(/\r?\n/).filter(Boolean).slice(0, 5);
   // For the app's info notice "Update installed", after the restart.
   saveState({ ...readState(), last_update: { at: now(), changes } });
-  const paused = job.paused.length ? ` The ${job.paused.length} run(s) paused for it resume by themselves after the restart, each step in its own session.` : '';
+  const paused = [
+    job.paused.length ? ` The ${job.paused.length} run(s) paused for it resume by themselves after the restart, each step in its own session.` : '',
+    job.sessions.length ? ` The ${job.sessions.length} live session(s) paused for it carry on by themselves after the restart.` : '',
+  ].join('');
   reportEvent('update_installed', `Chiefmate installed an approved update (${behind} change(s)${changes.length ? `: ${changes.join('; ')}` : ''}) and restarts by itself.${paused}`);
   await restart(hooks.beforeRestart);
   return true;
@@ -224,9 +235,11 @@ export async function checkNow() {
 
 /**
  * Checks GitHub a minute after starting and every 10 minutes after that.
- * options: isBusy() (runs going on, or the manager answering or with messages waiting: "wait" mode waits for none),
- * crewBusy() (runs going on), pauseRuns() (asks every run going on to pause; returns the ids it asked), managerAnswering(),
- * interruptManager(), resume() (the queue and the manager's messages go on) and beforeRestart().
+ * options: isBusy() (runs going on, the manager answering or with messages waiting, or a live session's turn: "wait"
+ * mode waits for none), crewBusy() (runs going on), pauseRuns() (asks every run going on to pause; returns the ids it
+ * asked), sessionsBusy() and pauseSessions() (the same for the turns of the live sessions in the app),
+ * managerAnswering(), interruptManager(), resume() (the queue, the manager's messages and the sessions go on) and
+ * beforeRestart().
  */
 export function startUpdates(options) {
   hooks = { ...options, apply };

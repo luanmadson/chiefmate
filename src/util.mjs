@@ -1,5 +1,5 @@
 // Paths and small helpers shared by the rest of Chiefmate.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -23,12 +23,29 @@ export function readJson(file, fallback) {
   }
 }
 
-/** Writes to a temporary file and swaps it in at once, so a shutdown midway never leaves half a JSON file. */
+const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * Writes to a temporary file and swaps it in at once, so a shutdown midway never leaves half a JSON file. On Windows,
+ * the swap fails (EBUSY, EPERM, EACCES) while another process (the window of a live session, the CLI, an antivirus)
+ * has the file open: it is tried again for about two seconds. The temporary file is this process's own.
+ */
 export function writeJson(file, data) {
   ensureDir(path.dirname(file));
-  const temporary = `${file}.tmp`;
+  const temporary = `${file}.${process.pid}.tmp`;
   writeFileSync(temporary, JSON.stringify(data, null, 2));
-  renameSync(temporary, file);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      renameSync(temporary, file);
+      return;
+    } catch (error) {
+      if (attempt >= 20 || !['EBUSY', 'EPERM', 'EACCES'].includes(error.code)) {
+        rmSync(temporary, { force: true });
+        throw error;
+      }
+      pause(100);
+    }
+  }
 }
 
 export const now = () => new Date().toISOString();

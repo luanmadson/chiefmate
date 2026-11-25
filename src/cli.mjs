@@ -119,7 +119,9 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 profile, lists the profiles and the sessions open; --dry-run shows the
                                                 folder, the command and the first message only
   node src/cli.mjs session log <id> [n]         a session's history: the last n entries (40), messages and actions
-  node src/cli.mjs session say <id> "<message>" writes to a session in the app (queued while the agent works)
+  node src/cli.mjs session say <id> "<message>" [--owner-asked]
+                                                writes to a session in the app (queued while the agent works); the
+                                                manager does it only when the owner asks, with --owner-asked
   node src/cli.mjs session end <id>             ends a live session (its turn stops, or its window closes)
   node src/cli.mjs dev <project> [--dry-run]    starts the project's development environment ("dev_start" in its settings)
                                                 in a window of its own, in your clone; --dry-run shows what would run
@@ -388,10 +390,12 @@ async function sessionCommand() {
     return;
   }
   if (first === 'say') {
-    if (process.env.CHIEFMATE_MANAGER) throw new Error("The manager doesn't write to the owner's live sessions.");
+    // The manager writes to the owner's sessions only when the owner asks it to, and the message says so.
+    const manager = !!process.env.CHIEFMATE_MANAGER;
+    if (manager && !has('--owner-asked')) throw new Error("The manager writes to the owner's live sessions only when the owner asks: add --owner-asked only then.");
     const text = rest.filter(x => !x.startsWith('--')).slice(2).join(' ');
     if (!second || !text.trim()) throw new Error('Use: node src/cli.mjs session say <id> "<message>"');
-    const m = await api('/api/session/say', { id: second, text });
+    const m = await api('/api/session/say', { id: second, text, by: manager ? 'manager' : 'owner' });
     console.log(m.queued ? `Queued (${m.position} waiting): it goes when the agent finishes its turn.` : `Sent. Follow it with: node src/cli.mjs session log ${second}`);
     return;
   }
@@ -416,9 +420,11 @@ async function sessionCommand() {
     const window = has('--window');
     const args = window ? sessions.sessionArgs({ ...profile, cwd: folder.dir }, config, prompt.blocksGiven ? '<first message>' : null)
       : profile.tool === 'codex' ? sessions.codexArgs({ ...profile, cwd: folder.dir })
-      : ['-p', '--output-format', 'stream-json', '--session-id', '<new>', '--setting-sources', 'project,local', '--strict-mcp-config', '--allowedTools', '(reading, editing, terminal)', '--disallowedTools', ...sessions.ASK_FIRST];
+      : ['-p', '--output-format', 'stream-json', '--session-id', '<new>', '--setting-sources', 'project,local', '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: sessions.sessionMcp(config, profile).servers }), '--allowedTools', '(reading, editing, terminal)', ...sessions.sessionMcp(config, profile).tools, '--disallowedTools', ...sessions.ASK_FIRST];
     console.log(window ? 'In a window of its own.' : 'In the app: each message is one turn of the tool, resuming the same session; the message goes through standard input.');
     console.log(`Folder: ${folder.dir}${folder.copy ? " (Chiefmate's read-only copy of the library)" : ''}`);
+    const mcp = sessions.sessionMcp(config, profile);
+    if (profile.tool === 'claude') console.log(`External tools (MCP): ${mcp.names.join(', ') || '(none)'}${mcp.unknown.length ? ` (released but missing from "mcp_servers": ${mcp.unknown.join(', ')})` : ''}`);
     console.log(`Command: ${command} ${args.map(a => (/[\s"{}]/.test(a) ? JSON.stringify(a) : a)).join(' ')}`);
     if (prompt.missing.length) console.log(`Not found in the prompt builder: ${prompt.missing.join(', ')}`);
     if (prompt.unresolved?.length) console.log(`Variables left unfilled (no value in the prompt builder): ${prompt.unresolved.map(v => `{${v}}`).join(', ')}`);
@@ -443,10 +449,13 @@ function updateLine(u) {
     if (u.blocked === 'changes') return "It can't be installed: Chiefmate's files were changed by hand in this installation.";
     if (u.blocked === 'merge') return "It can't be installed: this installation's branch has commits of its own.";
     if (u.blocked === 'checks') return 'It failed its checks, so Chiefmate stayed on the current version.';
-    return u.mode === 'wait' ? 'It installs once the crew and the manager are free ("auto_update_mode": "wait").' : 'It installs on the next check.';
+    return u.mode === 'wait' ? 'It installs once the crew, the manager and the live sessions are free ("auto_update_mode": "wait").' : 'It installs on the next check.';
   }
-  const paused = job.paused?.length ? ` ${job.paused.length} run(s) paused for it resume after the restart.` : '';
-  if (job.stage === 'pausing') return `Installing: pausing the runs going on at a safe point.${paused}`;
+  const paused = [
+    job.paused?.length ? ` ${job.paused.length} run(s) paused for it resume after the restart.` : '',
+    job.sessions?.length ? ` ${job.sessions.length} live session(s) paused for it carry on after the restart.` : '',
+  ].join('');
+  if (job.stage === 'pausing') return `Installing: pausing the runs and the live sessions' turns going on at a safe point.${paused}`;
   if (job.stage === 'manager') return `Installing: waiting for the manager's answer to end${job.interruptManager ? ' (it is being interrupted)' : ''}.${paused}`;
   return `Installing the new version: Chiefmate checks it and restarts by itself.${paused}`;
 }
@@ -474,7 +483,7 @@ async function main() {
         const { startUpdates } = await import('./update.mjs');
         const { live, pauseAll } = await import('./runs.mjs');
         const { nudgeQueue } = await import('./queue.mjs');
-        const { startSessions } = await import('./sessions.mjs');
+        const { pauseSessionTurns, resumeSessions, sessionTurnsGoingOn, startSessions } = await import('./sessions.mjs');
         const { chat, deliverPending, interruptManager, managerBusy } = await import('./manager.mjs');
         const { startWatch } = await import('./plan.mjs');
         const { startAutopilot } = await import('./autopilot.mjs');
@@ -483,17 +492,20 @@ async function main() {
         startWatch();
         startAutopilot();
         startSessions();
-        // In "pause" mode (and on "update now") the update pauses the runs going on and waits for the manager's answer;
-        // in "wait" mode, it waits for every run to end and for the manager. The sessions' windows stay open.
+        // In "pause" mode (and on "update now") the update pauses the runs and the live sessions' turns going on and
+        // waits for the manager's answer; in "wait" mode, it waits for all of them to end. The sessions' windows stay open.
         startUpdates({
-          isBusy: () => live.size > 0 || managerBusy(),
+          isBusy: () => live.size > 0 || managerBusy() || sessionTurnsGoingOn(),
           crewBusy: () => live.size > 0,
           pauseRuns: pauseAll,
+          sessionsBusy: sessionTurnsGoingOn,
+          pauseSessions: pauseSessionTurns,
           managerAnswering: () => chat.responding,
           interruptManager,
           resume: () => {
             nudgeQueue();
             deliverPending();
+            resumeSessions();
           },
           beforeRestart: close,
         });

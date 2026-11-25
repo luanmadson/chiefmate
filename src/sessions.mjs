@@ -13,7 +13,7 @@ import { appendFileSync, createWriteStream, existsSync, readdirSync, readFileSyn
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
-import { userClaudeExcludes } from './access.mjs';
+import { stepMcp, userClaudeExcludes } from './access.mjs';
 import { describeAction, environment, executable as claudeExecutable, runClaude } from './claude.mjs';
 import { loadConfig } from './config.mjs';
 import { formatDateTime, t } from './i18n.mjs';
@@ -21,6 +21,7 @@ import { computer, formatBytes, processes, refreshProcesses } from './machine.mj
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { assembleBlocks, builderSettings, parseBlocks } from './prompts.mjs';
+import { updating } from './update.mjs';
 import { clip, DATA, ensureDir, languageName, now, readJson, ROOT, slug, stamp, WORKSPACES, writeJson } from './util.mjs';
 
 const SESSIONS = path.join(DATA, 'sessions');
@@ -53,14 +54,14 @@ export function sessionIdOf(command) {
 
 /**
  * The profiles: "sessions": { "<id>": { "name", "tool": "claude" | "codex", "project" or "library_folder"
- * ("<library>/<folder>"), "prompt_blocks": ["..."], "model", "cwd" } }. Then the automatic ones: for each project,
- * one per tool the settings have no profile of for that project (see autoProfiles).
+ * ("<library>/<folder>"), "prompt_blocks": ["..."], "model", "cwd", "mcp": ["..."] } }. Then the automatic ones: for
+ * each project, one per tool the settings have no profile of for that project (see autoProfiles).
  */
 export function sessionProfiles(config = loadConfig()) {
   const configured = Object.entries(config.sessions ?? {}).map(([id, p]) => ({
     id, name: p?.name ?? id, tool: String(p?.tool ?? 'claude').toLowerCase(), project: p?.project ?? null, library_folder: p?.library_folder ?? null,
     prompt_blocks: (Array.isArray(p?.prompt_blocks) ? p.prompt_blocks : String(p?.prompt_blocks ?? '').split(',')).map(b => String(b).trim()).filter(Boolean),
-    model: p?.model ?? null, cwd: p?.cwd ?? null, auto: false,
+    model: p?.model ?? null, cwd: p?.cwd ?? null, mcp: Array.isArray(p?.mcp) ? p.mcp.map(String) : [], auto: false,
   }));
   return [...configured, ...autoProfiles(config, configured)];
 }
@@ -78,8 +79,18 @@ function autoProfiles(config, configured) {
     .map(tool => ({
       id: `project-${id}-${tool}`, name: `${p?.name ?? id} (${tool === 'codex' ? 'Codex' : 'Claude Code'})`, tool, project: id, library_folder: null,
       prompt_blocks: builder && p?.prompt_block ? [p.prompt_block, environment].filter(Boolean) : [],
-      model: tool === 'claude' ? config.default_model ?? null : null, cwd: null, auto: true,
+      model: tool === 'claude' ? config.default_model ?? null : null, cwd: null, mcp: [], auto: true,
     })));
+}
+
+/**
+ * The external tools (MCP servers) of a session, as a step gets them: only those in "mcp_servers", released to its
+ * project ("projects.<id>.mcp") or to its profile ("mcp"). session: a session's record, or a profile.
+ */
+export function sessionMcp(config, session) {
+  const profileId = session.profile ?? session.id;
+  const profile = sessionProfiles(config).find(p => p.id === profileId);
+  return stepMcp(config, config.projects?.[session.project] ?? {}, { mcp: profile?.mcp ?? [] });
 }
 
 /** Your own copy of a repository on this computer: the folder itself, or ~/Documents/GitHub/<repository name>. */
@@ -179,7 +190,8 @@ export function toolCommand(tool) {
 
 /**
  * The tool's arguments, the first message last. Claude Code starts without the user's own configuration, as the
- * crew's steps do (no user settings, hooks, plugins, skills, ~/.claude/CLAUDE.md or MCP servers of their own).
+ * crew's steps do (no user settings, hooks, plugins, skills, ~/.claude/CLAUDE.md or MCP servers of their own), with
+ * the external tools released to the session (see sessionMcp).
  * Codex has no option to skip its own configuration (~/.codex): it gets the folder (-C) and the model.
  */
 export function sessionArgs(session, config, prompt) {
@@ -189,7 +201,7 @@ export function sessionArgs(session, config, prompt) {
   if (config.attribution === false) Object.assign(settings, { includeCoAuthoredBy: false, attribution: { commit: '', pr: '' } });
   // --mcp-config takes a list: the options after it end it, so the message is not read as one more file.
   return [
-    '--setting-sources', 'project,local', '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: {} }),
+    '--setting-sources', 'project,local', '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: sessionMcp(config, session).servers }),
     ...(session.model ? ['--model', session.model] : []), '--settings', JSON.stringify(settings), ...first,
   ];
 }
@@ -353,7 +365,7 @@ export async function endSession(id) {
     }
     for (const r of session.requests ?? []) if (r.status === 'open') Object.assign(r, { status: 'canceled', done: now() });
     if (OPEN.includes(session.status)) note(id, t('You ended the session. Its history stays here; Resume carries on in the same conversation.'));
-    return saveSession({ ...session, status: 'ended', ended: now(), endedBy: 'owner', queue: [], working: null });
+    return saveSession({ ...session, status: 'ended', ended: now(), endedBy: 'owner', queue: [], working: null, paused: null });
   }
   if (OPEN.includes(session.status) && process.platform === 'win32') {
     const { list } = await processes(0);
@@ -423,15 +435,17 @@ function appSession(id) {
 /**
  * The owner's message to a session in the app. It goes at once when the agent is free; while it works, the message
  * waits in the session's queue and goes with the others, in order, when the turn ends. A message to a session that
- * ended resumes it, in the same conversation of the tool. Returns { id, text, at, queued, position }.
+ * ended resumes it, in the same conversation of the tool. by: "manager" when the manager writes it at the owner's
+ * request ("session say <id> ... --owner-asked"): the agent and the app see who wrote it.
+ * Returns { id, text, at, queued, position }.
  */
-export function sayToSession(id, text) {
+export function sayToSession(id, text, { by = 'owner' } = {}) {
   const message = clip(String(text ?? '').trim(), 20_000);
   if (!message) throw new Error(t('Write a message.'));
   let session = appSession(id);
   if (session.status === 'ended') session = resumeSession(id);
-  const item = { id: randomUUID().slice(0, 8), text: message, at: now() };
-  const queued = live.has(id) || session.status !== 'open' || (session.queue ?? []).length > 0;
+  const item = { id: randomUUID().slice(0, 8), text: message, at: now(), ...(by === 'manager' ? { by } : {}) };
+  const queued = live.has(id) || session.status !== 'open' || !!session.paused || updating() || (session.queue ?? []).length > 0;
   saveSession({ ...session, queue: [...(session.queue ?? []), item] });
   deliverSession(id);
   return { ...item, queued, position: queued ? (readSession(id)?.queue ?? []).length : 0 };
@@ -477,18 +491,28 @@ export function answerPermission(id, requestId, allow) {
   return request;
 }
 
-/** The text of a turn: the owner's message, or the queue in order, and a word when the last turn was interrupted. */
+/**
+ * The text of a turn: the owner's message, or the queue in order, and a word when the last turn was interrupted or
+ * paused for an update of Chiefmate (then, with no message, the turn only carries on).
+ */
 function turnText(config, session, items) {
   const owner = config.owner || 'the owner';
   const parts = [];
   if (session.interrupted) parts.push(`${owner} interrupted your previous turn at ${formatDateTime(session.interrupted)}. What you were doing then may be half done: check it before you carry on.`);
+  if (session.paused) parts.push(`Chiefmate paused your previous turn at ${formatDateTime(session.paused)}, at a safe point (once the actions under way had finished), to install an update of itself, and has restarted. Carry on where you left off.`);
   const mine = items.filter(m => !m.first);
   const first = items.find(m => m.first);
+  const by = m => (m.by === 'manager' ? `, written by Chiefmate's manager at ${owner}'s request` : '');
   if (first) parts.push(first.text);
-  if (mine.length === 1 && !first) parts.push(mine[0].text);
-  else if (mine.length) parts.push(`${mine.length === 1 ? `A message from ${owner}` : `${mine.length} messages from ${owner}, oldest first`}:\n\n${mine.map(m => `[sent ${formatDateTime(m.at)}]\n${m.text}`).join('\n\n')}`);
+  if (mine.length === 1 && !first && !mine[0].by) parts.push(mine[0].text);
+  else if (mine.length) parts.push(`${mine.length === 1 ? `A message from ${owner}` : `${mine.length} messages from ${owner}, oldest first`}:\n\n${mine.map(m => `[sent ${formatDateTime(m.at)}${by(m)}]\n${m.text}`).join('\n\n')}`);
   return parts.join('\n\n');
 }
+
+// Claude Code refuses --session-id for a session it already has ("Session ID ... is already in use"), and --resume
+// for one it never saved ("No conversation found"): a turn cut off by a restart may leave either behind.
+const SESSION_EXISTS = /session id .* is already in use/i;
+const SESSION_MISSING = /no conversation found/i;
 
 /** Claude Code's added instructions in a session in the app. */
 const appSystem = owner => [
@@ -497,18 +521,22 @@ const appSystem = owner => [
   `There is no prompt to ask before acting: pushing, pull requests and changing remotes are refused until ${owner} allows them in the app. When one is refused, say what you wanted to run and why, and stop.`,
 ].join('\n');
 
-/** Starts the next turn of a session in the app, with its whole queue, when it is open and free. Returns whether one started. */
+/**
+ * Starts the next turn of a session in the app, with its whole queue, when it is open and free; a turn paused for an
+ * update carries on by itself. None starts while an update of Chiefmate is being installed. Returns whether one started.
+ */
 export function deliverSession(id) {
-  if (live.has(id)) return false;
+  if (live.has(id) || updating()) return false;
   const session = readSession(id);
-  if (!session || session.mode !== 'app' || session.status !== 'open' || !(session.queue ?? []).length) return false;
-  const items = session.queue;
+  if (!session || session.mode !== 'app' || session.status !== 'open' || (!(session.queue ?? []).length && !session.paused)) return false;
+  const items = session.queue ?? [];
   const config = loadConfig();
-  const turn = { since: now(), last: null, pid: null, cancel: () => {}, started: false, interrupted: false, ending: false };
+  const turn = { since: now(), last: null, pid: null, cancel: () => {}, interrupt: () => false, started: false, interrupted: false, ending: false, pausing: false };
   live.set(id, turn);
-  for (const m of items) remember(id, { kind: 'owner', text: m.text, ...(m.first ? { first: true } : {}), sent: m.at });
+  for (const m of items) remember(id, { kind: 'owner', text: m.text, ...(m.first ? { first: true } : {}), ...(m.by ? { by: m.by } : {}), sent: m.at });
+  if (session.paused && !items.length) note(id, t('The agent carries on after the update of Chiefmate.'));
   const prompt = turnText(config, session, items);
-  saveSession({ ...session, queue: [], working: turn.since, interrupted: null });
+  saveSession({ ...session, queue: [], working: turn.since, interrupted: null, paused: null });
   const onEvent = event => {
     if (event.type === 'start') turn.started = true;
     if (event.type === 'say') remember(id, { kind: 'say', text: event.text });
@@ -517,23 +545,61 @@ export function deliverSession(id) {
       remember(id, { kind: 'action', text: event.text, ...(event.failed ? { failed: true } : {}) });
     }
   };
-  let run;
+  const mcp = sessionMcp(config, session);
+  // One call of Claude Code; when its session is not where the turn count says (see SESSION_EXISTS), once more the other way.
+  const claudeTurn = (resume, retried = false) => {
+    const run = runClaude({
+      dir: session.cwd, prompt, system: appSystem(config.owner || 'the owner'), model: session.model ?? config.default_model,
+      tools: [...APP_TOOLS, ...mcp.tools, ...(session.allowed ?? []).filter(r => !ASK_FIRST.includes(r))],
+      disallowed: ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r)), mcpServers: mcp.servers,
+      attribution: config.attribution !== false, maxMinutes: TURN_MINUTES,
+      session: { id: session.toolSession, resume }, log: rawLog(id), onEvent,
+    });
+    Object.assign(turn, { pid: run.pid ?? null, cancel: () => run.cancel(t('interrupted by you')), interrupt: () => run.interrupt() });
+    return run.promise.then(r => {
+      const wrong = resume ? SESSION_MISSING : SESSION_EXISTS;
+      if (r.ok || retried || turn.started || turn.interrupted || turn.ending || turn.pausing || !wrong.test(r.error ?? '')) return r;
+      return claudeTurn(!resume, true);
+    });
+  };
+  let promise;
   try {
-    run = session.tool === 'codex'
-      ? runCodex({ session, prompt, log: rawLog(id), onEvent })
-      : runClaude({
-        dir: session.cwd, prompt, system: appSystem(config.owner || 'the owner'), model: session.model ?? config.default_model,
-        tools: [...APP_TOOLS, ...(session.allowed ?? []).filter(r => !ASK_FIRST.includes(r))],
-        disallowed: ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r)),
-        attribution: config.attribution !== false, maxMinutes: TURN_MINUTES,
-        session: { id: session.toolSession, resume: (session.turns ?? 0) > 0 }, log: rawLog(id), onEvent,
-      });
+    if (session.tool === 'codex') {
+      const run = runCodex({ session, prompt, log: rawLog(id), onEvent });
+      Object.assign(turn, { pid: run.pid ?? null, cancel: () => run.cancel(t('interrupted by you')) });
+      promise = run.promise;
+    } else {
+      promise = claudeTurn((session.turns ?? 0) > 0);
+    }
   } catch (error) {
-    run = { promise: Promise.resolve({ ok: false, error: error.message }), cancel: () => {} };
+    promise = Promise.resolve({ ok: false, error: error.message });
   }
-  Object.assign(turn, { pid: run.pid ?? null, cancel: () => run.cancel(t('interrupted by you')) });
-  run.promise.then(r => finishTurn(id, turn, r)).catch(error => finishTurn(id, turn, { ok: false, error: error.message }));
+  promise.then(r => finishTurn(id, turn, r)).catch(error => finishTurn(id, turn, { ok: false, error: error.message }));
   return true;
+}
+
+/**
+ * For an update of Chiefmate: asks every turn of Claude Code going on to stop at a safe point (once the actions under
+ * way finish), to carry on by itself after the restart in the same session. A turn of Codex can't stop that way: the
+ * update waits for it to end. Returns the ids of the sessions asked.
+ */
+export function pauseSessionTurns() {
+  const asked = [];
+  for (const [id, turn] of live) {
+    if (turn.pausing || turn.ending || turn.interrupted || !turn.interrupt()) continue;
+    turn.pausing = true;
+    note(id, t('Pausing at a safe point for an update of Chiefmate: the agent carries on by itself after the restart.'));
+    asked.push(id);
+  }
+  return asked;
+}
+
+/** Whether a turn of a live session is going on. */
+export const sessionTurnsGoingOn = () => live.size > 0;
+
+/** After an update that did not go in, or after the restart: the sessions' turns and queues go on. */
+export function resumeSessions() {
+  for (const s of listSessions().filter(x => x.mode === 'app' && x.status === 'open')) deliverSession(s.id);
 }
 
 function finishTurn(id, turn, r) {
@@ -543,7 +609,10 @@ function finishTurn(id, turn, r) {
   // A turn that got to start counts: the next one resumes its session (Codex's thread, or Claude Code's own id).
   const started = session.tool === 'codex' ? r.session : turn.started || r.session ? session.toolSession : null;
   Object.assign(session, { working: null, lastTurn: { at: now(), ok: !!r.ok }, ...(started ? { toolSession: started, turns: (session.turns ?? 0) + 1 } : {}) });
-  if (turn.interrupted && !turn.ending) {
+  if (turn.pausing && r.interrupted && !turn.ending && !turn.interrupted) {
+    // Paused for an update: the next turn carries on by itself (see deliverSession), after the restart.
+    session.paused = now();
+  } else if (turn.interrupted && !turn.ending) {
     session.interrupted = now();
     note(id, t('You interrupted the agent. The conversation goes on: your next message tells it.'));
   } else if (!r.ok && !turn.ending && r.error) {
@@ -731,12 +800,14 @@ export function watchEnded(records = listSessions()) {
 }
 
 export function startSessions() {
-  // A turn cut off by a restart (an update of Chiefmate, say): the session stays open, and the agent is told.
+  // A turn cut off by a restart (Chiefmate stopped or crashed; an update pauses the turns first): the session stays
+  // open, and the agent is told.
   for (const s of listSessions().filter(x => x.mode === 'app' && x.working)) {
     note(s.id, t('Chiefmate restarted while the agent was working: that turn was cut off. Your next message tells it.'));
     saveSession({ ...s, working: null, interrupted: s.working });
   }
-  for (const s of listSessions().filter(x => x.mode === 'app' && x.status === 'open')) deliverSession(s.id);
+  // The turns paused for an update carry on, and the messages left in the queues go.
+  resumeSessions();
   setInterval(() => {
     checkLogins().catch(error => console.error('Sessions:', error.message));
     try {
@@ -749,12 +820,14 @@ export function startSessions() {
 }
 
 /**
- * Where a session in the app stands, for the app and the manager: "working" (a turn going on), "permission" (it asks
- * the owner to allow something), "login" (Codex to sign in), "waiting" (the owner's turn) or "ended".
+ * Where a session in the app stands, for the app and the manager: "working" (a turn going on), "paused" (its turn
+ * paused for an update of Chiefmate, to carry on by itself), "permission" (it asks the owner to allow something),
+ * "login" (Codex to sign in), "waiting" (the owner's turn) or "ended".
  */
 function appPhase(s) {
   if (s.status === 'ended') return 'ended';
   if (s.status === 'login') return 'login';
+  if (live.get(s.id)?.pausing || s.paused) return 'paused';
   if (live.has(s.id)) return 'working';
   if ((s.requests ?? []).some(r => r.status === 'open' && r.kind === 'permission')) return 'permission';
   return 'waiting';
@@ -833,6 +906,7 @@ function sessionLine(s) {
   if (s.mode !== 'app') return `${head}: ${s.alive ? 'open' : 'starting'} since ${formatDateTime(s.started)}${s.ram ? `, ${formatBytes(s.ram)}` : ''}.`;
   const phase = {
     working: `the agent is working (turn since ${formatDateTime(s.turn?.since)}${s.turn?.last ? `, last action: ${clip(s.turn.last.text, 100)}` : ''})`,
+    paused: 'its turn is paused for an update of Chiefmate and carries on by itself after the restart',
     permission: `asks the owner to allow: ${clip(s.request?.what, 120)}`,
     waiting: "the owner's turn (the agent waits for a message)",
   }[s.phase] ?? s.phase;
@@ -847,8 +921,8 @@ export function sessionsLine(config, machine = computer(config)) {
   const available = profiles.map(p => p.id).join(', ');
   const owner = config.owner || 'the owner';
   return [
-    `Live sessions (${owner} working with an agent, in the app or in a window; not the crew, and not yours to end or write to unless asked): ${open.length ? '' : 'none open.'}`,
+    `Live sessions (${owner} working with an agent, in the app or in a window; not the crew, and not yours to end or write to unless ${owner} asks): ${open.length ? '' : 'none open.'}`,
     ...open.map(sessionLine),
-    `Read a session's history with node src/cli.mjs session log <id>.${available ? ` Profiles: ${available} (node src/cli.mjs session <profile> opens one).` : ''} Each project also has project-<id>-claude and project-<id>-codex, opened in ${owner}'s own clone of the project.`,
+    `Read a session's history with node src/cli.mjs session log <id>; when ${owner} asks you to write to a session in the app, node src/cli.mjs session say <id> "<message>" --owner-asked.${available ? ` Profiles: ${available} (node src/cli.mjs session <profile> opens one).` : ''} Each project also has project-<id>-claude and project-<id>-codex, opened in ${owner}'s own clone of the project.`,
   ].join('\n');
 }
