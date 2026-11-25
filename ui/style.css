@@ -47,7 +47,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 ::-webkit-scrollbar-track { background: transparent; }
 
 /* Window frame */
-.app { display: grid; height: 100vh; grid-template: "title title" 40px "nav alerts" auto "nav content" 1fr "status status" 28px / 196px 1fr; }
+.app { display: grid; height: 100vh; height: 100dvh; grid-template: "title title" 40px "nav alerts" auto "nav content" 1fr "status status" 28px / 196px 1fr; }
 .titlebar { grid-area: title; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .brand { display: flex; align-items: center; gap: 10px; font-size: 12px; font-weight: 600; letter-spacing: 0.22em; color: var(--strong); }
 .titlebar-right { display: flex; align-items: center; gap: 18px; min-width: 0; }
@@ -245,7 +245,7 @@ textarea { resize: vertical; min-height: 64px; }
 .run-count { margin-bottom: 12px; }
 .runs.several .logbook { height: 260px; min-height: 0; }
 .sessions .table { margin-top: 6px; }
-.session-profiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; margin-top: 14px; }
+.session-profiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr)); gap: 10px; margin-top: 14px; }
 .session-profile { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); background: var(--raised); }
 .session-profile .name { color: var(--strong); font-weight: 500; }
 .steps { list-style: none; margin: 0; padding: 0; }
@@ -313,7 +313,7 @@ textarea { resize: vertical; min-height: 64px; }
 .crew-line .arrow { color: var(--faint); }
 
 /* Crew */
-.crew-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+.crew-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); gap: 16px; }
 .crew-card { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 16px; background: var(--panel); border: 1px solid var(--line); border-top: 2px solid var(--agent, var(--line-strong)); padding: 16px; }
 .crew-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
 .crew-card h2 { margin: 0; font-size: 15px; font-weight: 600; color: var(--strong); }
@@ -322,7 +322,7 @@ textarea { resize: vertical; min-height: 64px; }
 .crew-role { margin: 8px 0 0; font-size: 12.5px; color: var(--muted); }
 .crew-card .facts { grid-template-columns: 96px 1fr; font-size: 12.5px; margin-top: 10px; }
 .section-title { margin: 28px 0 12px; font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
-.teams { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+.teams { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); gap: 16px; }
 .team { background: var(--panel); border: 1px solid var(--line); padding: 14px 16px; }
 .team-top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 8px; }
 .team h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--strong); }
@@ -362,7 +362,7 @@ textarea { resize: vertical; min-height: 64px; }
 .table .run-line { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60ch; }
 
 /* Usage and projects */
-.usage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
+.usage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 20px; }
 .row-actions { text-align: right; white-space: nowrap; }
 .row-actions .button + .button { margin-left: 6px; }
 .table tr.processes > td { padding: 0 0 10px 18px; background: var(--bg); }
@@ -530,7 +530,7 @@ details summary { cursor: pointer; }
 #project-computer .section-title, #project-sessions .section-title { margin-top: 24px; }
 .project-facts { grid-template-columns: 190px minmax(0, 1fr); margin: 0; }
 .project-facts code { word-break: break-all; }
-.project-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; align-items: start; }
+.project-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 20px; align-items: start; }
 .project-run { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
 .project-run .name { color: var(--strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-run[data-agent-run]:hover { background: var(--hover); }
@@ -622,9 +622,59 @@ details summary { cursor: pointer; }
 .context-form fieldset { border: 1px solid var(--line); margin: 0 0 12px; padding: 8px 12px; }
 .context-form legend { padding: 0 6px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
 .context-form fieldset .option { margin-bottom: 4px; }
-.context-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.context-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 12px; }
 .context-form textarea { font: 12px/1.5 var(--mono); }
 .context-edit-member { border-top: 1px solid var(--line); padding: 6px 0; }
 .context-edit-member > summary { color: var(--strong); padding: 4px 0; }
 .context-edit-member label { margin-top: 8px; }
 .context-preview { margin-top: 12px; border-left: 2px solid var(--accent); }
+
+/* Phones (about 390 px wide): one column, rows that wrap, wide tables that scroll on their own */
+@media (max-width: 600px) {
+  /* 16 px fields, so phone browsers don't zoom in on focus */
+  input, select, textarea { font-size: 16px; }
+  .titlebar { gap: 10px; padding: 0 12px; }
+  .brand span, .clock { display: none; }
+  .focus { margin: 0; padding-left: 10px; }
+  .titlebar-right { gap: 10px; }
+  .project-jump { max-width: 120px; }
+  .nav a { padding: 10px 14px; }
+  .view { padding: 14px 12px 24px; }
+  .view-header, .mission-top, .project-head-top { flex-wrap: wrap; align-items: flex-start; }
+  .builder-project { min-width: 0; width: 100%; }
+  /* Notices: the level on its own line, then the text, then the buttons */
+  .attn { flex-wrap: wrap; gap: 6px 12px; }
+  .attn-level { width: auto; }
+  .attn-text { flex: 1 1 100%; }
+  .attn-band .attn, .attn-more { padding-left: 14px; padding-right: 14px; }
+  .attn-actions { flex-wrap: wrap; }
+  /* Tabs scroll sideways instead of widening the page */
+  .tabs { overflow-x: auto; border-bottom: 0; box-shadow: inset 0 -1px 0 var(--line); }
+  .tab { flex: none; margin-bottom: 0; padding: 8px 12px; white-space: nowrap; }
+  /* A table wider than the screen scrolls inside its own box */
+  .table { display: block; overflow-x: auto; }
+  .facts, .project-facts { grid-template-columns: 110px minmax(0, 1fr); }
+  .live { grid-template-columns: 44px minmax(0, 1fr) auto; gap: 10px 12px; }
+  .live-clock strong { font-size: 17px; }
+  .logbook { height: 55vh; min-height: 220px; }
+  .compose-footer { flex-wrap: wrap; }
+  .compose-buttons { margin-left: auto; }
+  .live-facts .compose-buttons { margin-left: 0; }
+  .agent-panel { padding: 12px; }
+  .toast { left: 12px; right: 12px; max-width: none; }
+  .statusbar { overflow-x: auto; padding: 0 12px; }
+  .statusbar .group { flex: none; overflow: visible; }
+  /* The board: each item is a card; title on top, then project, priority, status, links and buttons */
+  .plan-table { display: block; overflow: visible; }
+  .plan-table thead { display: none; }
+  .plan-table tbody { display: block; }
+  .plan-table .plan-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 10px 8px; border-bottom: 1px solid var(--line); }
+  .plan-table .plan-row td { display: block; padding: 0; border: 0; background: transparent; box-shadow: none; }
+  .plan-table .plan-row td:first-child { width: auto; box-shadow: none; }
+  .plan-table .plan-row td:nth-child(2) { flex: 1 1 calc(100% - 60px); min-width: 0; }
+  .plan-table .plan-row td.row-actions { flex: 1 1 auto; }
+  .plan-table .plan-row.plan-triaged, .plan-table .plan-row.plan-waiting_owner { background: var(--important-bg); box-shadow: inset 2px 0 0 var(--important); }
+  .plan-table .plan-row.editing { background: var(--raised); }
+  .plan-table .plan-row.editing td:nth-child(2) { flex-basis: 100%; }
+  .plan-decide .button { flex: 1; min-width: 0; }
+}
