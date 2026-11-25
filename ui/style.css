@@ -17,6 +17,11 @@
   --error: #e0706a;
   --warn: #d6a447;
   --info: #6fa8dc;
+  /* The attention levels (src/attention.mjs): urgent, important, info. Both colors keep 4.5:1 or more on the dark panels. */
+  --urgent: #ff5c52;
+  --urgent-bg: rgba(255, 92, 82, 0.13);
+  --important: #e8bd5f;
+  --important-bg: rgba(232, 189, 95, 0.1);
   --mono: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
   --face-tile: #12161c;
   --face-fill: #0e1116;
@@ -62,20 +67,41 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .nav a.active { color: var(--strong); background: var(--raised); border-left-color: var(--accent); }
 .counter { display: inline-flex; align-items: center; gap: 6px; font: 11px var(--mono); color: var(--accent); }
 .nav a.running { color: var(--text); }
+.nav a > span:first-child { flex: 1; }
+.nav-attn:empty { display: none; }
+
+/* Attention: one component for the whole app. A notice (.attn) and its mark (.attn-mark), colored by data-level. */
+.alerts { grid-area: alerts; min-width: 0; }
+[data-level="urgent"] { --attn: var(--urgent); --attn-bg: var(--urgent-bg); }
+[data-level="important"] { --attn: var(--important); --attn-bg: var(--important-bg); }
+[data-level="info"] { --attn: var(--muted); --attn-bg: transparent; }
+.attn-mark { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 9px; height: 9px; background: var(--attn); color: var(--on-accent); font: 700 10.5px/1 var(--mono); }
+.attn-mark:not(:empty) { min-width: 17px; height: 17px; padding: 0 4px; }
+.attn-mark[data-level="info"] { background: transparent; border: 1px solid var(--muted); color: var(--muted); }
+.attn-mark[data-level="urgent"] { animation: attn-pulse 2.4s ease-in-out infinite; }
+@keyframes attn-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(255, 92, 82, 0.55); } 50% { box-shadow: 0 0 0 5px rgba(255, 92, 82, 0); } }
+.attn { display: flex; align-items: center; gap: 14px; padding: 8px 16px; background: var(--attn-bg); border-left: 4px solid var(--attn); border-bottom: 1px solid var(--line); color: var(--strong); }
+.attn[data-level="info"] { border-left-width: 2px; border-left-color: var(--line-strong); color: var(--text); }
+.attn[data-seen] { background: transparent; border-left-color: var(--line-strong); color: var(--muted); }
+.attn[data-seen] .attn-mark { animation: none; opacity: 0.5; }
+.attn-level { display: inline-flex; align-items: center; gap: 7px; flex: none; width: 120px; color: var(--attn); font-weight: 700; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; }
+.attn[data-seen] .attn-level { color: var(--muted); }
+.attn-text { flex: 1; min-width: 0; }
+.attn-title { font-weight: 600; }
+.attn-text .hint { display: block; font-size: 12px; }
+.attn-actions { display: flex; gap: 8px; flex: none; }
+.attn-band { background: var(--panel); border-bottom: 1px solid var(--line); }
+.attn-band .attn { padding-left: 28px; padding-right: 28px; }
+.attn-band > .attn:first-child { padding-top: 9px; padding-bottom: 9px; }
+.attn-more { display: flex; justify-content: flex-end; gap: 8px; padding: 6px 28px; }
+.attn-list { margin-bottom: 18px; border: 1px solid var(--line); background: var(--panel); }
+.attn-list .attn:last-child { border-bottom: 0; }
+.attn-head { display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--line); }
+.attn-head .label { margin: 0; }
+.run-block[data-level="urgent"] { border-left: 4px solid var(--urgent); padding-left: 14px; }
+@media (prefers-reduced-motion: reduce) { .attn-mark { animation: none !important; } }
 .nav-footer { margin-top: auto; padding: 12px 18px; font-size: 11px; color: var(--faint); }
 
-/* The band of alerts: it warns, nothing is paused. */
-.alerts { grid-area: alerts; min-width: 0; }
-.alert { display: block; padding: 7px 28px; background: var(--panel); border-bottom: 1px solid var(--line); border-left: 2px solid var(--warn); color: var(--text); }
-.alert:hover { background: var(--hover); text-decoration: none; }
-.alert .state { white-space: normal; align-items: baseline; }
-.alert:has(.state-error) { border-left-color: var(--error); }
-/* A step needs the owner: the strongest band, in brass, until "Done". */
-.needs { display: flex; align-items: center; gap: 14px; padding: 9px 28px; background: var(--accent-bg); border-bottom: 1px solid var(--accent); border-left: 4px solid var(--accent); color: var(--strong); }
-.needs .needs-text { flex: 1; min-width: 0; }
-.needs .needs-label { color: var(--accent); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; font-size: 11.5px; margin-right: 8px; }
-.needs .hint { display: block; }
-.needs .button { flex: none; }
 
 .content { grid-area: content; position: relative; overflow: hidden; }
 .view { display: none; height: 100%; overflow-y: auto; padding: 22px 28px 32px; }
@@ -323,6 +349,17 @@ textarea { resize: vertical; min-height: 64px; }
 .report-who { display: flex; align-items: center; gap: 10px; }
 .report-who strong { color: var(--strong); font-weight: 600; }
 .report .body p { margin: 0 0 8px; }
+/* Final summaries: what was done, what changes, whether you are needed; the full report folded below. */
+.outcome { display: grid; gap: 8px; margin: 8px 0; padding: 10px 12px; border: 1px solid var(--line); border-left: 2px solid var(--accent); background: var(--accent-bg); }
+.outcome .label { margin-bottom: 2px; }
+.outcome p, .outcome ul { margin: 0; }
+.outcome ul { padding-left: 18px; }
+.report-full { margin-top: 6px; }
+.report-full > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.report-full[open] > summary { margin-bottom: 6px; }
+.run-summary { margin: 4px 0 8px; color: var(--text); }
+.live-summary { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.table .run-line { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60ch; }
 
 /* Usage and projects */
 .usage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
@@ -358,12 +395,8 @@ details summary { cursor: pointer; }
 }
 
 /* Planning */
-.plan-waiting { margin-bottom: 18px; border-left: 2px solid var(--warn); background: var(--accent-bg); }
-.plan-waiting ul { list-style: none; margin: 0; padding: 0; }
-.plan-waiting li { padding: 6px 0; border-bottom: 1px solid var(--line); }
-.plan-waiting li:last-child { border-bottom: 0; }
-.plan-waiting .primary { color: var(--strong); }
-/* The owner's decisions on the crew's proposals: a short ordered list with large buttons, dragged to reorder */
+/* The owner's decisions on the crew's proposals, in the important level: a short ordered list with large buttons, dragged to reorder */
+.plan-decisions { margin-bottom: 18px; border-left: 2px solid var(--important); background: var(--important-bg); }
 .plan-decisions ol { list-style: none; margin: 8px 0 0; padding: 0; }
 .plan-decision { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .plan-decision:last-child { border-bottom: 0; }
@@ -378,15 +411,16 @@ details summary { cursor: pointer; }
 .plan-reason { display: block; font-size: 12px; color: var(--muted); margin-top: 6px; }
 .plan-turn { margin: -8px 0 18px; font-size: 12px; }
 .plan-quick .tab { background: transparent; border-top: 0; border-left: 0; border-right: 0; font: inherit; font-size: 12.5px; cursor: pointer; }
-.plan-row.plan-triaged td:first-child { box-shadow: inset 2px 0 0 var(--warn); color: var(--warn); }
+.plan-row.plan-triaged td { background: var(--important-bg); }
+.plan-row.plan-triaged td:first-child { box-shadow: inset 2px 0 0 var(--important); color: var(--important); }
 .plan-row.plan-discarded .primary { color: var(--muted); text-decoration: line-through; }
 @media (max-width: 700px) { .plan-decision { flex-wrap: wrap; } .plan-decide { width: 100%; } }
 .plan-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0 16px; margin-bottom: 8px; }
 .plan-filters label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
 .plan-table td:first-child { width: 44px; color: var(--muted); }
 .plan-table .plan-description { white-space: pre-wrap; color: var(--text); }
-.plan-row.plan-waiting_owner td { background: rgba(214, 164, 71, 0.06); }
-.plan-row.plan-waiting_owner td:first-child { box-shadow: inset 2px 0 0 var(--warn); color: var(--warn); }
+.plan-row.plan-waiting_owner td { background: var(--important-bg); }
+.plan-row.plan-waiting_owner td:first-child { box-shadow: inset 2px 0 0 var(--important); color: var(--important); }
 .plan-row.plan-done .primary, .plan-row.archived .primary { color: var(--muted); }
 .plan-row.editing td { background: var(--raised); }
 .plan-row.editing label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
@@ -460,13 +494,6 @@ details summary { cursor: pointer; }
 .menu-item:hover { background: var(--hover); color: var(--strong); }
 .menu-item:disabled { opacity: 0.45; cursor: default; background: transparent; }
 /* What waits for the owner in this project: brass, above the tabs */
-.project-needs { margin-bottom: 16px; padding: 10px 16px; background: var(--accent-bg); border: 1px solid var(--accent); border-left-width: 4px; }
-.project-needs .label { color: var(--accent); margin-bottom: 6px; }
-.project-need { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 6px 0; border-top: 1px solid rgba(201, 164, 93, 0.25); }
-.project-need:first-of-type { border-top: 0; }
-.project-need .primary { display: block; color: var(--strong); }
-.project-need .hint { display: block; font-size: 12px; }
-.project-need .button { flex: none; }
 .tab .counter { margin-left: 6px; }
 .project-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-bottom: 20px; }
 .summary-card { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 12px 16px; background: var(--panel); border: 1px solid var(--line); color: var(--text); }

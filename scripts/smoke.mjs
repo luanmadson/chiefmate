@@ -65,7 +65,7 @@ try {
     failures.push('the server did not start');
   } else {
     const state = await (await fetch(`${base}/api/state`)).json();
-    for (const key of ['now', 'version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'teams', 'needs', 'prompts', 'focus', 'running', 'current', 'parallel', 'sessions', 'queue', 'history', 'usage', 'manager', 'computer', 'plan', 'planning', 'alerts']) {
+    for (const key of ['now', 'version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'teams', 'needs', 'prompts', 'focus', 'running', 'current', 'parallel', 'sessions', 'queue', 'history', 'usage', 'manager', 'computer', 'plan', 'planning', 'alerts', 'attention']) {
       expect(key in state, `/api/state has no "${key}"`);
     }
     // What the app shows live (the run going on, its clock, its last action, the queue's order) comes from these.
@@ -92,6 +92,16 @@ try {
     expect(machine.memory?.total > 0 && Array.isArray(machine.projects), '/api/computer has no memory or projects');
     // Commands that must refuse without changing anything (the settings are the installation's own).
     const post = (route, body) => fetch(base + route, { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1' }, body: JSON.stringify(body) });
+    // Attention: the board's item waiting for the owner (#7) is an important notice; marked as seen, it fades.
+    const proposal = state.attention.items.find(i => i.id.startsWith('plan:7:'));
+    expect(proposal?.level === 'important' && proposal.kind === 'proposal' && !proposal.seen && state.attention.counts.important >= 1 && state.attention.top,
+      `the board's item waiting for the owner is not an important notice: ${JSON.stringify(state.attention)}`);
+    if (proposal) {
+      expect((await post('/api/attention/seen', { ids: [proposal.id] })).ok, 'marking a notice as seen failed');
+      const after = (await (await fetch(`${base}/api/state`)).json()).attention;
+      const faded = after.items.find(i => i.id === proposal.id);
+      expect(faded?.seen && after.counts.important === state.attention.counts.important - 1, 'a notice marked as seen did not fade');
+    }
     expect((await post('/api/stop-project', { project: 'none' })).status === 400, 'stopping a project without a confirmed list was not refused');
     expect((await post('/api/reset-grants', { action: 'used', index: 9999 })).status === 400, 'marking a free reset that does not exist was not refused');
     // Updates are off in the smoke test: "update now" and "update check" answer so, and nothing is fetched or installed.
@@ -792,6 +802,100 @@ try {
   }
 } catch (error) {
   failures.push(`unit checks: ${error.message}`);
+}
+
+// Titles, summaries and final summaries (src/digest.mjs): the fallbacks, the parsing of a report, "doing now", and
+// the quick model's call made through a stand-in for Claude Code (nothing real starts).
+try {
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const digest = await import(src('digest.mjs'));
+  const { claudeArgs, describeDoing } = await import(src('claude.mjs'));
+  const { t } = await import(src('i18n.mjs'));
+  const long = "Before anything else: 'git fetch origin' and merge origin/main into the current branch, solving the conflicts there are. Then run the tests.";
+  const title = digest.shortTitle(long);
+  expect(title.length <= digest.TITLE_MAX && title.startsWith('Before anything else') && title.endsWith('…'), `the fallback title is wrong: ${title}`);
+  expect(digest.shortTitle('# Fix the login\n\nMore here.') === 'Fix the login', 'the fallback title kept markdown or more than the first sentence');
+  expect(digest.shortSummary('One. Two is here. Three.') === 'One. Two is here.', 'the fallback summary is not the first sentences');
+
+  const outcome = { done: ['Added short titles', 'Folded the reports'], change: 'Each run says what it does in one line.', needs: null };
+  for (const lang of ['en', 'pt-BR']) {
+    const report = `# Report\n\n${digest.outcomeMarkdown(outcome, lang)}\n\n### ${digest.outcomeLabels(lang).full}\nThe details.`;
+    const parsed = digest.parseOutcome(report, [lang]);
+    expect(JSON.stringify(parsed.outcome) === JSON.stringify(outcome) && parsed.rest === 'The details.', `the final summary at the top of a report (${lang}) was not read: ${JSON.stringify(parsed)}`);
+  }
+  const needs = digest.parseOutcome('### What was done\n- A\n### What changes for you\nB.\n### Needs you?\nYes: sign in to X.\n\nThe rest.');
+  expect(needs.outcome?.needs === 'sign in to X.' && needs.rest === 'The rest.', `"Needs you?" was read wrong: ${JSON.stringify(needs)}`);
+  expect(digest.parseOutcome('Just a report.').outcome === null, 'a report without a final summary got one');
+  expect(digest.mergeOutcomes([{ outcome: { done: ['a', 'b'], change: 'x', needs: null } }, { outcome: { done: ['c', 'd'], change: 'y', needs: 'z' } }])?.done.join() === 'a,b,c'
+    && digest.mergeOutcomes([{}]) === null, "the steps' summaries were not put together");
+  expect(describeDoing('Bash', { command: 'npm run smoke' }) === t('running the tests') && describeDoing('Read', { file_path: 'C:/x/src/runs.mjs' }) === t('reading the code ({file})', { file: 'runs.mjs' }),
+    '"doing now" is wrong for a test command or a file read');
+  const quickArgs = claudeArgs({ model: 'haiku', noTools: true });
+  expect(quickArgs.at(-2) === '--tools' && quickArgs.at(-1) === '', 'the quick call does not turn every tool off');
+  expect(await digest.askQuick('Hello', { quick_model: false }) === null, 'the quick call ran with "quick_model" off');
+
+  // A stand-in answers the quick call: the run gets its title and summary, and keeps what was given.
+  const fake = path.join(data, 'fake-quick.mjs');
+  writeFileSync(fake, [
+    "process.stdin.resume(); process.stdin.on('end', () => {",
+    "  const tools = process.argv.indexOf('--tools');",
+    "  const text = tools > 0 && process.argv[tools + 1] === '' ? JSON.stringify({ title: 'Builder: highlight the blocks', summary: 'Shows the blocks. So the owner sees them.' }) : 'tools were on';",
+    "  console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: text, num_turns: 1 }));",
+    '});',
+  ].join('\n'));
+  process.env.CHIEFMATE_CLAUDE = fake;
+  const { describeLater } = await import(src('runs.mjs'));
+  const { readRun, saveRun } = await import(src('store.mjs'));
+  saveRun({ id: 'brief-test', kind: 'task', project: 'none', title: 'Old: the start of the instruction', instruction: 'Highlight the blocks of the builder.', status: 'done', steps: [] });
+  saveRun({ id: 'brief-given', kind: 'task', project: 'none', title: 'Given', summary: 'Given too.', briefBy: { title: 'given', summary: 'given' }, instruction: 'x', status: 'done', steps: [] });
+  await describeLater('brief-test');
+  const described = readRun('brief-test');
+  expect(described.title === 'Builder: highlight the blocks' && described.summary === 'Shows the blocks. So the owner sees them.' && described.briefBy?.title === 'model',
+    `an older run did not get its title and summary from the quick model: ${JSON.stringify([described.title, described.summary])}`);
+  expect(describeLater('brief-given') === null && readRun('brief-given').title === 'Given', 'a title and summary given by the manager were generated again');
+  process.env.CHIEFMATE_CLAUDE = path.join(data, 'no-claude.exe');
+} catch (error) {
+  failures.push(`titles and summaries: ${error.message}`);
+}
+
+// The attention levels, in this process with made-up records (nothing is notified): what is urgent, important and
+// info, the seen marks (an info notice goes away), and the urgent Windows notification that stays until seen.
+try {
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const { attentionItems, attentionSummary, markSeen } = await import(src('attention.mjs'));
+  const { toastXml } = await import(src('notify.mjs'));
+  const at = new Date(Date.now() - 3600_000).toISOString();
+  const later = new Date(Date.now() + 2 * 3600_000).toISOString();
+  const runs = [
+    { id: 'a-failed', project: 'p', title: 'Broke', status: 'failed', created: at, ended: at, result: 'tests failed' },
+    { id: 'a-pr', project: 'p', title: 'With a PR', status: 'done', created: at, ended: at, pullRequest: 'https://github.com/o/r/pull/1' },
+    { id: 'a-done', project: 'p', title: 'Plain task', status: 'done', created: at, ended: at },
+    { id: 'a-old', project: 'p', title: 'Old', status: 'failed', created: '2020-01-01T00:00:00Z', ended: '2020-01-01T00:00:00Z' },
+  ];
+  const input = {
+    config: { plan_resets: [{ kind: 'full', expires: later, used: false }] }, runs,
+    needs: [{ id: 'r1', run: 'a-run', title: 'Task', what: 'Sign in', at, project: 'p' }],
+    usage: { five_hour: { used: 0.95, resets: later }, seven_day: { used: 0.75, resets: later } },
+    machine: { memory: { free: 1, total: 10 }, projects: [] },
+    items: [{ id: 3, title: 'Approve', status: 'waiting_owner', pr: 'https://github.com/o/r/pull/2', project: 'p' }],
+    update: { waiting: 1, blocked: 'changes' },
+  };
+  const list = attentionItems(input);
+  const level = id => list.find(i => i.id.startsWith(id))?.level;
+  expect(level('needs:') === 'urgent' && level('failed:a-failed') === 'urgent' && level('usage:five_hour') === 'urgent' && level('memory:') === 'urgent' && level('reset:') === 'urgent',
+    `an urgent notice is missing or not urgent: ${JSON.stringify(list.map(i => [i.id, i.level]))}`);
+  expect(level('usage:seven_day') === 'important' && level('plan:3:') === 'important' && level('pr:a-pr') === 'important' && level('update:') === 'important',
+    `an important notice is missing or not important: ${JSON.stringify(list.map(i => [i.id, i.level]))}`);
+  expect(level('done:a-done') === 'info' && !list.some(i => i.id === 'failed:a-old') && list[0].level === 'urgent' && list.at(-1).level === 'info', 'the info notices or the order of the levels are wrong');
+  expect(attentionSummary(list).top === 'urgent' && !list.find(i => i.kind === 'needs').seenable, "the summary is not urgent, or a step's request can be marked as seen");
+  markSeen(['done:a-done', 'failed:a-failed']);
+  const again = attentionItems(input);
+  expect(!again.some(i => i.id === 'done:a-done') && again.find(i => i.id === 'failed:a-failed')?.seen, 'a seen info notice did not go away, or a seen urgent one did not fade');
+  expect(attentionItems({ ...input, runs: [...runs, { id: 'a-redo', project: 'p', title: 'Broke', status: 'running', created: new Date().toISOString() }] }).every(i => i.id !== 'failed:a-failed'), 'a failed run redone still asks for attention');
+  const urgent = toastXml('Needs you', 'Sign in', 'chiefmate:operations', { urgent: true });
+  expect(urgent.includes('scenario="reminder"') && urgent.includes('activationType="system"') && !toastXml('Done', 'x').includes('scenario'), 'an urgent Windows notification does not stay until seen');
+} catch (error) {
+  failures.push(`attention levels: ${error.message}`);
 }
 
 try {

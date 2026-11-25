@@ -11,7 +11,7 @@ import { now } from './util.mjs';
 
 const DAY = 86400_000;
 const WEEK = 7 * DAY;
-const RAM_LOW = 0.15; // an episode of low memory starts below 15% free...
+export const RAM_LOW = 0.15; // an episode of low memory starts below 15% free...
 const RAM_BACK = 0.2; // ...and ends above 20%
 const USAGE_STEPS = [0.9, 0.7];
 const WINDOWS = [
@@ -20,7 +20,7 @@ const WINDOWS = [
 ];
 
 /** A window still running (its value is not from before a reset). */
-const current = w => typeof w?.used === 'number' && (!w.resets || Date.parse(w.resets) > Date.now());
+export const current = w => typeof w?.used === 'number' && (!w.resets || Date.parse(w.resets) > Date.now());
 
 // ---------- Free resets of the plan ----------
 
@@ -129,7 +129,7 @@ async function watch() {
     const step = USAGE_STEPS.find(s => w.used >= s);
     if (!step) continue;
     const keys = USAGE_STEPS.filter(s => s <= step).map(s => `usage:${key}:${w.resets}:${s}`);
-    if (keys.map(fresh)[0]) send.push({ title: t('Account usage at {percent}', { percent: formatPercent(w.used) }), text: usageText(name(), w), target: 'chiefmate:usage', event: 'usage_alert' });
+    if (keys.map(fresh)[0]) send.push({ title: t('Account usage at {percent}', { percent: formatPercent(w.used) }), text: usageText(name(), w), target: 'chiefmate:usage', event: 'usage_alert', urgent: step >= 0.9 });
   }
 
   const available = availableResets(config);
@@ -143,7 +143,7 @@ async function watch() {
     const step = left <= DAY ? '1d' : left <= 3 * DAY ? '3d' : null;
     if (!step) continue;
     const keys = step === '1d' ? [`${id}:1d`, `${id}:3d`] : [`${id}:3d`];
-    if (keys.map(fresh)[0]) send.push({ title: t('Free reset expiring'), text: expiryText(g), target: 'chiefmate:usage', event: 'usage_alert' });
+    if (keys.map(fresh)[0]) send.push({ title: t('Free reset expiring'), text: expiryText(g), target: 'chiefmate:usage', event: 'usage_alert', urgent: step === '1d' });
   }
 
   for (const [key, at] of Object.entries(a.sent)) if (Date.now() - Date.parse(at) > 30 * DAY) delete a.sent[key];
@@ -152,10 +152,10 @@ async function watch() {
 
   if (lowMemory) {
     await processes(60_000).catch(() => {});
-    send.unshift({ title: t('Low memory on this computer'), text: ramText(computer(config)), target: 'chiefmate:projects', event: 'memory_alert' });
+    send.unshift({ title: t('Low memory on this computer'), text: ramText(computer(config)), target: 'chiefmate:projects', event: 'memory_alert', urgent: true });
   }
   for (const n of send) {
-    notify(n.title, n.text, n.target);
+    notify(n.title, n.text, n.target, { urgent: !!n.urgent });
     // The manager gets the alert as the owner does (in the owner's language): it only warns, nothing pauses.
     reportEvent(n.event, `Alert sent to the owner: ${n.title}. ${n.text}`, { config });
   }

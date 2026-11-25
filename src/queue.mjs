@@ -2,7 +2,7 @@
 // project, one run at a time, in the order requested. This is what keeps agents from setting off other agents.
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
-import { activeRun, cancelLive, execute, live, liveRuns } from './runs.mjs';
+import { activeRun, cancelLive, doingNow, execute, live, liveRuns } from './runs.mjs';
 import { listRuns, readRun, saveRun, stepsOf } from './store.mjs';
 import { updating } from './update.mjs';
 import { now } from './util.mjs';
@@ -66,12 +66,12 @@ function busyProjects() {
 export function focus(config = loadConfig()) {
   const about = run => ({
     project: run.project, projectName: config.projects?.[run.project]?.name ?? run.project,
-    run: run.id, title: run.title, kind: run.kind, mission: run.mission ?? null,
+    run: run.id, title: run.title, summary: run.summary ?? null, kind: run.kind, mission: run.mission ?? null,
   });
   const running = liveRuns()
     .map(l => {
       const run = activeRun(l.run) ?? readRun(l.run);
-      return run ? { state: 'running', ...about(run), agent: l.agent, step: l.step, since: run.started ?? l.started } : null;
+      return run ? { state: 'running', ...about(run), agent: l.agent, step: l.step, doing: doingNow(l), since: run.started ?? l.started } : null;
     })
     .filter(Boolean);
   if (running.length) return { ...running[0], others: running.slice(1) };

@@ -80,6 +80,53 @@ export function describeAction(name, input = {}, dir) {
   }
 }
 
+const CODE_FILE = /\.(m?[jt]sx?|c[jt]s|py|rb|go|rs|java|kt|cs|php|swift|c|cc|cpp|h|css|scss|html?|vue|svelte|sh|ps1|vbs|sql)$/i;
+const TEST_COMMAND = /\b(test|tests|smoke|check|lint|pytest|jest|vitest|mocha|tsc|eslint|phpunit)\b/i;
+
+/** What the agent is doing now, in plain words and one short line, for the owner (Operations, focus, the manager). */
+export function describeDoing(name, input = {}, dir) {
+  const file = input.file_path ? path.basename(input.file_path) : '';
+  const kind = f => (CODE_FILE.test(f) ? 'code' : /\.(md|txt|rst|adoc)$/i.test(f) ? 'docs' : 'file');
+  switch (name) {
+    case 'Bash': {
+      const command = String(input.command ?? '').trim();
+      if (/needs-you/.test(command)) return t('waiting for you');
+      if (/^git\s+commit\b/.test(command)) return t('saving the work (commit)');
+      if (/^git\s+(diff|log|status|show)\b/.test(command)) return t('reviewing the changes');
+      if (/^git\b/.test(command)) return t('working with git');
+      if (/\b(npm|pnpm|yarn)\s+(install|ci|add)\b|\bpip\s+install\b/.test(command)) return t('installing dependencies');
+      if (TEST_COMMAND.test(command)) return t('running the tests');
+      if (/\bbuild\b/.test(command)) return t('building the project');
+      if (/^gh\b/.test(command)) return t('looking at GitHub');
+      if (/^(ls|dir|tree|find|Get-ChildItem)\b/i.test(command)) return t('looking at the files');
+      if (/^(cat|head|tail|type|less|grep|rg|sed -n|Get-Content|Select-String)\b/i.test(command)) return t('reading files');
+      return t('running a command');
+    }
+    case 'Read':
+      return { code: t('reading the code ({file})', { file }), docs: t('reading the documentation ({file})', { file }), file: t('reading {file}', { file }) }[kind(file)];
+    case 'Edit':
+    case 'MultiEdit':
+    case 'NotebookEdit':
+      return t('changing {file}', { file: file || path.basename(input.notebook_path ?? '') });
+    case 'Write':
+      return t('writing {file}', { file });
+    case 'Glob':
+    case 'Grep':
+      return t('searching the project');
+    case 'WebSearch':
+      return t('searching the web');
+    case 'WebFetch':
+      return t('reading a web page');
+    case 'Agent':
+    case 'Task':
+      return t('working with a helper agent');
+    case 'TodoWrite':
+      return t('planning the next steps');
+    default:
+      return t('using {tool}', { tool: String(name).replace(/^mcp__/, '').replace(/__/g, ': ') });
+  }
+}
+
 // The context window of each model, as Claude Code reports it at the end of every call ("contextWindow").
 // Until a model has been seen: 1 million tokens for the "[1m]" variants, 200,000 for the others.
 const windows = {};
@@ -96,7 +143,7 @@ function stop(child) {
 }
 
 /** The command line of a step (see runClaude below). */
-export function claudeArgs({ model, effort, tools = [], disallowed = [], addDirs = [], mcpServers = {}, attribution = true, systemFile, session }) {
+export function claudeArgs({ model, effort, tools = [], disallowed = [], addDirs = [], mcpServers = {}, attribution = true, systemFile, session, noTools = false }) {
   const args = [
     '-p', '--output-format', 'stream-json', '--verbose', '--model', model, '--permission-mode', 'dontAsk',
     '--setting-sources', 'project,local', '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers }),
@@ -113,6 +160,8 @@ export function claudeArgs({ model, effort, tools = [], disallowed = [], addDirs
   // The lists go last: each one runs until the next "--", and the prompt goes through standard input.
   if (disallowed.length) args.push('--disallowedTools', ...disallowed);
   if (tools.length) args.push('--allowedTools', ...tools);
+  // No tool at all (a short call that only writes text, such as a run's title and summary).
+  if (noTools) args.push('--tools', '');
   return args;
 }
 
@@ -201,7 +250,7 @@ export function runClaude(options) {
         if (block.type === 'text' && block.text.trim()) onEvent({ type: 'say', text: block.text });
         if (block.type === 'tool_use') {
           inFlight.add(block.id);
-          onEvent({ type: 'action', tool: block.name, text: describeAction(block.name, block.input, dir) });
+          onEvent({ type: 'action', tool: block.name, text: describeAction(block.name, block.input, dir), doing: describeDoing(block.name, block.input, dir) });
         }
       }
       // A subagent's turns fill its own context, not this one.
