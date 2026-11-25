@@ -4,16 +4,21 @@
 // Cards are built from the attention notices (src/attention.mjs), so a card leaves when its notice does. "Not now"
 // marks the notice as seen (the card fades to the end of the list); every decision reaches the manager as news
 // ("owner_decided"; a merge is "merged" news, src/merge.mjs). A project whose work someone else reviews
-// ("merge_by_owner": false) shows its pull requests as waiting for that review, with no Approve.
+// ("merge_by_owner": false) shows its pull requests as waiting for that review, with no Approve. A push the manager
+// tried and the guard refused becomes a card too: the owner allows that one push (src/guard.mjs, takeGrant) or refuses it.
+import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { markSeen } from './attention.mjs';
 import { loadConfig } from './config.mjs';
-import { t } from './i18n.mjs';
+import { GRANT_MINUTES, plainPush, pushFacts, readPushes, repoOf, samePath } from './guard.mjs';
+import { formatDateTime, t } from './i18n.mjs';
 import { discardRun, mergeRun, verdict } from './merge.mjs';
 import { reportEvent } from './news.mjs';
+import { notify } from './notify.mjs';
 import { decideItem } from './planning.mjs';
 import { readRun } from './store.mjs';
-import { clip, DATA, ensureDir, now, readJson, writeJson } from './util.mjs';
+import { clip, DATA, ensureDir, now, readJson, ROOT, writeJson } from './util.mjs';
 
 const QUESTIONS_MAX = 200;
 export const OPTIONS_MAX = 6;
@@ -65,6 +70,87 @@ function closeQuestion(id, answer) {
   Object.assign(q, { status: choice ? 'answered' : 'dismissed', answer: choice, answered_at: now() });
   saveQuestions(questions);
   return q;
+}
+
+// ---------- The manager's pushes ----------
+// The guard refuses the manager every push. One it tried that could be allowed (a plain push of one branch, not the
+// main one, not forced) becomes a request here: the owner allows it on its card, for that repository, branch, folder
+// and source, once, within GRANT_MINUTES, or refuses it. The hook and "cli.mjs push" take the grant (src/guard.mjs).
+
+const PUSHES_MAX = 100;
+const PUSH_OPEN_FOR = 24 * 3600_000; // a request not answered in a day leaves the cards
+export const pushesFile = () => path.join(ensureDir(path.join(DATA, 'manager')), 'pushes.json');
+const cliPush = p => `node src/cli.mjs push "${p.dir.replaceAll('\\', '/')}" ${p.branch}`;
+
+/** The requests still waiting for the owner, oldest first. */
+export const openPushes = (list = readPushes(pushesFile())) => list.filter(p => p.status === 'open' && Date.now() - Date.parse(p.at) < PUSH_OPEN_FOR);
+
+/**
+ * Turns what the guard refused in the manager's answer (its log, removed once read) into push requests: one per push
+ * that could be allowed, unless the same one already waits. Returns the new requests.
+ */
+export function pushRequestsFrom(log) {
+  if (!existsSync(log)) return [];
+  const lines = readFileSync(log, 'utf8').split('\n').filter(Boolean);
+  rmSync(log, { force: true });
+  const made = [];
+  for (const line of lines) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue; // a line cut by a crash
+    }
+    const command = String(entry.tool_input?.command ?? '');
+    const target = plainPush(command, entry.cwd || ROOT);
+    if (!target.branch) continue;
+    const facts = pushFacts(target);
+    if (!facts.repo || facts.main) continue;
+    const request = addPushRequest({ ...target, ...facts, command });
+    if (request) made.push(request);
+  }
+  return made;
+}
+
+/** A push request for the owner: { dir, remote, src, branch, repo, commits, count, command }. Null when the same one waits. */
+export function addPushRequest({ dir, remote, src, branch, repo, commits = [], count = 0, command = '' }) {
+  const list = readPushes(pushesFile());
+  const same = p => p.repo === repo && p.branch === branch && p.src === src && samePath(p.dir, dir);
+  const open = openPushes(list).find(same);
+  if (open) {
+    // Tried again: what it would send now.
+    Object.assign(open, { commits: commits.slice(0, 20), count, command: clip(command, 500) });
+    writeJson(pushesFile(), list);
+    return null;
+  }
+  const request = { id: randomUUID().slice(0, 8), status: 'open', repo, branch, dir, remote, src, commits: commits.slice(0, 20), count, command: clip(command, 500), at: now() };
+  writeJson(pushesFile(), [...list, request].slice(-PUSHES_MAX));
+  notify(t('The manager asks to push'), t('Branch {branch} to {repo}', { branch, repo }), 'chiefmate:decisions', { urgent: true });
+  return request;
+}
+
+/** The owner's answer to a push request: allowed (once, for GRANT_MINUTES) or refused. Returns the request. */
+export function answerPush(id, allow) {
+  const list = readPushes(pushesFile());
+  const p = list.find(x => x.id === String(id ?? ''));
+  if (!p || !openPushes([p]).length) throw new Error(t('This decision is no longer pending.'));
+  Object.assign(p, allow
+    ? { status: 'allowed', decided: now(), expires: new Date(Date.now() + GRANT_MINUTES * 60_000).toISOString() }
+    : { status: 'refused', decided: now() });
+  writeJson(pushesFile(), list);
+  return p;
+}
+
+/** The manager's line: its push requests waiting for the owner, and the pushes allowed and not used yet. */
+export function pushesLine() {
+  const list = readPushes(pushesFile());
+  const open = openPushes(list);
+  const allowed = list.filter(p => p.status === 'allowed' && Date.parse(p.expires) > Date.now());
+  const parts = [
+    open.length ? `waiting for the owner's card: ${open.map(p => `${p.branch} to ${p.repo}`).join('; ')}` : '',
+    allowed.length ? `allowed by the owner, once each: ${allowed.map(p => `${p.branch} to ${p.repo} from ${p.dir}, until ${formatDateTime(p.expires)} (${cliPush(p)})`).join('; ')}` : '',
+  ].filter(Boolean);
+  return parts.length ? `Your pushes: ${parts.join('. ')}.` : '';
 }
 
 // ---------- The cards ----------
@@ -165,15 +251,35 @@ function questionCard(notice, q, config) {
   };
 }
 
+function pushCard(notice, p, config) {
+  const project = Object.entries(config.projects ?? {}).find(([, x]) => x.repository && repoOf(x.repository) === p.repo)?.[0] ?? null;
+  const more = p.count > (p.commits?.length ?? 0) ? `\n- ${t('and {count} more', { count: p.count - p.commits.length })}` : '';
+  const commits = p.commits?.length ? `${t('Commits')}:\n- ${p.commits.join('\n- ')}${more}` : '';
+  return {
+    id: notice.id, kind: 'push', level: notice.level, seen: false, at: p.at, project,
+    label: t('Push by the manager to {repo}', { repo: p.repo }),
+    title: t('Send the branch {branch} to GitHub', { branch: p.branch }),
+    what: t('{count} commit(s) from {folder} go to the branch {branch} of {repo}. It is not the main branch.', { count: p.count, folder: p.dir, branch: p.branch, repo: p.repo }),
+    change: t('Only this push is allowed: this branch of this repository, from this folder, once, within {minutes} minutes. Never the main branch, never a forced push.', { minutes: GRANT_MINUTES }),
+    risk: t('The commits go to GitHub: whoever can see the repository sees them (anyone, if it is public). Nothing goes into the main branch.'),
+    recommend: '', recommendShort: '',
+    detail: [commits, `${t('Command')}: \`${p.command}\``].filter(Boolean).join('\n\n'),
+    push: p.id, approve: true,
+  };
+}
+
 /**
  * The cards, in the notices' order (not seen first, then by level and time): { id (the notice's), kind (merge,
- * decision, question), level, seen, label, title, what, change, risk, recommend, detail, approve, ... }.
+ * decision, question, push), level, seen, label, title, what, change, risk, recommend, detail, approve, ... }.
  */
-export function decisionCards({ config = loadConfig(), attention = [], items = [], questions = openQuestions() } = {}) {
+export function decisionCards({ config = loadConfig(), attention = [], items = [], questions = openQuestions(), pushes = openPushes() } = {}) {
   const cards = [];
   for (const n of attention) {
     try {
-      if (n.kind === 'question') {
+      if (n.kind === 'push') {
+        const p = pushes.find(x => n.id === `push:${x.id}`);
+        if (p) cards.push(pushCard(n, p, config));
+      } else if (n.kind === 'question') {
         const q = questions.find(x => n.id === `question:${x.id}`);
         if (q) cards.push(questionCard(n, q, config));
       } else if (n.kind === 'decision') {
@@ -225,6 +331,14 @@ export async function decide({ card, action, option, reason } = {}, cards = []) 
     await decideItem(c.item, action, { reason, by: 'owner' });
     tell(`The owner ${action === 'approve' ? 'approved' : 'discarded'} ${about} (planning item #${c.item}) from the app${action === 'approve' ? ': its task starts in its turn' : ''}.`);
     return { card: c.id, done: action === 'approve' ? 'approved' : 'discarded' };
+  } else if (c.kind === 'push' && ['approve', 'discard'].includes(action)) {
+    const p = answerPush(c.push, action === 'approve');
+    if (p.status === 'allowed') {
+      reportEvent('push_allowed', `The owner allowed, from the app, your push of branch ${p.branch} to ${p.repo} (from ${p.dir}), once, until ${formatDateTime(p.expires)}. Run it now: the same command (${p.command}) or ${cliPush(p)}.`, { urgent: true });
+    } else {
+      tell(`The owner refused, from the app, your push of branch ${p.branch} to ${p.repo} (from ${p.dir}). Don't try it again.`);
+    }
+    return { card: c.id, done: p.status };
   } else if (c.kind === 'question' && ['answer', 'discard'].includes(action)) {
     const q = closeQuestion(c.question, action === 'answer' ? String(option ?? '') : null);
     tell(q.answer

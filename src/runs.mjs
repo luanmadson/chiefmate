@@ -52,8 +52,11 @@ export const doingNow = l => (Date.now() < (l.heldUntil ?? 0) ? t('waiting for y
 // they are written (git -C dir push, bash -c "git push", a pull request opened through GitHub's API).
 export const ALWAYS_DISALLOWED = ['Bash(git push:*)', 'Bash(gh pr:*)', 'Bash(gh repo:*)', 'Bash(git remote:*)'];
 
-/** The guard of a crew step or of the manager: refuses any publication, noting each refusal in "log" (nothing is ever allowed). */
-export const crewGuard = log => guardHooks({ log, allowed: [] });
+/**
+ * The guard of a crew step or of the manager: refuses any publication, noting each refusal in "log" (nothing is ever
+ * allowed). grants: the manager's only, the pushes the owner allowed it once (src/decisions.mjs).
+ */
+export const crewGuard = (log, grants = null) => guardHooks({ log, allowed: [], grants });
 
 /** Chiefmate's command line, for a step: to ask for the owner (src/needs.mjs) and to propose items (src/planning.mjs). */
 function cliCommand() {

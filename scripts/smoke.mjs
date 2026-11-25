@@ -1494,6 +1494,101 @@ try {
   failures.push(`decision cards: ${error.message}`);
 }
 
+// The manager's push, allowed once by the owner, in this process with a made-up repository (no network): the guard
+// refuses it and it becomes a card; allowed, the same push goes once (then refused again); never the main branch, a
+// forced push, another branch or folder, nor after the grant expires. "cli.mjs push" sends only a granted push.
+const pushDir = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-push-'));
+try {
+  process.env.CHIEFMATE_SMOKE = '1';
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const { plainPush, pushFacts, readPushes } = await import(src('guard.mjs'));
+  const { crewGuard } = await import(src('runs.mjs'));
+  const { claudeArgs } = await import(src('claude.mjs'));
+  const { addPushRequest, answerPush, decide, decisionCards, openPushes, pushesFile, pushRequestsFrom } = await import(src('decisions.mjs'));
+  const { attentionItems } = await import(src('attention.mjs'));
+  const git = (dir, ...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true }).trim();
+  const repo = path.join(pushDir, 'clone');
+  const bare = path.join(pushDir, 'remote.git');
+  mkdirSync(repo);
+  execFileSync('git', ['init', '-q', '--bare', bare], { windowsHide: true });
+  git(repo, 'init', '-q', '-b', 'trunk');
+  git(repo, 'config', 'user.email', 'sample@example.com');
+  git(repo, 'config', 'user.name', 'Sample');
+  writeFileSync(path.join(repo, 'a.txt'), 'a');
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-q', '-m', 'First change');
+  git(repo, 'branch', 'feature');
+  git(repo, 'remote', 'add', 'origin', 'https://github.com/example-org/sample.git');
+  git(repo, 'remote', 'add', 'local', bare);
+  git(repo, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/trunk');
+
+  // What can be allowed: one plain push of one branch, alone; the main branch and a forced push never.
+  const kinds = {
+    'git push origin feature': 'ok', 'git -C sub push -u origin HEAD:feature': 'ok', 'git push -q origin refs/heads/feature': 'ok',
+    'git push --force origin feature': 'forced', 'git push origin +feature': 'forced', 'git push --force-with-lease origin feature': 'forced',
+    'git push --mirror origin': 'forced', 'git push --delete origin feature': 'forced', 'git push origin :feature': 'forced', 'git push -fu origin feature': 'forced',
+    'git push origin main': 'main', 'git push origin HEAD:master': 'main', 'git push origin refs/heads/main': 'main',
+    'git push': 'shape', 'git push origin': 'shape', 'cd x && git push origin feature': 'shape', 'git -c a=b push origin feature': 'shape',
+    'git push origin $B': 'shape', 'git push --tags origin feature': 'shape', 'git push origin a b': 'shape', 'bash -c "git push origin feature"': 'shape',
+  };
+  const misjudged = Object.entries(kinds).filter(([c, k]) => (plainPush(c, repo).branch ? 'ok' : plainPush(c, repo).refused) !== k);
+  expect(!misjudged.length, `the guard misjudged which pushes the owner may allow: ${misjudged.map(([c]) => `${c} -> ${JSON.stringify(plainPush(c, repo))}`).join('; ')}`);
+  const facts = pushFacts(plainPush('git push origin feature', repo));
+  expect(facts.repo === 'example-org/sample' && !facts.main && facts.count === 1 && facts.commits[0].endsWith('First change') && pushFacts(plainPush('git push origin trunk', repo)).main,
+    `what a push would send is wrong, or the remote's default branch is not the main one: ${JSON.stringify(facts)}`);
+
+  // The manager's hook: refused and noted; the refusal becomes a card (not for the main branch).
+  const log = path.join(pushDir, 'guard.jsonl');
+  const settings = JSON.parse(claudeArgs({ model: 'm', hooks: crewGuard(log, pushesFile()) }).find((a, i, all) => all[i - 1] === '--settings'));
+  const hook = settings.hooks?.PreToolUse?.[0]?.hooks?.[0]?.command ?? '';
+  const goes = (command, cwd = repo) => !/"permissionDecision":"deny"/.test(execFileSync(hook, { shell: true, encoding: 'utf8', input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', tool_input: { command }, cwd }) }));
+  expect(hook.includes('--grants') && !goes('git push origin feature') && !goes('git push origin main'), `the manager's push went without the owner: ${hook}`);
+  const made = pushRequestsFrom(log);
+  expect(made.length === 1 && made[0].branch === 'feature' && made[0].repo === 'example-org/sample' && !existsSync(log), `a refused push did not become one request: ${JSON.stringify(made)}`);
+  const pushes = openPushes();
+  const cards = decisionCards({ config: { projects: {} }, attention: attentionItems({ config: { projects: {} }, pushes }), pushes });
+  const card = cards.find(c => c.kind === 'push');
+  expect(card?.approve && card.level === 'urgent' && card.title.includes('feature') && card.detail.includes('First change'), `the push request is not a card: ${JSON.stringify(cards)}`);
+  expect((await decide({ card: card.id, action: 'approve' }, cards)).done === 'allowed', 'the owner could not allow the push from its card');
+  // Allowed: another branch, another folder and a forced push are still refused; the push itself goes once.
+  const other = path.join(pushDir, 'other');
+  expect(!goes('git push origin other') && !goes('git push origin feature', other) && !goes('git push --force origin feature') && !goes('git push origin HEAD:feature'),
+    'an allowed push let another branch, folder, source or a forced push through');
+  expect(goes('git push origin feature') && readPushes(pushesFile()).find(p => p.id === card.push)?.status === 'used' && !goes('git push origin feature'),
+    'the allowed push did not go once, or was not used up');
+  // A grant for the main branch, or expired, lets nothing through; a refusal is recorded.
+  const later = new Date(Date.now() + 600_000).toISOString();
+  writeFileSync(pushesFile(), JSON.stringify([...readPushes(pushesFile()),
+    { id: 'g-main', status: 'allowed', repo: 'example-org/sample', branch: 'main', src: 'main', dir: repo, remote: 'origin', expires: later },
+    { id: 'g-old', status: 'allowed', repo: 'example-org/sample', branch: 'feature', src: 'feature', dir: repo, remote: 'origin', expires: new Date(Date.now() - 1000).toISOString() },
+  ]));
+  expect(!goes('git push origin main') && !goes('git push origin feature'), 'a grant for the main branch, or an expired one, let a push through');
+  const refusedOne = addPushRequest({ ...plainPush('git push origin feature', repo), ...facts, command: 'git push origin feature' });
+  expect(answerPush(refusedOne.id, false).status === 'refused' && !openPushes().length, 'a refused push is still waiting');
+
+  // The command line: refused without a grant and inside a step; with one, it pushes once (to a local remote).
+  // As the manager would run it: not inside a step (the smoke test itself may run inside one).
+  const { CHIEFMATE_RUN, CHIEFMATE_STEP, ...outside } = process.env;
+  const cli = (args, env = {}) => {
+    try {
+      return { ok: true, out: execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'push', ...args], { encoding: 'utf8', windowsHide: true, stdio: 'pipe', env: { ...outside, ...env } }) };
+    } catch (error) {
+      return { ok: false, out: String(error.stderr ?? error.message) };
+    }
+  };
+  expect(!cli([repo, 'feature']).ok, 'cli.mjs push sent a push the owner had not allowed');
+  const local = addPushRequest({ ...plainPush('git push local feature', repo), ...pushFacts(plainPush('git push local feature', repo)), command: 'git push local feature' });
+  answerPush(local.id, true);
+  expect(!cli([repo, 'feature'], { CHIEFMATE_RUN: 'r1' }).ok, 'a step of a run pushed through cli.mjs push');
+  const sent = cli([repo, 'feature']);
+  expect(sent.ok && git(bare, 'rev-parse', 'refs/heads/feature') === git(repo, 'rev-parse', 'feature') && !cli([repo, 'feature']).ok,
+    `cli.mjs push did not send the allowed push once: ${sent.out}`);
+} catch (error) {
+  failures.push(`the manager's push: ${error.message}`);
+} finally {
+  rmSync(pushDir, { recursive: true, force: true });
+}
+
 // Live sessions in the app, in this process, with stand-ins for Claude Code and Codex (no real tool, no window): the
 // first message is the first turn; the text and the actions go to the history as they happen; a message sent while
 // the agent works waits in the queue and goes next, in the same session; a refused push becomes a request that the

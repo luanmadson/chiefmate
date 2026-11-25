@@ -828,7 +828,7 @@ function drawClock() {
 // fades a card to the end, under "Left for later".
 
 const decisionsNow = () => (online ? state?.decisions ?? [] : []);
-const decisionKind = c => ({ merge: c.thirdParty ? t('Waiting for a third-party review') : t('Merge'), decision: t('Proposal'), question: t('Question') })[c.kind] ?? '';
+const decisionKind = c => ({ merge: c.thirdParty ? t('Waiting for a third-party review') : t('Merge'), decision: t('Proposal'), question: t('Question'), push: t('Push') })[c.kind] ?? '';
 
 function decisionCardHtml(c) {
   const facts = [
@@ -846,12 +846,12 @@ function decisionCardHtml(c) {
   const button = (action, text, kind = '', extra = '') => `<button type="button" class="button${kind}" data-decide="${esc(action)}" data-card="${esc(c.id)}"${extra}>${text}</button>`;
   const choices = c.kind === 'question'
     ? c.options.map(o => button('answer', esc(o), o === c.recommend ? '' : ' secondary', ` data-option="${esc(o)}"${o === c.recommend ? ` title="${esc(t('Recommended by the manager'))}"` : ''}`)).join('')
-    : c.approve ? button('approve', label(t('Approve'))) : '';
+    : c.approve ? button('approve', label(c.kind === 'push' ? t('Allow push') : t('Approve'))) : '';
   const buttons = [
     choices,
-    // Someone else's review only informs: "Hide" sends it to the archive.
-    c.seen ? '' : button('later', c.thirdParty ? label(t('Hide')) : label(t('Not now'), t('Later')), ' secondary'),
-    c.thirdParty ? '' : button('discard', label(t('Discard')), ' danger'),
+    // Someone else's review only informs: "Hide" sends it to the archive. A push the manager asks is allowed or refused.
+    c.seen || c.kind === 'push' ? '' : button('later', c.thirdParty ? label(t('Hide')) : label(t('Not now'), t('Later')), ' secondary'),
+    c.thirdParty ? '' : button('discard', label(c.kind === 'push' ? t('Refuse') : t('Discard')), ' danger'),
     button('talk', label(t('Talk about this'), t('Talk')), ' secondary'),
   ].join('');
   const about = [esc(c.label), c.at ? esc(relative(c.at)) : ''].filter(Boolean).join(' · ');
@@ -912,13 +912,15 @@ $('#decisions').addEventListener('click', async event => {
   if (c.kind === 'merge' && action === 'approve' && !(await confirmDialog(t('Approve and merge'), `${c.label}: ${c.title}. ${how}`, t('Approve')))) return;
   const closes = c.url ? t('The pull request is closed on GitHub; it can be reopened there.') : t('The branch stays in your clone, not merged.');
   if (c.kind === 'merge' && action === 'discard' && !(await confirmDialog(t('Discard this work'), `${c.label}: ${c.title}. ${closes}`, t('Discard')))) return;
+  // Allowing a push is confirmed too: it lets the manager send that branch to GitHub once.
+  if (c.kind === 'push' && action === 'approve' && !(await confirmDialog(t('Allow this push'), `${c.title}. ${c.what} ${c.change}`, t('Allow push')))) return;
   const card = button.closest('.decision');
   for (const b of card.querySelectorAll('button')) b.disabled = true;
   try {
     const r = await api('/api/decide', { card: c.id, action, option: button.dataset.option });
     toast({
       merged: t('Merged.'), later: c.thirdParty ? t('Hidden: it is in the archive.') : t('Left for later: the card stays at the end, faded.'), discarded: t('Discarded.'),
-      approved: t('Approved: it becomes a task for its agent, in its turn.'), answered: t('Answer sent to the manager: {answer}', { answer: r.answer ?? '' }),
+      approved: t('Approved: it becomes a task for its agent, in its turn.'), allowed: t('Allowed: the manager may send it once now.'), refused: t('Refused: the manager is told.'), answered: t('Answer sent to the manager: {answer}', { answer: r.answer ?? '' }),
     }[r.done] ?? '');
   } catch (error) {
     toast(error.message);
@@ -935,7 +937,7 @@ const newsEvent = kind => ({
   merge_failed: t('merge failed'), needs_you: t('needs you'), update_installed: t('update installed'), update_blocked: t('update blocked'),
   memory_alert: t('memory alert'), usage_alert: t('usage alert'), session_ended: t('live session ended'), plan_proposed: t('new proposal'),
   idle: t('empty queue'), autopilot_report: t('autopilot report'), watchdog: t('watchdog'),
-  away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'),
+  away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'),
 }[kind] ?? kind);
 
 let chatScrolled = false;

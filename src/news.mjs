@@ -21,11 +21,12 @@ import { DATA, ensureDir, now, readJson, writeJson } from './util.mjs';
 export const NEWS_EVENTS = [
   'run_finished', 'run_failed', 'run_paused', 'pr_ready', 'merged', 'merge_failed', 'needs_you',
   'update_installed', 'update_blocked', 'memory_alert', 'usage_alert', 'session_ended', 'plan_proposed',
-  'idle', 'autopilot_report', 'watchdog', 'away', 'back', 'owner_decided',
+  'idle', 'autopilot_report', 'watchdog', 'away', 'back', 'owner_decided', 'push_allowed',
 ];
 
-// The owner's own switch: always told to the manager, whatever "manager_updates" says.
-const OWNER_EVENTS = ['away', 'back'];
+// The owner's own switch, and a push the owner allowed (for a short time): always told to the manager, whatever
+// "manager_updates" says.
+const OWNER_EVENTS = ['away', 'back', 'push_allowed'];
 
 /**
  * While the owner is away, these events wait for the summary when they are back. The rest still go at once: the
