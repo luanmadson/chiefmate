@@ -217,7 +217,7 @@ textarea { resize: vertical; min-height: 64px; }
 .msg-body ul, .msg-body ol { margin: 4px 0 8px; padding-left: 20px; }
 .msg-body h4 { margin: 10px 0 4px; font-size: 13px; color: var(--strong); }
 .msg.error .msg-body { color: var(--error); }
-.typing .live-last { margin-top: 10px; }
+.msg.typing .live-last { margin-top: 10px; }
 .msg-head .tag { margin: 0; }
 /* The manager's notices (news it gives on its own): a brass rule on the left and a faint brass wash. */
 .msg.news { border-left: 2px solid var(--accent); background: rgba(201, 164, 93, 0.05); }
@@ -856,9 +856,17 @@ details summary { cursor: pointer; }
   .toast { bottom: calc(68px + env(safe-area-inset-bottom)); }
   .agent-panel { top: calc(48px + env(safe-area-inset-top)); bottom: auto; height: calc(var(--app-h, 100dvh) - 48px - env(safe-area-inset-top)); width: 100vw; }
 
-  /* While typing, the bottom bar and the notices step aside for the keyboard */
-  html.typing .nav, html.typing .alerts, html.typing #view-manager .view-header, html.typing .suggestions { display: none; }
-  html.typing #view-manager .chat-column { height: calc(var(--view-h, 70dvh) - 20px); }
+  /* With the keyboard open, the bottom bar and the notices step aside; in a conversation, so do the title bar, the headers
+     and the decisions: its last messages and the field take the whole visible area, Send always beside the field */
+  html.typing .nav, html.typing .alerts, html.typing .suggestions { display: none; }
+  html.typing-chat .titlebar, html.typing-chat .view-header, html.typing-chat #session-page,
+  html.typing-chat #view-project > :not(#project-live), html.typing-chat #project-live-list, html.typing-chat .live-head { display: none; }
+  html.typing-chat .app { padding-top: env(safe-area-inset-top); }
+  html.typing-chat .view.active { padding-top: 0; padding-bottom: 0; overflow: hidden; } /* the same width: the messages don't reflow */
+  html.typing-chat #view-manager .chat-column, html.typing-chat .live-session .chat-column { height: var(--view-h, 60dvh); min-height: 0; border-top-width: 0; border-bottom-width: 0; }
+  html.typing-chat .chat-queue { max-height: 22%; }
+  html.typing-chat .compose { padding: 6px 8px; }
+  html.typing-chat .compose textarea { min-height: 44px; height: 44px; } /* one line, growing with the text (fitField) */
 
   .view { padding: 8px 12px 12px; }
   .view-header h1 { font-size: 18px; }
@@ -918,7 +926,7 @@ details summary { cursor: pointer; }
   .side { margin-top: 16px; overflow: visible; }
   /* The field with its buttons to the right, as in a messaging app; the suggestions in one row below, scrolling sideways */
   .compose { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 8px; }
-  .compose textarea { grid-area: 1 / 1; min-height: 64px; height: 100%; }
+  .compose textarea { grid-area: 1 / 1; min-height: 64px; height: 100%; max-height: calc(5lh + 18px); resize: none; }
   .compose-footer { display: contents; }
   .compose-buttons { grid-area: 1 / 2; flex-direction: column; justify-content: flex-end; margin-left: 0; }
   .compose-buttons .button { min-width: 76px; }
