@@ -96,8 +96,9 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 for the crew: proposes an item (status "proposed", the author recorded);
                                                 the manager hears of it and triages it, the owner decides
   node src/cli.mjs plan triage <n> --recommend now|later|discard [--agent <member>] [--priority ...] [--note "..."]
-                            [--order <position>]
-                                                for the manager: the item then waits for the owner's decision
+                            [--risk "..."] [--order <position>]
+                                                for the manager: the item then waits for the owner's decision (--risk:
+                                                one line on what to watch, shown on the owner's card)
   node src/cli.mjs plan approve|later|discard <n> [--reason "..."] [--duplicate-of <m>]
                                                 the decision: "approve" makes it a task for its agent (one approved task
                                                 per project at a time, the others wait in order), "later" leaves it for
@@ -143,6 +144,9 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs cancel <id>                  cancels a run
   node src/cli.mjs resume <id> [--ignore-limits]
                                                 resumes a paused, failed or canceled run
+  node src/cli.mjs ask-owner "<question>" [--context "<explanation>"] [--options "Yes|No|Wait"] [--recommend <option>] [--project <id>]
+                                                the manager's question for the owner: a card in the app with one button
+                                                per option; the answer comes back as "owner_decided" news
   node src/cli.mjs merge <id> [--yes]           merges a finished run's work, only with the owner's authorization: shows
                                                 the pull request (or the branch delivered locally), the checks and the
                                                 review's verdict; with --yes, Chiefmate merges it (a pull request on
@@ -297,7 +301,7 @@ async function chatCommand() {
 async function planCommand() {
   const planning = await import('./planning.mjs');
   // The options that take a value.
-  const keys = ['title', 'description', 'project', 'priority', 'status', 'agent', 'run', 'pr', 'summary', 'recommend', 'note', 'order', 'reason', 'by', 'duplicate-of'];
+  const keys = ['title', 'description', 'project', 'priority', 'status', 'agent', 'run', 'pr', 'summary', 'recommend', 'note', 'risk', 'order', 'reason', 'by', 'duplicate-of'];
   const [action = 'list', ...args] = rest.filter((x, i) => !x.startsWith('--') && !keys.includes(rest[i - 1]?.slice(2)));
   const fields = () => Object.fromEntries(['title', 'description', 'project', 'priority', 'status', 'agent', 'run', 'pr'].filter(k => option(`--${k}`) !== undefined).map(k => [k, option(`--${k}`)]));
   const line = i => `#${String(i.id).padEnd(3)} ${i.priority.padEnd(6)} ${i.status.padEnd(13)} ${i.project}: ${i.title}${i.agent ? `  (${i.agent})` : ''}${i.recommend ? `  [recommended: ${i.recommend}]` : ''}${i.run ? `  [run ${i.run}${i.run_status ? `, ${i.run_status}` : ''}]` : ''}${i.pr ? `  ${i.pr}` : ''}${i.archived ? '  (archived)' : ''}`;
@@ -333,7 +337,7 @@ async function planCommand() {
       return;
     }
     case 'triage':
-      show('Triaged', await change({ action: 'triage', id: which(), priority: option('--priority'), agent: option('--agent'), recommend: option('--recommend'), note: option('--note'), order: option('--order') }));
+      show('Triaged', await change({ action: 'triage', id: which(), priority: option('--priority'), agent: option('--agent'), recommend: option('--recommend'), note: option('--note'), risk: option('--risk'), order: option('--order') }));
       return;
     case 'approve':
     case 'later':
@@ -652,6 +656,16 @@ async function main() {
     case 'chat':
       await chatCommand();
       return;
+    case 'ask-owner': {
+      // The manager's (or the owner's) question; a step of a run asks with needs-you instead.
+      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error('A step of a run asks the owner with needs-you.');
+      const question = rest.find((x, i) => !x.startsWith('--') && !['--context', '--options', '--recommend', '--project'].includes(rest[i - 1]));
+      if (!question) throw new Error('Which question? node src/cli.mjs ask-owner "<question>" --context "<explanation>" --options "Yes|No|Wait"');
+      const q = (await api('/api/ask-owner', { question, context: option('--context'), options: option('--options'), recommend: option('--recommend'), project: option('--project') })).question;
+      console.log(`Question #${q.id} is waiting for the owner in the app: ${q.question} [${q.options.join(' | ')}]${q.recommend ? ` (recommended: ${q.recommend})` : ''}`);
+      console.log('The answer comes back to you as "owner_decided" news. Do not ask it again in the conversation.');
+      return;
+    }
     case 'plan':
       await planCommand();
       return;

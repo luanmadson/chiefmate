@@ -401,17 +401,18 @@ function placeAt(board, item, position) {
 const TRIAGE_FROM = ['proposed', 'triaged', 'future', 'todo'];
 
 /**
- * The manager's triage: { priority, agent, recommend (now | later | discard), note (one line on why), order (a position
- * in the owner's list) }. The item then waits for the owner's decision.
+ * The manager's triage: { priority, agent, recommend (now | later | discard), note (one line on why), risk (one line on
+ * what to watch, for the owner's decision card), order (a position in the owner's list) }. The item then waits for the
+ * owner's decision.
  */
-export function triageItem(id, { priority, agent, recommend, note, order } = {}) {
+export function triageItem(id, { priority, agent, recommend, note, risk, order } = {}) {
   const board = readBoard();
   const item = findIn(board, id);
   if (item.archived || !TRIAGE_FROM.includes(item.status)) throw new Error(`Item #${item.id} is ${item.archived ? 'archived' : item.status}: only proposed, future or to-do items are triaged.`);
   if (recommend == null || recommend === '') throw new Error(`Recommend something: --recommend ${RECOMMENDATIONS.join('|')}.`);
   applyFields(item, { priority: priority || undefined, agent: agent || undefined });
   if (!item.agent) throw new Error(`Say which agent would do item #${item.id}: --agent <member>.`);
-  Object.assign(item, { recommend: parseRecommendation(recommend), recommend_note: clip(note, 200) || item.recommend_note || '', triaged_at: now(), status: 'triaged', updated: now() });
+  Object.assign(item, { recommend: parseRecommendation(recommend), recommend_note: clip(note, 200) || item.recommend_note || '', recommend_risk: clip(risk, 200) || item.recommend_risk || '', triaged_at: now(), status: 'triaged', updated: now() });
   placeAt(board, item, order != null && order !== '' ? order : item.rank ?? Number.MAX_SAFE_INTEGER);
   saveBoard(board);
   return item;
@@ -533,7 +534,7 @@ export async function changePlan(body = {}) {
       return proposeItem({ project: body.project, title: body.title, summary: body.summary ?? body.description, agent: body.agent, priority: body.priority, by: who.by, run: who.run });
     }
     case 'triage':
-      return triageItem(body.id, { priority: body.priority, agent: body.agent, recommend: body.recommend, note: body.note, order: body.order });
+      return triageItem(body.id, { priority: body.priority, agent: body.agent, recommend: body.recommend, note: body.note, risk: body.risk, order: body.order });
     case 'approve':
       // The manager's approval for the owner, within the autopilot's limits only.
       if (body.autopilot) return (await import('./autopilot.mjs')).autopilotApprove(body.id);
