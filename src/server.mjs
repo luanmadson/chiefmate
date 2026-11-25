@@ -15,7 +15,8 @@ import { addQuestion, decide, decisionCards, openPushes, openQuestions } from '.
 import { listFolder, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
-import { computer, processes, stoppable, stopProject } from './machine.mjs';
+import { closeBrowser, focusBrowser, openBrowsers } from './browsers.mjs';
+import { computer, latestProcesses, processes, stoppable, stopProject } from './machine.mjs';
 import { chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
 import { closeReplaced, mergeRun, previewClose, previewMerge } from './merge.mjs';
 import { awayInfo, reportEvent, setAway } from './news.mjs';
@@ -389,6 +390,8 @@ function buildState() {
     history: runs.filter(r => !['queued', 'waiting'].includes(r.status) && !goingIds.has(r.id)).slice(0, 30).map(summary),
     usage: { limits: config.limits ?? {}, account: usage },
     computer: machine,
+    // The crew's browsers open (src/browsers.mjs): project, task, since when and whether the task still goes on.
+    browsers: openBrowsers(config, latestProcesses()),
     sessions: sessionsState(config, machine),
     plan: {
       resets: planResets(config),
@@ -465,6 +468,7 @@ const OPENS_ON_PC = {
   '/api/project/dev': body => body.action === 'start',
   '/api/session': body => !!body.window,
   '/api/prompt-builder/session': body => !!body.window,
+  '/api/browser': body => body.action === 'focus',
 };
 
 export function startServer() {
@@ -711,6 +715,13 @@ export function startServer() {
           if (body.preview) return reply(res, 200, { processes: await stoppable(String(body.project ?? '')) });
           if (!Array.isArray(body.pids) || !body.pids.length) return reply(res, 400, { error: t('Confirm which processes to stop.') });
           return reply(res, 200, { stopped: await stopProject(String(body.project ?? ''), body.pids) });
+        }
+        case '/api/browser': {
+          // One of the crew's browsers: closed, or brought to the front on this computer.
+          const pid = Number(body.pid);
+          if (body.action === 'focus') return reply(res, 200, { browser: await focusBrowser(pid) });
+          if (body.action === 'close') return reply(res, 200, { browser: await closeBrowser(pid) });
+          return reply(res, 400, { error: 'unknown action' });
         }
         case '/api/planning':
           return reply(res, 200, { item: await changePlan(body) });

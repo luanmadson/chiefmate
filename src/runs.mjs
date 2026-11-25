@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { instructionFiles, stepAccess, stepMcp } from './access.mjs';
+import { browserServers, closeAfterRun } from './browsers.mjs';
 import { contextWindow, runClaude } from './claude.mjs';
 import { loadConfig, projectCrew } from './config.mjs';
 import { guardHooks } from './guard.mjs';
@@ -651,7 +652,8 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     tools,
     disallowed,
     addDirs: access.addDirs,
-    mcpServers: mcp.servers,
+    // Playwright's browser on the project's own profile, its window named after the project and the run (src/browsers.mjs).
+    mcpServers: browserServers(config, mcp.servers, { project: run.project, owner: `run:${run.id}`, task: run.title || run.id }),
     hooks: crewGuard(path.join(runDir(run.id), `${name}.guard.jsonl`)),
     guardLog: path.join(runDir(run.id), `${name}.guard.jsonl`),
     // For "needs-you": which run and step is asking, and where Chiefmate answers.
@@ -1069,6 +1071,7 @@ export async function execute(run) {
     reportEvent('run_failed', `${aboutRun(run)} failed: ${clip(error.message, 400)}`);
   } finally {
     live.delete(run.id);
+    closeAfterRun(); // its browser, unless a request of the run is still open for the owner
     // A run that ended with steps on Codex or Grok: how each did, for the manager's choice of tools (node src/cli.mjs tools).
     if (['done', 'failed'].includes(run.status) && !run.qualityRecorded) {
       try {

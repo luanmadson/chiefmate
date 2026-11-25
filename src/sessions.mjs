@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { stepMcp, userClaudeExcludes } from './access.mjs';
+import { browserServers } from './browsers.mjs';
 import { addRequest, chargeFolder, chargeProfile, chargeProject, chargeTurn, takeRequest } from './charge.mjs';
 import { describeAction, environment, runClaude } from './claude.mjs';
 import { loadConfig } from './config.mjs';
@@ -98,6 +99,9 @@ export function sessionMcp(config, session) {
   return stepMcp(config, config.projects?.[session.project] ?? {}, { mcp: profile?.mcp ?? [] });
 }
 
+/** Whose a session's browser is (src/browsers.mjs): its project, or its own name for a folder outside the projects. */
+const sessionBrowser = session => ({ project: session.project ?? null, owner: `session:${session.id}`, task: session.name, name: session.name });
+
 /** Your own copy of a repository on this computer: the folder itself, or ~/Documents/GitHub/<repository name>. */
 function ownCopy(repository) {
   const text = String(repository ?? '');
@@ -176,14 +180,14 @@ export function sessionPrompt(config, profile, folder) {
  * the external tools released to the session (see sessionMcp).
  * Codex has no option to skip its own configuration (~/.codex): it gets the folder (-C) and the model.
  */
-export function sessionArgs(session, config, prompt) {
+export function sessionArgs(session, config, prompt, servers = sessionMcp(config, session).servers) {
   const first = prompt ? [prompt] : [];
   if (session.tool === 'codex') return [...(session.model ? ['-m', session.model] : []), '-C', session.cwd, ...first];
   const settings = { claudeMdExcludes: userClaudeExcludes() };
   if (config.attribution === false) Object.assign(settings, { includeCoAuthoredBy: false, attribution: { commit: '', pr: '' } });
   // --mcp-config takes a list: the options after it end it, so the message is not read as one more file.
   return [
-    '--setting-sources', 'project,local', '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: sessionMcp(config, session).servers }),
+    '--setting-sources', 'project,local', '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: servers }),
     ...(session.model ? ['--model', session.model] : []), '--settings', JSON.stringify(settings), ...first,
   ];
 }
@@ -315,7 +319,7 @@ export async function runSession(id) {
   saveSession({ ...session, status: 'open', pid: process.pid, opened: now() });
   console.log(`Chiefmate: ${session.name} (${session.tool}) in ${session.cwd}\n`);
   process.on('SIGINT', () => {}); // Ctrl+C belongs to the agent
-  const child = spawn(tool.command, [...tool.prefix, ...sessionArgs(session, config, prompt)], {
+  const child = spawn(tool.command, [...tool.prefix, ...sessionArgs(session, config, prompt, browserServers(config, sessionMcp(config, session).servers, sessionBrowser(session)))], {
     cwd: session.cwd, stdio: 'inherit', env: session.tool === 'claude' ? environment() : codexEnvironment(),
   });
   const code = await new Promise(resolve => {
@@ -553,7 +557,7 @@ export function deliverSession(id) {
     const run = runClaude({
       dir: session.cwd, prompt, system: charge?.system ?? appSystem(config.owner || 'the owner'), model: charge?.model ?? session.model ?? config.default_model,
       tools: charge ? charge.tools : [...APP_TOOLS, ...mcp.tools, ...(session.allowed ?? []).filter(r => !ASK_FIRST.includes(r))],
-      disallowed: charge ? [...charge.disallowed, ...ASK_FIRST] : ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r)), mcpServers: charge ? {} : mcp.servers,
+      disallowed: charge ? [...charge.disallowed, ...ASK_FIRST] : ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r)), mcpServers: charge ? {} : browserServers(config, mcp.servers, sessionBrowser(session)),
       addDirs: charge?.addDirs ?? [], hooks: guardHooks({ log: guardLog(id), allowed: charge ? [] : session.allowed ?? [] }),
       attribution: config.attribution !== false, maxMinutes: TURN_MINUTES,
       session: { id: session.toolSession, resume }, log: rawLog(id), onEvent,
