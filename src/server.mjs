@@ -19,7 +19,10 @@ import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
 import { activeRun, createRun, describeLater, doingNow, liveRuns, needsBrief, outcomeLater } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
-import { endSession, finishSessionRequest, openSession, planSession, profileFor, sessionRequests, sessionsState } from './sessions.mjs';
+import {
+  answerPermission, endSession, finishSessionRequest, interruptSession, openSession, planSession, profileFor, removeQueued, resumeSession, sayToSession,
+  sessionRequests, sessionsState, sessionView,
+} from './sessions.mjs';
 import { talkTo } from './talk.mjs';
 import { listRuns, readConversation, readNotifications, readPending, readRun, readUsage, runDir, stepsOf } from './store.mjs';
 import { checkNow, updateInfo, updateMode, updateNow } from './update.mjs';
@@ -342,6 +345,9 @@ export function startServer() {
         if (projectContextPath) return reply(res, 200, projectContext(loadConfig(), decodeURIComponent(projectContextPath[1]), { member: url.searchParams.get('member') || null }));
         const page = url.pathname.match(/^\/api\/project\/([^/]+)$/);
         if (page) return reply(res, 200, await projectPage(decodeURIComponent(page[1])));
+        // A live session's conversation in the app: the session, its queue, its open requests and its history from "?from=".
+        const sessionPath = url.pathname.match(/^\/api\/session\/([\w.-]+)$/);
+        if (sessionPath) return reply(res, 200, sessionView(sessionPath[1], url.searchParams.has('from') ? Number(url.searchParams.get('from')) : null));
         if (url.pathname.startsWith('/api/run/')) {
           const run = readRun(decodeURIComponent(url.pathname.slice('/api/run/'.length)));
           if (!run) return reply(res, 404, { error: t('Run not found.') });
@@ -402,8 +408,19 @@ export function startServer() {
             const { profile, folder, prompt } = planSession(loadConfig(), String(body.profile ?? ''));
             return reply(res, 200, { dryRun: true, profile: profile.id, tool: profile.tool, cwd: folder.dir, blocks: prompt.blocks, missing: prompt.missing, prompt: prompt.blocksGiven ? prompt.text : null });
           }
-          return reply(res, 200, await openSession(String(body.profile ?? ''), { origin: body.origin ?? 'app' }));
+          // "window": in a window of its own (Windows Terminal), instead of the conversation in the app.
+          return reply(res, 200, await openSession(String(body.profile ?? ''), { origin: body.origin ?? 'app', window: !!body.window }));
         }
+        case '/api/session/say':
+          return reply(res, 200, sayToSession(String(body.id ?? ''), body.text));
+        case '/api/session/interrupt':
+          return reply(res, 200, { interrupted: interruptSession(String(body.id ?? '')) });
+        case '/api/session/resume':
+          return reply(res, 200, resumeSession(String(body.id ?? '')));
+        case '/api/session/queue/remove':
+          return reply(res, 200, { queue: removeQueued(String(body.id ?? ''), String(body.item ?? '')) });
+        case '/api/session/permission':
+          return reply(res, 200, answerPermission(String(body.id ?? ''), String(body.request ?? ''), body.allow === true));
         case '/api/project/open':
           // "app": "folder" (the file manager) or "vscode", in your own clone of the project.
           return reply(res, 200, openProjectApp(String(body.project ?? ''), String(body.app ?? ''), { dryRun: !!body.dryRun }));
@@ -436,7 +453,7 @@ export function startServer() {
             const { folder, prompt } = planSession(config, profile, { prompt: String(body.prompt) });
             return reply(res, 200, { dryRun: true, profile, tool, cwd: folder.dir, prompt: prompt.text });
           }
-          return reply(res, 200, await openSession(profile, { origin: 'app', prompt: String(body.prompt) }));
+          return reply(res, 200, await openSession(profile, { origin: 'app', prompt: String(body.prompt), window: !!body.window }));
         }
         case '/api/prompts-sync':
           return reply(res, 200, await syncPrompts());

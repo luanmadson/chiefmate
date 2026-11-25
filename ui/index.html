@@ -184,6 +184,31 @@
         <div id="project-planning" class="project-tab" hidden></div>
         <div id="project-context" class="project-tab" hidden></div>
         <div id="project-builder" class="project-tab" hidden></div>
+        <div id="project-live" class="project-tab" hidden>
+          <div id="project-live-list"></div>
+          <div id="live-body" class="live-session" hidden>
+            <div id="live-head" class="live-head"></div>
+            <div class="chat-column">
+              <div id="live-feed" class="chat" aria-live="polite"></div>
+              <div id="live-asks"></div>
+              <div id="live-queue" class="chat-queue" hidden></div>
+              <form id="live-form" class="compose">
+                <textarea id="live-text" rows="3" placeholder="Write to the agent. Enter sends; Shift+Enter starts a new line." data-t-placeholder="Write to the agent. Enter sends; Shift+Enter starts a new line."></textarea>
+                <div class="compose-footer">
+                  <span id="live-hint" class="hint"></span>
+                  <div class="compose-buttons">
+                    <button type="button" class="button danger" id="live-interrupt" data-t="Interrupt" hidden>Interrupt</button>
+                    <button type="submit" class="button" id="live-send" data-t="Send">Send</button>
+                  </div>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-session">
+        <div id="session-page"></div>
       </section>
 
       <section class="view" id="view-builder">
