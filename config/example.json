@@ -67,5 +67,8 @@
     "host": "",
     "logins": [],
     "port": 4748
+  },
+  "viewer": {
+    "extra_roots": []
   }
 }

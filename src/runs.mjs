@@ -22,7 +22,7 @@ import { readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.m
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
 import { clip, languageName, now, ROOT, slug, stamp } from './util.mjs';
 import {
-  advanceClone, baseBranch, changedFiles, checkoutBranch, commitPending, createBranch, deliverToClone, freeBranch, newCommits, noTrace,
+  advanceClone, baseBranch, changedFiles, checkoutBranch, commitPending, createBranch, deliverToClone, discardSince, freeBranch, headCommit, newCommits, noTrace,
   openPullRequest, prepareLibrary, prepareWorkspace, projectDir, runBranch, runChecks, traces,
 } from './workspace.mjs';
 
@@ -820,6 +820,8 @@ export async function execute(run) {
       if (noTrace(project) && project.deliver === 'local' && project.local_clone && existsSync(project.local_clone)) {
         run.branch = await freeBranch(project.local_clone, run.branch);
       }
+      // Where the run starts: what it created or changed is read against it (the app's "Files", src/files.mjs).
+      run.baseCommit = await headCommit(dir);
       await createBranch(dir, run.branch);
       run.prepared = true;
       saveRun(run);

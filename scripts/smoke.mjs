@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { SAMPLE_CSV, SAMPLE_PNG, sampleXlsx } from './fixtures.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const port = 47000 + Math.floor(Math.random() * 900);
@@ -35,9 +36,18 @@ const feedWhole = `${feedLines}\n`;
 writeFileSync(path.join(data, 'runs', 'smoke-feed', '01-generalist.jsonl'), `${feedWhole}{"type":"assistant","message":{"content":[{"type":"text","text":"half`);
 // The remote access through Tailscale Serve, made up: a second listener, with a tailnet name and a login of its own.
 const remote = { enabled: true, host: 'pc.smoke-tailnet.ts.net', logins: ['owner@example.com'], port: port + 1 };
+// The file viewer's extra folder, made up: an image, a CSV, a workbook, and files it must never open.
+const files = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-files-'));
+mkdirSync(path.join(files, 'designs'));
+writeFileSync(path.join(files, 'designs', 'proposal-1.png'), SAMPLE_PNG);
+writeFileSync(path.join(files, 'designs', 'proposal-2.png'), SAMPLE_PNG);
+writeFileSync(path.join(files, 'sales.csv'), SAMPLE_CSV);
+writeFileSync(path.join(files, 'budget.xlsx'), sampleXlsx());
+writeFileSync(path.join(files, 'page.html'), '<script>alert(1)</script>');
+writeFileSync(path.join(files, '.env'), 'TOKEN=made-up');
 const child = spawn(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'server'], {
   cwd: root,
-  env: { ...process.env, CHIEFMATE_PORT: String(port), CHIEFMATE_SMOKE: '1', CHIEFMATE_REMOTE_ACCESS: JSON.stringify(remote) },
+  env: { ...process.env, CHIEFMATE_PORT: String(port), CHIEFMATE_SMOKE: '1', CHIEFMATE_REMOTE_ACCESS: JSON.stringify(remote), CHIEFMATE_VIEWER: JSON.stringify({ extra_roots: [files] }) },
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });
@@ -332,6 +342,37 @@ try {
     expect(opens.status === 403 && JSON.parse(opens.text).error?.includes('computer'), `opening a window on the computer from another device was not refused: ${opens.status}`);
     expect((await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder', dryRun: true })).status !== 403, 'a dry run of opening a folder was refused through the remote access');
     expect((await ask(port, '/api/state', tailnet)).status === 403, "the app's own port answered the tailnet name");
+
+    // The file viewer: an image, a CSV and a workbook open, read only, with the safety headers; what is outside its
+    // folders, protected or asked by another site is refused; the remote access asks for its login here too.
+    const fileUrl = (what, p, extra = '') => `/api/files/${what}?path=${encodeURIComponent(p)}${extra}`;
+    const image = await fetch(`${base}${fileUrl('raw', path.join(files, 'designs', 'proposal-1.png'))}`);
+    const imageBytes = Buffer.from(await image.arrayBuffer());
+    expect(image.status === 200 && image.headers.get('content-type') === 'image/png' && imageBytes.equals(SAMPLE_PNG)
+      && image.headers.get('x-content-type-options') === 'nosniff' && image.headers.get('cache-control') === 'no-store'
+      && /sandbox/.test(image.headers.get('content-security-policy') ?? '') && image.headers.get('cross-origin-resource-policy') === 'same-origin',
+    `the viewer did not send the image with its safety headers: ${image.status} ${[...image.headers].join('; ')}`);
+    const imageInfo = await (await fetch(`${base}${fileUrl('info', path.join(files, 'designs', 'proposal-2.png'))}`)).json();
+    expect(imageInfo.kind === 'image' && imageInfo.size === SAMPLE_PNG.length && imageInfo.gallery?.length === 2, `an image's facts or its gallery are wrong: ${JSON.stringify(imageInfo)}`);
+    const csv = await (await fetch(`${base}${fileUrl('table', path.join(files, 'sales.csv'))}`)).json();
+    expect(csv.rows?.length === 3 && csv.rows[1][1] === 'Porto Alegre' && csv.truncated === false, `the CSV did not open as a table: ${JSON.stringify(csv).slice(0, 300)}`);
+    const book = await (await fetch(`${base}${fileUrl('table', path.join(files, 'budget.xlsx'))}`)).json();
+    expect(book.sheets?.join('|') === 'Sales|Notes & more' && book.rows?.[1]?.[2] === '2026-03-01', `the workbook did not open as a table: ${JSON.stringify(book).slice(0, 300)}`);
+    const sheet2 = await (await fetch(`${base}${fileUrl('table', path.join(files, 'budget.xlsx'), '&sheet=1')}`)).json();
+    expect(sheet2.sheet === 1 && sheet2.rows?.[0]?.[0] === 'Only note', "the workbook's second sheet did not open");
+    const listed = await (await fetch(`${base}${fileUrl('list', files)}`)).json();
+    expect(listed.entries?.map(e => e.name).join('|') === 'designs|budget.xlsx|page.html|sales.csv', `the folder's list is wrong, or shows a protected file: ${JSON.stringify(listed.entries?.map(e => e.name))}`);
+    const htmlFile = await fetch(`${base}${fileUrl('raw', path.join(files, 'page.html'))}`);
+    expect(/^attachment/.test(htmlFile.headers.get('content-disposition') ?? '') && htmlFile.headers.get('content-type') === 'application/octet-stream', 'an HTML file was not sent as a download');
+    expect((await fetch(`${base}${fileUrl('raw', path.join(files, '.env'))}`)).status === 403, 'the viewer opened a .env file');
+    expect((await fetch(`${base}${fileUrl('raw', path.join(files, '..', path.basename(data), 'state.json'))}`)).status === 403, 'the viewer opened a file outside its folders');
+    expect((await fetch(`${base}${fileUrl('raw', path.join(root, 'package.json'))}`)).status === 403, "the viewer opened a file outside its folders (Chiefmate's own)");
+    expect((await ask(port, fileUrl('raw', path.join(files, 'sales.csv')), { host: `localhost:${port}`, 'sec-fetch-site': 'cross-site' })).status === 403, 'the viewer answered another site');
+    expect((await ask(port, fileUrl('raw', path.join(files, 'sales.csv')), { host: `localhost:${port}`, 'sec-fetch-site': 'same-site' })).status === 403, 'the viewer answered another port of this computer');
+    expect((await ask(remote.port, fileUrl('info', path.join(files, 'sales.csv')), { host: remote.host })).status === 403, 'the viewer answered the remote access without a Tailscale login');
+    expect((await ask(remote.port, fileUrl('info', path.join(files, 'sales.csv')), tailnet)).status === 200, 'the viewer refused the remote access with an allowed login');
+    expect((await fetch(`${base}/api/files/run/smoke-feed`)).ok, "a run's files did not answer");
+    expect((await fetch(`${base}/api/files/run/..%2Fsmoke-feed`)).status === 404, "a run's files answered a made-up id");
 
     // The watchdog: its news for the manager (never delivered here), a look that changes nothing, and the rescue
     // actions refused inside a step.
@@ -1790,6 +1831,7 @@ try {
 
 try {
   rmSync(data, { recursive: true, force: true, maxRetries: 5 });
+  rmSync(files, { recursive: true, force: true, maxRetries: 5 });
 } catch {
   // a temporary folder left behind is harmless
 }
