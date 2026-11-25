@@ -784,7 +784,7 @@ details summary { cursor: pointer; }
 
 /* Touch screens: buttons, tabs and fields of 44 px or more */
 @media (pointer: coarse) {
-  .button, .button.small, .tab, .away, .suggestion, select, input:not([type=checkbox], [type=radio], [type=range]) { min-height: 44px; }
+  .button, .button.small, .decision-buttons .button, .tab, .away, .suggestion, select, input:not([type=checkbox], [type=radio], [type=range]) { min-height: 44px; }
   .button, .button.small { display: inline-flex; align-items: center; justify-content: center; }
   .suggestion { padding: 6px 12px; }
 }

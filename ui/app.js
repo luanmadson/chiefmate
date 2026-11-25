@@ -3897,7 +3897,7 @@ if (window.visualViewport) {
   fit();
 }
 new ResizeObserver(([entry]) => document.documentElement.style.setProperty('--view-h', `${Math.round(entry.contentRect.height)}px`)).observe($('.content'));
-const typingField = el => el?.matches?.('textarea, input:not([type=checkbox], [type=radio], [type=button], [type=submit], [type=range], [type=file])');
+const typingField = el => !!el?.matches?.('textarea, input:not([type=checkbox], [type=radio], [type=button], [type=submit], [type=range], [type=file])');
 document.addEventListener('focusin', event => document.documentElement.classList.toggle('typing', touchScreen() && typingField(event.target)));
 document.addEventListener('focusout', () => setTimeout(() => {
   if (!typingField(document.activeElement)) document.documentElement.classList.remove('typing');
