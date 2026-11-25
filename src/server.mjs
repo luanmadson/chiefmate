@@ -14,7 +14,7 @@ import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { changePlan, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
 import { openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
-import { isSyncing, syncPrompts } from './promptsync.mjs';
+import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
 import { activeRun, createRun, liveRuns } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
@@ -317,7 +317,10 @@ export function startServer() {
         // The app's prompt builder: the document and the project's last choice ("?project=<id>").
         if (url.pathname === '/api/prompt-builder') {
           const config = loadConfig();
-          return reply(res, 200, { ...builderPage(config, url.searchParams.get('project') ?? ''), syncing: isSyncing(), cdp: !!config.browser_cdp });
+          const page = builderPage(config, url.searchParams.get('project') ?? '');
+          // With a library, the document's last commit there (read once per commit of the library's copy).
+          if (page.status.source === 'library') page.status.commit = await documentCommit(config);
+          return reply(res, 200, { ...page, syncing: isSyncing(), cdp: !!config.browser_cdp });
         }
         // The project's Context tab: everything its crew gets, in order and by source (src/context.mjs).
         const projectContextPath = url.pathname.match(/^\/api\/project\/([^/]+)\/context$/);

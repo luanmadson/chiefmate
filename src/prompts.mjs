@@ -22,7 +22,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { t } from './i18n.mjs';
-import { DATA, now, readJson, ROOT, writeJson } from './util.mjs';
+import { DATA, now, readJson, ROOT, WORKSPACES, writeJson } from './util.mjs';
 
 export const SYNC_FILE = path.join(DATA, 'prompt-builder.json');
 // The last choice made in the app's prompt builder, per project.
@@ -30,23 +30,60 @@ const CHOICES_FILE = path.join(DATA, 'prompt-builder-choices.json');
 // A copy older than this is shown as old.
 export const STALE_DAYS = 7;
 
-/** "prompt_builder": { "file": "data/manager/montador/PROMPTS_MONTADOR.md", "doc_id": "...", "environment": "Home" } */
+/**
+ * "prompt_builder": { "library_file": "<library>/<path>", "file": "data/manager/montador/PROMPTS_MONTADOR.md",
+ * "doc_id": "...", "environment": "Home" }. The document is read from the library's copy (library_file) when there is
+ * one; "file" is used without it, or while the library's copy is not there yet. "origin" says where "Reload" takes it
+ * from: the library (git), Google Docs (doc_id) or the file on this computer, as it is.
+ */
 export function builderSettings(config) {
   const b = config.prompt_builder ?? {};
-  const file = b.file ? path.resolve(ROOT, b.file) : null;
-  return { file, docId: b.doc_id ?? null, environment: b.environment ?? null, configured: !!file };
+  const own = b.file ? path.resolve(ROOT, b.file) : null;
+  const library = libraryFile(config, b.library_file);
+  const file = library && (existsSync(library.file) || !own) ? library.file : own;
+  const docId = b.doc_id ?? null;
+  const origin = library ? 'library' : docId ? 'google' : 'file';
+  return { file, docId, environment: b.environment ?? null, configured: !!file, library, origin };
 }
 
-/** The copy on this computer: where it is, whether it exists, when it was written and the last synchronization. */
+/** "<library>/<path>" in the library's copy (workspaces/.library/<id>), or null. */
+function libraryFile(config, raw) {
+  const [id, ...rest] = String(raw ?? '').split(/[\\/]/).filter(Boolean);
+  if (!id || !rest.length || rest.includes('..')) return null;
+  const source = config.library?.[id];
+  const dir = path.join(WORKSPACES, '.library', id);
+  return { id, name: source?.name ?? id, known: !!source?.repository, path: rest.join('/'), dir, file: path.join(dir, ...rest) };
+}
+
+// When the library's copy was last brought up to date from GitHub: its last fetch, or its clone.
+function libraryRefreshed(dir) {
+  for (const name of ['FETCH_HEAD', 'HEAD']) {
+    const file = path.join(dir, '.git', name);
+    if (existsSync(file)) return statSync(file).mtime.toISOString();
+  }
+  return null;
+}
+
+/**
+ * The copy on this computer: where it comes from, whether it exists, when it was brought up to date (for a library,
+ * its last update from GitHub; else the last download or when the file was written), the document's last commit in
+ * the library (recorded by src/promptsync.mjs) and the last reload.
+ */
 export function builderStatus(config) {
-  const { file, docId, environment, configured } = builderSettings(config);
+  const { file, docId, environment, configured, library, origin } = builderSettings(config);
   const exists = !!file && existsSync(file);
   const sync = readJson(SYNC_FILE, {});
   const modified = exists ? statSync(file).mtime.toISOString() : null;
-  // The copy's date: the last download, or when the file was last written (by hand, or by an older download).
-  const copied = [sync.synced_at, modified].filter(Boolean).sort().at(-1) ?? null;
+  const fromLibrary = !!library && file === library.file;
+  const copied = fromLibrary ? libraryRefreshed(library.dir) ?? modified : [sync.synced_at, modified].filter(Boolean).sort().at(-1) ?? null;
   const stale = !!copied && Date.now() - Date.parse(copied) > STALE_DAYS * 86_400_000;
-  return { configured, docId: !!docId, environment, exists, modified, copied, stale, staleDays: STALE_DAYS, sync };
+  const commit = fromLibrary && sync.commit?.file === library.file ? sync.commit : null;
+  return {
+    configured, docId: !!docId, origin, environment, exists, modified, copied, stale, staleDays: STALE_DAYS, sync,
+    source: fromLibrary ? 'library' : file ? 'file' : null,
+    library: library ? { id: library.id, name: library.name, path: library.path, known: library.known } : null,
+    file: fromLibrary ? null : file, commit,
+  };
 }
 
 const norm = s =>
@@ -358,7 +395,7 @@ export function composeChoice(sections, { chosen = [], off = [], language } = {}
   }
   const offSet = new Set(off.map(n => find(n)).filter(Boolean));
   const { chosen: result, automatic, unmet, context } = resolveChoice(all, picked, offSet);
-  const rendered = render(all, picked[0] ?? null, result, { language });
+  const rendered = render(all, picked[0] ?? null, result, { language, automatic });
   return {
     ...rendered,
     automatic: [...automatic].map(b => b.name),

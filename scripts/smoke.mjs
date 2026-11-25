@@ -82,6 +82,10 @@ try {
       const r = await fetch(base + file);
       expect(r.ok, `${file} answered ${r.status}`);
     }
+    // A project's page: its tabs (the prompt builder's screen moves into the last one) and the prompt shown by blocks.
+    const html = await (await fetch(`${base}/`)).text();
+    expect(['project-status', 'project-actions', 'project-more', 'project-needs', 'project-overview', 'project-crew', 'project-tasks', 'project-planning', 'project-context', 'project-builder', 'builder-body', 'builder-view', 'builder-edit']
+      .every(id => html.includes(`id="${id}"`)), "the app's page lacks a part of the project's page or of the prompt builder");
     const unsigned = await fetch(`${base}/api/limits`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     expect(unsigned.status === 403, `a command without the x-chiefmate header answered ${unsigned.status} instead of 403`);
     const machine = await (await fetch(`${base}/api/computer`)).json();
@@ -152,7 +156,7 @@ try {
     expect((await post('/api/session', { profile: 'no-such-profile', dryRun: true })).status === 400, 'a dry run of an unknown session profile was not refused');
     // The app's prompt builder: the document (or none) and the copy's state; nothing opens (dry runs, or refused).
     const builderPage = await (await fetch(`${base}/api/prompt-builder`)).json();
-    expect(builderPage.status && 'document' in builderPage && 'last' in builderPage && Array.isArray(builderPage.defaults), `/api/prompt-builder is incomplete: ${JSON.stringify(builderPage).slice(0, 200)}`);
+    expect(builderPage.status && ['file', 'library', 'google'].includes(builderPage.status.origin) && 'document' in builderPage && 'last' in builderPage && Array.isArray(builderPage.defaults), `/api/prompt-builder is incomplete: ${JSON.stringify(builderPage).slice(0, 200)}`);
     expect((await fetch(`${base}/api/prompt-builder?project=no-such-project`)).status === 400, 'the prompt builder of a project that does not exist did not answer 400');
     expect((await post('/api/prompt-builder/session', { project: 'no-such-project', tool: 'claude', prompt: 'Hello', dryRun: true })).status === 400, "a session from the prompt builder for a project that does not exist was not refused");
     if (state.projects[0]) expect((await post('/api/prompt-builder/session', { project: state.projects[0].id, tool: 'claude', prompt: ' ', dryRun: true })).status === 400, 'a session from the prompt builder with an empty prompt was not refused');
@@ -596,6 +600,38 @@ try {
     expect(page.document.sections.map(s => s.name).join() === 'AMBIENTES,ACESSO,PROJETOS,REGRAS,MÓDULOS' && page.document.combinations.length === 2 && page.defaults.join() === 'Alpha,Start' && page.status.copied && !page.status.stale, `the prompt builder's page is wrong: ${JSON.stringify(page).slice(0, 300)}`);
     const fromApp = composeFromApp(appConfig, { project: 'alpha', chosen: ['Alpha', 'Casa'], off: ['Library'] });
     expect(fromApp.blocks.join() === 'Casa,Alpha,Code rules,Always' && lastChoice('alpha')?.off.join() === 'Library', `a choice in the app was not put together or remembered: ${fromApp.blocks.join()}`);
+    expect(fromApp.details.find(d => d.name === 'Alpha')?.how === 'chosen' && fromApp.details.filter(d => fromApp.automatic.includes(d.name)).every(d => d.how !== 'chosen'), `the app's choice does not say how its automatic blocks came in: ${JSON.stringify(fromApp.details.map(d => [d.name, d.how]))}`);
+
+    // The document in a library ("library_file"): read from the library's copy when it is there, else from "file"; a
+    // path can't leave its library; "Reload" with an unknown library fails without touching anything; and the
+    // document's last commit in a shallow copy is found by deepening it (a made-up repository, through file://).
+    const { builderSettings, builderStatus } = await import(src('prompts.mjs'));
+    const libConfig = { ...appConfig, library: {}, prompt_builder: { file: builderDoc, library_file: 'no-such-library/PROMPTS/PROMPTS_MONTADOR.md' } };
+    const libSettings = builderSettings(libConfig);
+    expect(libSettings.origin === 'library' && libSettings.library.path === 'PROMPTS/PROMPTS_MONTADOR.md' && libSettings.file === builderDoc && builderStatus(libConfig).source === 'file', `a library_file without the library's copy did not fall back to the file: ${JSON.stringify(libSettings)}`);
+    expect(!builderSettings({ prompt_builder: { library_file: 'lib/../../secret.md' } }).library, 'a library_file leaving its library was accepted');
+    expect(builderSettings({ prompt_builder: { file: builderDoc } }).origin === 'file' && builderSettings({ prompt_builder: { file: builderDoc, doc_id: 'x' } }).origin === 'google', "the prompt builder's origin is wrong without a library");
+    const { syncPrompts } = await import(src('promptsync.mjs'));
+    const libSync = await syncPrompts(libConfig);
+    expect(libSync.ok === false && libSync.error.includes('no-such-library'), `reloading from an unknown library did not fail: ${JSON.stringify(libSync)}`);
+    const { libraryFileCommit } = await import(src('workspace.mjs'));
+    const git = (dir, ...args) => execFileSync('git', ['-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd: dir, stdio: 'pipe' });
+    const libOrigin = path.join(sessionTemp, 'library-origin');
+    mkdirSync(path.join(libOrigin, 'PROMPTS'), { recursive: true });
+    git(libOrigin, 'init', '-q', '-b', 'main');
+    writeFileSync(path.join(libOrigin, 'PROMPTS', 'doc.md'), docPt);
+    git(libOrigin, 'add', '.');
+    git(libOrigin, 'commit', '-q', '-m', 'Add the document');
+    for (const n of [1, 2]) {
+      writeFileSync(path.join(libOrigin, `other-${n}.md`), 'x');
+      git(libOrigin, 'add', '.');
+      git(libOrigin, 'commit', '-q', '-m', `Other ${n}`);
+    }
+    const libCopy = path.join(sessionTemp, 'library-copy');
+    git(sessionTemp, 'clone', '-q', '--depth', '1', pathToFileURL(libOrigin).href, libCopy);
+    const docCommit = await libraryFileCommit(libCopy, path.join(libCopy, 'PROMPTS', 'doc.md'));
+    expect(docCommit?.subject === 'Add the document' && !docCommit.approximate && !Number.isNaN(Date.parse(docCommit.date)), `the document's last commit in a shallow copy is wrong: ${JSON.stringify(docCommit)}`);
+    expect(!existsSync(path.join(libCopy, '.git', 'FETCH_HEAD')), "deepening the library's history changed the date of its last update (FETCH_HEAD)");
     const written = planSession(sessionConfig, 'review', { prompt: '  My own prompt.  ' });
     expect(written.prompt.text === 'My own prompt.' && written.prompt.written, "a prompt written in the prompt builder is not a session's first message as it is");
     expect(sessionIdOf('"C:\\nodejs\\node.exe" "C:\\chiefmate\\src\\cli.mjs" session-run 2026-01-02-0900-review') === '2026-01-02-0900-review' && sessionIdOf('node src/cli.mjs server') === null, "a session's window process is not recognized");

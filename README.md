@@ -36,7 +36,7 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
 - **One-off tasks** for any agent, at any time.
 - **A queue that runs one run per project at a time**, with runs of different projects going on side by side (three at most by default), so agents never set off other agents.
 - **Live sessions** with Claude Code or Codex, opened from the app or the command line, each in its own window and folder, started with the blocks of the prompt builder you choose (see "Live sessions" below).
-- **A prompt builder screen** for your document of blocks: choose the blocks, edit the prompt, then open a live session with it, send it with a task or copy it (see "The prompt builder in the app" below).
+- **A prompt builder screen** for your document of blocks (kept in a library, or in a file): choose the blocks and see each one come into the prompt, edit the prompt, then open a live session with it, send it with a task or copy it (see "The prompt builder in the app" below).
 - **It improves itself.** Chiefmate can be one of its own projects: the crew proposes improvements in pull requests and, when you merge one, your installation updates itself.
 - **English and Brazilian Portuguese.**
 
@@ -130,7 +130,7 @@ Every exchange is kept in the run (`talk` in `data/runs/<id>.json`). At the end 
 
 ### The prompt builder (optional)
 
-If you keep your project instructions in a document of blocks, Chiefmate can put each step's instructions together from it instead of the project's `notes`. The document is Markdown, kept outside the repository (`prompt_builder.file`):
+If you keep your project instructions in a document of blocks, Chiefmate can put each step's instructions together from it instead of the project's `notes`. The document is Markdown, kept outside the repository: in a library (`prompt_builder.library_file`, see below) or in a file on this computer (`prompt_builder.file`):
 
 ```markdown
 # Projects
@@ -174,37 +174,45 @@ My project with the board = My project + Board + Start the system
 - Blocks that need you live (a browser, a board, a confirmation) are kept: the agent asks for you with `needs-you`. A sentence that conflicts with the crew's rules (pushing, other branches, pull requests) is replaced by a note saying Chiefmate's rules prevail, and the adaptation is recorded in the step's context.
 - Without the file, the project's `notes` are used as before.
 
-To copy the document from Google Docs, set `prompt_builder.doc_id` and `browser_cdp`, install the optional `playwright-core` (`npm install --no-save playwright-core` in the Chiefmate folder) and run `node src/cli.mjs prompts-sync`, or use the button in the Crew section or **Reload document** in the prompt builder screen. Chiefmate borrows your browser's session to download the document's Markdown export: it never changes the document and never touches your tabs.
+Where the document comes from:
+
+- **A library** (recommended): `"library_file": "<library>/<path>"`, such as `"notes/PROMPTS/PROMPTS_BUILDER.md"` for a library `notes` in `library`. It is read from Chiefmate's copy of that library (`workspaces/.library/<library>`), which comes before `file`; `file` is used only while that copy has no such file yet. The copy is brought up to date from GitHub before every run, and by **Reload document** (the prompt builder screen), **Update from the library** (the Crew section) or `node src/cli.mjs prompts-sync`. The screens show the document's path and the date and message of its last commit (the copy is shallow: its history is deepened when needed to find it). To change the document, change it in the library and send it to GitHub.
+- **A file on this computer**: `"file": "<path>"`, read as it is.
+- **Google Docs** (optional): to copy the document from Google Docs into `file`, set `prompt_builder.doc_id` and `browser_cdp`, install the optional `playwright-core` (`npm install --no-save playwright-core` in the Chiefmate folder) and run `node src/cli.mjs prompts-sync`, or use the button in the Crew section or **Reload document** in the prompt builder screen. Chiefmate borrows your browser's session to download the document's Markdown export: it never changes the document and never touches your tabs. Without `doc_id` (or with `library_file`), the app says nothing about Google Docs.
 
 ### The prompt builder in the app
 
-**Builder** in the menu (`#builder`), or **Prompt builder** on a project's page (`#builder/<id>`, with that project chosen), works with the whole document as you would by hand:
+**Builder** in the menu (`#builder`, or `#builder/<id>` with a project chosen), or the **Builder** tab of a project's page (`#project/<id>/builder`), works with the whole document as you would by hand:
 
-- The ready combinations are buttons at the top (on a project's screen, the ones with its block; **All** shows the others). Each section lists its blocks: one per section for `one`, any number for `several`. A block whose `requires` is not met can't be marked. The automatic blocks come in by themselves, marked "automatic", and can be turned off or marked by hand.
-- The final prompt is shown as it is put together, variables filled in (the ones without a value are pointed out), and can be edited before it goes anywhere. Changing the blocks writes it again.
+- The ready combinations are buttons at the top (on a project's screen, the ones with its block; **All** shows the others). Each section lists its blocks: one per section for `one`, any number for `several`. A block whose `requires` is not met can't be marked. The automatic blocks come in by themselves, marked "automatic" with a dashed margin and the reason under their name (came in with its `include with`, by sharing a tag or an access, by its `requires`, or always), and can be turned off or marked by hand.
+- The final prompt is shown block by block, as it is put together, variables filled in (the ones without a value are underlined and pointed out). Each block has a color of its own, the same on its checkbox and in the margin of its part of the prompt (solid when chosen, dashed when it came in by itself). A block marked comes into the prompt with a brass background that fades in about 2 seconds, and the prompt scrolls to it; a block unmarked leaves with a brief red mark. With reduced motion asked for by the system, nothing fades or scrolls smoothly. **Edit** shows the prompt as text, to change it before it goes anywhere; changing the blocks writes it again.
 - **Open live session** opens Claude Code or Codex in your clone of the project (with the project's profile for that tool), with this prompt as the first message, as it is.
 - **Send as a task** queues a task for a member of the project's crew, with the manager's review if you want it. The steps get this prompt as the project's instructions, instead of the one put together from the document (lines that conflict with the crew's rules are still adapted). The instruction is optional: without one, the agent does what the prompt asks.
-- **Copy** puts it on the clipboard, and **Reload document** copies the document from Google Docs again (when `doc_id` and `browser_cdp` are set) or reads the copy on this computer again.
-- The last choice made for each project is remembered (`data/prompt-builder-choices.json`); the first time, the screen starts with the project's block, the environment and its modules. The screen shows the copy's date, and warns when it is more than 7 days old.
+- **Copy** puts it on the clipboard, and **Reload document** brings the document up to date: the library's copy from GitHub (with `library_file`), a new copy from Google Docs (with `doc_id` and `browser_cdp`) or the file on this computer read again.
+- The last choice made for each project is remembered (`data/prompt-builder-choices.json`); the first time, the screen starts with the project's block, the environment and its modules (**Work live**, on the project's page, always starts with these). The screen shows where the document comes from and how recent it is (for a library, its last commit and when the copy was updated), and warns when the copy is more than 7 days old.
 
 ## Project pages
 
-Each project has a page of its own in the app (`#project/<id>`): pick it in the list of projects at the top of the window, or click the project's name in the crews by project, the focus, the Projects section, Planning or Missions. It shows:
+Each project has a page of its own in the app (`#project/<id>`): pick it in the list of projects at the top of the window, or click the project's name in the crews by project, the focus, the Projects section, Planning or Missions.
 
-- **The project**: its name and the sentence `about` it; your own clone (`local_clone`, or `Documents/GitHub/<repository name>`) and the branch checked out there right now; how its work is delivered (a pull request, or a branch handed to your clone with `"deliver": "local"`); the repository, the site, the personal documentation and the development environment's command.
-- **Its crew**, with its team lead above it when it has one, each with what it is doing (a click on a member at work opens its panel).
-- **Its runs going on and in the queue**, each with a button to cancel it, and **its recent history**: the latest runs, with their result, the pull request and a **Reports** button that opens each step's report in the Log.
-- **Its open items on the planning board**, with a button that opens Planning filtered by the project.
-- **The project on this computer**: its state, its memory and its processes, with the button to stop them, and its development environment.
-- **Its live sessions**: those open, with **End**, and its profiles, each with **Open**.
+At the top:
 
-And these buttons:
+- **The name**, the sentence `about` it, and **one line of status**: whether the crew is working on it (and on what), it is in the queue or stopped; its memory on this computer; and the branch checked out in your clone.
+- **Three main actions**:
+  - **Work live** opens the project's **Builder** tab with its usual blocks (its block, the environment and its modules), ready for a live session, a task or the clipboard. Without a prompt builder, it opens a live session with Claude Code.
+  - **New task for the crew** goes to the form in **Tasks and history**: who does it (a member of the project's crew or, when the project has a team lead, a request for the lead to plan), what to do and whether the manager reviews it.
+  - **Start environment** / **Stop environment**, for a project with `dev_start` in its settings (such as `"dev_start": "npm run dev"`): runs that command in your clone, in a window of its own (Windows Terminal, or PowerShell), through `node src/cli.mjs dev-run <project>`. Its processes count in the project's memory, marked "development environment", and stopping it closes the window with everything it started. From the command line: `node src/cli.mjs dev <project>` (`--dry-run` shows what would run) and `dev stop <project>`.
+- **More**: **Open folder** (your clone in File Explorer), **Open in VS Code** (shown when the `code` command is found), **Live session: Claude Code** and **Live session: Codex**. A session opens in your clone of the project, with the project's own profile for that tool when `sessions` has one; otherwise an automatic profile (`project-<id>-claude`, `project-<id>-codex`), never written to the settings, whose first message has the project's sentence `about` it, its block of the prompt builder (`prompt_block`) and the environment (`prompt_builder.environment`), when there is a copy of the prompt builder. A Claude Code session uses `default_model`.
+- **Waiting for you**, in brass, when something of the project needs you: the crew's requests (`needs-you`), with **Mark as done**, and the board's items waiting for you.
 
-- **Prompt builder** opens the prompt builder screen with the project chosen (when `prompt_builder` is set).
-- **New task** goes to the form at the bottom: a member of the project's crew (or, when the project has a team lead, a request for the lead to plan), the instruction and whether the manager reviews it.
-- **Live session: Claude Code** and **Live session: Codex** open a session in your clone of the project. They use the project's own profile for that tool when `sessions` has one; otherwise an automatic profile (`project-<id>-claude`, `project-<id>-codex`), never written to the settings, whose first message has the project's sentence `about` it, its block of the prompt builder (`prompt_block`) and the environment (`prompt_builder.environment`), when there is a copy of the prompt builder. A Claude Code session uses `default_model`.
-- **Open folder** opens your clone in File Explorer, and **Open in VS Code** in VS Code (shown when the `code` command is found).
-- **Start the development environment**, for a project with `dev_start` in its settings (such as `"dev_start": "npm run dev"`): runs that command in your clone, in a window of its own (Windows Terminal, or PowerShell), through `node src/cli.mjs dev-run <project>`. Its processes count in the project's memory, marked "development environment", and **Stop** closes the window with everything it started. From the command line: `node src/cli.mjs dev <project>` (`--dry-run` shows what would run) and `dev stop <project>`.
+Below, the tabs (`#project/<id>/<tab>`):
+
+- **At a glance**: the crew now, the last run and the open items on the board, each opening its tab; **the project** (your own clone, `local_clone` or `Documents/GitHub/<repository name>`, and its branch; how its work is delivered, a pull request or a branch handed to your clone with `"deliver": "local"`; the repository, the site, the personal documentation and the development environment's command); and **the project on this computer**: its state, its memory and its processes, with the button to stop them, and its development environment.
+- **Crew** (`crew`): its crew, with its team lead above it when it has one, each with what it is doing (a click on a member at work opens its panel); and its live sessions, those open with **End** and its profiles with **Open**.
+- **Tasks and history** (`tasks`): its runs going on and in the queue, each with a button to cancel it, the form for a new task, and its recent history: the latest runs, with their result, the pull request and a **Reports** button that opens each step's report in the Log.
+- **Planning** (`planning`): its open items on the planning board, with a button that opens Planning filtered by the project.
+- **Context** (`context`): see below.
+- **Builder** (`builder`, when `prompt_builder` is set): the prompt builder with the project chosen (see "The prompt builder in the app").
 
 Without your own clone of the project, the buttons that need it are disabled and the page says to set `local_clone`.
 
@@ -305,7 +313,7 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `mcp_servers` | External tools (MCP servers) the crew may use, in Claude Code's format: `{ "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] } }`. Nothing is released until a project or an agent lists it in `mcp` |
 | `browser_cdp` | The address of your own browser with remote debugging on, such as `http://127.0.0.1:9333`: sign-ins asked by the crew open there, and the prompt builder is copied through it. Any local program can control a browser with remote debugging on: prefer a separate profile |
 | `needs_you` | `{ "max_wait_minutes": 120 }`: the longest a step waits for you before it goes on without you |
-| `prompt_builder` | The optional prompt builder: `{ "file": "data/manager/prompt-builder.md", "doc_id": "<Google Docs id>", "environment": "<block>" }` |
+| `prompt_builder` | The optional prompt builder: `{ "library_file": "<library>/<path>", "file": "data/manager/prompt-builder.md", "doc_id": "<Google Docs id>", "environment": "<block>" }` (`library_file` or `file`; `doc_id` only to copy it from Google Docs) |
 | `auto_update_mode` | How the self-update installs an approved update (see "Chiefmate improves itself"): `"pause"` (the default) pauses the work going on at a safe point, installs and resumes it by itself; `"wait"` installs only once no run is going on and the manager is free |
 | `manager_updates` | The manager's news in the conversation (see "News from the manager"): `true` (the default, every event), `false` (none) or a list of the events that wake it, such as `["run_failed", "pr_ready", "needs_you"]` |
 | `usage_reader` | The optional reading of your usage page on claude.ai (see below): `{ "enabled": false, "every_hours": 4 }`, and `browser` with the path to Edge or Chrome if it isn't found |
@@ -457,7 +465,7 @@ node src/cli.mjs project-context <project> [member] [--short] [--json]
                                               its live sessions' first messages and what changed since the last run
 node src/cli.mjs needs-you "..." [--url <address>] [--wait] [--check "<command>"]
                                               for a step: asks you to act and, with --wait, waits for Done
-node src/cli.mjs prompts-sync                 copies the prompt builder's document from Google Docs
+node src/cli.mjs prompts-sync                 brings the prompt builder's document up to date (the library's copy, or Google Docs)
 node src/cli.mjs limits --window-5h 0.85 --plan-week 0.9
 node src/cli.mjs ram                          the projects running on this computer and their memory
 node src/cli.mjs stop-project <id> [--yes]    lists a project's processes; with --yes, stops them

@@ -12,7 +12,7 @@ import {
 } from './leads.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
-import { projectInstructions, writtenInstructions } from './prompts.mjs';
+import { builderSettings, projectInstructions, writtenInstructions } from './prompts.mjs';
 import { readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
 import { clip, languageName, now, ROOT, slug, stamp } from './util.mjs';
@@ -652,6 +652,12 @@ export async function execute(run) {
     }
     const base = run.base ?? project.main_branch;
     const libraries = await prepareLibraries(config, libraryIds(project), log);
+    // The prompt builder's document in a library ("prompt_builder.library_file"): its copy up to date, so the steps'
+    // instructions are put together from the latest version (the copy itself is not given to the steps).
+    const builderLibrary = builderSettings(config).library;
+    if (builderLibrary?.known && !libraries.some(x => x.id === builderLibrary.id)) {
+      await prepareLibrary(builderLibrary.id, config.library[builderLibrary.id], log).catch(error => log(error.message));
+    }
 
     // The steps in order, the final review last. The order is read again after every step: a team lead's plan adds
     // the crew's tasks right after its planning step.

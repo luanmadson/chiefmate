@@ -119,7 +119,8 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs needs-you "<what to do>" [--url <address>] [--wait] [--check "<command>"] [--id <request>]
                                                 for a step of a run: asks the owner to act and, with --wait, waits
                                                 until they click Done (or the check command succeeds)
-  node src/cli.mjs prompts-sync                 copies the prompt builder's document from Google Docs, through your browser
+  node src/cli.mjs prompts-sync                 brings the prompt builder's document up to date: the library's copy
+                                                (git), or a copy from Google Docs through your browser
   node src/cli.mjs limits [--window-5h 0.85] [--plan-week 0.9]
                                                 when runs pause, as a share of the account's 5-hour window and plan week
   node src/cli.mjs ram                          the projects running on this computer and the memory each one uses
@@ -498,7 +499,11 @@ async function main() {
       const { syncPrompts } = await import('./promptsync.mjs');
       const status = await apiOr('/api/prompts-sync', {}, () => syncPrompts());
       if (!status.ok) throw new Error(status.error);
-      console.log(`Prompt builder copied at ${formatDateTime(status.synced_at)} (${status.bytes} bytes).`);
+      if (status.source === 'library') {
+        const c = status.commit;
+        console.log(`Prompt builder: the library's copy updated (${status.bytes} bytes).${c ? ` Last change ${formatDateTime(c.date)}${c.approximate ? ' or earlier' : ''}: ${c.subject} (${c.hash.slice(0, 7)}).` : ''}`);
+      } else if (status.source === 'google') console.log(`Prompt builder copied from Google Docs at ${formatDateTime(status.synced_at)} (${status.bytes} bytes).`);
+      else console.log(`Prompt builder: the file on this computer read again (${status.bytes} bytes).`);
       return;
     }
     case 'limits': {

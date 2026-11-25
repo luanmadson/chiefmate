@@ -303,13 +303,19 @@ const toolName = tool => (tool === 'codex' ? 'Codex' : 'Claude Code');
 
 // ---------- Navigation ----------
 
-// A project's page is "#project/<id>" (its Context tab, "#project/<id>/context"); the prompt builder is "#builder",
-// or "#builder/<id>" for a project.
+// A project's page is "#project/<id>", and each of its tabs "#project/<id>/<tab>"; the prompt builder is "#builder",
+// or "#builder/<id>" for a project (also shown in the project's "builder" tab).
 const VIEWS = ['manager', 'operations', 'planning', 'missions', 'crew', 'projects', 'builder', 'log', 'usage', 'project'];
 const pageProject = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length).split('/')[0]) : null);
-const pageTab = () => (location.hash.startsWith('#project/') && location.hash.slice('#project/'.length).split('/')[1] === 'context' ? 'context' : 'overview');
+const PROJECT_TABS = ['overview', 'crew', 'tasks', 'planning', 'context', 'builder'];
+const pageTab = () => {
+  const tab = location.hash.startsWith('#project/') ? location.hash.slice('#project/'.length).split('/')[1] : null;
+  return PROJECT_TABS.includes(tab) ? tab : 'overview';
+};
 const builderHash = () => /^#builder(\/|$)/.test(location.hash);
 const builderProjectOf = () => (location.hash.startsWith('#builder/') ? decodeURIComponent(location.hash.slice('#builder/'.length)) : '');
+// The project the prompt builder is shown for: its own view's, or the project's whose "builder" tab is open (null: hidden).
+const builderTarget = () => (builderHash() ? builderProjectOf() : pageProject() && pageTab() === 'builder' ? pageProject() : null);
 const currentView = () => (pageProject() ? 'project' : builderHash() ? 'builder' : VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
 function showView() {
   const view = currentView();
@@ -324,7 +330,10 @@ function showView() {
     // The Context tab is read again each time it is opened (not on every refresh of the app).
     if (pageTab() === 'context') openProjectContext(pageProject());
   }
-  if (view === 'builder' && state) openBuilder(builderProjectOf());
+  if (view === 'builder' && state) {
+    placeBuilder(false);
+    openBuilder(builderProjectOf());
+  }
 }
 window.addEventListener('hashchange', showView);
 
@@ -950,15 +959,16 @@ function drawPromptBuilder() {
   const p = state.prompts ?? {};
   let html = '';
   if (p.configured) {
-    const copy = p.sync?.synced_at
-      ? t('Copied from Google Docs on {when}.', { when: shortDate(p.sync.synced_at) })
-      : p.exists ? t('Copy on this computer from {when}.', { when: shortDate(p.modified) }) : t('No copy on this computer yet: the steps use the projects\' notes.');
+    const google = p.origin === 'google';
+    const button = p.origin === 'library'
+      ? `<button type="button" class="button secondary small" data-prompts-sync ${p.syncing ? 'disabled' : ''}>${esc(p.syncing ? t('Updating…') : t('Update from the library'))}</button>`
+      : google ? `<button type="button" class="button secondary small" data-prompts-sync ${p.syncing || !p.cdp ? 'disabled' : ''}>${esc(p.syncing ? t('Copying…') : t('Copy from Google Docs'))}</button>
+        ${!p.cdp ? `<span class="hint">${esc(t('Needs "prompt_builder.doc_id" and "browser_cdp" in the settings.'))}</span>` : ''}` : '';
     html = `<div class="panel">
       <div class="label">${esc(t('Prompt builder'))}</div>
-      <p>${esc(copy)}${p.environment ? ` ${esc(t('Environment: {name}.', { name: p.environment }))}` : ''}</p>
+      <p>${builderSourceLines(p).map(esc).join(' ')}${p.exists ? '' : ` ${esc(t("The steps use the projects' notes."))}`}${p.environment ? ` ${esc(t('Environment: {name}.', { name: p.environment }))}` : ''}</p>
       ${p.sync?.ok === false ? `<p>${stateHtml([p.sync.error, 'error'])}</p>` : ''}
-      <div class="actions left"><button type="button" class="button secondary small" data-prompts-sync ${p.syncing || !p.docId || !p.cdp ? 'disabled' : ''}>${esc(p.syncing ? t('Copying…') : t('Copy from Google Docs'))}</button>
-      ${!p.docId || !p.cdp ? `<span class="hint">${esc(t('Needs "prompt_builder.doc_id" and "browser_cdp" in the settings.'))}</span>` : ''}</div>
+      ${button ? `<div class="actions left">${button}</div>` : ''}
     </div>`;
   }
   draw('#prompt-builder', html, html);
@@ -1151,68 +1161,154 @@ async function refreshProjectPage() {
   if (pageProject() === id && state) drawProjectPage();
 }
 
-const PAGE_PARTS = ['#project-title', '#project-actions', '#project-tabs', '#project-facts', '#project-team', '#project-runs', '#project-history', '#project-planning', '#project-computer', '#project-sessions'];
+const PAGE_PARTS = ['#project-title', '#project-more', '#project-status', '#project-actions', '#project-needs', '#project-tabs', '#project-summary', '#project-facts', '#project-team', '#project-runs', '#project-history', '#project-planning', '#project-computer', '#project-sessions'];
+// Each tab and the part of the page it shows.
+const TAB_PARTS = { overview: '#project-overview', crew: '#project-crew', tasks: '#project-tasks', planning: '#project-planning', context: '#project-context', builder: '#project-builder' };
+
+const projectHash = (id, tab = 'overview') => `#project/${encodeURIComponent(id)}${tab === 'overview' ? '' : `/${tab}`}`;
+const projectOpenItems = (id, p) => planItemsNow().filter(i => !i.archived && i.status !== 'done' && (i.project === id || i.project === p?.name));
+const noCloneAttr = info => (info && !info.clone ? ` disabled title="${esc(t('No clone of yours on this computer: set "local_clone" in its settings.'))}"` : '');
 
 function drawProjectPage() {
   const id = pageProject();
   if (!id || !state) return;
   const p = state.projects.find(x => x.id === id);
-  $('#project-task-form').hidden = !p;
   if (!p) {
     const html = `<h1>${esc(t('Unknown project: {id}', { id }))}</h1><p>${esc(t('It is not in the settings. Pick a project in the list at the top.'))}</p>`;
     draw('#project-title', html, html);
     for (const part of PAGE_PARTS.slice(1)) draw(part, '', '');
-    $('#project-overview').hidden = false;
-    $('#project-context').hidden = true;
+    for (const part of Object.values(TAB_PARTS)) $(part).hidden = true;
     return;
   }
   const info = projectPage.data?.id === id ? projectPage.data : null;
   const title = `<h1>${esc(p.name ?? id)}</h1><p>${esc(info?.error ?? (info ? info.about || t('No sentence about this project in its settings ("about").') : t('Loading…')))}</p>`;
   draw('#project-title', title, title);
+  drawProjectStatus(id, info);
   drawProjectActions(id, info);
-  const tab = pageTab();
-  const tabs = [['overview', `#project/${encodeURIComponent(id)}`, t('Overview')], ['context', `#project/${encodeURIComponent(id)}/context`, t('Context')]]
-    .map(([key, href, label]) => `<a href="${href}" class="tab${key === tab ? ' active' : ''}"${key === tab ? ' aria-current="page"' : ''}>${esc(label)}</a>`).join('');
+  drawProjectMore(id, info);
+  drawProjectNeeds(id, p);
+  const builderOn = !!state.prompts?.configured;
+  const tab = pageTab() === 'builder' && !builderOn ? 'overview' : pageTab();
+  const count = n => (n ? ` <span class="counter">${n}</span>` : '');
+  const working = going().filter(a => a.project === id).length + (online ? queueOrder().filter(r => r.project === id).length : 0);
+  const tabs = [
+    ['overview', t('At a glance')], ['crew', t('Crew')], ['tasks', t('Tasks and history'), working], ['planning', t('Planning'), projectOpenItems(id, p).length],
+    ['context', t('Context')], ...(builderOn ? [['builder', t('Builder')]] : []),
+  ].map(([key, label, n]) => `<a href="${projectHash(id, key)}" class="tab${key === tab ? ' active' : ''}"${key === tab ? ' aria-current="page"' : ''}>${esc(label)}${count(n)}</a>`).join('');
   draw('#project-tabs', tabs, tabs);
-  $('#project-overview').hidden = tab !== 'overview';
-  $('#project-context').hidden = tab !== 'context';
+  for (const [key, part] of Object.entries(TAB_PARTS)) $(part).hidden = key !== tab;
   if (tab === 'context') {
     if (projectContext.id !== id) openProjectContext(id);
     else drawProjectContext();
-    return;
+  } else if (tab === 'builder') {
+    placeBuilder(true);
+    if (builder.project !== id || !builder.data) openBuilder(id);
+    else drawBuilderTop();
+  } else if (tab === 'crew') {
+    drawProjectTeam(id);
+    drawProjectSessions(id);
+  } else if (tab === 'tasks') {
+    drawProjectRuns(id);
+    drawProjectHistory(info);
+    fillProjectTask(id);
+  } else if (tab === 'planning') drawProjectPlanning(id, p);
+  else {
+    drawProjectSummary(id, p, info);
+    drawProjectFacts(info);
+    drawProjectComputer(id, info);
   }
-  drawProjectFacts(info);
-  drawProjectTeam(id);
-  drawProjectRuns(id);
-  drawProjectHistory(info);
-  drawProjectPlanning(id, p);
-  drawProjectComputer(id, info);
-  drawProjectSessions(id);
-  fillProjectTask(id);
 }
 
-/** The page's buttons: a new task, a live session per tool, the folder, VS Code and the development environment. */
+/** One line under the name: whether the crew is working on it, in the queue or stopped; its memory; your branch. */
+function drawProjectStatus(id, info) {
+  const runs = going().filter(a => a.project === id);
+  const queued = online ? queueOrder().filter(r => r.project === id).length : 0;
+  const c = state.computer?.projects.find(x => x.id === id);
+  const status = runs.length ? `${liveDot()} ${stateHtml([t('Running: {task}', { task: runs[0].title }), 'info'])}`
+    : queued ? stateHtml([t('In the queue ({count})', { count: queued }), 'info'])
+    : stateHtml([t('Stopped'), 'neutral']);
+  const branch = info?.branch ? (info.branch === 'HEAD' ? t('no branch (detached)') : info.branch) : null;
+  const html = [
+    `<span class="project-status-run">${status}</span>`,
+    `<span>${esc(t('Memory'))} <span class="num">${c?.ram ? bytes(c.ram) : '—'}</span></span>`,
+    `<span>${esc(t('Branch'))} ${branch ? `<code>${esc(branch)}</code>` : '—'}</span>`,
+  ].join('<span class="sep" aria-hidden="true">·</span>');
+  draw('#project-status', html, html);
+}
+
+/** The three main actions: work live (the prompt builder with the usual blocks), a task for the crew, the environment. */
 function drawProjectActions(id, info) {
+  const noClone = noCloneAttr(info);
+  const big = (attrs, title, hint, kind = '') => `<button type="button" class="action-big${kind}" ${attrs}><span class="action-title">${esc(title)}</span><span class="action-hint">${esc(hint)}</span></button>`;
+  const claude = (state.sessions?.profiles ?? []).find(x => x.project === id && x.tool === 'claude');
+  const live = state.prompts?.configured
+    ? big('data-project-live', t('Work live'), t('The prompt builder with the usual blocks, then a live session'), ' primary')
+    : claude ? big(`data-session-open="${esc(claude.id)}"${noClone}`, t('Work live'), t('Claude Code in your clone of the project'), ' primary') : '';
+  const dev = info?.dev;
+  const devAction = !info?.devStart
+    ? big(`disabled title="${esc(t('None: set "dev_start" in its settings to start it from here.'))}"`, t('Start environment'), t('No command set'))
+    : dev?.status === 'running' ? big('data-project-dev="stop"', t('Stop environment'), t('Running · {size}', { size: bytes(dev.ram) }), ' danger')
+    : dev?.status === 'starting' ? big('disabled', t('Starting…'), info.devStart)
+    : big(`data-project-dev="start"${noClone}`, t('Start environment'), info.devStart);
+  const html = [live, big('data-project-task', t('New task for the crew'), t('Someone of the crew does it, you approve')), devAction].join('');
+  draw('#project-actions', html, html);
+}
+
+/** The secondary actions, in the "More" menu: the folder, VS Code and a live session with each tool. */
+function drawProjectMore(id, info) {
+  // Kept while open, so a refresh doesn't close it under the pointer.
+  if ($('#project-more .menu[open]')) return;
   const profiles = (state.sessions?.profiles ?? []).filter(x => x.project === id);
-  const noClone = info && !info.clone ? ` disabled title="${esc(t('No clone of yours on this computer: set "local_clone" in its settings.'))}"` : '';
+  const noClone = noCloneAttr(info);
+  const item = (attrs, label) => `<button type="button" class="menu-item" ${attrs}>${esc(label)}</button>`;
   const session = tool => {
     const profile = profiles.find(x => x.tool === tool);
-    return profile ? `<button type="button" class="button secondary" data-session-open="${esc(profile.id)}"${noClone}>${esc(t('Live session: {tool}', { tool: toolName(tool) }))}</button>` : '';
+    return profile ? item(`data-session-open="${esc(profile.id)}"${noClone}`, t('Live session: {tool}', { tool: toolName(tool) })) : '';
   };
-  const dev = info?.dev;
-  const devButton = !info?.devStart ? ''
-    : dev?.status === 'running' ? `<button type="button" class="button danger" data-project-dev="stop">${esc(t('Stop the development environment'))}</button>`
-    : `<button type="button" class="button secondary" data-project-dev="start"${dev?.status === 'starting' ? ' disabled' : noClone}>${esc(dev?.status === 'starting' ? t('Starting…') : t('Start the development environment'))}</button>`;
-  const html = [
-    `<button type="button" class="button" data-project-task>${esc(t('New task'))}</button>`,
+  const items = [
+    item(`data-project-open="folder"${noClone}`, t('Open folder')),
+    info?.vscode ? item(`data-project-open="vscode"${noClone}`, t('Open in VS Code')) : '',
     session('claude'),
     session('codex'),
-    state.prompts?.configured ? `<a class="button secondary" href="#builder/${encodeURIComponent(id)}">${esc(t('Prompt builder'))}</a>` : '',
-    `<button type="button" class="button secondary" data-project-open="folder"${noClone}>${esc(t('Open folder'))}</button>`,
-    info?.vscode ? `<button type="button" class="button secondary" data-project-open="vscode"${noClone}>${esc(t('Open in VS Code'))}</button>` : '',
-    devButton,
   ].join('');
-  draw('#project-actions', html, html);
+  const html = `<details class="menu"><summary class="button secondary">${esc(t('More'))}</summary><div class="menu-list">${items}</div></details>`;
+  draw('#project-more', html, html);
+}
+
+/** What waits for you in this project, at the top: the crew's requests and the board's items waiting for you. */
+function drawProjectNeeds(id, p) {
+  const needs = (online ? state.needs ?? [] : []).filter(n => n.project === id);
+  const items = projectOpenItems(id, p).filter(i => i.status === 'waiting_owner');
+  const rows = [
+    ...needs.map(n => `<div class="project-need">
+      <div><span class="primary">${esc(n.what)}</span><span class="hint">${esc(n.title)}${n.url ? ` · <a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}</span></div>
+      <button type="button" class="button small" ${n.session ? `data-needs-session="${esc(n.session)}"` : `data-needs-done="${esc(n.run)}"`} data-request="${esc(n.id)}">${esc(t('Mark as done'))}</button></div>`),
+    ...items.map(i => `<div class="project-need">
+      <div><span class="primary">#${i.id} ${esc(i.title)}</span><span class="hint">${esc(t('On the board, waiting for you'))}</span></div>
+      <a class="button secondary small" href="${projectHash(id, 'planning')}">${esc(t('See'))}</a></div>`),
+  ];
+  const html = rows.length ? `<div class="project-needs" role="alert"><div class="label">${esc(t('Waiting for you ({count})', { count: rows.length }))}</div>${rows.join('')}</div>` : '';
+  draw('#project-needs', html, html);
+}
+
+/** At a glance: the crew now, the last run and the board, each opening its tab. */
+function drawProjectSummary(id, p, info) {
+  const runs = going().filter(a => a.project === id);
+  const queued = online ? queueOrder().filter(r => r.project === id).length : 0;
+  const last = info?.history?.[0];
+  const items = projectOpenItems(id, p);
+  const card = (tab, label, body) => `<a class="summary-card" href="${projectHash(id, tab)}"><span class="label">${esc(label)}</span>${body}</a>`;
+  const crewNow = runs.length
+    ? `<span class="primary">${liveDot()} ${esc(runs[0].title)}</span><span class="hint">${esc(stepLine(runs[0]))}</span>`
+    : `<span class="primary">${esc(t('No one working on it'))}</span><span class="hint">${esc(queued ? t('{count} in the queue', { count: queued }) : t('Nothing in the queue'))}</span>`;
+  const result = last
+    ? `<span class="primary">${esc(last.title)}</span><span class="hint">${stateHtml(runLabel(last))} · <span class="num">${shortDate(last.created)}</span></span>`
+    : `<span class="primary">${esc(info ? t('No runs yet') : t('Loading…'))}</span>`;
+  const board = items.length
+    ? `<span class="primary">${esc(t('{count} open item(s)', { count: items.length }))}</span><span class="hint">#${items[0].id} ${esc(items[0].title)}</span>`
+    : `<span class="primary">${esc(t('Nothing open'))}</span>`;
+  const html = `<div class="project-summary">${card('tasks', t('Crew now'), crewNow)}${card('tasks', t('Last run'), result)}${card('planning', t('Planning'), board)}</div>`;
+  draw('#project-summary', html, html);
 }
 
 function drawProjectFacts(info) {
@@ -1747,7 +1843,8 @@ $('#project-task-form').addEventListener('submit', async event => {
 // The document of blocks, the choice made for the project and the prompt it gives. "chosen" are the blocks marked by
 // hand, "off" the automatic blocks turned off; the server puts them together (src/prompts.mjs) and remembers the
 // choice per project. The prompt can be edited before it goes to a live session, a task or the clipboard.
-const builder = { project: null, data: null, chosen: [], off: [], result: null, edited: false, loading: null, seq: 0, allCombos: false };
+// "editing": the prompt shown as text to edit; "focus": the block marked or unmarked last, shown first.
+const builder = { project: null, data: null, chosen: [], off: [], result: null, edited: false, editing: false, focus: null, usual: null, loading: null, seq: 0, allCombos: false };
 const sameName = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
 const hasName = (list, name) => (list ?? []).some(x => sameName(x, name));
 const withoutName = (list, name) => list.filter(x => !sameName(x, name));
@@ -1759,15 +1856,15 @@ async function openBuilder(project, { reload = false } = {}) {
   builder.loading = project;
   try {
     const data = await api(`/api/prompt-builder?project=${encodeURIComponent(project)}`);
-    if (builderProjectOf() !== project) return;
+    if (builderTarget() !== project) return;
     const keep = reload && builder.project === project;
-    Object.assign(builder, { project, data, result: null, edited: false });
+    // "Work live" on the project's page asks for its usual blocks, not the last choice.
+    const usual = builder.usual === project;
+    builder.usual = null;
+    Object.assign(builder, { project, data, result: null, edited: false, editing: false });
     if (!keep) {
       // The last choice made for the project; the first time, its block, the environment and its modules.
-      const names = builderSections().flatMap(s => s.blocks.map(b => b.name));
-      const start = data.last ?? { chosen: data.defaults, off: data.defaultsOff ?? [] };
-      builder.chosen = (start.chosen ?? []).filter(n => hasName(names, n));
-      builder.off = (start.off ?? []).filter(n => hasName(names, n));
+      startBuilder(usual || !data.last ? { chosen: data.defaults, off: data.defaultsOff ?? [] } : data.last);
       builder.allCombos = false;
       $('#builder-text').value = '';
     }
@@ -1781,17 +1878,139 @@ async function openBuilder(project, { reload = false } = {}) {
   }
 }
 
+/** Starts the choice from a list of blocks (those still in the document). */
+function startBuilder(start) {
+  const names = builderSections().flatMap(s => s.blocks.map(b => b.name));
+  builder.chosen = (start.chosen ?? []).filter(n => hasName(names, n));
+  builder.off = (start.off ?? []).filter(n => hasName(names, n));
+}
+
+/** The prompt builder's screen lives in its own view or in a project's tab: it is moved to where it is shown. */
+function placeBuilder(inProject) {
+  const home = inProject ? $('#project-builder') : $('#view-builder');
+  const body = $('#builder-body');
+  if (body.parentElement !== home) home.append(body);
+}
+
+/** "Work live": the project's prompt builder with its usual blocks (its block, the environment and its modules). */
+async function workLive(id) {
+  const hash = `#project/${encodeURIComponent(id)}/builder`;
+  if (builder.project === id && builder.data?.document) {
+    startBuilder({ chosen: builder.data.defaults, off: builder.data.defaultsOff ?? [] });
+    if (location.hash !== hash) {
+      location.hash = hash;
+      drawProjectPage();
+    }
+    await composeBuilder();
+  } else {
+    builder.usual = id;
+    if (location.hash !== hash) location.hash = hash;
+    else openBuilder(id, { reload: true });
+  }
+}
+
 async function composeBuilder({ remember = true } = {}) {
   const seq = ++builder.seq;
+  const before = builder.result?.blocks ?? null;
   try {
     const result = await api('/api/prompt-builder/compose', { project: builder.project, chosen: builder.chosen, off: builder.off, remember });
     if (seq !== builder.seq) return;
-    Object.assign(builder, { result, edited: false });
+    // The parts that leave the prompt are marked in red for a moment before it is written again.
+    const leaving = (before ?? []).filter(n => !hasName(result.blocks, n));
+    if (leaving.length && (await markLeaving(leaving)) && seq !== builder.seq) return;
+    Object.assign(builder, { result, edited: false, editing: false });
     $('#builder-text').value = result.text;
+    drawBuilder();
+    if (before) markEntering(result.blocks.filter(n => !hasName(before, n)));
+    return;
   } catch (error) {
     toast(error.message);
   }
   drawBuilder();
+}
+
+const calm = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+const builderPart = name => [...document.querySelectorAll('#builder-view .builder-part')].find(el => sameName(el.dataset.block, name));
+const firstPart = parts => parts.find(el => sameName(el.dataset.block, builder.focus)) ?? parts[0];
+
+/** Marks the parts leaving the prompt in red for a moment; false when they are not shown. */
+async function markLeaving(names) {
+  const parts = names.map(builderPart).filter(Boolean);
+  if (!parts.length || $('#builder-view').hidden) return false;
+  for (const el of parts) el.classList.add('leaving');
+  scrollToPart(firstPart(parts));
+  await new Promise(resolve => setTimeout(resolve, calm() ? 400 : 650));
+  return true;
+}
+
+/** Marks the parts that came into the prompt in brass, fading in about 2 seconds, and scrolls to them. */
+function markEntering(names) {
+  const parts = names.map(builderPart).filter(Boolean);
+  if (!parts.length || $('#builder-view').hidden) return;
+  for (const el of parts) {
+    el.classList.add('entering');
+    setTimeout(() => el.classList.remove('entering'), 2000);
+  }
+  scrollToPart(firstPart(parts));
+}
+
+/** Scrolls the prompt to a part, unless it is already in sight. */
+function scrollToPart(el) {
+  const view = $('#builder-view');
+  const top = el.offsetTop - 8;
+  const bottom = el.offsetTop + Math.min(el.offsetHeight, view.clientHeight - 16);
+  if (top < view.scrollTop || bottom > view.scrollTop + view.clientHeight) view.scrollTo({ top, behavior: calm() ? 'auto' : 'smooth' });
+}
+
+// A color per block, the same on its checkbox and in the margin of its part of the prompt; muted, so brass stays the accent.
+function blockColor(name) {
+  const names = builderSections().flatMap(sec => sec.blocks.map(b => b.name));
+  const i = Math.max(0, names.findIndex(n => sameName(n, name)));
+  return `hsl(${Math.round((i * 137.508) % 360)} 38% 64%)`;
+}
+
+/** Why an automatic block came in by itself, from the details of the prompt put together. */
+function automaticWhy(d) {
+  switch (d?.how) {
+    case 'include-with': return t('Came in by itself, with: {list}', { list: d.condition });
+    case 'tags': return t('Came in by itself, sharing: {list}', { list: d.condition });
+    case 'requires': return t('Came in by itself, as it requires: {list}', { list: d.condition });
+    case 'always': return t('Always comes in by itself');
+    default: return '';
+  }
+}
+
+/** The final prompt, block by block: each part with its block's color in the margin, the automatic ones dashed. */
+function drawBuilderView() {
+  const r = builder.result;
+  const editing = builder.editing || builder.edited;
+  $('#builder-view').hidden = editing;
+  $('#builder-text').hidden = !editing;
+  const edit = $('#builder-edit');
+  edit.hidden = builder.edited;
+  edit.textContent = editing ? t('Show the blocks') : t('Edit');
+  const details = r?.details ?? [];
+  const unfilled = text => esc(text).replace(/\{([^{}\s]+)\}/g, (whole, name) => ((r.unresolved ?? []).includes(name) ? `<span class="unfilled">${whole}</span>` : whole));
+  const html = details.length
+    ? details.map(d => `<div class="builder-part${hasName(r.automatic, d.name) ? ' automatic' : ''}" data-block="${esc(d.name)}" style="--block: ${blockColor(d.name)}">${unfilled(d.text)}</div>`).join('')
+    : `<div class="empty">${esc(t('Mark blocks to put the prompt together.'))}</div>`;
+  draw('#builder-view', JSON.stringify([details.map(d => [d.name, d.text]), r?.automatic, r?.unresolved]), html);
+}
+
+/** Where the prompt builder's document comes from and how recent it is, a sentence each. */
+function builderSourceLines(s) {
+  const lines = [];
+  const c = s.commit;
+  if (s.source === 'library') {
+    lines.push(t('Document {path}, in the library {name}.', { path: s.library.path, name: s.library.name }));
+    if (c) lines.push(c.approximate ? t('Last change on {when} or before: {subject}', { when: shortDate(c.date), subject: c.subject }) : t('Last change on {when}: {subject}', { when: shortDate(c.date), subject: c.subject }));
+    if (s.copied) lines.push(t("The library's copy was updated on {when}.", { when: shortDate(s.copied) }));
+  } else if (s.origin === 'library') {
+    lines.push(t('The library {name} has no {path} yet: the file on this computer is used.', { name: s.library.name, path: s.library.path }));
+  } else if (s.origin === 'google') {
+    lines.push(s.sync?.synced_at ? t('Copied from Google Docs on {when}.', { when: shortDate(s.sync.synced_at) }) : s.exists ? t('Copy on this computer from {when}.', { when: shortDate(s.modified) }) : t('No copy of the document on this computer yet.'));
+  } else lines.push(s.exists ? t('Document on this computer, from {when}.', { when: shortDate(s.modified) }) : t('No copy of the document on this computer yet.'));
+  return lines;
 }
 
 function drawBuilder() {
@@ -1801,6 +2020,7 @@ function drawBuilder() {
   if (!draw('#builder-project', options, options)) $('#builder-project').value = builderProjectOf();
   drawBuilderTop();
   drawBuilderSections();
+  drawBuilderView();
   drawBuilderNotes();
   fillBuilderAgents();
 }
@@ -1814,15 +2034,17 @@ function drawBuilderTop() {
   else if (d.error) status = `<div class="panel">${stateHtml([d.error, 'error'])}</div>`;
   else if (!d.status.configured) status = `<div class="empty">${esc(t('No prompt builder set: add "prompt_builder" with the "file" of your document of blocks to the settings (see the README).'))}</div>`;
   else {
-    const s = d.status;
+    // The status read with the page (with the document's last commit), the state's for what changes meanwhile.
+    const s = { ...d.status, ...(p.configured ? { copied: p.copied, stale: p.stale, sync: p.sync, commit: p.commit ?? d.status.commit } : {}) };
     const syncing = p.syncing ?? d.syncing;
-    const sync = p.sync ?? s.sync ?? {};
-    const canSync = s.docId && d.cdp;
-    const copy = s.copied ? t('Copy of the document from {when}.', { when: shortDate(s.copied) }) : t('No copy of the document on this computer yet.');
-    status = `<div class="builder-status"><p>${esc(copy)}</p>
-      ${s.stale ? stateHtml([t('The copy is more than {days} days old: reload it to get your latest changes.', { days: s.staleDays }), 'warn']) : ''}
+    const sync = s.sync ?? {};
+    const library = s.origin === 'library';
+    const title = library ? t("Updates the library's copy (git), then reads it.") : s.origin === 'google' && d.cdp ? t('Copies the document from Google Docs again, then reads it.') : t('Reads the copy on this computer again.');
+    const stale = library ? t("The library's copy was last updated more than {days} days ago: reload it.", { days: s.staleDays }) : t('The copy is more than {days} days old: reload it to get your latest changes.', { days: s.staleDays });
+    status = `<div class="builder-status"><p>${builderSourceLines(s).map(esc).join(' ')}</p>
+      ${s.stale ? stateHtml([stale, 'warn']) : ''}
       ${sync.ok === false ? stateHtml([sync.error, 'error']) : ''}
-      <button type="button" class="button secondary small" data-builder-reload title="${esc(canSync ? t('Copies the document from Google Docs again, then reads it.') : t('Reads the copy on this computer again.'))}"${syncing ? ' disabled' : ''}>${esc(syncing ? t('Copying…') : t('Reload document'))}</button></div>`;
+      <button type="button" class="button secondary small" data-builder-reload title="${esc(title)}"${syncing ? ' disabled' : ''}>${esc(syncing ? (library ? t('Updating…') : t('Copying…')) : t('Reload document'))}</button></div>`;
   }
   draw('#builder-status', status, status);
 
@@ -1853,6 +2075,7 @@ function drawBuilderSections() {
         const automatic = !!r && hasName(r.automatic, b.name);
         const unavailable = !on && !!r && hasName(r.unavailable, b.name);
         const unmet = (r?.unmet ?? []).some(u => sameName(u.block, b.name));
+        const why = automatic ? automaticWhy((r.details ?? []).find(x => sameName(x.name, b.name))) : '';
         const facts = [
           b.tags.length ? t('tags: {list}', { list: b.tags.join(', ') }) : '',
           b.access.length ? t('sign-in: {list}', { list: b.access.join(', ') }) : '',
@@ -1860,9 +2083,9 @@ function drawBuilderSections() {
           b.includeWith ? t('comes with: {list}', { list: b.includeWith }) : '',
           hasName(builder.off, b.name) ? t('turned off') : '',
         ].filter(Boolean).join(' · ');
-        return `<label class="builder-block${automatic ? ' automatic' : ''}${unavailable ? ' unavailable' : ''}${unmet ? ' unmet' : ''}" data-auto="${esc(t('automatic'))}" title="${esc(b.text.slice(0, 500))}">
-          <input type="checkbox" data-builder-block="${esc(b.name)}" data-selection="${esc(b.selection)}" data-section="${esc(s.name)}"${on ? ' checked' : ''}${unavailable ? ' disabled' : ''}>
-          <span class="name">${esc(b.name)}</span>${facts ? `<span class="hint">${esc(facts)}</span>` : ''}</label>`;
+        return `<label class="builder-block${on ? ' included' : ''}${automatic ? ' automatic' : ''}${unavailable ? ' unavailable' : ''}${unmet ? ' unmet' : ''}" style="--block: ${blockColor(b.name)}" data-auto="${esc(t('automatic'))}" title="${esc(b.text.slice(0, 500))}">
+          <input type="checkbox" data-builder-block="${esc(b.name)}" data-selection="${esc(b.selection)}" data-section="${esc(s.name)}"${on ? ' checked' : ''}${unavailable ? ' disabled' : ''}${why ? ` aria-description="${esc(why)}"` : ''}>
+          <span class="name">${esc(b.name)}</span>${why ? `<span class="why">${esc(why)}</span>` : ''}${facts ? `<span class="hint">${esc(facts)}</span>` : ''}</label>`;
       }).join('')}
     </div>`).join('');
   draw('#builder-sections', html, html);
@@ -1905,6 +2128,7 @@ $('#builder-sections').addEventListener('change', event => {
   const input = event.target.closest('[data-builder-block]');
   if (!input) return;
   const name = input.dataset.builderBlock;
+  builder.focus = name;
   if (input.checked) {
     builder.off = withoutName(builder.off, name);
     if (input.dataset.selection === 'one') {
@@ -1922,7 +2146,14 @@ $('#builder-sections').addEventListener('change', event => {
 
 $('#builder-text').addEventListener('input', () => {
   builder.edited = true;
+  drawBuilderView();
   drawBuilderNotes();
+});
+
+$('#builder-edit').addEventListener('click', () => {
+  builder.editing = !builder.editing;
+  drawBuilderView();
+  if (builder.editing) $('#builder-text').focus();
 });
 
 $('#builder-copy').addEventListener('click', async () => {
@@ -1962,7 +2193,7 @@ $('#builder-task').addEventListener('submit', async event => {
   }
 });
 
-$('#view-builder').addEventListener('click', async event => {
+$('#builder-body').addEventListener('click', async event => {
   const target = event.target.closest('[data-builder-combo],[data-builder-all-combos],[data-builder-reload]');
   if (!target) return;
   try {
@@ -1977,10 +2208,11 @@ $('#view-builder').addEventListener('click', async event => {
     } else {
       target.disabled = true;
       const d = builder.data;
-      if (d?.status?.docId && d.cdp) {
-        toast(t('Copying the prompt builder…'));
+      const origin = d?.status?.origin;
+      if (origin === 'library' || (origin === 'google' && d.cdp)) {
+        toast(origin === 'library' ? t("Updating the library's copy…") : t('Copying the prompt builder…'));
         const status = await api('/api/prompts-sync', {});
-        toast(status.ok ? t('Prompt builder copied.') : status.error);
+        toast(status.ok ? (status.source === 'library' ? t('Document updated from the library.') : t('Prompt builder copied.')) : status.error);
       } else toast(t('Document read again.'));
       await openBuilder(builder.project, { reload: true });
     }
@@ -2461,6 +2693,7 @@ async function refresh() {
     refreshProjectPage();
   }
   if (currentView() === 'builder') {
+    placeBuilder(false);
     if (builder.project !== builderProjectOf() || !builder.data) openBuilder(builderProjectOf());
     else drawBuilderTop();
   }
@@ -2641,15 +2874,25 @@ $('#limits-form').addEventListener('submit', async event => {
   }
 });
 
+document.addEventListener('click', event => {
+  for (const menu of document.querySelectorAll('details.menu[open]')) if (!menu.contains(event.target) || event.target.closest('.menu-item')) menu.open = false;
+});
+
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-needs-done],[data-needs-session],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-needs-done],[data-needs-session],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live]');
   if (!target) return;
   // A project's name inside a row that opens on a click (Projects) goes to its page, and nothing else.
   if (event.target.closest('a.project-link') && !target.matches('a')) return;
   try {
     if (target.hasAttribute('data-project-task')) {
-      $('#project-task-form').scrollIntoView({ behavior: 'smooth' });
+      // The form is in the "Tasks and history" tab.
+      location.hash = `#project/${encodeURIComponent(pageProject())}/tasks`;
+      drawProjectPage();
+      $('#project-task-form').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'nearest' });
       $('#project-task-form').instruction.focus();
+      return;
+    } else if (target.hasAttribute('data-project-live')) {
+      await workLive(pageProject());
       return;
     } else if (target.dataset.projectPlanning) {
       planFilter.project = target.dataset.projectPlanning;
@@ -2746,9 +2989,10 @@ document.addEventListener('click', async event => {
       return;
     } else if (target.hasAttribute('data-prompts-sync')) {
       target.disabled = true;
-      toast(t('Copying the prompt builder…'));
+      const library = state.prompts?.origin === 'library';
+      toast(library ? t("Updating the library's copy…") : t('Copying the prompt builder…'));
       const status = await api('/api/prompts-sync', {});
-      toast(status.ok ? t('Prompt builder copied.') : status.error);
+      toast(status.ok ? (library ? t('Document updated from the library.') : t('Prompt builder copied.')) : status.error);
     } else if (target.dataset.reader) {
       const action = target.dataset.reader;
       await api('/api/usage-reader', action === 'now' ? { read: true } : { enabled: action === 'on' });
