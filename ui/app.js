@@ -336,14 +336,25 @@ const builderTarget = () => (builderHash() ? builderProjectOf() : pageProject() 
 const pageSession = () => (location.hash.startsWith('#session/') ? decodeURIComponent(location.hash.slice('#session/'.length)) : null);
 const pageLiveSession = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length).split('/')[2] ?? '') : '');
 const currentView = () => (pageProject() ? 'project' : pageSession() ? 'session' : builderHash() ? 'builder' : VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
+const touchScreen = () => matchMedia('(pointer: coarse)').matches;
+/** Phones: the bottom bar holds the main sections, and "More" opens the others above it. */
+function setNavMore(open) {
+  $('#nav-more').setAttribute('aria-expanded', String(open));
+  $('.nav').classList.toggle('open', open);
+}
 function showView() {
   const view = currentView();
   if (view !== 'session' && !(view === 'project' && pageTab() === 'live')) stopLive();
   if (view === 'session' && state) drawSessionPage();
   for (const v of VIEWS) $(`#view-${v}`).classList.toggle('active', v === view);
-  for (const a of document.querySelectorAll('.nav a')) a.classList.toggle('active', a.dataset.view === view);
+  // A project's page lights Projects; a session's page, Operations (where the sessions are listed).
+  const section = { project: 'projects', session: 'operations' }[view] ?? view;
+  for (const a of document.querySelectorAll('.nav a')) a.classList.toggle('active', a.dataset.view === section);
+  $('#nav-more').classList.toggle('active', !!document.querySelector('.nav a.nav-extra.active'));
+  setNavMore(false);
   $('#project-jump').value = pageProject() ?? '';
-  if (view === 'manager') setTimeout(() => $('#message').focus(), 0);
+  // Not on a touch screen: the keyboard would cover half of it at every visit.
+  if (view === 'manager' && !touchScreen()) setTimeout(() => $('#message').focus(), 0);
   if (view === 'project' && state) {
     if (projectPage.data?.id !== pageProject()) projectPage.data = null;
     drawProjectPage();
@@ -646,9 +657,14 @@ function drawNavAttention() {
     const html = attnMark(list.filter(i => i.view === a.dataset.view), a.firstElementChild?.textContent ?? '');
     if (slot.innerHTML !== html) slot.innerHTML = html;
   }
+  // On phones, "More" carries the marks of the sections it holds.
+  const extra = new Set([...document.querySelectorAll('.nav a.nav-extra')].map(a => a.dataset.view));
+  const more = attnMark(list.filter(i => extra.has(i.view)), t('More'));
+  if ($('#nav-more-attn').innerHTML !== more) $('#nav-more-attn').innerHTML = more;
 }
 
 function drawStatusbar() {
+  $('#statusbar').classList.toggle('offline', !online); // phones show the bar only then
   if (!online) {
     draw('#statusbar', 'off', `<div class="group">${stateHtml([t('No connection to Chiefmate. Trying again…'), 'error'])}</div>`);
     return;
@@ -3760,6 +3776,32 @@ document.addEventListener('click', async event => {
     toast(error.message);
   }
 });
+
+$('#nav-more').addEventListener('click', () => setNavMore(!$('.nav').classList.contains('open')));
+document.addEventListener('click', event => {
+  if ($('.nav').classList.contains('open') && (!event.target.closest('.nav') || event.target.closest('.nav a'))) setNavMore(false);
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && $('.nav').classList.contains('open')) setNavMore(false);
+});
+
+// Phones: the app fits the visible area (above the on-screen keyboard too), and the conversations take the height
+// of their screen (--view-h). While typing, the bottom bar and the notices step aside (html.typing).
+if (window.visualViewport) {
+  const fit = () => {
+    if (visualViewport.scale > 1.01) return; // zoomed in by the owner: leave the layout as it is
+    document.documentElement.style.setProperty('--app-h', `${Math.round(visualViewport.height)}px`);
+    if (scrollY) scrollTo(0, 0);
+  };
+  visualViewport.addEventListener('resize', fit);
+  fit();
+}
+new ResizeObserver(([entry]) => document.documentElement.style.setProperty('--view-h', `${Math.round(entry.contentRect.height)}px`)).observe($('.content'));
+const typingField = el => el?.matches?.('textarea, input:not([type=checkbox], [type=radio], [type=button], [type=submit], [type=range], [type=file])');
+document.addEventListener('focusin', event => document.documentElement.classList.toggle('typing', touchScreen() && typingField(event.target)));
+document.addEventListener('focusout', () => setTimeout(() => {
+  if (!typingField(document.activeElement)) document.documentElement.classList.remove('typing');
+}, 0));
 
 showView();
 drawClock();
