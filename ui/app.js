@@ -608,12 +608,32 @@ function drawTitle() {
   }
 }
 
-/** A request's buttons: Done (a step's, Codex to sign in), or Allow and See (a session's permission). */
+/**
+ * A step's request, answered from the app: a question has one button per option (the recommended one in brass), an
+ * action the owner takes outside the app has "I did it".
+ */
+function requestButtons(run, q, size = '') {
+  if (!q.options?.length) return `<button type="button" class="button${size}" data-needs-done="${esc(run)}" data-request="${esc(q.id)}">${esc(t('I did it'))}</button>`;
+  const option = o => {
+    const recommended = o === q.recommend;
+    const marks = recommended ? ` title="${esc(t('Recommended by the agent'))}" aria-label="${esc(t('{option} (recommended)', { option: o }))}"` : '';
+    return `<button type="button" class="button${recommended ? '' : ' secondary'}${size}" data-needs-done="${esc(run)}" data-request="${esc(q.id)}" data-answer="${esc(o)}"${marks}>${esc(o)}</button>`;
+  };
+  return `<span class="request-options">${q.options.map(option).join('')}</span>`;
+}
+
+/** A question's recommendation and its reason, in one line ("Recommends: Resend. Simpler to set up."). */
+const requestWhy = q => (q?.options?.length && (q.recommend || q.why)
+  ? `<span class="request-why">${esc([q.recommend ? t('Recommends: {what}', { what: q.recommend }) : '', q.why ?? ''].filter(Boolean).join('. '))}</span>`
+  : '');
+
+/** A request's buttons: a step's (requestButtons), "I did it" (Codex to sign in), or Allow and See (a session's permission). */
 function needsButtons(n, size) {
   if (n.kind === 'permission') {
     return `<span class="compose-buttons"><a class="button secondary${size}" href="${esc(sessionHash({ id: n.session, project: n.project }))}">${esc(t('See'))}</a><button type="button" class="button${size}" data-needs-session="${esc(n.session)}" data-request="${esc(n.id)}">${esc(t('Allow'))}</button></span>`;
   }
-  return `<button type="button" class="button${size}" ${n.session ? `data-needs-session="${esc(n.session)}"` : `data-needs-done="${esc(n.run)}"`} data-request="${esc(n.id)}">${esc(t('Mark as done'))}</button>`;
+  if (n.session) return `<button type="button" class="button${size}" data-needs-session="${esc(n.session)}" data-request="${esc(n.id)}">${esc(t('I did it'))}</button>`;
+  return requestButtons(n.run, n, size);
 }
 
 /** A permission asked, in plain words: where, what changes, whether it can be undone and the risk; the command folded. */
@@ -663,14 +683,16 @@ function attnNotice(i, brief = false) {
   const open = i.view === 'log' && i.run ? `href="#log" data-select="${esc(i.run)}"` : `href="#${esc(i.view)}"`;
   // A notice with a decision card: "Decide" opens it in Decisions.
   const decide = !r && currentView() !== 'decisions' && decisionsNow().some(c => c.id === i.id);
+  // In the band at the top, a question leads to Operations, where its options come with the recommendation and its reason.
   const actions = r && brief && r.kind === 'permission'
     ? `<a class="button small" href="${esc(sessionHash({ id: r.session, project: i.project }))}">${esc(t('See'))}</a>`
+    : r && brief && r.options?.length ? `<a class="button small" href="#${esc(i.view)}">${esc(t('Answer'))}</a>`
     : r ? needsButtons({ ...r, project: i.project }, ' small')
     : decide ? `<a class="button small" href="#decisions">${esc(t('Decide'))}</a>`
     : `${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
   return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
       <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
-      <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}${where || links.length ? `<span class="hint">${[esc(where), ...links].filter(Boolean).join(' · ')}</span>` : ''}${brief ? '' : permissionFacts(r?.explain, r?.id)}</div>
+      <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}${brief ? '' : requestWhy(r)}${where || links.length ? `<span class="hint">${[esc(where), ...links].filter(Boolean).join(' · ')}</span>` : ''}${brief ? '' : permissionFacts(r?.explain, r?.id)}</div>
       <div class="attn-actions">${actions}</div>
     </div>`;
 }
@@ -1654,7 +1676,7 @@ async function refreshDetail(force = false) {
   });
   // What the crew asked of the owner during the run.
   const requests = (r.requests ?? []).length
-    ? `<div class="report"><div class="report-top"><strong>${esc(t('Asked of you'))}</strong></div>${r.requests.map(q => `<div>${stateHtml(q.status === 'open' ? [t('Waiting for your action'), 'warn'] : [t('Done'), 'ok'])} ${esc(q.what)}${q.url ? ` · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${q.status === 'open' ? ` <button type="button" class="button small" data-needs-done="${esc(r.id)}" data-request="${esc(q.id)}">${esc(t('Mark as done'))}</button>` : ''}</div>`).join('')}</div>`
+    ? `<div class="report"><div class="report-top"><strong>${esc(t('Asked of you'))}</strong></div>${r.requests.map(q => `<div>${stateHtml(q.status === 'open' ? [t('Waiting for your action'), 'warn'] : [t('Done'), 'ok'])} ${esc(q.what)}${q.url ? ` · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${q.status === 'open' ? `${requestWhy(q)} ${requestButtons(r.id, q, ' small')}` : q.answer ? ` · ${esc(t('Your answer: {answer}', { answer: q.answer }))}` : ''}</div>`).join('')}</div>`
     : '';
   const checks = r.checks?.length
     ? `<div class="report"><div class="report-top"><strong>${esc(t('Checks'))}</strong></div>${r.checks.map(c => `<div>${stateHtml(c.ok ? [t('Passed'), 'ok'] : [t('Failed'), 'error'])} <code>${esc(c.command)}</code></div>`).join('')}</div>`
@@ -3499,7 +3521,7 @@ function drawAgentHead(f) {
 }
 
 function drawAgentTalk(f) {
-  const open = new Set(f.requests.map(r => r.id));
+  const open = new Map(f.requests.map(r => [r.id, r]));
   const entries = f.talk.map(m => {
     const meta = [clockTime(m.at), t('step {n}', { n: m.step })];
     if (m.who === 'owner') {
@@ -3507,12 +3529,15 @@ function drawAgentTalk(f) {
       return `<div class="talk owner"><div class="talk-head"><span class="talk-who">${esc(t('You'))}</span> · ${esc([...meta, status].filter(Boolean).join(' · '))}</div><div class="talk-text">${esc(m.text)}</div></div>`;
     }
     const asking = m.kind === 'request';
-    const waiting = asking && open.has(m.request);
-    const button = waiting ? ` <button type="button" class="button small" data-needs-done="${esc(f.run)}" data-request="${esc(m.request)}">${esc(t('Mark as done'))}</button>` : '';
-    return `<div class="talk${asking ? ' request' : ''}"><div class="talk-head"><span class="talk-who">${esc(agentName(m.agent, f.project))}</span> · ${esc([...meta, asking ? t('asks for your help') : ''].filter(Boolean).join(' · '))}${button}</div><div class="talk-text">${esc(m.text)}</div>${waiting ? `<div class="hint">${esc(t('Answer below: your message goes to the agent as the answer.'))}</div>` : ''}</div>`;
+    const request = asking ? open.get(m.request) : null;
+    // A question's options go under its text; "I did it" stays beside the agent's name.
+    const button = request && !request.options?.length ? ` ${requestButtons(f.run, request, ' small')}` : '';
+    const choices = request?.options?.length ? `<div class="talk-options">${requestWhy(request)}${requestButtons(f.run, request, ' small')}</div>` : '';
+    const hint = !request ? '' : request.options?.length ? t('Choose an option, or write your answer below.') : t('Answer below: your message goes to the agent as the answer.');
+    return `<div class="talk${asking ? ' request' : ''}"><div class="talk-head"><span class="talk-who">${esc(agentName(m.agent, f.project))}</span> · ${esc([...meta, asking ? t('asks for your help') : ''].filter(Boolean).join(' · '))}${button}</div><div class="talk-text">${esc(m.text)}</div>${choices}${hint ? `<div class="hint">${esc(hint)}</div>` : ''}</div>`;
   });
   const html = entries.join('') || `<div class="hint">${esc(t('Nothing yet. Write below: the agent pauses at a safe point, reads your message and goes on in the same session, on the same branch.'))}</div>`;
-  if (draw('#agent-talk', JSON.stringify([f.run, f.talk.map(m => [m.id, m.status]), [...open]]), html)) $('#agent-talk').scrollTop = $('#agent-talk').scrollHeight;
+  if (draw('#agent-talk', JSON.stringify([f.run, f.talk.map(m => [m.id, m.status]), [...open.keys()]]), html)) $('#agent-talk').scrollTop = $('#agent-talk').scrollHeight;
 }
 
 async function pollAgent() {
@@ -4021,8 +4046,9 @@ document.addEventListener('click', async event => {
       if (!ok) return;
       await api('/api/reset-grants', { action: 'remove', index: Number(target.dataset.resetRemove) });
     } else if (target.dataset.needsDone) {
-      await api('/api/needs-you/done', { run: target.dataset.needsDone, id: target.dataset.request });
-      toast(t('Marked as done. The crew goes on.'));
+      const answer = target.dataset.answer ?? null;
+      await api('/api/needs-you/done', { run: target.dataset.needsDone, id: target.dataset.request, answer });
+      toast(answer ? t('Answer sent: {answer}. The crew goes on.', { answer }) : t('Marked as done. The crew goes on.'));
       if (selectedRun === target.dataset.needsDone) await refreshDetail(true);
     } else if (target.dataset.needsSession) {
       const permission = (state.needs ?? []).some(n => n.id === target.dataset.request && n.kind === 'permission');

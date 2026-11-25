@@ -166,7 +166,10 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 changed since each member's last run. --short leaves the texts out
   node src/cli.mjs needs-you "<what to do>" [--url <address>] [--wait] [--check "<command>"] [--id <request>]
                                                 for a step of a run: asks the owner to act and, with --wait, waits
-                                                until they click Done (or the check command succeeds)
+                                                until they click "I did it" (or the check command succeeds)
+  node src/cli.mjs needs-you "<question>" --options "A|B" [--recommend A] [--why "<one sentence>"]
+                                                for a step of a run: asks the owner to choose, one button per option
+                                                (the recommended one marked), and waits for the answer
   node src/cli.mjs prompts-sync                 brings the prompt builder's document up to date: the library's copy
                                                 (git), or a copy from Google Docs through your browser
   node src/cli.mjs limits [--window-5h 0.85] [--plan-week 0.9]
@@ -213,12 +216,16 @@ async function needsYou() {
   const check = option('--check');
   let id = option('--id');
   if (!id) {
-    const what = rest.find((x, i) => !x.startsWith('--') && !['--url', '--check', '--id'].includes(rest[i - 1]));
-    const request = await api('/api/needs-you', { run, step: process.env.CHIEFMATE_STEP, what, url: option('--url'), wait: has('--wait'), check });
+    const what = rest.find((x, i) => !x.startsWith('--') && !['--url', '--check', '--id', '--options', '--recommend', '--why'].includes(rest[i - 1]));
+    const request = await api('/api/needs-you', {
+      run, step: process.env.CHIEFMATE_STEP, what, url: option('--url'), wait: has('--wait'), check,
+      options: option('--options'), recommend: option('--recommend'), why: option('--why'),
+    });
     id = request.id;
     const opened = { browser_cdp: "in a new tab of the owner's browser", playwright: 'in a browser window for the owner', browser: 'in a browser window for the owner' }[request.opened];
-    console.log(`Request ${id} sent to the owner${opened ? `; the address opened ${opened}` : ''}.${request.openError ? ` The address did not open: ${request.openError}` : ''}`);
-    if (!has('--wait')) return;
+    console.log(`${request.options ? 'Question' : 'Request'} ${id} sent to the owner${opened ? `; the address opened ${opened}` : ''}.${request.openError ? ` The address did not open: ${request.openError}` : ''}`);
+    // A question always waits for its answer.
+    if (!request.wait) return;
   }
   const { spawnSync } = await import('node:child_process');
   const roundEnds = Date.now() + 9 * 60_000;
@@ -227,7 +234,7 @@ async function needsYou() {
     const s = await api('/api/needs-you/poll', { run, id });
     if (s.status === 'done') {
       if (s.answer) console.log(`The owner answered you from the app:\n${s.answer}\n\nTake the answer into account and go on.`);
-      else console.log(s.by === 'check' ? 'Done: the check succeeded.' : 'Done: the owner signaled it is done. Go on.');
+      else console.log(s.by === 'check' ? 'Done: the check succeeded.' : 'Done: the owner says they did it. Go on.');
       return;
     }
     if (s.timedOut) {
