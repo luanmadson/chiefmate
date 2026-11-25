@@ -10,6 +10,7 @@ import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
 import { addQuestion, decide, decisionCards, openQuestions } from './decisions.mjs';
+import { listFolder, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
 import { computer, processes, stoppable, stopProject } from './machine.mjs';
@@ -182,6 +183,42 @@ function runFeed(id, params) {
     step: n, current, total: steps.length, agent: step?.agent ?? null, stepStatus: step?.status ?? null, stepStarted: step?.started ?? null,
     review: step === run.review, items, next, talk: (run.talk ?? []).slice(-80), requests: (run.requests ?? []).filter(r => r.status === 'open'),
   };
+}
+
+/** A run's record by its id from the address, or null for an id that is not one. */
+const runById = id => (/^[\w.-]+$/.test(id) && !id.includes('..') ? activeRun(id) ?? readRun(id) : null);
+
+/**
+ * The file viewer, read only (src/files.mjs): GET /api/files/run/<id> (what a run created or changed), roots (a
+ * project's folders), list (a folder), info, raw, text and table (a file, by "path", or by "run" and "file"). Refused
+ * when another site asks, even one on another port of this computer (Sec-Fetch-Site).
+ */
+async function filesRoute(req, res, url) {
+  const site = req.headers['sec-fetch-site'];
+  if (site && site !== 'same-origin' && site !== 'none') return reply(res, 403, { error: 'request refused' });
+  const config = loadConfig();
+  const params = Object.fromEntries(url.searchParams);
+  const route = url.pathname.slice('/api/files/'.length);
+  try {
+    const runPath = route.match(/^run\/([^/]+)$/);
+    if (runPath) {
+      const run = runById(decodeURIComponent(runPath[1]));
+      if (!run) return reply(res, 404, { error: t('Run not found.') });
+      const { dir: _, ...files } = await runFiles(run, config);
+      return reply(res, 200, files);
+    }
+    if (route === 'roots') return reply(res, 200, { roots: rootsFor(config, params.project ?? '') });
+    if (route === 'list') return reply(res, 200, listFolder(params.path, viewerRoots(config)));
+    if (['info', 'text', 'table'].includes(route)) return reply(res, 200, await viewFile(route, params, { config, readRun: runById }));
+    if (route === 'raw') {
+      const { body, headers } = await viewFile('raw', params, { config, readRun: runById, dest: req.headers['sec-fetch-dest'] ?? '' });
+      res.writeHead(200, { ...headers, 'content-length': body.length });
+      return res.end(body);
+    }
+    return reply(res, 404, { error: 'not found' });
+  } catch (error) {
+    return reply(res, typeof error.code === 'number' ? error.code : 400, { error: error.message });
+  }
 }
 
 /**
@@ -430,6 +467,7 @@ export function startServer() {
           const data = runFeed(decodeURIComponent(feed[1]), url.searchParams);
           return data ? reply(res, 200, data) : reply(res, 404, { error: t('Run not found.') });
         }
+        if (url.pathname.startsWith('/api/files/')) return await filesRoute(req, res, url);
         // The app's prompt builder: the document and the project's last choice ("?project=<id>").
         if (url.pathname === '/api/prompt-builder') {
           const config = loadConfig();

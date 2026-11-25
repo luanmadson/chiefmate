@@ -820,6 +820,8 @@ export async function execute(run) {
       if (noTrace(project) && project.deliver === 'local' && project.local_clone && existsSync(project.local_clone)) {
         run.branch = await freeBranch(project.local_clone, run.branch);
       }
+      // Where the run starts: what it created or changed is read against it (the app's "Files", src/files.mjs).
+      run.baseCommit = await headCommit(dir);
       await createBranch(dir, run.branch);
       run.prepared = true;
       saveRun(run);
