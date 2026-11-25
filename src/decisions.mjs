@@ -6,9 +6,11 @@
 // ("owner_decided"; a merge is "merged" news, src/merge.mjs). A project whose work someone else reviews
 // ("merge_by_owner": false) shows its pull requests as waiting for that review, with no Approve. A push the manager
 // tried and the guard refused becomes a card too: the owner allows that one push (src/guard.mjs, takeGrant) or refuses it.
+// So does a private repository the manager asks to create (cli.mjs repo-create; see repoCreate).
 // Each card carries the approval level the manager gave its run, item or question ("approval": 1, the manager
 // decides and does it; 2, the owner approves; 3, never without the owner; null, not given). The app folds the level 1
 // cards apart and counts only the others as needing the owner.
+import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
@@ -141,17 +143,20 @@ export function addPushRequest({ dir, remote, src, branch, repo, commits = [], c
   return request;
 }
 
-/** The owner's answer to a push request: allowed (once, for GRANT_MINUTES) or refused. Returns the request. */
-export function answerPush(id, allow) {
-  const list = readPushes(pushesFile());
+/** The owner's answer to a request kept in "file": allowed (once, for GRANT_MINUTES) or refused. Returns the request. */
+function answerRequest(file, open, id, allow) {
+  const list = readPushes(file);
   const p = list.find(x => x.id === String(id ?? ''));
-  if (!p || !openPushes([p]).length) throw new Error(t('This decision is no longer pending.'));
+  if (!p || !open([p]).length) throw new Error(t('This decision is no longer pending.'));
   Object.assign(p, allow
     ? { status: 'allowed', decided: now(), expires: new Date(Date.now() + GRANT_MINUTES * 60_000).toISOString() }
     : { status: 'refused', decided: now() });
-  writeJson(pushesFile(), list);
+  writeJson(file, list);
   return p;
 }
+
+/** The owner's answer to a push request: allowed (once, for GRANT_MINUTES) or refused. Returns the request. */
+export const answerPush = (id, allow) => answerRequest(pushesFile(), openPushes, id, allow);
 
 /** The manager's line: its push requests waiting for the owner, and the pushes allowed and not used yet. */
 export function pushesLine() {
@@ -163,6 +168,131 @@ export function pushesLine() {
     allowed.length ? `allowed by the owner, once each: ${allowed.map(p => `${p.branch} to ${p.repo} from ${p.dir}, until ${formatDateTime(p.expires)} (${cliPush(p)})`).join('; ')}` : '',
   ].filter(Boolean);
   return parts.length ? `Your pushes: ${parts.join('. ')}.` : '';
+}
+
+// ---------- The manager's new repositories ----------
+// The guard refuses the manager "gh repo create". It asks with "cli.mjs repo-create <name> --private --from <folder>"
+// instead: a request here and a card for the owner. Once allowed (that name and folder, once, within GRANT_MINUTES),
+// the same command creates the repository, always private, in the account gh is signed in to, adds it to the folder
+// as "origin" and sends the folder's branch as its first main branch. From then on it is like any other repository:
+// its main branch only through Chiefmate's merge, other branches through a push card.
+
+export const reposFile = () => path.join(ensureDir(path.join(DATA, 'manager')), 'repos.json');
+const REPO_NAME = /^[A-Za-z0-9_.-]{1,100}$/;
+const cliRepo = r => `node src/cli.mjs repo-create ${r.name} --private --from "${r.dir.replaceAll('\\', '/')}"`;
+
+/** The repository requests still waiting for the owner, oldest first. */
+export const openRepoRequests = (list = readPushes(reposFile())) => list.filter(r => r.status === 'open' && Date.now() - Date.parse(r.at) < PUSH_OPEN_FOR);
+
+const runCommand = (file, args, cwd) => {
+  const r = spawnSync(file, args, { cwd, encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+  return { ok: r.status === 0, out: String(r.stdout ?? '').trim(), err: String(r.stderr || r.error?.message || '').trim() };
+};
+const gitIn = (dir, ...args) => runCommand('git', ['-C', dir, ...args]);
+/** GitHub's command line; in the smoke test, a stand-in (CHIEFMATE_GH, a .mjs run with this Node.js). */
+function gh(...args) {
+  const stand = process.env.CHIEFMATE_SMOKE && process.env.CHIEFMATE_GH;
+  return stand ? runCommand(process.execPath, [stand, ...args]) : runCommand('gh', args);
+}
+
+/**
+ * What creating the repository "name" from "dir" would do, checked now: { owner, name, repo, dir, branch, commits,
+ * count }, or { problem } when it can't: a bad name, not the top folder of a git repository, no branch or commit, a
+ * remote "origin" already there, gh not signed in, or a repository of that name already in the account.
+ */
+export function repoFacts({ name, dir }) {
+  name = String(name ?? '').trim();
+  if (!REPO_NAME.test(name) || /^\.+$/.test(name) || /\.git$/i.test(name)) return { problem: `"${name}" is not a valid repository name: letters, digits, ".", "-" and "_" only.` };
+  if (!dir) return { problem: 'Which folder? --from <folder>' };
+  const folder = path.resolve(String(dir));
+  const top = gitIn(folder, 'rev-parse', '--show-toplevel');
+  if (!top.ok || !samePath(top.out, folder)) return { problem: `${folder} is not the top folder of a git repository.` };
+  const branch = gitIn(folder, 'symbolic-ref', '--short', 'HEAD').out;
+  if (!branch) return { problem: `${folder} has no branch checked out.` };
+  if (!gitIn(folder, 'rev-parse', '--verify', '-q', 'HEAD').ok) return { problem: `${folder} has no commit yet: commit its files first.` };
+  if (gitIn(folder, 'remote').out.split('\n').includes('origin')) {
+    return { problem: `${folder} already has a remote "origin" (${gitIn(folder, 'remote', 'get-url', 'origin').out}): it has a repository already.` };
+  }
+  const login = gh('api', 'user', '--jq', '.login');
+  if (!login.ok || !login.out) return { problem: `GitHub's command line (gh) is not signed in, or GitHub did not answer: ${login.err}` };
+  const repo = `${login.out}/${name}`;
+  const seen = gh('repo', 'view', repo, '--json', 'name');
+  if (seen.ok) return { problem: `${repo} already exists on GitHub: choose another name.` };
+  if (!/could not resolve|not found/i.test(seen.err)) return { problem: `Could not check whether ${repo} exists: ${seen.err}` };
+  const commits = gitIn(folder, 'log', '--format=%h %s', '-n', '20', branch).out.split('\n').filter(Boolean);
+  const count = Number(gitIn(folder, 'rev-list', '--count', branch).out) || commits.length;
+  return { owner: login.out, name, repo, dir: folder, branch, commits, count };
+}
+
+/** A repository request for the owner: { request, again } (again: the same one already waited, now brought up to date). */
+export function addRepoRequest({ owner, name, repo, dir, branch, commits = [], count = 0, description = '' }) {
+  const list = readPushes(reposFile());
+  const fields = { owner, name, repo, dir, branch, commits: commits.slice(0, 20), count, description: clip(description, 300) };
+  const open = openRepoRequests(list).find(r => r.repo.toLowerCase() === repo.toLowerCase() && samePath(r.dir, dir));
+  if (open) {
+    Object.assign(open, fields);
+    writeJson(reposFile(), list);
+    return { request: open, again: true };
+  }
+  const request = { id: randomUUID().slice(0, 8), status: 'open', ...fields, at: now() };
+  writeJson(reposFile(), [...list, request].slice(-PUSHES_MAX));
+  notify(t('The manager asks to create a repository'), t('Private repository {repo}', { repo }), 'chiefmate:decisions', { urgent: true });
+  return { request, again: false };
+}
+
+/** The owner's answer to a repository request: allowed (once, for GRANT_MINUTES) or refused. Returns the request. */
+export const answerRepo = (id, allow) => answerRequest(reposFile(), openRepoRequests, id, allow);
+
+/**
+ * "cli.mjs repo-create": without the owner's grant, a request and its card ({ request, again }); with it, the
+ * repository created, always private, the folder's "origin" and its branch sent ({ created }). Throws what refuses it.
+ */
+export function repoCreate({ name, from, description = '', visibility = '' }) {
+  if (visibility !== 'private') {
+    throw new Error(visibility
+      ? 'Chiefmate never creates a public or internal repository: only a private one (--private).'
+      : 'Say --private: Chiefmate creates only private repositories.');
+  }
+  const facts = repoFacts({ name, dir: from });
+  if (facts.problem) throw new Error(facts.problem);
+  const list = readPushes(reposFile());
+  const grant = list.find(r => r.status === 'allowed' && Date.parse(r.expires) > Date.now()
+    && r.repo.toLowerCase() === facts.repo.toLowerCase() && samePath(r.dir, facts.dir) && r.branch === facts.branch);
+  if (!grant) return addRepoRequest({ ...facts, description });
+  // Used up at once, before anything goes to GitHub.
+  Object.assign(grant, { status: 'used', used: now() });
+  writeJson(reposFile(), list);
+  const record = fields => writeJson(reposFile(), readPushes(reposFile()).map(r => (r.id === grant.id ? { ...r, ...fields } : r)));
+  const fail = (what, r, next) => {
+    record({ status: 'failed', error: clip(`${what}: ${r.err || r.out}`, 500) });
+    throw new Error(`${what}: ${r.err || r.out}. ${next}`);
+  };
+  const byHand = "Tell the owner what is left, for them to finish by hand; don't try it another way.";
+  // What the owner saw on the card: the name, the description and the folder's branch.
+  const made = gh('repo', 'create', facts.repo, '--private', ...(grant.description ? ['--description', grant.description] : []));
+  if (!made.ok) fail(`GitHub did not create ${facts.repo}`, made, 'The grant was used: run the same command again to ask the owner once more.');
+  const url = `https://github.com/${facts.repo}.git`;
+  const remote = gitIn(facts.dir, 'remote', 'add', 'origin', url);
+  if (!remote.ok) fail(`${facts.repo} was created (private), but the folder's remote "origin" could not be added`, remote, byHand);
+  const sent = gitIn(facts.dir, 'push', '-u', 'origin', `refs/heads/${facts.branch}:refs/heads/${facts.branch}`);
+  if (!sent.ok) fail(`${facts.repo} was created (private) and is the folder's "origin", but its branch ${facts.branch} could not be sent`, sent, byHand);
+  // The remote's default branch, known here too: later pushes to it are refused as pushes to the main branch.
+  gitIn(facts.dir, 'remote', 'set-head', 'origin', facts.branch);
+  const created = { status: 'created', url: made.out.split('\n').find(l => /^https?:\/\//.test(l)) || `https://github.com/${facts.repo}`, created: now() };
+  record(created);
+  return { created: { ...grant, ...created } };
+}
+
+/** The manager's line: its repository requests waiting for the owner, and the ones allowed and not used yet. */
+export function reposLine() {
+  const list = readPushes(reposFile());
+  const open = openRepoRequests(list);
+  const allowed = list.filter(r => r.status === 'allowed' && Date.parse(r.expires) > Date.now());
+  const parts = [
+    open.length ? `waiting for the owner's card: ${open.map(r => `${r.repo} from ${r.dir}`).join('; ')}` : '',
+    allowed.length ? `allowed by the owner, once each: ${allowed.map(r => `${r.repo} from ${r.dir}, until ${formatDateTime(r.expires)} (${cliRepo(r)})`).join('; ')}` : '',
+  ].filter(Boolean);
+  return parts.length ? `Your new repositories: ${parts.join('. ')}.` : '';
 }
 
 // ---------- The cards ----------
@@ -279,15 +409,34 @@ function pushCard(notice, p, config) {
   };
 }
 
+function repoCard(notice, r) {
+  const more = r.count > (r.commits?.length ?? 0) ? `\n- ${t('and {count} more', { count: r.count - r.commits.length })}` : '';
+  const commits = r.commits?.length ? `${t('Commits')}:\n- ${r.commits.join('\n- ')}${more}` : '';
+  return {
+    id: notice.id, kind: 'repo', level: notice.level, seen: false, at: r.at, project: null,
+    label: t('New repository by the manager'),
+    title: t('The manager asks to create the private repository {repo} and send {folder}', { repo: r.repo, folder: r.dir }),
+    what: t('A new private repository {repo} in your GitHub account becomes the "origin" of {folder}, and its branch {branch} ({count} commit(s)) goes there as the main branch.', { repo: r.repo, folder: r.dir, branch: r.branch, count: r.count }),
+    change: t('Only this creation is allowed: this name, from this folder, once, within {minutes} minutes. The repository is always private; later pushes follow the usual rules (the main branch only through a merge).', { minutes: GRANT_MINUTES }),
+    risk: t('Everything in these commits goes to GitHub, private: only you and whoever you invite see it. Make sure no secret or personal file is in them.'),
+    recommend: '', recommendShort: '',
+    detail: [r.description ? `${t('Description')}: ${r.description}` : '', commits, `${t('Command')}: \`${cliRepo(r)}\``].filter(Boolean).join('\n\n'),
+    repoRequest: r.id, approve: true,
+  };
+}
+
 /**
  * The cards, in the notices' order (not seen first, then by level and time): { id (the notice's), kind (merge,
- * decision, question, push), level, approval, seen, label, title, what, change, risk, recommend, detail, approve, ... }.
+ * decision, question, push, repo), level, approval, seen, label, title, what, change, risk, recommend, detail, approve, ... }.
  */
-export function decisionCards({ config = loadConfig(), attention = [], items = [], questions = openQuestions(), pushes = openPushes() } = {}) {
+export function decisionCards({ config = loadConfig(), attention = [], items = [], questions = openQuestions(), pushes = openPushes(), repos = openRepoRequests() } = {}) {
   const cards = [];
   for (const n of attention) {
     try {
-      if (n.kind === 'push') {
+      if (n.kind === 'repo') {
+        const r = repos.find(x => n.id === `repo:${x.id}`);
+        if (r) cards.push(repoCard(n, r));
+      } else if (n.kind === 'push') {
         const p = pushes.find(x => n.id === `push:${x.id}`);
         if (p) cards.push(pushCard(n, p, config));
       } else if (n.kind === 'question') {
@@ -360,6 +509,14 @@ export async function decide({ card, action, option, reason } = {}, cards = []) 
       tell(`The owner refused, from the app, your push of branch ${p.branch} to ${p.repo} (from ${p.dir}). Don't try it again.`);
     }
     return { card: c.id, done: p.status };
+  } else if (c.kind === 'repo' && ['approve', 'discard'].includes(action)) {
+    const r = answerRepo(c.repoRequest, action === 'approve');
+    if (r.status === 'allowed') {
+      reportEvent('repo_allowed', `The owner allowed, from the app, the private repository ${r.repo} with ${r.dir} sent to it (branch ${r.branch}), once, until ${formatDateTime(r.expires)}. Run it now: ${cliRepo(r)}.`, { urgent: true });
+    } else {
+      tell(`The owner refused, from the app, the private repository ${r.repo} from ${r.dir}. Don't ask for it again.`);
+    }
+    return { card: c.id, done: r.status };
   } else if (c.kind === 'question' && ['answer', 'discard'].includes(action)) {
     const q = closeQuestion(c.question, action === 'answer' ? String(option ?? '') : null);
     // A request of an agent in charge follows the answer by itself: authorized, on hold or refused.

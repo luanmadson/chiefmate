@@ -867,7 +867,7 @@ function drawClock() {
 // fades a card to the end, under "Left for later".
 
 const decisionsNow = () => (online ? state?.decisions ?? [] : []);
-const decisionKind = c => ({ merge: c.thirdParty ? t('Waiting for a third-party review') : t('Merge'), decision: t('Proposal'), question: t('Question'), push: t('Push') })[c.kind] ?? '';
+const decisionKind = c => ({ merge: c.thirdParty ? t('Waiting for a third-party review') : t('Merge'), decision: t('Proposal'), question: t('Question'), push: t('Push'), repo: t('New repository') })[c.kind] ?? '';
 // The approval level the manager gave a card (src/decisions.mjs): 1 is the manager's to settle, 2 and 3 are yours.
 const managerSettles = c => c.approval === 1;
 const approvalBadge = c => {
@@ -891,12 +891,13 @@ function decisionCardHtml(c) {
   const button = (action, text, kind = '', extra = '') => `<button type="button" class="button${kind}" data-decide="${esc(action)}" data-card="${esc(c.id)}"${extra}>${text}</button>`;
   const choices = c.kind === 'question'
     ? c.options.map(o => button('answer', esc(o), o === c.recommend ? '' : ' secondary', ` data-option="${esc(o)}"${o === c.recommend ? ` title="${esc(t('Recommended by the manager'))}"` : ''}`)).join('')
-    : c.approve ? button('approve', label(c.kind === 'push' ? t('Allow push') : t('Approve'))) : '';
+    : c.approve ? button('approve', label(c.kind === 'push' ? t('Allow push') : c.kind === 'repo' ? t('Allow creation') : t('Approve'))) : '';
   const buttons = [
     choices,
-    // Someone else's review only informs: "Hide" sends it to the archive. A push the manager asks is allowed or refused.
-    c.seen || c.kind === 'push' ? '' : button('later', c.thirdParty ? label(t('Hide')) : label(t('Not now'), t('Later')), ' secondary'),
-    c.thirdParty ? '' : button('discard', label(c.kind === 'push' ? t('Refuse') : t('Discard')), ' danger'),
+    // Someone else's review only informs: "Hide" sends it to the archive. A push or a repository the manager asks is
+    // allowed or refused.
+    c.seen || c.kind === 'push' || c.kind === 'repo' ? '' : button('later', c.thirdParty ? label(t('Hide')) : label(t('Not now'), t('Later')), ' secondary'),
+    c.thirdParty ? '' : button('discard', label(c.kind === 'push' || c.kind === 'repo' ? t('Refuse') : t('Discard')), ' danger'),
     button('talk', label(t('Talk about this'), t('Talk')), ' secondary'),
   ].join('');
   const about = [esc(c.label), c.at ? esc(relative(c.at)) : ''].filter(Boolean).join(' · ');
@@ -966,6 +967,8 @@ $('#decisions').addEventListener('click', async event => {
   if (c.kind === 'merge' && action === 'discard' && !(await confirmDialog(t('Discard this work'), `${c.label}: ${c.title}. ${closes}`, t('Discard')))) return;
   // Allowing a push is confirmed too: it lets the manager send that branch to GitHub once.
   if (c.kind === 'push' && action === 'approve' && !(await confirmDialog(t('Allow this push'), `${c.title}. ${c.what} ${c.change}`, t('Allow push')))) return;
+  // And creating a repository: the manager may then create it, private, and send the folder once.
+  if (c.kind === 'repo' && action === 'approve' && !(await confirmDialog(t('Allow this repository'), `${c.what} ${c.change}`, t('Allow creation')))) return;
   const card = button.closest('.decision');
   for (const b of card.querySelectorAll('button')) b.disabled = true;
   try {
@@ -990,7 +993,7 @@ const newsEvent = kind => ({
   merge_failed: t('merge failed'), needs_you: t('needs you'), update_installed: t('update installed'), update_blocked: t('update blocked'),
   memory_alert: t('memory alert'), usage_alert: t('usage alert'), session_ended: t('live session ended'), plan_proposed: t('new proposal'),
   idle: t('empty queue'), autopilot_report: t('autopilot report'), watchdog: t('watchdog'),
-  away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), owner_request: t('request from an agent in charge'),
+  away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'),
 }[kind] ?? kind);
 
 let chatScrolled = false;
