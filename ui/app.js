@@ -212,7 +212,10 @@ const projectName = id => state?.projects.find(p => p.id === id)?.name ?? id;
 function draw(selector, signature, html) {
   if (signatures[selector] === signature) return false;
   signatures[selector] = signature;
+  // What the owner opened ([data-keep-open] details) stays open when the content is drawn again.
+  const opened = [...$(selector).querySelectorAll('details[data-keep-open][open]')].map(d => d.dataset.keepOpen);
   $(selector).innerHTML = html;
+  for (const d of $(selector).querySelectorAll('details[data-keep-open]')) if (opened.includes(d.dataset.keepOpen)) d.open = true;
   return true;
 }
 
@@ -558,6 +561,18 @@ function needsButtons(n, size) {
   return `<button type="button" class="button${size}" ${n.session ? `data-needs-session="${esc(n.session)}"` : `data-needs-done="${esc(n.run)}"`} data-request="${esc(n.id)}">${esc(t('Mark as done'))}</button>`;
 }
 
+/** A permission asked, in plain words: where, what changes, whether it can be undone and the risk; the command folded. */
+function permissionFacts(x, id = '') {
+  if (!x) return '';
+  const risk = { low: t('Low risk'), medium: t('Medium risk'), high: t('High risk') }[x.risk] ?? t('Unknown risk');
+  const fact = (label, text) => (text ? `<dt>${esc(label)}</dt><dd>${text}</dd>` : '');
+  return `<div class="perm">
+      <dl class="perm-facts">${fact(t('Where'), esc(x.where))}${fact(t('What changes'), esc(x.change))}${fact(t('Can it be undone?'), esc(x.undo))}${fact(t('Risk'), `<span class="perm-risk" data-risk="${esc(x.risk ?? 'unknown')}">${esc(risk)}</span> ${esc(x.why ?? '')}`)}</dl>
+      <span class="hint">${esc(t('Allowed, it is told to go ahead; the permission lasts for this session.'))}</span>
+      ${x.command ? `<details class="perm-command" data-keep-open="${esc(id)}"><summary>${esc(t('See the command'))}</summary><pre>${esc(x.command)}</pre></details>` : ''}
+    </div>`;
+}
+
 // ---------- Attention: what needs you, in three levels ----------
 // One component for the whole app (the mark and the notice, styled by "data-level"): urgent (bright red, a soft
 // pulse), important (lit brass) and info (discreet). The server decides the level (src/attention.mjs).
@@ -596,7 +611,7 @@ function attnNotice(i) {
     : `${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
   return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
       <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
-      <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}${where || links.length ? `<span class="hint">${[esc(where), ...links].filter(Boolean).join(' · ')}</span>` : ''}</div>
+      <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}${where || links.length ? `<span class="hint">${[esc(where), ...links].filter(Boolean).join(' · ')}</span>` : ''}${permissionFacts(r?.explain, r?.id)}</div>
       <div class="attn-actions">${actions}</div>
     </div>`;
 }
@@ -1355,7 +1370,7 @@ function drawLive() {
 
   // What the agent asks of you: each permission, with Allow and Refuse.
   const asks = (d?.requests ?? []).filter(r => r.kind === 'permission').map(r => `<div class="needs live-ask" role="alert">
-      <div class="needs-text"><span class="needs-label">${esc(t('Needs you'))}</span>${esc(t('The agent asks to: {what}', { what: r.what }))}<span class="hint">${esc(t('Allowed, it is told to go ahead; the permission lasts for this session.'))}</span></div>
+      <div class="needs-text"><span class="needs-label">${esc(t('Needs you'))}</span>${r.explain ? `<strong class="perm-what">${esc(r.explain.summary)}</strong>${permissionFacts(r.explain, r.id)}` : `${esc(t('The agent asks to: {what}', { what: r.what }))}<span class="hint">${esc(t('Allowed, it is told to go ahead; the permission lasts for this session.'))}</span>`}</div>
       <span class="compose-buttons"><button type="button" class="button secondary small" data-live-refuse="${esc(r.id)}">${esc(t('Refuse'))}</button><button type="button" class="button small" data-live-allow="${esc(r.id)}">${esc(t('Allow'))}</button></span>
     </div>`).join('');
   draw('#live-asks', JSON.stringify([x.id, d?.requests ?? [], language()]), asks);

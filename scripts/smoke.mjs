@@ -1467,6 +1467,9 @@ try {
     await idle(s.id);
     const ask = sessions.readSession(s.id).requests.find(r => r.kind === 'permission' && r.status === 'open');
     expect(ask?.rule === 'Bash(git push:*)' && sessions.sessionRequests().some(r => r.id === ask.id && r.session === s.id), 'a refused push did not become a request for the owner');
+    const plain = ask.explain ?? {};
+    expect(plain.summary === 'Send the commits of branch main to origin' && plain.risk === 'high' && plain.change.includes('main branch') && plain.undo && plain.command === 'git push origin main',
+      `a push to the main branch is not explained in plain words (what, what changes, undo, high risk, the command): ${JSON.stringify(plain)}`);
     const noMachine = { sessions: [], supported: false };
     expect(sessions.sessionsState(liveConfig, noMachine).open.find(x => x.id === s.id)?.phase === 'permission', 'a session waiting for a permission is not shown as such');
     sessions.answerPermission(s.id, ask.id, true);
