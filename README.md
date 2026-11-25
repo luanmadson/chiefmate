@@ -264,8 +264,8 @@ At the top:
 
 Below, the tabs (`#project/<id>/<tab>`):
 
-- **In charge** (`charge`): the project's agent in charge, its requests to the manager with their state, and your conversation with it (see below). Its mark counts the requests still open.
 - **At a glance**: the crew now, the last run and the open items on the board, each opening its tab; **the project** (your own clone, `local_clone` or `Documents/GitHub/<repository name>`, and its branch; how its work is delivered, a pull request or a branch handed to your clone with `"deliver": "local"`; the repository, the site, the personal documentation and the development environment's command); and **the project on this computer**: its state, its memory and its processes, with the button to stop them, and its development environment.
+- **In charge** (`charge`): the project's agent in charge, its requests to the manager with their state, and your conversation with it (see below). Its mark counts the requests still open.
 - **Live** (`live`): the project's live sessions in the app and their conversation (see "Live sessions"): those open, with their state and memory, a **New session** button per tool, the latest ended ones (to read or resume) and, below, the conversation of the one chosen (`#project/<id>/live/<session>`).
 - **Crew** (`crew`): its crew, with its team lead above it when it has one, each with what it is doing (a click on a member at work opens its panel); and its live sessions, those open with **End** and its profiles with **Open**.
 - **Tasks and history** (`tasks`): its runs going on and in the queue, each with a button to cancel it, the form for a new task, and its recent history: the latest runs, with their result, the pull request and a **Reports** button that opens each step's report in the Log.
