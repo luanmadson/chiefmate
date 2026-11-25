@@ -652,7 +652,8 @@ export async function execute(run) {
     }
     const base = run.base ?? project.main_branch;
     const libraries = await prepareLibraries(config, libraryIds(project), log);
-    // The prompt builder's document in a library ("prompt_builder.library_file"): its copy up to date for the steps.
+    // The prompt builder's document in a library ("prompt_builder.library_file"): its copy up to date, so the steps'
+    // instructions are put together from the latest version (the copy itself is not given to the steps).
     const builderLibrary = builderSettings(config).library;
     if (builderLibrary?.known && !libraries.some(x => x.id === builderLibrary.id)) {
       await prepareLibrary(builderLibrary.id, config.library[builderLibrary.id], log).catch(error => log(error.message));

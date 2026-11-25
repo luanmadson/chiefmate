@@ -129,7 +129,8 @@ export async function libraryFileCommit(dir, file, branch = 'main') {
     const [hash, date, ...subject] = line.split('\t');
     const commit = { hash, date, subject: subject.join('\t'), approximate: shallow().includes(hash) };
     if (!commit.approximate || tries >= 3) return commit;
-    const r = await run('git', ['fetch', '--deepen=50', 'origin', branch], dir, { maxMinutes: 5 });
+    // FETCH_HEAD is left alone: its date is when the copy was last updated (src/prompts.mjs).
+    const r = await run('git', ['fetch', '--deepen=50', '--no-write-fetch-head', 'origin', branch], dir, { maxMinutes: 5 });
     if (r.code !== 0) return commit;
   }
 }

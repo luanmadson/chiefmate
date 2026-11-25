@@ -631,6 +631,7 @@ try {
     git(sessionTemp, 'clone', '-q', '--depth', '1', pathToFileURL(libOrigin).href, libCopy);
     const docCommit = await libraryFileCommit(libCopy, path.join(libCopy, 'PROMPTS', 'doc.md'));
     expect(docCommit?.subject === 'Add the document' && !docCommit.approximate && !Number.isNaN(Date.parse(docCommit.date)), `the document's last commit in a shallow copy is wrong: ${JSON.stringify(docCommit)}`);
+    expect(!existsSync(path.join(libCopy, '.git', 'FETCH_HEAD')), "deepening the library's history changed the date of its last update (FETCH_HEAD)");
     const written = planSession(sessionConfig, 'review', { prompt: '  My own prompt.  ' });
     expect(written.prompt.text === 'My own prompt.' && written.prompt.written, "a prompt written in the prompt builder is not a session's first message as it is");
     expect(sessionIdOf('"C:\\nodejs\\node.exe" "C:\\chiefmate\\src\\cli.mjs" session-run 2026-01-02-0900-review') === '2026-01-02-0900-review' && sessionIdOf('node src/cli.mjs server') === null, "a session's window process is not recognized");
