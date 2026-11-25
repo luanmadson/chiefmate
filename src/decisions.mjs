@@ -7,6 +7,7 @@
 // ("merge_by_owner": false) shows its pull requests as waiting for that review, with no Approve.
 import path from 'node:path';
 import { markSeen } from './attention.mjs';
+import { ownerAnswered } from './charge.mjs';
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { discardRun, mergeRun, prNumber, verdict } from './merge.mjs';
@@ -31,7 +32,7 @@ export const mergedByOwner = (config, project) => config?.projects?.[project]?.m
  * A question for the owner, with the options they answer with: { question, context, options ("A|B|C" or a list),
  * recommend (one of the options), project }. It waits as a card until answered or discarded.
  */
-export function addQuestion({ question, context, options, recommend, project } = {}, config = loadConfig()) {
+export function addQuestion({ question, context, options, recommend, project, request = null } = {}, config = loadConfig()) {
   const text = clip(question, 300);
   if (!text) throw new Error('The question is missing.');
   const list = (Array.isArray(options) ? options : String(options ?? '').split('|')).map(o => clip(o, 60)).filter(Boolean);
@@ -46,6 +47,8 @@ export function addQuestion({ question, context, options, recommend, project } =
   const q = {
     id: Math.max(0, ...questions.map(x => x.id)) + 1, question: text, context: String(context ?? '').trim().slice(0, 2000),
     options: choices, recommend: recommended ?? null, project: id || null, at: now(), status: 'open', answer: null, answered_at: null,
+    // A request of a project's agent in charge, taken to the owner (src/charge.mjs): the answer decides it.
+    ...(request != null ? { request: Number(request) } : {}),
   };
   saveQuestions([...questions, q]);
   return q;
@@ -226,10 +229,15 @@ export async function decide({ card, action, option, reason } = {}, cards = []) 
     return { card: c.id, done: action === 'approve' ? 'approved' : 'discarded' };
   } else if (c.kind === 'question' && ['answer', 'discard'].includes(action)) {
     const q = closeQuestion(c.question, action === 'answer' ? String(option ?? '') : null);
-    tell(q.answer
+    // A request of an agent in charge follows the answer by itself: authorized, on hold or refused.
+    const followed = q.request ? await ownerAnswered(q).then(x => x.request, error => ({ error: error.message })) : null;
+    const request = !followed ? '' : followed.error
+      ? ` Request #${q.request} could not follow it (${followed.error}).`
+      : ` Chiefmate applied it to request #${q.request}: ${followed.status}${followed.run ? `, run ${followed.run} queued` : ''}; don't answer that request again.`;
+    tell((q.answer
       ? `The owner answered your question #${q.id} "${q.question}" from the app: "${q.answer}".${q.recommend ? ` (You had recommended "${q.recommend}".)` : ''}`
-      : `The owner discarded your question #${q.id} "${q.question}" from the app without answering it.`);
-    return { card: c.id, done: q.answer ? 'answered' : 'discarded', answer: q.answer };
+      : `The owner discarded your question #${q.id} "${q.question}" from the app without answering it.`) + request);
+    return { card: c.id, done: q.answer ? 'answered' : 'discarded', answer: q.answer, run: followed?.run ?? null };
   }
   throw new Error(t('This decision does not take that action.'));
 }
