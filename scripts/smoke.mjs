@@ -133,6 +133,25 @@ try {
     expect((await post('/api/task', { project: 'none', agent: 'generalist', instruction: 'x', plan: 999 })).status === 400, 'a task linked to an item that does not exist was not refused');
     const archived = await post('/api/planning', { action: 'archive', id: 9 });
     expect(archived.ok && (await archived.json()).item?.archived, 'an item was not archived');
+    // Proposals: proposed, refused when repeated, triaged by the manager, then the owner's decision (in a project
+    // that is not in the settings, "do" is refused: its task could not be queued).
+    const itemOf = async r => (r.ok ? (await r.json()).item : { error: (await r.json()).error });
+    const proposed = await itemOf(await post('/api/planning', { action: 'propose', project: 'Sample', title: 'Smoke proposal', summary: 'A clear gain.', agent: 'someone', priority: 'low' }));
+    expect(proposed?.status === 'proposed' && proposed.proposed_by === 'owner' && proposed.agent === 'someone' && proposed.description === 'A clear gain.', `a proposal was not recorded: ${JSON.stringify(proposed)}`);
+    const p = proposed?.id;
+    expect((await post('/api/planning', { action: 'propose', project: 'Sample', title: 'smoke  PROPOSAL' })).status === 400, 'a proposal repeating an open item was not refused');
+    expect((await post('/api/planning', { action: 'triage', id: p, agent: 'someone' })).status === 400, 'a triage without a recommendation was not refused');
+    const triaged = await itemOf(await post('/api/planning', { action: 'triage', id: p, recommend: 'fazer agora', priority: 'alta', note: 'Small and useful.', order: 1 }));
+    expect(triaged?.status === 'triaged' && triaged.recommend === 'now' && triaged.priority === 'high' && triaged.rank === 1 && triaged.recommend_note === 'Small and useful.', `a proposal was not triaged: ${JSON.stringify(triaged)}`);
+    expect((await post('/api/planning', { action: 'approve', id: p })).status === 400, 'an item of a project not in the settings was approved');
+    const dropped = await itemOf(await post('/api/planning', { action: 'discard', id: p, reason: 'Not now.' }));
+    expect(dropped?.status === 'discarded' && dropped.discard_reason === 'Not now.' && dropped.rank === null, `a proposal was not discarded with its reason: ${JSON.stringify(dropped)}`);
+    const back = await itemOf(await post('/api/planning', { action: 'restore', id: p }));
+    expect(back?.status === 'triaged', `a discarded proposal did not come back to the owner's decision: ${JSON.stringify(back)}`);
+    const later = await itemOf(await post('/api/planning', { action: 'later', id: p }));
+    expect(later?.status === 'future' && later.rank === null, `"later" did not leave the item for the future: ${JSON.stringify(later)}`);
+    expect((await post('/api/planning', { action: 'reorder', ids: [999] })).status === 400, 'reordering an item that does not exist was not refused');
+    expect(['proposed', 'triaged', 'approved', 'discarded'].every(s => state.planning.statuses.includes(s)), 'the board has no statuses for the proposals');
     // The agent's panel: the step's log read live, from where it stopped, and the direct talk refused off a step.
     const feed = await (await fetch(`${base}/api/run/smoke-feed/feed`)).json();
     expect(feed.step === 1 && feed.items?.length === 2 && feed.items[0].type === 'say' && feed.items[1].tool === 'Bash', `the agent's panel did not read the step's log: ${JSON.stringify(feed.items)}`);
@@ -263,6 +282,41 @@ try {
   expect(line.includes('#3 Sample: First thing') && line.includes('waiting for Owner: #7'), `the manager's summary of the board is wrong: ${line}`);
 } catch (error) {
   failures.push(`planning checks: ${error.message}`);
+}
+
+// Proposals in this process: the author is the step's agent, the manager's summary lists them, and approved items
+// become tasks one per project at a time, in the owner's order (runs recorded in the temporary folder; none starts).
+try {
+  process.env.CHIEFMATE_SMOKE = '1'; // the new proposals here never reach the manager
+  const planning = await import(pathToFileURL(path.join(root, 'src', 'planning.mjs')).href);
+  const { saveRun, readRun } = await import(pathToFileURL(path.join(root, 'src', 'store.mjs')).href);
+  const { loadConfig, projectCrew } = await import(pathToFileURL(path.join(root, 'src', 'config.mjs')).href);
+  saveRun({ id: 'smoke-proposer', kind: 'task', project: 'Sample', status: 'running', steps: [{ agent: 'designer', status: 'running' }], review: { agent: 'manager', status: 'pending' } });
+  expect(planning.proposer({ run: 'smoke-proposer', step: '1' }).by === 'designer' && planning.proposer({ run: 'smoke-proposer', step: '2' }).by === 'manager', "a proposal's author is not the step's agent");
+  expect(planning.proposer({ by: 'manager' }).by === 'manager' && planning.proposer({}).by === 'owner', 'a proposal made outside a run has the wrong author');
+  const mine = planning.proposeItem({ project: 'Other', title: 'Proposed in a step', summary: 'One line.', by: 'designer', run: 'smoke-proposer' });
+  expect(mine.proposed_by === 'designer' && mine.proposed_run === 'smoke-proposer', 'a proposal did not keep its author and run');
+  expect(planning.planningLine('Owner').includes(`proposals waiting for your triage (plan triage, or plan discard): #${mine.id} Other: Proposed in a step (by designer`), `the manager's summary lacks the proposals: ${planning.planningLine('Owner')}`);
+  // One approved task per project at a time: only with a project in this installation's settings (read only).
+  const config = loadConfig();
+  const projectId = Object.keys(config.projects ?? {})[0];
+  const agent = projectId && Object.keys(projectCrew(config, projectId)).find(id => id !== 'manager' && id !== 'lead');
+  if (agent) {
+    const [a, b] = ['First approved', 'Second approved'].map(title => planning.proposeItem({ project: projectId, title: `Smoke ${title}`, agent, by: 'manager' }));
+    planning.triageItem(a.id, { recommend: 'now' });
+    planning.triageItem(b.id, { recommend: 'later', order: 1 }); // b first in the owner's order...
+    planning.reorderItems([a.id, b.id]); // ...then dragged after a
+    await planning.decideItem(b.id, 'approve');
+    const first = planning.planItem(b.id);
+    expect(first.status === 'queued' && first.run && readRun(first.run)?.plan === b.id && readRun(first.run)?.review, `an approved item did not become a task with the manager's review: ${JSON.stringify(first)}`);
+    await planning.decideItem(a.id, 'approve');
+    expect(planning.planItem(a.id).status === 'approved' && !planning.planItem(a.id).run, 'a second approved task of the same project did not wait its turn');
+    saveRun({ ...readRun(first.run), status: 'done' });
+    await planning.startApproved();
+    expect(planning.planItem(b.id).status === 'done' && planning.planItem(a.id).status === 'queued', 'the next approved item did not start when the first one ended');
+  }
+} catch (error) {
+  failures.push(`proposal checks: ${error.message}`);
 }
 
 // The direct talk with an agent at work, in this process: a made-up step going on (nothing real runs), then a

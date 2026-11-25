@@ -253,7 +253,11 @@ export function newsMessage(owner, events, alongside = false) {
   const ask = alongside
     ? `Answer ${owner}'s message(s) and, in the same reply, tell ${owner} about these events in a few lines.`
     : `Write ${owner} a short, clear notice in the conversation: what happened and, when something needs ${owner}, what to do. A few lines, no headings, no greeting. Check the records when the situation is not enough, but don't queue or change anything because of this notice alone.`;
-  return `${head}\n${lines.join('\n')}\n\n${ask}`;
+  // The one change a notice asks for: the triage of new proposals, which is the manager's job (the decision stays the owner's).
+  const triage = events.some(e => e.kind === 'plan_proposed')
+    ? `\n\nFor the plan_proposed events: triage those proposals first (plan triage, or plan discard with a one-line reason for duplicates and what makes no sense), then tell ${owner} in one line what now waits for their decision in Planning. Never approve for ${owner}.`
+    : '';
+  return `${head}\n${lines.join('\n')}\n\n${ask}${triage}`;
 }
 
 /** The text the manager receives: your message, or the queue in order with the time of each one, and Chiefmate's news. */
