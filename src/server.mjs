@@ -10,6 +10,7 @@ import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
 import { computer, processes, stoppable, stopProject } from './machine.mjs';
 import { chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
+import { mergeRun, previewMerge } from './merge.mjs';
 import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { changePlan, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
@@ -522,6 +523,10 @@ export function startServer() {
           return reply(res, 200, { status: cancel(body.id) });
         case '/api/resume':
           return reply(res, 200, { status: resume(body.id, !!body.ignoreLimits) });
+        case '/api/merge':
+          // Merges a finished run's work with the owner's authorization (src/merge.mjs): "preview" only shows it.
+          if (body.preview) return reply(res, 200, await previewMerge(body.run));
+          return reply(res, 200, await mergeRun(body.run, { by: body.by === 'manager' ? 'manager' : 'owner' }));
         case '/api/manager':
           // Accepted at any time: while the manager answers, the message waits in the queue.
           return reply(res, 202, { ok: true, ...sendToManager(body.message) });

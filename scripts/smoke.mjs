@@ -112,6 +112,8 @@ try {
     expect(Array.isArray(state.teams) && state.teams.every(x => x.project && Array.isArray(x.members)), '/api/state has no crews by project');
     expect(Array.isArray(state.needs), "/api/state has no list of the owner's requests");
     expect((await post('/api/needs-you', { what: 'Sign in' })).status === 400, 'a request for the owner without a run was not refused');
+    // A merge needs a finished run with a pull request or a branch in the owner's clone.
+    expect((await post('/api/merge', { run: 'smoke-feed', preview: true })).status === 400 && (await post('/api/merge', { run: 'no-such-run' })).status === 400, 'a merge of a run with nothing to merge was not refused');
     expect((await fetch(`${base}/api/run/none/context/1`)).status === 404, "a step's context of a run that does not exist did not answer 404");
     const outside = await fetch(`${base}/../package.json`);
     expect(!outside.ok || !(await outside.text()).includes('"name": "chiefmate"'), 'a file outside ui/ was served');
@@ -319,7 +321,9 @@ try {
   expect(planItem(3).status === 'in_progress', 'the item did not follow its run going on');
   saveRun(Object.assign(run, { status: 'done', pullRequest: 'https://example.com/pull/1' }));
   expect(planItem(3).status === 'waiting_owner' && planItem(3).pr === 'https://example.com/pull/1', 'a run done with a pull request did not leave its item waiting for the owner');
-  saveRun(Object.assign(run, { status: 'failed', pullRequest: null }));
+  saveRun(Object.assign(run, { merged: { at: new Date().toISOString(), by: 'owner', how: 'pr' } }));
+  expect(planItem(3).status === 'done', 'the item of a merged run did not become done');
+  saveRun(Object.assign(run, { status: 'failed', pullRequest: null, merged: null }));
   expect(planItem(3).status === 'todo', 'the item of a failed run did not go back to "todo"');
   const line = planningLine('Owner');
   expect(line.includes('#3 Sample: First thing') && line.includes('waiting for Owner: #7'), `the manager's summary of the board is wrong: ${line}`);
@@ -1061,6 +1065,47 @@ try {
   }
 } catch (error) {
   failures.push(`remote access checks: ${error.message}`);
+}
+
+// Merging with the owner's authorization (src/merge.mjs), in this process: a branch delivered locally goes into a
+// made-up clone's base branch (a git repository in the temporary folder; nothing goes to GitHub), only once, and the
+// command refuses to run inside a step.
+try {
+  const { mergeRun, previewMerge } = await import(pathToFileURL(path.join(root, 'src', 'merge.mjs')).href);
+  const { readRun } = await import(pathToFileURL(path.join(root, 'src', 'store.mjs')).href);
+  const clone = path.join(data, 'merge-clone');
+  mkdirSync(clone);
+  const git = (...args) => execFileSync('git', ['-c', 'user.name=smoke', '-c', 'user.email=smoke@example.com', ...args], { cwd: clone, encoding: 'utf8', windowsHide: true, stdio: 'pipe' });
+  git('init', '-q', '-b', 'main');
+  writeFileSync(path.join(clone, 'a.txt'), 'a\n');
+  git('add', '.');
+  git('commit', '-q', '-m', 'start');
+  git('checkout', '-q', '-b', 'chiefmate/smoke');
+  writeFileSync(path.join(clone, 'b.txt'), 'b\n');
+  git('add', '.');
+  git('commit', '-q', '-m', 'the run');
+  git('checkout', '-q', 'main');
+  writeFileSync(path.join(data, 'runs', 'smoke-merge.json'), JSON.stringify({
+    id: 'smoke-merge', kind: 'task', project: 'local-sample', title: 'Local merge', status: 'done', created: new Date().toISOString(),
+    branch: 'chiefmate/smoke', delivered: clone, steps: [],
+  }));
+  const config = { projects: { 'local-sample': { local_clone: clone, main_branch: 'main', deliver: 'local' } } };
+  const preview = await previewMerge('smoke-merge', config);
+  expect(preview.kind === 'local' && preview.base === 'main' && preview.branch === 'chiefmate/smoke', `the merge preview is wrong: ${JSON.stringify(preview)}`);
+  expect(!existsSync(path.join(clone, 'b.txt')), 'the merge preview changed the clone');
+  await mergeRun('smoke-merge', { by: 'manager' }, config);
+  expect(existsSync(path.join(clone, 'b.txt')) && git('branch', '--show-current').trim() === 'main', "the run's branch was not merged into the clone's base branch");
+  expect(readRun('smoke-merge').merged?.by === 'manager', 'the merge was not recorded in the run');
+  expect(await mergeRun('smoke-merge', {}, config).then(() => false, e => /already/.test(e.message)), 'a run was merged twice');
+  let refused = false;
+  try {
+    execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'merge', 'smoke-merge', '--yes'], { env: { ...process.env, CHIEFMATE_RUN: 'x', CHIEFMATE_MANAGER: '' }, stdio: 'pipe', windowsHide: true });
+  } catch (error) {
+    refused = /never merges/.test(String(error.stderr));
+  }
+  expect(refused, 'the merge command ran inside a step');
+} catch (error) {
+  failures.push(`merge checks: ${error.message}`);
 }
 
 try {

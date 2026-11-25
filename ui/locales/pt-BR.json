@@ -1056,5 +1056,22 @@
   "This session was already open: here it is.": "Esta sessão já estava aberta: aqui está.",
   "\"{name}\" ends, and anything the agent is doing stops. Its history stays here, and Resume carries on in the same conversation.": "\"{name}\" é encerrada, e o que o agente estiver fazendo para. O histórico fica aqui, e Retomar continua a mesma conversa.",
   "Claude Code or Codex in your clone of the project, starting with the project's block of the prompt builder and the environment. The conversation is in the Live tab.": "Claude Code ou Codex no seu clone do projeto, começando com o bloco do projeto no montador de prompts e o ambiente. A conversa fica na aba Ao vivo.",
-  "Write to the agent. Enter sends; Shift+Enter starts a new line.": "Escreva ao agente. Enter envia; Shift+Enter começa uma nova linha."
+  "Write to the agent. Enter sends; Shift+Enter starts a new line.": "Escreva ao agente. Enter envia; Shift+Enter começa uma nova linha.",
+  "This run was already merged.": "O merge desta execução já foi feito.",
+  "Only a finished run can be merged.": "Só se faz merge de uma execução concluída.",
+  "This run has nothing to merge: no pull request and no branch delivered.": "Esta execução não tem o que juntar: nem pull request, nem branch entregue.",
+  "The branch {branch} is not in a clone of yours (local_clone): merge it by hand.": "O branch {branch} não está num clone seu (local_clone): faça o merge à mão.",
+  "Check out {base} in {path} first: it has {current} checked out now.": "Antes, passe {path} para {base}: agora está em {current}.",
+  "{path} has changes not committed: commit them or put them aside first.": "{path} tem mudanças sem commit: faça o commit delas ou guarde-as antes.",
+  "The branch {branch} doesn't merge cleanly into {base}: nothing was changed. {output}": "O branch {branch} não se junta a {base} sem conflitos: nada foi mudado. {output}",
+  "GitHub didn't merge the pull request: {output}": "O GitHub não fez o merge do pull request: {output}",
+  "merged": "merge feito",
+  "Merge": "Fazer merge",
+  "Merged": "Merge feito",
+  "by the manager, with your authorization": "pelo Gerente, com sua autorização",
+  "by you": "por você",
+  "The pull request {address} is merged on GitHub.": "O merge do pull request {address} é feito no GitHub.",
+  "The branch {branch} is merged into {base} in {path}. Nothing is sent to GitHub.": "O branch {branch} é juntado a {base} em {path}. Nada vai para o GitHub.",
+  "{count} check(s) failed.": "{count} verificação(ões) falharam.",
+  "Merged.": "Merge feito."
 }

@@ -125,6 +125,10 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs cancel <id>                  cancels a run
   node src/cli.mjs resume <id> [--ignore-limits]
                                                 resumes a paused, failed or canceled run
+  node src/cli.mjs merge <id> [--yes]           merges a finished run's work, only with the owner's authorization: shows
+                                                the pull request (or the branch delivered locally), the checks and the
+                                                review's verdict; with --yes, Chiefmate merges it (a pull request on
+                                                GitHub; a local branch into your clone's base branch, nothing pushed)
   node src/cli.mjs update-check                 looks for an approved update of Chiefmate now (after a merge), instead of
                                                 within 10 minutes; it then installs as "auto_update_mode" says
   node src/cli.mjs update-now [--yes] [--interrupt-manager]
@@ -644,6 +648,24 @@ async function main() {
         console.log(`${p.id.padEnd(16)} ${state[p.state].padEnd(25)} ${formatBytes(p.ram).padStart(8)}  ${p.processes.length} process(es)`);
         for (const x of p.processes) console.log(`    ${String(x.pid).padStart(6)} ${formatBytes(x.ram).padStart(8)}  ${x.name}${x.crew ? ' (crew)' : ''}${x.session ? ' (session)' : ''}${x.guarded ? ' (kept)' : ''}  ${x.command}`);
       }
+      return;
+    }
+    case 'merge': {
+      // Never from a step of a run: only the owner authorizes a merge, from the app or through the manager.
+      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error('The crew never merges: only the owner authorizes a merge.');
+      const id = rest[0];
+      if (!id || id.startsWith('--')) throw new Error('Which run? node src/cli.mjs merge <id> [--yes]');
+      if (!has('--yes')) {
+        const m = await api('/api/merge', { run: id, preview: true });
+        console.log(`${m.title} [${m.run}], project ${m.project}`);
+        console.log(m.kind === 'pr' ? `Pull request: ${m.url}` : `Branch ${m.branch} into ${m.base}, in ${m.dir} (nothing is sent to GitHub)`);
+        console.log(m.failedChecks ? `${m.failedChecks} check(s) failed.` : 'The checks passed.');
+        console.log(m.verdict ? `Review's verdict:\n${m.verdict}` : 'No review verdict was found.');
+        console.log("Nothing was merged. Add --yes only with the owner's explicit yes for this run.");
+        return;
+      }
+      const m = await api('/api/merge', { run: id, by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' });
+      console.log(m.kind === 'pr' ? `Merged: ${m.url}.` : `Merged: ${m.branch} into ${m.base}, in ${m.dir}. Nothing was sent to GitHub.`);
       return;
     }
     case 'update-check': {

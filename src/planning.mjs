@@ -187,7 +187,7 @@ export const planItem = id => findIn(readBoard(), id);
 
 // ---------- Following the linked run ----------
 
-/** The item's status for the run's: done with a pull request (or a branch delivered locally) waits for the owner. */
+/** The item's status for the run's: done with a pull request (or a branch delivered locally) waits for the owner, until merged. */
 function statusForRun(run) {
   switch (run.status) {
     case 'queued':
@@ -197,7 +197,7 @@ function statusForRun(run) {
     case 'running':
       return 'in_progress';
     case 'done':
-      return run.pullRequest || run.delivered ? 'waiting_owner' : 'done';
+      return (run.pullRequest || run.delivered) && !run.merged ? 'waiting_owner' : 'done';
     case 'failed':
     case 'canceled':
       return 'todo';
@@ -210,6 +210,8 @@ function statusForRun(run) {
 function follow(item, run) {
   let changed = false;
   if (run.pullRequest && item.pr !== run.pullRequest) [item.pr, changed] = [run.pullRequest, true];
+  // Merged with the owner's authorization (src/merge.mjs): nothing waits for the owner any more.
+  if (run.merged && item.status === 'waiting_owner') [item.status, changed] = ['done', true];
   if (item.run_status !== run.status) {
     item.run_status = run.status;
     const status = statusForRun(run);

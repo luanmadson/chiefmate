@@ -613,7 +613,7 @@ function drawClock() {
 
 // The events Chiefmate tells the manager about (src/news.mjs), as the app names them.
 const newsEvent = kind => ({
-  run_finished: t('run finished'), run_failed: t('run failed'), run_paused: t('run paused'), pr_ready: t('pull request ready'),
+  run_finished: t('run finished'), run_failed: t('run failed'), run_paused: t('run paused'), pr_ready: t('pull request ready'), merged: t('merged'),
   needs_you: t('needs you'), update_installed: t('update installed'), update_blocked: t('update blocked'),
   memory_alert: t('memory alert'), usage_alert: t('usage alert'), session_ended: t('live session ended'), plan_proposed: t('new proposal'),
 }[kind] ?? kind);
@@ -1367,6 +1367,8 @@ async function refreshDetail(force = false) {
     ${r.instruction ? `<details class="report-full"><summary>${esc(t('Full instruction'))}</summary><p class="hint">${esc(r.instruction)}</p></details>` : ''}
     <div class="actions left">
       ${r.pullRequest ? `<a class="button" href="${esc(r.pullRequest)}" target="_blank" rel="noopener">${esc(t('Open pull request'))}</a>` : ''}
+      ${r.status === 'done' && (r.pullRequest || r.delivered) && !r.merged ? `<button type="button" class="button secondary" data-merge="${esc(r.id)}">${esc(t('Merge'))}</button>` : ''}
+      ${r.merged ? `<span class="hint">${stateHtml([t('Merged'), 'ok'])} <span class="num">${shortDate(r.merged.at)}</span> · ${esc(r.merged.by === 'manager' ? t('by the manager, with your authorization') : t('by you'))}</span>` : ''}
       ${canResume ? `<button type="button" class="button secondary" data-resume="${esc(r.id)}">${esc(t('Resume'))}</button>` : ''}
       ${r.status === 'paused' ? `<button type="button" class="button secondary" data-resume="${esc(r.id)}" data-ignore>${esc(t('Resume past the limit'))}</button>` : ''}
       ${canCancel ? `<button type="button" class="button danger" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button>` : ''}
@@ -3365,7 +3367,7 @@ document.addEventListener('click', event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live]');
   if (!target) return;
   // A project's name inside a row that opens on a click (Projects) goes to its page, and nothing else.
   if (event.target.closest('a.project-link') && !target.matches('a')) return;
@@ -3432,6 +3434,16 @@ document.addEventListener('click', async event => {
       if (!ok) return;
       const r = await api('/api/cancel', { id: target.dataset.cancel });
       toast(r.status === 'canceling' ? t('Canceling…') : t('Canceled.'));
+    } else if (target.dataset.merge) {
+      // The click is the owner's authorization: Chiefmate merges (src/merge.mjs).
+      const m = await api('/api/merge', { run: target.dataset.merge, preview: true });
+      const where = m.kind === 'pr' ? t('The pull request {address} is merged on GitHub.', { address: m.url }) : t('The branch {branch} is merged into {base} in {path}. Nothing is sent to GitHub.', { branch: m.branch, base: m.base, path: m.dir });
+      const checks = m.failedChecks ? ` ${t('{count} check(s) failed.', { count: m.failedChecks })}` : '';
+      if (!(await confirmDialog(t('Merge'), `${where}${checks}`, t('Merge')))) return;
+      target.disabled = true;
+      await api('/api/merge', { run: target.dataset.merge });
+      toast(t('Merged.'));
+      if (selectedRun === target.dataset.merge) await refreshDetail(true);
     } else if (target.dataset.resume) {
       await api('/api/resume', { id: target.dataset.resume, ignoreLimits: target.hasAttribute('data-ignore') });
       toast(t('Back in the queue.'));

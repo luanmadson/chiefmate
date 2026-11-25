@@ -100,7 +100,7 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
   // Important: a pull request of the last week not on the board.
   const onBoard = new Set(waiting.map(i => i.pr).filter(Boolean));
   for (const r of runs) {
-    if (r.status !== 'done' || !r.pullRequest || onBoard.has(r.pullRequest) || !ago(r.ended, PR_FOR)) continue;
+    if (r.status !== 'done' || !r.pullRequest || r.merged || onBoard.has(r.pullRequest) || !ago(r.ended, PR_FOR)) continue;
     add({ id: `pr:${r.id}`, level: 'important', kind: 'pr', title: t('Pull request waiting for your approval'), text: r.title, view: 'log', project: r.project, run: r.id, at: r.ended, url: r.pullRequest });
   }
   // Important: an approved update that could not be installed.
