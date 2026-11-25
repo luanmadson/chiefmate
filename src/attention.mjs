@@ -1,8 +1,9 @@
 // What needs the owner, in three levels, for the whole app: urgent (act now), important (decide soon) and info
 // (good to know). A notice fades when marked as seen and goes to the archive when it no longer needs the owner: its
 // cause ended, its pull request was merged or closed (or its branch merged in the owner's clone), or, for an info
-// notice, once seen or a day old. Work merged outside Chiefmate marks its run as merged, so its board item is done. Nothing is lost: the archive keeps the last ARCHIVE_MAX. In data/state.json: the
-// seen marks ("attention_seen"), the notices shown last time ("attention_shown") and the archive ("attention_archive").
+// notice, once seen or a day old. Work merged outside Chiefmate marks its run as merged, so its board item is done.
+// Nothing is lost: the archive keeps the last ARCHIVE_MAX. In data/state.json: the seen marks ("attention_seen"), the
+// notices shown last time ("attention_shown") and the archive ("attention_archive").
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
 import { RAM_LOW, availableResets, current } from './plan.mjs';
 import { readRun, readState, saveRun, saveState } from './store.mjs';
