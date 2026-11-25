@@ -740,6 +740,60 @@ try {
   failures.push(`unit checks: ${error.message}`);
 }
 
+// Titles, summaries and final summaries (src/digest.mjs): the fallbacks, the parsing of a report, "doing now", and
+// the quick model's call made through a stand-in for Claude Code (nothing real starts).
+try {
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const digest = await import(src('digest.mjs'));
+  const { claudeArgs, describeDoing } = await import(src('claude.mjs'));
+  const { t } = await import(src('i18n.mjs'));
+  const long = "Before anything else: 'git fetch origin' and merge origin/main into the current branch, solving the conflicts there are. Then run the tests.";
+  const title = digest.shortTitle(long);
+  expect(title.length <= digest.TITLE_MAX && title.startsWith('Before anything else') && title.endsWith('…'), `the fallback title is wrong: ${title}`);
+  expect(digest.shortTitle('# Fix the login\n\nMore here.') === 'Fix the login', 'the fallback title kept markdown or more than the first sentence');
+  expect(digest.shortSummary('One. Two is here. Three.') === 'One. Two is here.', 'the fallback summary is not the first sentences');
+
+  const outcome = { done: ['Added short titles', 'Folded the reports'], change: 'Each run says what it does in one line.', needs: null };
+  for (const lang of ['en', 'pt-BR']) {
+    const report = `# Report\n\n${digest.outcomeMarkdown(outcome, lang)}\n\n### ${digest.outcomeLabels(lang).full}\nThe details.`;
+    const parsed = digest.parseOutcome(report, [lang]);
+    expect(JSON.stringify(parsed.outcome) === JSON.stringify(outcome) && parsed.rest === 'The details.', `the final summary at the top of a report (${lang}) was not read: ${JSON.stringify(parsed)}`);
+  }
+  const needs = digest.parseOutcome('### What was done\n- A\n### What changes for you\nB.\n### Needs you?\nYes: sign in to X.\n\nThe rest.');
+  expect(needs.outcome?.needs === 'sign in to X.' && needs.rest === 'The rest.', `"Needs you?" was read wrong: ${JSON.stringify(needs)}`);
+  expect(digest.parseOutcome('Just a report.').outcome === null, 'a report without a final summary got one');
+  expect(digest.mergeOutcomes([{ outcome: { done: ['a', 'b'], change: 'x', needs: null } }, { outcome: { done: ['c', 'd'], change: 'y', needs: 'z' } }])?.done.join() === 'a,b,c'
+    && digest.mergeOutcomes([{}]) === null, "the steps' summaries were not put together");
+  expect(describeDoing('Bash', { command: 'npm run smoke' }) === t('running the tests') && describeDoing('Read', { file_path: 'C:/x/src/runs.mjs' }) === t('reading the code ({file})', { file: 'runs.mjs' }),
+    '"doing now" is wrong for a test command or a file read');
+  const quickArgs = claudeArgs({ model: 'haiku', noTools: true });
+  expect(quickArgs.at(-2) === '--tools' && quickArgs.at(-1) === '', 'the quick call does not turn every tool off');
+  expect(await digest.askQuick('Hello', { quick_model: false }) === null, 'the quick call ran with "quick_model" off');
+
+  // A stand-in answers the quick call: the run gets its title and summary, and keeps what was given.
+  const fake = path.join(data, 'fake-quick.mjs');
+  writeFileSync(fake, [
+    "process.stdin.resume(); process.stdin.on('end', () => {",
+    "  const tools = process.argv.indexOf('--tools');",
+    "  const text = tools > 0 && process.argv[tools + 1] === '' ? JSON.stringify({ title: 'Builder: highlight the blocks', summary: 'Shows the blocks. So the owner sees them.' }) : 'tools were on';",
+    "  console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: text, num_turns: 1 }));",
+    '});',
+  ].join('\n'));
+  process.env.CHIEFMATE_CLAUDE = fake;
+  const { describeLater } = await import(src('runs.mjs'));
+  const { readRun, saveRun } = await import(src('store.mjs'));
+  saveRun({ id: 'brief-test', kind: 'task', project: 'none', title: 'Old: the start of the instruction', instruction: 'Highlight the blocks of the builder.', status: 'done', steps: [] });
+  saveRun({ id: 'brief-given', kind: 'task', project: 'none', title: 'Given', summary: 'Given too.', briefBy: { title: 'given', summary: 'given' }, instruction: 'x', status: 'done', steps: [] });
+  await describeLater('brief-test');
+  const described = readRun('brief-test');
+  expect(described.title === 'Builder: highlight the blocks' && described.summary === 'Shows the blocks. So the owner sees them.' && described.briefBy?.title === 'model',
+    `an older run did not get its title and summary from the quick model: ${JSON.stringify([described.title, described.summary])}`);
+  expect(describeLater('brief-given') === null && readRun('brief-given').title === 'Given', 'a title and summary given by the manager were generated again');
+  process.env.CHIEFMATE_CLAUDE = path.join(data, 'no-claude.exe');
+} catch (error) {
+  failures.push(`titles and summaries: ${error.message}`);
+}
+
 try {
   rmSync(data, { recursive: true, force: true, maxRetries: 5 });
 } catch {

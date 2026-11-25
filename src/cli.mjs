@@ -3,6 +3,7 @@ import { openSync, writeSync } from 'node:fs';
 import path from 'node:path';
 import { format } from 'node:util';
 import { loadConfig, saveConfig } from './config.mjs';
+import { fullReport, outcomeMarkdown } from './digest.mjs';
 import { formatDateTime, formatDuration } from './i18n.mjs';
 import { notify } from './notify.mjs';
 import { listRuns, readRun, stepsOf } from './store.mjs';
@@ -14,6 +15,11 @@ const option = name => {
   return i >= 0 ? rest[i + 1] : undefined;
 };
 const has = name => rest.includes(name);
+// The words of a command that are not options nor their values ("--title <text>").
+const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary'];
+const words = () => rest.filter((x, i) => !x.startsWith('--') && !VALUED.includes(rest[i - 1]));
+/** The title and summary given with --title and --summary: nothing is generated for them. */
+const brief = () => ({ title: option('--title'), summary: option('--summary') });
 // CHIEFMATE_PORT runs a second, temporary Chiefmate next to yours (the smoke test does this).
 const port = () => Number(process.env.CHIEFMATE_PORT) || loadConfig().port || 4747;
 const work = run => formatDuration(stepsOf(run).reduce((sum, s) => sum + (s.durationMs ?? 0), 0));
@@ -399,20 +405,20 @@ async function main() {
       return;
     }
     case 'mission': {
-      const run = await api('/api/mission', { mission: rest[0], origin: option('--origin') ?? 'manager', plan: option('--plan') });
+      const run = await api('/api/mission', { mission: words()[0], origin: option('--origin') ?? 'manager', plan: option('--plan'), ...brief() });
       console.log(`Queued: ${run.title} [${run.id}]`);
       return;
     }
     case 'task': {
-      const [project, agent, instruction] = rest;
+      const [project, agent, instruction] = words();
       const modules = (option('--modules') ?? '').split(',').map(m => m.trim()).filter(Boolean);
-      const run = await api('/api/task', { project, agent, instruction, review: has('--review'), modules, origin: option('--origin') ?? 'manager', plan: option('--plan') });
+      const run = await api('/api/task', { project, agent, instruction, review: has('--review'), modules, origin: option('--origin') ?? 'manager', plan: option('--plan'), ...brief() });
       console.log(`Queued: ${run.title} [${run.id}]`);
       return;
     }
     case 'ask': {
-      const [project, request] = rest;
-      const run = await api('/api/ask', { project, request, origin: option('--origin') ?? 'manager', plan: option('--plan') });
+      const [project, request] = words();
+      const run = await api('/api/ask', { project, request, origin: option('--origin') ?? 'manager', plan: option('--plan'), ...brief() });
       console.log(`Queued: ${run.title} [${run.id}]. The team lead plans it into at most 3 tasks for the crew.`);
       return;
     }
@@ -436,9 +442,10 @@ async function main() {
     case 'report': {
       const run = readRun(rest[0]);
       if (!run) throw new Error('Run not found.');
-      console.log(`# ${run.title} (${run.status})\n${run.result ?? ''}${run.pullRequest ? `\nPull request: ${run.pullRequest}` : ''}\n`);
+      console.log(`# ${run.title} (${run.status})\n${run.summary ? `${run.summary}\n` : ''}${run.result ?? ''}${run.pullRequest ? `\nPull request: ${run.pullRequest}` : ''}\n`);
+      if (run.outcome) console.log(`${outcomeMarkdown(run.outcome, run.outcome.lang)}\n`);
       for (const step of stepsOf(run)) {
-        console.log(`## ${step.agent} (${step.status}, ${formatDuration(step.durationMs)}, ${step.model ?? ''})\n${step.report || step.error || '(no report)'}\n`);
+        console.log(`## ${step.agent} (${step.status}, ${formatDuration(step.durationMs)}, ${step.model ?? ''})\n${fullReport(step) || step.error || '(no report)'}\n`);
       }
       return;
     }

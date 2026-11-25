@@ -6,6 +6,10 @@ import path from 'node:path';
 import { instructionFiles, stepAccess, stepMcp } from './access.mjs';
 import { contextWindow, runClaude } from './claude.mjs';
 import { loadConfig, projectCrew } from './config.mjs';
+import {
+  fullReport, generateBrief, generateOutcome, mergeOutcomes, outcomeLine, outcomeMarkdown, outcomeTemplate, parseOutcome, shortSummary, shortTitle,
+  TITLE_MAX,
+} from './digest.mjs';
 import { formatDate, formatDateTime, formatDuration, formatNumber, formatPercent, t } from './i18n.mjs';
 import {
   applyPlan, finalReviewLines, LEAD, leadLines, leadPlanStep, leadReviewStep, memberLines, readMemory, saveMemory, takeMemory,
@@ -13,7 +17,7 @@ import {
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { builderSettings, projectInstructions, writtenInstructions } from './prompts.mjs';
-import { readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
+import { readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
 import { clip, languageName, now, ROOT, slug, stamp } from './util.mjs';
 import {
@@ -23,7 +27,8 @@ import {
 
 /**
  * What the app shows as happening right now: one entry per run going on, by run id (runs of different projects go on
- * at the same time). Each entry: { run, title, project, step, agent, started, pid, context, actions, heldUntil },
+ * at the same time). Each entry: { run, title, summary, project, step, agent, started, pid, context, actions, doing,
+ * heldUntil },
  * plus, kept off the app, the run as it is in memory (its steps save it as they go), the agent's process and the
  * cancellation asked for.
  */
@@ -33,7 +38,13 @@ export const liveOf = id => live.get(id) ?? null;
 /** The run going on with this id, as it is in memory; null when it is not going on. */
 export const activeRun = id => live.get(id)?.memory ?? null;
 /** What the app and the manager see of a run going on (without the run object, its process or the cancellation). */
-export const livePublic = l => ({ run: l.run, title: l.title, project: l.project, step: l.step, agent: l.agent, started: l.started, since: l.since, pid: l.pid, context: l.context, actions: l.actions });
+export const livePublic = l => ({
+  run: l.run, title: l.title, summary: l.summary ?? null, project: l.project, step: l.step, agent: l.agent, started: l.started, since: l.since, pid: l.pid,
+  context: l.context, actions: l.actions, doing: doingNow(l),
+});
+
+/** What the agent of a run going on is doing now, in plain words (one short line). */
+export const doingNow = l => (Date.now() < (l.heldUntil ?? 0) ? t('waiting for you') : l.doing ?? null);
 
 // No agent pushes anything to GitHub or changes it: Chiefmate itself pushes the branch and opens the pull request.
 export const ALWAYS_DISALLOWED = ['Bash(git push:*)', 'Bash(gh pr:*)', 'Bash(gh repo:*)', 'Bash(git remote:*)'];
@@ -44,7 +55,7 @@ function needsYouCommand() {
   return 'node ' + (/\s/.test(cli) ? '"' + cli + '"' : cli) + ' needs-you';
 }
 
-function crewRules(config, project) {
+function crewRules(config, project, reportLang = config.language || 'en') {
   const owner = languageName(config.language || 'en');
   const content = languageName(project.language || config.language || 'en');
   return `## Chiefmate rules (for the whole crew)
@@ -57,10 +68,28 @@ function crewRules(config, project) {
 - Never read, list or copy Chiefmate's \`data/\` folder (including \`data/browser-profile\`, the browser profile Chiefmate uses for the owner), other projects' working copies or other projects' personal documentation. You only get the folders this step needs.
 - When you need ${config.owner || 'the owner'} to act (sign in somewhere, confirm something, do what only a person can do), don't stop and don't work around it: run \`${needsYouCommand()} "<what to do, in ${owner}>" [--url <address>] [--wait] [--check "<command that succeeds once it is done>"]\` with the Bash tool's timeout at 600000 ms. Chiefmate shows the request to the owner and opens the address in their browser. With --wait the command returns once the owner clicks Done (or the check succeeds); if it says it is still waiting, run the command it prints. If it gives up waiting, finish what you can and say in your report what is left for the owner. Never type passwords or codes yourself.
 - ${config.owner || 'The owner'} may write to you directly from the app while you work: the message arrives as your next turn, with your work kept as it was. Answer it in one short message, then go on. To ask ${config.owner || 'the owner'} something, use needs-you with --wait: they can answer from the app, and the answer comes back as the command's output.
-- Your last message is the step's report, in ${owner}: short markdown with what you did (and the files), the sources you used, what you left out and why, and what the reviewer should check.`;
+- Your last message is the step's report, in ${languageName(reportLang)}: short markdown with what you did (and the files), the sources you used, what you left out and why, and what the reviewer should check. ${config.owner || 'The owner'} must understand it in seconds, so it starts with this final summary, in plain words and with these headings exactly, the full report under the last one ("Needs you?" says whether ${config.owner || 'the owner'} must do something besides reviewing the work, and what):
+${fenced(outcomeTemplate(reportLang), 'markdown')}`;
 }
 
-export function createRun({ kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [], plan = null, prompt = null }) {
+const BUILDER_TASK = 'Do what the project instructions below (written in the prompt builder) ask.';
+
+/** What a run is about, for its title and summary: the instruction, the prompt builder's prompt or the mission's steps. */
+function workOf(run, config = loadConfig()) {
+  if (run.kind === 'mission') {
+    return [config.missions?.[run.mission]?.description, ...(run.steps ?? []).map(s => `${s.agent}: ${s.part}`)].filter(Boolean).join('\n');
+  }
+  return run.instruction === BUILDER_TASK && run.builderPrompt ? run.builderPrompt : run.instruction || run.title;
+}
+
+/**
+ * Queues a run. title and summary: given by whoever queues it (the manager's --title and --summary); what is missing
+ * comes from the instruction's first sentence at once and from the quick model a moment later (describeLater).
+ */
+export function createRun({
+  kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [], plan = null, prompt = null,
+  title: givenTitle = null, summary: givenSummary = null,
+}) {
   const config = loadConfig();
   let title, steps, finalReview, project;
   if (kind === 'mission') {
@@ -81,7 +110,6 @@ export function createRun({ kind, missionId, projectId, agent, instruction, revi
     if (!lead) throw new Error(t('{project} has no team lead: add "lead" to its settings, or queue a task or a mission.', { project: projectId }));
     if (!instruction?.trim()) throw new Error(t('Write what the agent should do.'));
     project = projectId;
-    title = `${t(lead.name)}: ${clip(instruction, 70)}`;
     steps = [leadPlanStep(instruction)];
     finalReview = { agent: 'manager', part: 'Review the work done for this request and write the pull request text.', status: 'pending' };
   } else {
@@ -90,21 +118,30 @@ export function createRun({ kind, missionId, projectId, agent, instruction, revi
     if (agent === LEAD) throw new Error(t('The team lead takes requests, not tasks: use "ask".'));
     if (!agents[agent]) throw new Error(t('{agent} is not in the crew of {project}.', { agent, project: projectId }));
     // A task sent from the app's prompt builder carries its prompt: the instruction may then be left out.
-    if (!instruction?.trim() && prompt?.trim()) instruction = 'Do what the project instructions below (written in the prompt builder) ask.';
+    if (!instruction?.trim() && prompt?.trim()) instruction = BUILDER_TASK;
     if (!instruction?.trim()) throw new Error(t('Write what the agent should do.'));
     project = projectId;
-    title = `${t(agents[agent].name)}: ${clip(instruction, 70)}`;
     steps = [{ agent, part: instruction.trim(), status: 'pending' }];
     finalReview = review ? { agent: 'manager', part: 'Review the work of this task and write the pull request text.', status: 'pending' } : null;
   }
   if (!config.projects?.[project]) throw new Error(t('Unknown project: {id}', { id: project }));
   // In a project with a team lead, the lead reviews the crew's work first in every run, and keeps the memory.
   if (kind !== 'ask' && projectCrew(config, project)[LEAD]) steps.push(leadReviewStep());
+  // The title says what will be done, short; the summary, what it is and why. "auto" ones are replaced by the quick model's.
+  const mission = kind === 'mission' ? config.missions[missionId] : null;
+  const given = { title: clip(givenTitle, TITLE_MAX + 20), summary: clip(givenSummary, 400) };
+  const briefBy = {
+    title: given.title ? 'given' : mission ? 'mission' : 'auto',
+    summary: given.summary ? 'given' : mission?.description ? 'mission' : 'auto',
+  };
+  const work = instruction === BUILDER_TASK && prompt?.trim() ? prompt : instruction;
+  title = given.title || title || shortTitle(work) || t('Untitled');
+  const summary = given.summary || (mission ? clip(mission.description, 400) : '') || shortSummary(work);
   const base = `${stamp()}-${slug(missionId ?? agent ?? LEAD)}`;
   let id = base;
   for (let n = 2; existsSync(runFile(id)); n++) id = `${base}-${n}`;
-  return saveRun({
-    id, kind, mission: missionId ?? null, project, title, instruction: instruction ?? null, origin,
+  const run = saveRun({
+    id, kind, mission: missionId ?? null, project, title, summary, briefBy, instruction: instruction ?? null, origin,
     status: 'queued', created: now(), notBefore, branch: `chiefmate/${id}`, steps, review: finalReview,
     modules: (Array.isArray(modules) ? modules : String(modules ?? '').split(',')).map(m => String(m).trim()).filter(Boolean),
     // The planning board's item this run was queued for: the item follows the run (src/planning.mjs).
@@ -112,6 +149,52 @@ export function createRun({ kind, missionId, projectId, agent, instruction, revi
     // The prompt written in the app's prompt builder: the steps get it instead of the one put together from the document.
     ...(prompt?.trim() ? { builderPrompt: prompt.trim() } : {}),
   });
+  describeLater(run.id, run);
+  return run;
+}
+
+// ---------- Titles and summaries from the quick model ----------
+
+const describing = new Map(); // run id: the call going on
+const describeTried = new Set(); // asked once per start of Chiefmate: a failure is not retried in a loop
+const described = new Map(); // run id: the fields applied, for a copy of the run read before they were
+
+/** Whether a run still has a title or summary to generate (old runs have neither). */
+export const needsBrief = run => (run.briefBy
+  ? run.briefBy.title === 'auto' || run.briefBy.summary === 'auto'
+  : !(run.kind === 'mission' && run.summary));
+
+/**
+ * Generates, in the background, the title and summary a run is missing (new runs, and old ones when the app lists
+ * them). Returns the call going on, or null.
+ */
+export function describeLater(id, known = null) {
+  if (describing.has(id)) return describing.get(id);
+  if (describeTried.has(id)) return null;
+  const run = known ?? activeRun(id) ?? readRun(id);
+  if (!run || !needsBrief(run)) return null;
+  describeTried.add(id);
+  const config = loadConfig();
+  const job = generateBrief({ what: workOf(run, config), project: config.projects?.[run.project]?.name ?? run.project, config })
+    .then(brief => brief && applyBrief(id, brief))
+    .catch(error => console.error('Title and summary:', error.message))
+    .finally(() => describing.delete(id));
+  describing.set(id, job);
+  return job;
+}
+
+function applyBrief(id, brief) {
+  const run = activeRun(id) ?? readRun(id);
+  if (!run) return;
+  const by = { title: run.briefBy?.title ?? (run.kind === 'mission' ? 'mission' : 'auto'), summary: run.briefBy?.summary ?? 'auto' };
+  const fields = { briefBy: { ...by } };
+  if (by.title === 'auto') Object.assign(fields, { title: brief.title, briefBy: { ...fields.briefBy, title: 'model' } });
+  if (by.summary === 'auto') Object.assign(fields, { summary: brief.summary, briefBy: { ...fields.briefBy, summary: 'model' } });
+  Object.assign(run, fields);
+  described.set(id, fields);
+  saveRun(run);
+  const l = live.get(id);
+  if (l) Object.assign(l, { title: run.title, summary: run.summary });
 }
 
 /** Cancels a run going on: its agent stops now, and the run ends as canceled. Returns false when it is not going on. */
@@ -264,7 +347,7 @@ export function promptParts({ run, step, project, previous, finalReview, changes
       `1. See what changed: \`git log --oneline origin/${base}..HEAD\` and the diff of every file that matters.`,
       `2. Check it against the reports and the project's rules${run.lead?.opinion ? ", weighing the team lead's opinion below (its first review)" : ''}. Fix whatever is wrong or incomplete, committing as "Chiefmate: manager review". When the owner guided a step directly (a "direct talk" section at the end of its report), check that the work follows what they said.`,
       `3. Run the checks: ${(project.checks ?? []).map(c => `\`${c}\``).join(', ') || 'the ones the project and its documentation describe, as far as this machine allows'}.`,
-      `4. Your last message presents the work for approval${local ? ', as the note that goes with the branch' : ', as the pull request text'}, in markdown and in ${languageName(prLanguage)}. End it with a section titled "${t("Manager's verdict", {}, prLanguage)}": what you fixed, the risks and your recommendation (approve, approve with caveats, or do not approve).`,
+      `4. Your last message presents the work for approval${local ? ', as the note that goes with the branch' : ', as the pull request text'}, in markdown and in ${languageName(prLanguage)}, starting with the final summary the rules below describe. End it with a section titled "${t("Manager's verdict", {}, prLanguage)}": what you fixed, the risks and your recommendation (approve, approve with caveats, or do not approve).`,
       '',
       '## Changed files',
       '```',
@@ -278,10 +361,10 @@ export function promptParts({ run, step, project, previous, finalReview, changes
   const reports = finalReview && lead ? previous.filter(p => p.agent !== LEAD) : previous;
   if (reports.length) {
     const lines = ['', finalReview ? '## Crew reports' : '## What the previous steps did'];
-    for (const p of reports) lines.push('', `### ${p.agent}${p.role ? `, ${p.role === 'plan' ? 'planning' : 'first review'}` : ''} (${p.status})`, p.report || p.error || '(no report)');
+    for (const p of reports) lines.push('', `### ${p.agent}${p.role ? `, ${p.role === 'plan' ? 'planning' : 'first review'}` : ''} (${p.status})`, fullReport(p) || p.error || '(no report)');
     add('reports', 'The reports of the steps before', lines);
   }
-  add('rules', 'Chiefmate (src/runs.mjs, crewRules)', ['', crewRules(config, project)]);
+  add('rules', 'Chiefmate (src/runs.mjs, crewRules)', ['', crewRules(config, project, finalReview ? prLanguage : config.language || 'en')]);
   return parts;
 }
 
@@ -415,7 +498,10 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   const paused = step.paused ?? null;
   delete step.paused;
   Object.assign(step, { status: 'running', started: paused ? step.started ?? now() : now(), error: null, model, promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
-  Object.assign(l, { step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0, talking: false, reply: null, session: null });
+  Object.assign(l, {
+    step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0, talking: false, reply: null, session: null,
+    doing: finalReview ? t('reviewing the work') : step.role === 'plan' ? t('planning the request') : t('getting started'),
+  });
   saveRun(run);
 
   // Every step keeps its Claude Code session, so a message from the owner can resume it (src/talk.mjs).
@@ -438,6 +524,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     onEvent: event => {
       followContext(l, event);
       logAction(l, event);
+      if (event.doing) l.doing = event.doing;
       if (event.type === 'start' && event.session) l.session = event.session;
       if (event.type === 'start' && event.init && !session.resume) appendLoaded(contextFile, event.init);
       // The first thing the agent says after the owner's message is its answer, shown next to the message.
@@ -530,10 +617,14 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   Object.assign(r, total);
 
   const waitUntil = limitHit(r);
+  // The final summary at the top of the report is kept apart (step.outcome): the app shows it first, the rest folded.
+  const reportLang = finalReview ? project.language || config.language || 'en' : config.language || 'en';
+  const { outcome, rest } = parseOutcome(r.text || '', [reportLang, config.language]);
   Object.assign(step, {
     status: waitUntil ? 'pending' : r.ok ? 'done' : 'failed', ended: waitUntil ? null : now(), tokens: r.tokens, turns: r.turns,
-    durationMs: r.durationMs, report: (r.text || '') + talkSection(run, index + 1, id => t(agents[id]?.name ?? id), config), error: r.error ?? null, subagents: r.subagents, actions: l.actions.length,
+    durationMs: r.durationMs, report: rest + talkSection(run, index + 1, id => t(agents[id]?.name ?? id), config), error: r.error ?? null, subagents: r.subagents, actions: l.actions.length,
     context: r.context ? { ...r.context, compactions: l.context?.compactions ?? r.context.compactions } : null,
+    outcome: outcome ? { ...outcome, lang: reportLang } : null,
   });
   if (r.context?.used) {
     logAction(l, { type: 'action', text: t('Context at the end of the step: {used} of {window} tokens ({percent}), {count} compaction(s)', {
@@ -552,10 +643,13 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
 function pullRequestBody(run, checks, agents, lang) {
   const labels = { pending: t('Pending', {}, lang), running: t('Running', {}, lang), done: t('Done', {}, lang), failed: t('Failed', {}, lang), skipped: t('Skipped', {}, lang) };
   const name = id => t(agents[id]?.name ?? id, {}, lang);
-  const main = run.review?.report || run.steps.map(s => `## ${name(s.agent)}\n\n${s.report || s.error || t('(no report)', {}, lang)}`).join('\n\n');
+  const main = run.review?.report || run.steps.map(s => `## ${name(s.agent)}\n\n${fullReport(s) || s.error || t('(no report)', {}, lang)}`).join('\n\n');
+  // The same final summary the app shows opens the text; the review's report follows (without its own copy of it).
+  const summary = run.prOutcome ? outcomeMarkdown(run.prOutcome, run.prOutcome.lang ?? lang) : '';
   const table = stepsOf(run).map(s => `| ${name(s.agent)} | ${labels[s.status] ?? s.status} | ${formatDuration(s.durationMs)} | ${s.turns ?? ''} |`);
   const checkList = checks.map(c => `- ${c.ok ? '✅' : '❌'} \`${c.command}\``);
   return [
+    ...(summary ? [summary, '', `### ${t('Full report', {}, lang)}`, ''] : []),
     main, '', '---', '',
     `### ${t('Done by Chiefmate', {}, lang)}`, '',
     `| ${t('Step', {}, lang)} | ${t('Status', {}, lang)} | ${t('Time', {}, lang)} | ${t('Turns', {}, lang)} |`, '|---|---|---|---|', ...table, '',
@@ -597,14 +691,62 @@ function afterLead(run, step, agents, log) {
   saveRun(run);
 }
 
+/**
+ * A run's final summary, once it ends: run.outcome in the owner's language (the app, the notifications, the manager)
+ * and run.prOutcome for the pull request (the final review's own, else the quick model's, in the project's language).
+ * Without the quick model, the steps' own summaries are put together.
+ */
+async function settleOutcome(run, config, prLang) {
+  const ownerLang = config.language || 'en';
+  const steps = stepsOf(run).filter(s => !['pending', 'skipped'].includes(s.status) && s.agent !== LEAD);
+  const review = run.review?.outcome ?? null;
+  let owner = review?.lang === ownerLang ? review : null;
+  let pr = null;
+  if (!owner) {
+    const made = await generateOutcome({ run, steps, config, prLang }).catch(() => null);
+    if (made) [owner, pr] = [{ ...made.owner, lang: ownerLang }, made.pr ? { ...made.pr, lang: prLang } : null];
+  }
+  const merged = owner ? null : mergeOutcomes(steps.filter(s => s.outcome?.lang === ownerLang));
+  run.outcome = owner ?? (merged ? { ...merged, lang: ownerLang } : null);
+  run.prOutcome = review ?? pr ?? run.outcome;
+}
+
+const outcomeTried = new Set();
+
+/**
+ * The final summary of a run that ended without one (an older run, or one that failed or was canceled), generated in
+ * the background when the app opens it. Returns the call going on, or null.
+ */
+export function outcomeLater(id) {
+  const run = readRun(id);
+  if (!run || run.outcome || live.has(id) || outcomeTried.has(id) || !['done', 'failed', 'canceled'].includes(run.status)) return null;
+  outcomeTried.add(id);
+  const config = loadConfig();
+  return settleOutcome(run, config, config.projects?.[run.project]?.language || config.language || 'en')
+    .then(() => {
+      const fresh = readRun(id);
+      if (fresh && run.outcome && !fresh.outcome) saveRun(Object.assign(fresh, { outcome: run.outcome, prOutcome: run.prOutcome }));
+    })
+    .catch(error => console.error('Final summary:', error.message));
+}
+
+/** A run for the manager's news: its short title, its summary and, once it ended, its final summary. */
+function aboutRun(run) {
+  const o = run.outcome;
+  const outcome = o ? ` [final summary: done: ${o.done.join('; ') || '-'}; what changes: ${o.change || '-'}; needs the owner: ${o.needs || 'no'}]` : '';
+  return `Run ${run.id} "${run.title}" (project ${run.project}${run.summary ? `; ${run.summary}` : ''})${outcome}`;
+}
+
 /** Runs (or resumes) a run until the end, a pause for a limit, or a cancellation. */
 export async function execute(run) {
   const config = loadConfig();
   const agents = projectCrew(config, run.project);
   const project = config.projects?.[run.project];
+  const prLang = project?.language || config.language || 'en';
   if (live.has(run.id)) throw new Error(`Run ${run.id} is already going on.`);
+  Object.assign(run, described.get(run.id) ?? {});
   const l = {
-    run: run.id, title: run.title, project: run.project, step: null, agent: null, started: now(), since: now(), pid: null, context: null, actions: [],
+    run: run.id, title: run.title, summary: run.summary ?? null, doing: t('preparing the working copy'), project: run.project, step: null, agent: null, started: now(), since: now(), pid: null, context: null, actions: [],
     heldUntil: 0, memory: run, process: null, cancelRequest: null,
   };
   live.set(run.id, l);
@@ -629,7 +771,7 @@ export async function execute(run) {
         ? t('{note}. I will resume on my own at {when}.', { note, when: formatDateTime(waitUntil) })
         : t('{note}. Open the app to decide.', { note }),
     );
-    reportEvent('run_paused', `Run ${run.id} "${run.title}" (project ${run.project}) paused: ${note}. ${waitUntil ? `It resumes on its own at ${formatDateTime(waitUntil)}.` : 'It waits for the owner to decide (resume or cancel).'}`);
+    reportEvent('run_paused', `${aboutRun(run)} paused: ${note}. ${waitUntil ? `It resumes on its own at ${formatDateTime(waitUntil)}.` : 'It waits for the owner to decide (resume or cancel).'}`);
   };
 
   try {
@@ -637,7 +779,12 @@ export async function execute(run) {
     // Over the limits already: wait before touching the working copy.
     const early = checkLimits(config, run);
     if (early) return wait(early.waitUntil, early.note);
-    if (firstTime) notify(t('Chiefmate started'), run.title);
+    if (firstTime) {
+      // The title and summary from the quick model take a few seconds: the notice waits for them, briefly.
+      const pending = describing.get(run.id);
+      if (pending) await Promise.race([pending, new Promise(resolve => setTimeout(resolve, 20_000))]);
+      notify(t('Chiefmate started'), run.summary ? clip(`${run.title}. ${run.summary}`, 250) : run.title);
+    }
     let dir;
     if (!run.prepared) {
       run.base = await baseBranch(project);
@@ -686,22 +833,28 @@ export async function execute(run) {
     }
 
     log(t("Running the project's checks"));
+    l.doing = t("running the project's checks");
     run.checks = await runChecks(dir, project.checks);
     const commits = await newCommits(dir, base);
     run.commits = commits.length;
+    l.doing = t('writing the final summary');
     if (!commits.length) {
       const plan = run.lead?.plan;
       const result = plan && !plan.tasks.length
         ? t('The team lead planned no task: {note}', { note: plan.note || plan.error || t('no reason given') })
         : t('Finished with no changes to review.');
-      Object.assign(run, { status: 'done', ended: now(), result });
+      run.result = result;
+      await settleOutcome(run, config, prLang);
+      Object.assign(run, { status: 'done', ended: now() });
       saveRun(run);
       notify(t('Chiefmate finished'), t('{title}: no changes to review.', { title: run.title }));
-      reportEvent('run_finished', `Run ${run.id} "${run.title}" (project ${run.project}) finished with no changes to review: ${result}`);
+      reportEvent('run_finished', `${aboutRun(run)} finished with no changes to review: ${result}`);
       return;
     }
     const failed = run.checks.filter(c => !c.ok).length;
-    const body = pullRequestBody(run, run.checks, agents, project.language || config.language || 'en');
+    await settleOutcome(run, config, prLang);
+    saveRun(run);
+    const body = pullRequestBody(run, run.checks, agents, prLang);
     const bodyFile = path.join(runDir(run.id), 'pull-request.md');
 
     if (project.deliver === 'local') {
@@ -718,26 +871,29 @@ export async function execute(run) {
         : t('Ready on {where}. Nothing was sent to GitHub.', { where });
       Object.assign(run, { status: 'done', ended: now(), result, delivered: project.local_clone ?? dir });
       saveRun(run);
-      notify(t('Ready for your review'), t('{title}: {result}', { title: run.title, result }), 'chiefmate:log');
-      reportEvent('run_finished', `Run ${run.id} "${run.title}" (project ${run.project}) finished and was delivered locally, waiting for the owner's review: ${result}`);
+      notify(t('Ready for your review'), t('{title}: {result}', { title: run.title, result: [outcomeLine(run.outcome), result].filter(Boolean).join(' ') }), 'chiefmate:log');
+      reportEvent('run_finished', `${aboutRun(run)} finished and was delivered locally, waiting for the owner's review: ${result}`);
       return;
     }
 
     log(t('Pushing the branch and opening the pull request'));
+    l.doing = t('opening the pull request');
     run.pullRequest = await openPullRequest(dir, {
-      base, branch: run.branch, title: `${run.title} (${formatDate(run.created)})`, body, bodyFile,
+      base, branch: run.branch, title: `${run.prOutcome?.title || run.title} (${formatDate(run.created)})`, body, bodyFile,
     });
     const result = failed ? t('Pull request opened, but {count} check(s) failed.', { count: failed }) : t('Pull request opened and verified.');
     Object.assign(run, { status: 'done', ended: now(), result });
     saveRun(run);
-    notify(t('Ready for your review'), t('{title}: {result}', { title: run.title, result }), run.pullRequest);
-    reportEvent('pr_ready', `Run ${run.id} "${run.title}" (project ${run.project}) finished: pull request ${run.pullRequest} waits for the owner's approval. ${result}`);
+    notify(t('Ready for your review'), t('{title}: {result}', { title: run.title, result: [outcomeLine(run.outcome), result].filter(Boolean).join(' ') }), run.pullRequest);
+    reportEvent('pr_ready', `${aboutRun(run)} finished: pull request ${run.pullRequest} waits for the owner's approval. ${result}`);
   } catch (error) {
     Object.assign(run, { status: 'failed', ended: now(), result: error.message });
     saveRun(run);
     notify(t('Chiefmate hit an error'), t('{title}: {error}', { title: run.title, error: clip(error.message, 180) }));
-    reportEvent('run_failed', `Run ${run.id} "${run.title}" (project ${run.project}) failed: ${clip(error.message, 400)}`);
+    reportEvent('run_failed', `${aboutRun(run)} failed: ${clip(error.message, 400)}`);
   } finally {
     live.delete(run.id);
+    // A run that failed or was canceled gets its final summary too, in the background.
+    if (['failed', 'canceled'].includes(run.status)) outcomeLater(run.id);
   }
 }

@@ -3,6 +3,7 @@
   "language": "en",
   "port": 4747,
   "default_model": "claude-opus-5-5",
+  "quick_model": "haiku",
   "projects": {
     "my-site": {
       "name": "My site",
