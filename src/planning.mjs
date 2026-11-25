@@ -1,6 +1,7 @@
 // The owner's planning board: items by project, with a priority and a status, kept in data/plan.json.
 // An item linked to a run follows it: queued, in progress, then done (or waiting for the owner, with a pull request
-// to approve), or back to "to do" when the run fails or is canceled.
+// to approve), or back to "to do" when the run fails or is canceled. Work discarded (its pull request closed without a
+// merge) sends the item back to the owner's decision.
 // Proposals: the crew proposes items (proposed), the manager triages them (triaged: waiting for the owner's decision,
 // with a recommendation), and the owner decides: "do" (approved: it becomes a task for its agent, one per project at a
 // time, in the owner's order), "later" (future) or "discard" (discarded, with a reason; it can come back).
@@ -218,6 +219,13 @@ function follow(item, run) {
     if (status) item.status = status;
     changed = true;
   }
+  // Its work discarded (from the app, or its pull request closed on GitHub without a merge, src/attention.mjs):
+  // nothing waits for the owner's approval; the item is theirs to decide again (to do, without an agent to do it).
+  // A "now" becomes "later": the autopilot does not redo work the owner turned down.
+  if (run.discarded && item.status === 'waiting_owner') {
+    Object.assign(item, { status: item.agent ? 'triaged' : 'todo', rank: null, recommend: item.recommend === 'now' ? 'later' : item.recommend });
+    changed = true;
+  }
   if (changed) item.updated = now();
   return changed;
 }
@@ -236,6 +244,8 @@ function syncRun(run) {
     }
     if (item.run === run.id && !item.archived && follow(item, run)) {
       changed = true;
+      // Back to the owner's decision: last in their order.
+      if (item.status === 'triaged' && item.rank == null) placeAt(board, item, Number.MAX_SAFE_INTEGER);
       // An approved item's run ended: the project's next approved item may start.
       if (item.approved_at && !ACTIVE.includes(item.status)) freed = true;
     }

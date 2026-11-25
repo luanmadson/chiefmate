@@ -1,7 +1,8 @@
 // What needs the owner, in three levels, for the whole app: urgent (act now), important (decide soon) and info
 // (good to know). A notice fades when marked as seen and goes to the archive when it no longer needs the owner: its
 // cause ended, its pull request was merged or closed (or its branch merged in the owner's clone), or, for an info
-// notice, once seen or a day old. Work merged outside Chiefmate marks its run as merged, so its board item is done.
+// notice, once seen or a day old. Work merged outside Chiefmate marks its run as merged, so its board item is done;
+// a pull request closed without a merge marks its run as discarded, and its item goes back to the owner's decision.
 // Nothing is lost: the archive keeps the last ARCHIVE_MAX. In data/state.json: the seen marks ("attention_seen"), the
 // notices shown last time ("attention_shown") and the archive ("attention_archive").
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
@@ -159,10 +160,11 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
     else if (i.level === 'info' && (seen[i.id] || (!i.lasting && i.at && !ago(i.at, DONE_FOR)))) toArchive(i, seen[i.id] ? 'seen' : 'expired');
     else active.push(i);
   }
-  // Merged outside Chiefmate (on GitHub, or in the owner's clone): the run is merged too, and its board item done.
+  // Settled outside Chiefmate: merged (on GitHub, or in the owner's clone), the run is merged and its board item done;
+  // closed on GitHub without a merge, the run is discarded and its item back to the owner's decision.
   for (const i of list) {
     const reason = archive[i.id]?.reason;
-    if (reason === 'merged' || reason === 'branch') mergedOutside(noticeRun(i, runs, items), reason === 'merged' ? i.url : null);
+    if (['merged', 'closed', 'branch'].includes(reason)) settledOutside(noticeRun(i, runs, items), reason, i.url);
   }
   // Shown last time and gone now: its cause ended (for an info notice, its day).
   for (const [id, i] of Object.entries(shown)) if (!ids.has(id) && !archive[id]) toArchive(i, i.level === 'info' ? 'expired' : 'resolved');
@@ -216,14 +218,15 @@ function resolution(i, runs, items) {
 }
 
 /**
- * Marks a run merged outside Chiefmate as merged ("by": "outside"): its pull request ("url") merged on GitHub, or,
- * without a url, its branch merged in the owner's clone. Read from disk: the listed run may be a summary.
+ * Records on a run what happened to its work outside Chiefmate ("by": "outside"): its pull request ("url") merged or
+ * closed on GitHub ("merged", "closed": run.merged or run.discarded), or its branch merged in the owner's clone
+ * ("branch"). Read from disk: the listed run may be a summary.
  */
-function mergedOutside(listed, url) {
+function settledOutside(listed, reason, url) {
   const run = listed && readRun(listed.id);
   if (!run || run.merged || run.discarded || run.status !== 'done') return;
-  if (url ? run.pullRequest !== url : !run.branch) return;
-  run.merged = { at: now(), by: 'outside', how: url ? 'pr' : 'local' };
+  if (reason === 'branch' ? !run.branch : run.pullRequest !== url) return;
+  run[reason === 'closed' ? 'discarded' : 'merged'] = { at: now(), by: 'outside', how: reason === 'branch' ? 'local' : 'pr' };
   saveRun(run);
 }
 

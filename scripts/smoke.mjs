@@ -1283,7 +1283,7 @@ try {
   expect(attentionArchive().every(i => i.archived && i.title), 'an archived notice lost what it said');
   // Merged outside Chiefmate (a pull request on GitHub, a branch in the owner's clone): the run is merged, its item done.
   const { readRun, saveRun } = await import(src('store.mjs'));
-  const { addItem, planItem } = await import(src('planning.mjs'));
+  const { addItem, planItem, triageItem } = await import(src('planning.mjs'));
   const onGitHub = addItem({ project: 'p', title: 'Merged on GitHub' });
   const inClone = addItem({ project: 'p', title: 'Merged in the clone' });
   saveRun({ id: 'o-pr', project: 'p', title: 'Merged on GitHub', status: 'done', created: at, ended: at, pullRequest: 'https://github.com/o/r/pull/1', plan: onGitHub.id });
@@ -1293,6 +1293,17 @@ try {
   expect(readRun('o-pr').merged?.by === 'outside' && readRun('o-pr').merged.how === 'pr' && readRun('o-local').merged?.how === 'local',
     `work merged outside Chiefmate did not mark its run as merged: ${JSON.stringify([readRun('o-pr').merged, readRun('o-local').merged])}`);
   expect(planItem(onGitHub.id).status === 'done' && planItem(inClone.id).status === 'done', 'a board item whose work was merged outside Chiefmate still waits for the owner');
+  // Closed on GitHub without a merge: the run is discarded, its item back to the owner's decision (to do, without an agent).
+  const closedTriaged = addItem({ project: 'p', title: 'Closed on GitHub', agent: 'generalist' });
+  triageItem(closedTriaged.id, { recommend: 'now' });
+  const closedPlain = addItem({ project: 'p', title: 'Closed, no agent' });
+  saveRun({ id: 'c-pr', project: 'p', title: 'Closed on GitHub', status: 'done', created: at, ended: at, pullRequest: 'https://github.com/o/r/pull/2', plan: closedTriaged.id });
+  saveRun({ id: 'c-pr2', project: 'p', title: 'Closed, no agent', status: 'done', created: at, ended: at, pullRequest: 'https://github.com/o/r/pull/2', plan: closedPlain.id });
+  attentionItems({ config: {}, runs: [readRun('c-pr'), readRun('c-pr2')], items: [planItem(closedTriaged.id), planItem(closedPlain.id)] });
+  expect(readRun('c-pr').discarded?.by === 'outside' && readRun('c-pr').discarded.how === 'pr' && !readRun('c-pr').merged,
+    `a pull request closed on GitHub did not mark its run as discarded: ${JSON.stringify(readRun('c-pr'))}`);
+  expect(planItem(closedTriaged.id).status === 'triaged' && planItem(closedTriaged.id).rank != null && planItem(closedTriaged.id).recommend === 'later' && planItem(closedPlain.id).status === 'todo',
+    `a board item whose pull request was closed without a merge did not go back to the owner's decision: ${JSON.stringify([planItem(closedTriaged.id), planItem(closedPlain.id)])}`);
   const urgent = toastXml('Needs you', 'Sign in', 'chiefmate:operations', { urgent: true });
   expect(urgent.includes('scenario="reminder"') && urgent.includes('activationType="system"') && !toastXml('Done', 'x').includes('scenario'), 'an urgent Windows notification does not stay until seen');
 } catch (error) {
