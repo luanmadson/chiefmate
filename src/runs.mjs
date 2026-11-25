@@ -428,6 +428,7 @@ function toolLines(tool) {
       '',
       '## Working on Grok',
       "- You run on the Grok CLI. Commands that would publish (git push, git remote, gh pr, gh repo, gh api, requests to GitHub's API) are refused by rule, even inside a longer command line: keep those words out of your commands.",
+      "- The rules match words anywhere in a command, so a commit message or a search may be refused too (\"push\", \"remote\", or \"gh\" followed by \"pr\", as in \"high priority\"). Then reword it, or leave your changes uncommitted: Chiefmate commits them when your step ends.",
     ];
   }
   return [];
