@@ -75,6 +75,12 @@ Every agent runs on **Claude Opus 5.5** by default.
 - **Signing in.** Before a step, Chiefmate checks that the tool is signed in (`codex login status`; Grok's saved sign-in or `XAI_API_KEY`). When it isn't, the step asks for you as `needs-you` does, with the command to run (`codex login` or `grok login`), and goes on by itself once you are signed in.
 - The Crew section shows the tool of each member beside its model (Codex and Grok in brass, with the last day when there is one); a run's page shows it on each step, and the context report of each step says how it ran.
 
+**A tool for one task.** Codex and Grok can also be complements for chosen tasks, with every member staying on Claude Code: `--tool codex|grok` on `task`, on `ask` (the tasks the team lead plans), on `mission` (its crew's steps; a mission's step may also name its own `"tool"`) and on `plan triage` or `plan approve` (the item keeps the tool, and its task runs on it). Without `--tool`, each member's own tool applies.
+- When the tool chosen is off, past its last day or not signed in, the step runs on Claude Code and its log says so (no wait for a sign-in, unlike a member set on that tool).
+- A project with `"sensitive": true` in its settings always runs on Claude Code, whatever the member or the task asks.
+- The run's card, the queue and the logbook show "on Codex" or "on Grok" for a run whose crew works on them.
+- **How each tool does.** When a run with steps on Codex or Grok ends, Chiefmate adds one line per step to `data/manager/tools-quality.jsonl`: the tool, the kind of task, the time, whether the checks passed and whether the manager's final review had to correct something (its commits, and the "Corrections:" line the review is asked to write), with one line on what. `node src/cli.mjs tools` sums it up by tool and kind of task (how many, % approved with no correction, mean time), so the manager can choose where each tool does best.
+
 **Crews by project.** A project can have a crew of its own with `"crew"` in its settings: its missions and tasks then take only its members. Each member is based on one of the agents above, with an optional name of its own and instructions for that project only:
 
 ```json
@@ -428,7 +434,7 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `backup_dir` | A folder of your own, such as one in a private repository, where Chiefmate keeps an up-to-date copy of these settings |
 | `viewer` | The file viewer: `extra_roots`, a list of more folders (absolute paths) it may open besides the projects' folders and the libraries. Empty by default |
 | `ui` | The app's own settings: `voice_input`, the microphone for dictation in the message fields (see "Dictation"). On by default; `false` hides it |
-| `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. Optional: `crew` (its own crew), `lead` (its team lead, see "The crew"), `mcp` (external tools it releases), `prompt_block`, `prompt_modules` and `prompt_exclude` (the prompt builder), `dev_start` (the command that starts its development environment from its page, such as `npm run dev`), `merge_by_owner: false` when someone else reviews and merges its work (its cards then have no Approve). See also "Local delivery" below |
+| `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. Optional: `crew` (its own crew), `lead` (its team lead, see "The crew"), `mcp` (external tools it releases), `prompt_block`, `prompt_modules` and `prompt_exclude` (the prompt builder), `dev_start` (the command that starts its development environment from its page, such as `npm run dev`), `merge_by_owner: false` when someone else reviews and merges its work (its cards then have no Approve). `"sensitive": true` keeps all of its work on Claude Code, whatever a member's or a task's tool (see "A tool for one task"). See also "Local delivery" below |
 | `missions` | For each mission: the `project`, the `steps` (an agent and its part, in order), the final `review`, the `schedule` (`days` such as `["mon"]` and a `time` such as `"09:00"`) and the `eve_reminder` time |
 | `crew` | Settings for one agent in this installation only, such as `{ "writer": { "model": "claude-opus-5-5", "max_minutes": 90, "extra_instructions": "..." } }`; `"tool": "codex"` or `"grok"` runs its steps on that tool (see "The crew") |
 | `tools` | The tools the crew may run on besides Claude Code: `{ "grok": { "available_until": "2026-12-17" }, "codex": { "enabled": true } }`. After `available_until` (or with `"enabled": false`), its members go back to Claude Code by themselves. Empty by default: both available |
@@ -643,18 +649,22 @@ node src/cli.mjs ask <project> "..."          queues a request for the project's
                                               3 tasks for the crew and reviews them first (--plan <n>)
                                               mission, task and ask take --title "..." (at most about 60 characters) and
                                               --summary "..." (one or two sentences): nothing is generated for them;
-                                              and --level 1|2|3, the approval level its decision card shows
+                                              and --level 1|2|3, the approval level its decision card shows;
+                                              and --tool claude|codex|grok, the tool of its crew's steps (see "A tool
+                                              for one task")
+node src/cli.mjs tools [--json]               how Codex and Grok did on the crew's steps, by tool and kind of task
 node src/cli.mjs level <run id> <1|2|3|none>  sets (or clears) a run's approval level
 node src/cli.mjs plan [list]                  the planning board's open items (--project, --status, --priority; --all)
 node src/cli.mjs plan add <project> "..."     adds an item (--priority high|medium|low, --status, --description)
-node src/cli.mjs plan set <n> --status ...    changes an item (--title, --description, --project, --priority, --agent, --run,
-                                              --pr, --level, --archive, --restore)
+node src/cli.mjs plan set <n> --status ...    changes an item (--title, --description, --project, --priority, --agent, --tool,
+                                              --run, --pr, --level, --archive, --restore)
 node src/cli.mjs plan done <n>                marks an item as completed
 node src/cli.mjs plan propose <project> "..." for the crew: proposes an item (--summary "<1-2 sentences>", --agent <member>,
                                               --priority); the manager triages it, you decide
 node src/cli.mjs plan triage <n> --recommend now|later|discard
                                               for the manager: the item waits for your decision (--agent, --priority,
-                                              --note "<why>", --risk "<what to watch>", --order <position>, --level 1|2|3)
+                                              --note "<why>", --risk "<what to watch>", --order <position>, --level 1|2|3,
+                                              --tool claude|codex|grok: the tool suggested for its task)
 node src/cli.mjs plan approve|later|discard <n>
                                               your decision: "approve" makes it a task for its agent, one per project
                                               at a time, in your order (discard: --reason "...", --duplicate-of <m>;

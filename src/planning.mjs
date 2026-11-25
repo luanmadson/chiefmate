@@ -10,6 +10,7 @@ import path from 'node:path';
 import { loadConfig, projectCrew } from './config.mjs';
 import { reportEvent } from './news.mjs';
 import { onRunSaved, readRun, stepsOf } from './store.mjs';
+import { parseTool } from './tools.mjs';
 import { clip, DATA, now, parseLevel, readJson, writeJson } from './util.mjs';
 
 const BOARD_FILE = path.join(DATA, 'plan.json');
@@ -275,7 +276,7 @@ function checkAgent(project, agent) {
   return id;
 }
 
-/** Checks and applies the fields given: project, title, description, priority, status, agent, run, pr. */
+/** Checks and applies the fields given: project, title, description, priority, status, agent, tool, run, pr. */
 function applyFields(item, fields) {
   const has = key => fields[key] !== undefined && fields[key] !== null;
   if (has('project')) {
@@ -290,6 +291,8 @@ function applyFields(item, fields) {
   if (has('description')) item.description = String(fields.description).trim().slice(0, 4000);
   if (has('priority')) item.priority = parsePriority(fields.priority);
   if (has('agent')) item.agent = checkAgent(item.project, fields.agent);
+  // The tool suggested for its task (claude, codex or grok; "" clears it): the task runs on it (src/tools.mjs).
+  if (has('tool')) item.tool = parseTool(fields.tool);
   if (has('level')) item.level = parseLevel(fields.level);
   if (has('status')) {
     const status = parseStatus(fields.status);
@@ -414,14 +417,14 @@ const TRIAGE_FROM = ['proposed', 'triaged', 'future', 'todo'];
 /**
  * The manager's triage: { priority, agent, recommend (now | later | discard), note (one line on why), risk (one line on
  * what to watch, for the owner's decision card), order (a position in the owner's list), level (the approval level: 1,
- * 2 or 3) }. The item then waits for the owner's decision.
+ * 2 or 3), tool (the tool suggested for its task) }. The item then waits for the owner's decision.
  */
-export function triageItem(id, { priority, agent, recommend, note, risk, order, level } = {}) {
+export function triageItem(id, { priority, agent, recommend, note, risk, order, level, tool } = {}) {
   const board = readBoard();
   const item = findIn(board, id);
   if (item.archived || !TRIAGE_FROM.includes(item.status)) throw new Error(`Item #${item.id} is ${item.archived ? 'archived' : item.status}: only proposed, future or to-do items are triaged.`);
   if (recommend == null || recommend === '') throw new Error(`Recommend something: --recommend ${RECOMMENDATIONS.join('|')}.`);
-  applyFields(item, { priority: priority || undefined, agent: agent || undefined, level: level ?? undefined });
+  applyFields(item, { priority: priority || undefined, agent: agent || undefined, level: level ?? undefined, tool: tool ?? undefined });
   if (!item.agent) throw new Error(`Say which agent would do item #${item.id}: --agent <member>.`);
   Object.assign(item, { recommend: parseRecommendation(recommend), recommend_note: clip(note, 200) || item.recommend_note || '', recommend_risk: clip(risk, 200) || item.recommend_risk || '', triaged_at: now(), status: 'triaged', updated: now() });
   placeAt(board, item, order != null && order !== '' ? order : item.rank ?? Number.MAX_SAFE_INTEGER);
@@ -434,7 +437,7 @@ export function triageItem(id, { priority, agent, recommend, note, risk, order, 
  * "later" (future) or "discard" (with a reason; "restore" brings it back). by: who decided, the owner, the manager
  * (which discards proposals that make no sense or repeat another) or the autopilot (src/autopilot.mjs).
  */
-export async function decideItem(id, decision, { reason, by = 'owner' } = {}) {
+export async function decideItem(id, decision, { reason, by = 'owner', tool } = {}) {
   const board = readBoard();
   const item = findIn(board, id);
   if (item.archived) throw new Error(`Item #${item.id} is archived: restore it first.`);
@@ -444,6 +447,7 @@ export async function decideItem(id, decision, { reason, by = 'owner' } = {}) {
     if (!item.agent) throw new Error(`Item #${item.id} has no agent to do it: the manager's triage sets one (plan triage ${item.id} --agent <member>).`);
     if (!loadConfig().projects?.[item.project]) throw new Error(`${item.project} is not a project in the settings: its task can't be queued.`);
     checkAgent(item.project, item.agent);
+    if (tool !== undefined && tool !== null) item.tool = parseTool(tool);
     Object.assign(item, { status: 'approved', approved_at: stamp, decided_by: by });
     placeAt(board, item, item.rank ?? Number.MAX_SAFE_INTEGER);
   } else if (decision === 'later') {
@@ -518,7 +522,7 @@ async function startNext() {
   for (const item of next.values()) {
     try {
       if (!config.projects?.[item.project]) throw new Error(`${item.project} is not a project in the settings`);
-      started.push(createRun({ kind: 'task', projectId: item.project, agent: item.agent, instruction: taskInstruction(item), review: true, origin: 'plan', plan: item.id, level: item.level ?? null }));
+      started.push(createRun({ kind: 'task', projectId: item.project, agent: item.agent, instruction: taskInstruction(item), review: true, origin: 'plan', plan: item.id, level: item.level ?? null, tool: item.tool ?? null }));
     } catch (error) {
       // Back to "to do", with the reason, so it doesn't hold the project's turn.
       console.error(`Planning: item #${item.id} could not start:`, error.message);
@@ -530,7 +534,7 @@ async function startNext() {
 
 /** The app's commands: { action: add | set | archive | restore | propose | triage | approve | later | discard | reorder, id, ...fields }. */
 export async function changePlan(body = {}) {
-  const fields = Object.fromEntries(['project', 'title', 'description', 'priority', 'status', 'agent', 'run', 'pr', 'level'].filter(k => body[k] !== undefined).map(k => [k, body[k]]));
+  const fields = Object.fromEntries(['project', 'title', 'description', 'priority', 'status', 'agent', 'tool', 'run', 'pr', 'level'].filter(k => body[k] !== undefined).map(k => [k, body[k]]));
   switch (body.action) {
     case 'add':
       return addItem(fields);
@@ -545,14 +549,14 @@ export async function changePlan(body = {}) {
       return proposeItem({ project: body.project, title: body.title, summary: body.summary ?? body.description, agent: body.agent, priority: body.priority, by: who.by, run: who.run });
     }
     case 'triage':
-      return triageItem(body.id, { priority: body.priority, agent: body.agent, recommend: body.recommend, note: body.note, risk: body.risk, order: body.order, level: body.level });
+      return triageItem(body.id, { priority: body.priority, agent: body.agent, recommend: body.recommend, note: body.note, risk: body.risk, order: body.order, level: body.level, tool: body.tool });
     case 'approve':
       // The manager's approval for the owner, within the autopilot's limits only.
       if (body.autopilot) return (await import('./autopilot.mjs')).autopilotApprove(body.id);
     // falls through
     case 'later':
     case 'discard':
-      return decideItem(body.id, body.action, { reason: body.reason, by: body.by === 'manager' ? 'manager' : 'owner' });
+      return decideItem(body.id, body.action, { reason: body.reason, by: body.by === 'manager' ? 'manager' : 'owner', tool: body.tool });
     case 'reorder':
       return reorderItems(body.ids);
     default:

@@ -124,7 +124,7 @@ function memberContext({ config, id, project, team, memberId, builder, libraries
   const sum = list => list.reduce((n, p) => n + p.tokens, 0);
   const repo = repository.files.filter(f => f.kind === 'start');
   const total = { system: sum(system), repository: sum(repo), prompt: sum(prompt) };
-  const { tool } = stepTool(config, agent, finalReview);
+  const { tool } = stepTool(config, agent, finalReview, { project });
   return {
     id: memberId, name: agent.name ?? memberId, base: agent.base ?? null, kind, role: kind === 'lead' ? 'review' : finalReview ? 'final review' : 'task',
     tool,

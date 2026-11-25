@@ -230,8 +230,10 @@ try {
     const p = proposed?.id;
     expect((await post('/api/planning', { action: 'propose', project: 'Sample', title: 'smoke  PROPOSAL' })).status === 400, 'a proposal repeating an open item was not refused');
     expect((await post('/api/planning', { action: 'triage', id: p, agent: 'someone' })).status === 400, 'a triage without a recommendation was not refused');
-    const triaged = await itemOf(await post('/api/planning', { action: 'triage', id: p, recommend: 'fazer agora', priority: 'alta', note: 'Small and useful.', order: 1 }));
-    expect(triaged?.status === 'triaged' && triaged.recommend === 'now' && triaged.priority === 'high' && triaged.rank === 1 && triaged.recommend_note === 'Small and useful.', `a proposal was not triaged: ${JSON.stringify(triaged)}`);
+    expect((await post('/api/planning', { action: 'triage', id: p, recommend: 'now', tool: 'gemini' })).status === 400, 'a triage with an unknown tool was not refused');
+    const triaged = await itemOf(await post('/api/planning', { action: 'triage', id: p, recommend: 'fazer agora', priority: 'alta', note: 'Small and useful.', order: 1, tool: 'Codex' }));
+    expect(triaged?.status === 'triaged' && triaged.recommend === 'now' && triaged.priority === 'high' && triaged.rank === 1 && triaged.recommend_note === 'Small and useful.' && triaged.tool === 'codex',
+      `a proposal was not triaged, or its task's tool was not kept: ${JSON.stringify(triaged)}`);
     const deciding = (await (await fetch(`${base}/api/state`)).json()).attention.items.find(i => i.id === `decide:${p}`);
     expect(deciding?.level === 'important' && deciding.kind === 'decision' && deciding.view === 'planning', `a triaged proposal is not an important notice: ${JSON.stringify(deciding)}`);
     expect((await post('/api/planning', { action: 'approve', id: p })).status === 400, 'an item of a project not in the settings was approved');
@@ -874,6 +876,35 @@ try {
   delete process.env.CHIEFMATE_GROK;
 } catch (error) {
   failures.push(`crew tools checks: ${error.message}`);
+}
+
+// A tool chosen for one task (--tool), in this process with made-up runs (nothing runs): the run keeps it, the prompt
+// of its step says how it runs, a sensitive project stays on Claude Code, the final review asks for its "Corrections:"
+// line, and the run's end leaves the records "node src/cli.mjs tools" sums up.
+try {
+  const runs = await import(pathToFileURL(path.join(root, 'src', 'runs.mjs')).href);
+  const tools = await import(pathToFileURL(path.join(root, 'src', 'tools.mjs')).href);
+  const config = { owner: 'Owner', language: 'en', projects: { p: { name: 'P' } } };
+  const access = { addDirs: [], denied: [], docs: null };
+  const run = { id: 'smoke-tool', kind: 'task', project: 'p', title: 'Fix the conflict', branch: 'b', tool: 'codex', steps: [{ agent: 'generalist', part: 'Fix it', status: 'pending' }], review: { agent: 'manager', part: 'Review', status: 'pending' } };
+  const parts = args => runs.promptParts({ run, previous: [], changes: '', traces: [], config, libraries: [], base: 'main', access, built: null, agents: {}, ...args });
+  const text = args => parts(args).flatMap(x => x.lines).join('\n');
+  expect(text({ step: run.steps[0], project: config.projects.p, finalReview: false }).includes('## Working on Codex'), "a task chosen for Codex does not tell its step how it runs");
+  expect(!text({ step: run.steps[0], project: { name: 'P', sensitive: true }, finalReview: false }).includes('## Working on'), 'a sensitive project ran a step on Codex');
+  expect(!text({ step: run.review, project: config.projects.p, finalReview: true }).includes('Corrections:'), 'the final review asked for corrections with no step on Codex or Grok');
+  Object.assign(run.steps[0], { status: 'done', tool: 'codex', durationMs: 3 * 60000, report: 'Done.' });
+  const review = text({ step: run.review, project: config.projects.p, finalReview: true, previous: run.steps });
+  expect(review.includes('ran on Codex') && review.includes('"Corrections:"') && !review.includes('## Working on'), 'the final review does not ask what it fixed in the work done on Codex, or left Claude Code');
+  Object.assign(run, { status: 'done', checks: [{ command: 'npm test', ok: true }] });
+  Object.assign(run.review, { status: 'done', report: '## Verdict\nCorrections: a test was missing\nApprove.' });
+  tools.recordQuality(tools.qualityRecords(run, []));
+  tools.recordQuality(tools.qualityRecords({ ...run, id: 'smoke-tool-2', review: { ...run.review, report: 'Corrections: none' } }, []));
+  const out = execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'tools'], { env: process.env, stdio: 'pipe', windowsHide: true, encoding: 'utf8' });
+  expect(/^Codex: 2 step\(s\), 50% approved with no correction, 1 corrected by the review, 0 failed, mean 3 min/m.test(out) && /^Grok: 0 step\(s\)/m.test(out) && /^ {2}task: 2 step\(s\)/m.test(out),
+    `"tools" does not sum up the records by tool and kind of task: ${out}`);
+  expect(existsSync(path.join(data, 'manager', 'tools-quality.jsonl')), 'the records are not in data/manager/tools-quality.jsonl');
+} catch (error) {
+  failures.push(`task tool checks: ${error.message}`);
 }
 
 // Updating without waiting, in this process, with made-up hooks (no git, no restart, no real run or answer): the runs

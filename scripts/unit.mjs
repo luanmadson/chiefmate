@@ -9,8 +9,11 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
-import { stepTool } from '../src/runs.mjs';
-import { agentTool, availableTools, codexEnvironment, codexEvents, codexGuard, codexStepArgs, GROK_DENY, grokEvents, grokStepArgs, toolAvailable, toolModel } from '../src/tools.mjs';
+import { askedTool, stepTool } from '../src/runs.mjs';
+import {
+  agentTool, availableTools, chooseTool, codexEnvironment, codexEvents, codexGuard, codexStepArgs, correctionLine, GROK_DENY, grokEvents, grokStepArgs, parseTool,
+  qualityRecords, qualitySummary, runTools, toolAvailable, toolModel,
+} from '../src/tools.mjs';
 import { parseLevel } from '../src/util.mjs';
 import { behindOrigin, fastForward, projectLibraries, sameRepository } from '../src/workspace.mjs';
 import { SAMPLE_CSV, sampleXlsx, zip } from './fixtures.mjs';
@@ -419,6 +422,62 @@ test("a tool's model: the member's own, never a Claude model on Codex or Grok", 
   assert.equal(toolModel('grok', 'Opus'), null);
   assert.equal(toolModel('codex', 'gpt-6.1'), 'gpt-6.1');
   assert.equal(toolModel('claude', 'claude-opus-5-5'), 'claude-opus-5-5');
+});
+
+test("a task's tool: over the member's, never for the leads, the final review or a sensitive project", () => {
+  const config = { tools: { grok: { available_until: '2026-12-17' } } };
+  const day = new Date(2026, 11, 1);
+  assert.equal(parseTool(' Codex '), 'codex');
+  assert.equal(parseTool(''), null);
+  assert.throws(() => parseTool('gemini'), /Unknown tool/);
+  assert.deepEqual(chooseTool(config, { id: 'generalist' }, { asked: 'codex', date: day }), { tool: 'codex', asked: 'codex', until: null, reason: null, task: true });
+  assert.equal(chooseTool(config, { id: 'writer', tool: 'grok' }, { asked: 'claude', date: day }).tool, 'claude', "the task's choice wins over the member's");
+  assert.deepEqual(chooseTool(config, { id: 'writer', tool: 'grok' }, { date: day }), { tool: 'grok', asked: 'grok', until: '2026-12-17', reason: null, task: false });
+  assert.equal(chooseTool(config, { id: 'lead', lead: true }, { asked: 'codex', date: day }).reason, 'lead');
+  assert.equal(chooseTool(config, { id: 'generalist' }, { asked: 'grok', date: new Date(2026, 11, 18) }).reason, 'expired');
+  const sensitive = chooseTool(config, { id: 'generalist', tool: 'codex' }, { asked: 'grok', project: { sensitive: true }, date: day });
+  assert.deepEqual([sensitive.tool, sensitive.asked, sensitive.reason], ['claude', 'grok', 'sensitive']);
+  assert.equal(chooseTool(config, { id: 'lead', lead: true }, { asked: 'codex', project: { sensitive: true }, date: day }).reason, 'lead', 'a lead is not "sensitive"');
+  assert.equal(stepTool(config, { id: 'generalist' }, true, { asked: 'codex' }).tool, 'claude', 'the final review left Claude Code');
+  // The step's own tool (a mission's step), else the run's.
+  assert.equal(askedTool({ tool: 'grok' }, { toolAsked: 'codex' }), 'codex');
+  assert.equal(askedTool({ tool: 'grok' }, {}), 'grok');
+  assert.equal(askedTool({}, {}), null);
+});
+
+test("a run's tools, for the cards: the ones its crew ran on, or will run on", () => {
+  assert.deepEqual(runTools({ kind: 'task', tool: 'codex', steps: [{ agent: 'generalist', status: 'pending' }] }), ['codex']);
+  assert.deepEqual(runTools({ kind: 'task', tool: 'codex', steps: [{ agent: 'generalist', status: 'done', tool: 'claude' }] }), [], 'it fell back to Claude Code');
+  assert.deepEqual(runTools({ kind: 'mission', steps: [{ agent: 'writer', status: 'pending', toolAsked: 'grok' }, { agent: 'generalist', status: 'done', tool: 'codex' }, { agent: 'manager', status: 'done', tool: 'claude' }] }), ['grok', 'codex']);
+  assert.deepEqual(runTools({ kind: 'ask', tool: 'grok', steps: [{ agent: 'lead', role: 'plan', status: 'pending' }] }), ['grok'], 'a request not planned yet');
+  assert.deepEqual(runTools({ kind: 'task', steps: [{ agent: 'generalist', status: 'pending' }] }), []);
+});
+
+test("the tools' quality: one record per step on Codex or Grok, and the summary by tool", () => {
+  assert.equal(correctionLine('## Verdict\n**Corrections:** fixed a missing import\nApprove.'), 'fixed a missing import');
+  assert.equal(correctionLine('No such line'), null);
+  const run = id => ({
+    id, project: 'demo', kind: 'task', title: 'Fix the conflict', tool: 'codex', status: 'done', checks: [{ command: 'npm test', ok: true }],
+    steps: [{ agent: 'generalist', status: 'done', tool: 'codex', durationMs: 4 * 60000 }],
+    review: { agent: 'manager', status: 'done', tool: 'claude', report: 'Corrections: none' },
+  });
+  const clean = qualityRecords(run('a'));
+  assert.equal(clean.length, 1);
+  assert.deepEqual([clean[0].tool, clean[0].kind, clean[0].chosen, clean[0].checks, clean[0].corrected, clean[0].note], ['codex', 'task', 'task', true, false, '']);
+  const fixed = qualityRecords(run('b'), ['Chiefmate: manager review']);
+  assert.deepEqual([fixed[0].corrected, fixed[0].note], [true, 'Chiefmate: manager review']);
+  const said = qualityRecords({ ...run('c'), review: { status: 'done', report: 'Corrections: the test was wrong' } });
+  assert.deepEqual([said[0].corrected, said[0].note], [true, 'the test was wrong']);
+  const failed = qualityRecords({ ...run('d'), status: 'failed', checks: [], review: { status: 'pending' }, steps: [{ agent: 'writer', status: 'failed', tool: 'grok', durationMs: 60000 }] });
+  assert.deepEqual([failed[0].tool, failed[0].checks, failed[0].corrected, failed[0].chosen], ['grok', null, null, 'task']);
+  assert.deepEqual(qualityRecords({ ...run('e'), steps: [{ agent: 'generalist', status: 'done', tool: 'claude' }] }), [], 'no step on Codex or Grok, no record');
+  const summary = qualitySummary([...clean, ...fixed, ...said, ...failed]);
+  const codex = summary.find(x => x.tool === 'codex');
+  assert.deepEqual([codex.count, codex.clean, codex.corrected, codex.failed, codex.meanMs], [3, 1, 2, 0, 4 * 60000]);
+  assert.deepEqual(codex.kinds.map(k => [k.kind, k.count]), [['task', 3]]);
+  const grok = summary.find(x => x.tool === 'grok');
+  assert.deepEqual([grok.count, grok.clean, grok.failed], [1, 0, 1]);
+  assert.ok(!summary.some(x => x.tool === 'claude'));
 });
 
 test('Codex: its sandbox, no own configuration, never asking, and the guard as its hook', () => {

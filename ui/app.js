@@ -163,6 +163,8 @@ function toolTitle(a) {
   return a.toolUntil ? t('Runs on {tool} until {date}', { tool: name, date: a.toolUntil }) : t('Runs on {tool}', { tool: name });
 }
 const toolBadge = a => (a?.tool ? `<span class="tool-mark" data-tool="${esc(a.tool)}" title="${esc(toolTitle(a))}">${esc(TOOL_LABELS[a.tool] ?? a.tool)}</span>` : '');
+/** The tools other than Claude Code a run's crew works (or will work) on, as "on Codex". */
+const runToolsLabel = r => (r?.tools ?? []).map(x => t('on {tool}', { tool: TOOL_LABELS[x] ?? x }));
 /** A model's short name; none: the tool's own default. */
 const modelLabel = a => (a.model ? shortModel(a.model) : t('default model'));
 
@@ -1158,7 +1160,7 @@ function drawQueue() {
   };
   const rows = list.map((r, i) => `<tr class="${i === 0 ? 'next' : ''}">
       <td class="num">${i + 1}</td>
-      <td>${i === 0 ? `<span class="tag">${esc(t('Next'))}</span>` : ''}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), r.note].filter(Boolean).join(' · '))}</span></td>
+      <td>${i === 0 ? `<span class="tag">${esc(t('Next'))}</span>` : ''}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span></td>
       <td>${stateHtml(runState(r.status))}</td>
       <td class="num">${r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? `${shortDate(r.notBefore)} (${esc(relative(r.notBefore))})` : esc(expected(r))}</td>
       <td class="row-actions"><button type="button" class="button danger small" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button></td>
@@ -1167,7 +1169,7 @@ function drawQueue() {
     ? `<div class="label" style="margin-top:24px">${esc(t('Queue'))}</div>
     <table class="table queue"><thead><tr><th>#</th><th>${esc(t('Run'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Expected start'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
     : '';
-  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note]), Math.floor(Date.now() / 60000)]), html);
+  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools]), Math.floor(Date.now() / 60000)]), html);
 }
 
 /** A run going on: who is at work, the step out of how many, the time counting and the last action, all live. */
@@ -1183,7 +1185,7 @@ function liveCard(a, key) {
         <div class="live-label">${online ? liveDot() : ''}<span class="label">${esc(t('Running now'))}</span></div>
         <div class="live-title" title="${esc(a.title)}">${esc(a.title)}</div>
         ${a.summary ? `<div class="live-summary" title="${esc(a.summary)}">${esc(a.summary)}</div>` : ''}
-        <div class="hint">${esc([projectName(a.project), kindLabel(a.kind), t('started at {time}', { time: clockTime(a.started) })].join(' · '))}</div>
+        <div class="hint">${esc([projectName(a.project), kindLabel(a.kind), ...runToolsLabel(a), t('started at {time}', { time: clockTime(a.started) })].join(' · '))}</div>
       </div>
       <div class="live-clock"><span class="label">${esc(t('Elapsed'))}</span><strong>${ticking(a.started)}</strong></div>
       <div class="live-progress">
@@ -1684,7 +1686,7 @@ function allRuns() {
 function drawLog() {
   const list = allRuns();
   const rows = list.map(r => {
-    const details = [kindLabel(r.kind), projectName(r.project), originLabel(r.origin), r.pullRequest ? t('pull request opened') : ''].filter(Boolean).join(' · ');
+    const details = [kindLabel(r.kind), projectName(r.project), ...runToolsLabel(r), originLabel(r.origin), r.pullRequest ? t('pull request opened') : ''].filter(Boolean).join(' · ');
     return `<tr class="clickable${r.id === selectedRun ? ' selected' : ''}" data-select="${esc(r.id)}">
       <td class="num">${shortDate(r.created)}</td>
       <td><span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc(details)}</span></td>
@@ -1695,7 +1697,7 @@ function drawLog() {
   const html = list.length
     ? `<table class="table"><thead><tr><th>${esc(t('Date'))}</th><th>${esc(t('Run'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Time'))}</th></tr></thead><tbody>${rows.join('')}</tbody></table>`
     : `<div class="empty">${esc(t('No runs yet.'))}</div>`;
-  draw('#log-list', JSON.stringify([selectedRun, list.map(r => [r.id, r.title, r.summary, r.status, r.ended, r.pullRequest, r.needsYou]), Math.floor(Date.now() / 60000)]), html);
+  draw('#log-list', JSON.stringify([selectedRun, list.map(r => [r.id, r.title, r.summary, r.status, r.ended, r.pullRequest, r.needsYou, r.tools]), Math.floor(Date.now() / 60000)]), html);
 }
 
 async function refreshDetail(force = false) {
@@ -1718,7 +1720,8 @@ async function refreshDetail(force = false) {
   const canResume = ['paused', 'waiting', 'failed', 'canceled'].includes(r.status);
   const canCancel = ['running', 'queued', 'waiting', 'paused'].includes(r.status);
   const reports = steps.map((s, i) => {
-    const facts = [s.tool && s.tool !== 'claude' ? TOOL_LABELS[s.tool] ?? s.tool : '', s.model ? shortModel(s.model) : '', s.durationMs ? t('{minutes} min', { minutes: Math.round(s.durationMs / 60000) }) : '', s.turns ? t('{count} turns', { count: s.turns }) : '', s.subagents ? t('{count} subagent(s)', { count: s.subagents }) : ''].filter(Boolean);
+    const chosen = s.status === 'pending' && !s.review && !['manager', 'lead'].includes(s.agent) ? s.toolAsked ?? r.tool : null;
+    const facts = [s.tool && s.tool !== 'claude' ? TOOL_LABELS[s.tool] ?? s.tool : chosen && chosen !== 'claude' ? t('to run on {tool}', { tool: TOOL_LABELS[chosen] ?? chosen }) : '', s.model ? shortModel(s.model) : '', s.durationMs ? t('{minutes} min', { minutes: Math.round(s.durationMs / 60000) }) : '', s.turns ? t('{count} turns', { count: s.turns }) : '', s.subagents ? t('{count} subagent(s)', { count: s.subagents }) : ''].filter(Boolean);
     let body = s.report || s.error;
     if (!body) body = s.status === 'pending' ? t('Not started yet.') : s.status === 'running' ? t('Working…') : t('No report.');
     return `
@@ -1740,7 +1743,7 @@ async function refreshDetail(force = false) {
   const html = `
     <h2>${esc(r.title)}</h2>
     ${r.summary ? `<p class="run-summary">${esc(r.summary)}</p>` : ''}
-    <div class="hint">${stateHtml(runLabel({ ...r, needsYou: (r.requests ?? []).filter(x => x.status === 'open').length }))} · <span class="num">${shortDate(r.created)}</span> · ${esc(projectName(r.project))} · ${esc(originLabel(r.origin))}${r.started ? ` · <span class="num">${esc(elapsed(r.started, r.ended ?? Date.now()))}</span>` : ''}</div>
+    <div class="hint">${stateHtml(runLabel({ ...r, needsYou: (r.requests ?? []).filter(x => x.status === 'open').length }))} · <span class="num">${shortDate(r.created)}</span> · ${esc(projectName(r.project))}${(brief?.tools ?? []).length ? ` · ${esc(runToolsLabel(brief).join(' · '))}` : ''} · ${esc(originLabel(r.origin))}${r.started ? ` · <span class="num">${esc(elapsed(r.started, r.ended ?? Date.now()))}</span>` : ''}</div>
     ${r.result ? `<p>${esc(r.result)}</p>` : ''}${r.note ? `<p class="hint">${esc(r.note)}</p>` : ''}
     ${r.outcome ? `<div class="label">${esc(t('Final summary'))}</div>${outcomeHtml(r.outcome)}` : ''}
     ${r.instruction ? `<details class="report-full"><summary>${esc(t('Full instruction'))}</summary><p class="hint">${esc(r.instruction)}</p></details>` : ''}
@@ -3192,6 +3195,7 @@ function planRow(i) {
   const about = [
     i.proposed_by === 'owner' ? t('Proposed by you') : i.proposed_by ? t('Proposed by {who}', { who: agentName(i.proposed_by, i.project) }) : '',
     i.agent ? t('for {agent}', { agent: agentName(i.agent, i.project) }) : '',
+    i.tool && i.tool !== 'claude' ? t('on {tool}', { tool: TOOL_LABELS[i.tool] ?? i.tool }) : '',
     i.recommend ? t('manager: {recommendation}', { recommendation: recommendLabel(i.recommend) }) + (i.recommend_note ? ` (${i.recommend_note})` : '') : '',
     i.status === 'discarded' ? t('discarded: {reason}', { reason: i.discard_reason || t('no reason given') }) : '',
   ].filter(Boolean).join(' · ');

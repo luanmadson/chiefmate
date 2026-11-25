@@ -1522,5 +1522,10 @@
   "Runs on {tool} until {date}": "Roda no {tool} até {date}",
   "Runs on {tool}": "Roda no {tool}",
   "default model": "modelo padrão",
-  "The tool it runs on": "A ferramenta em que roda"
+  "The tool it runs on": "A ferramenta em que roda",
+  "on {tool}": "no {tool}",
+  "to run on {tool}": "vai rodar no {tool}",
+  "Unknown tool \"{tool}\". Use: {list}.": "Ferramenta desconhecida \"{tool}\". Use: {list}.",
+  "{tool} was chosen, but this project is marked sensitive: this step runs on Claude Code": "{tool} foi escolhido, mas este projeto é marcado como sensível: este passo roda no Claude Code",
+  "{tool} is not signed in on this computer: this step runs on Claude Code": "{tool} não está conectado neste computador: este passo roda no Claude Code"
 }

@@ -16,10 +16,10 @@ const option = name => {
 };
 const has = name => rest.includes(name);
 // The words of a command that are not options nor their values ("--title <text>").
-const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--level', '--note', '--recommend', '--project'];
+const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--level', '--note', '--recommend', '--project', '--tool'];
 const words = () => rest.filter((x, i) => !x.startsWith('--') && !VALUED.includes(rest[i - 1]));
 /** The title and summary given with --title and --summary: nothing is generated for them. */
-const brief = () => ({ title: option('--title'), summary: option('--summary'), level: option('--level') });
+const brief = () => ({ title: option('--title'), summary: option('--summary'), level: option('--level'), tool: option('--tool') });
 // CHIEFMATE_PORT runs a second, temporary Chiefmate next to yours (the smoke test does this).
 const port = () => Number(process.env.CHIEFMATE_PORT) || loadConfig().port || 4747;
 const work = run => formatDuration(stepsOf(run).reduce((sum, s) => sum + (s.durationMs ?? 0), 0));
@@ -74,18 +74,26 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs server [--log]               starts the app, the queue, the schedule and the updates (http://localhost:${port()});
                                                 --log writes what it prints to data/server.log
   node src/cli.mjs status                       what is running, the queue, the account's usage and the crew
-  node src/cli.mjs mission <id> [--plan <n>] [--level 1|2|3]
-                                                queues a mission (the ids are in config/chiefmate.json)
+  node src/cli.mjs mission <id> [--plan <n>] [--level 1|2|3] [--tool claude|codex|grok]
+                                                queues a mission (the ids are in config/chiefmate.json); --tool: the
+                                                tool of its crew's steps that name none ("tool" in a mission's step)
   node src/cli.mjs task <project> <agent> "<what to do>" [--review] [--modules A,B] [--plan <n>] [--level 1|2|3]
+                            [--tool claude|codex|grok]
                                                 queues a one-off task; --review has the manager review it at the end;
                                                 --modules adds optional blocks of the prompt builder; --plan links it
                                                 to item n of the planning board, which then follows the run; --level is
                                                 the approval level of its result (1: the manager decides, 2: the owner
-                                                approves, 3: only the owner), shown on the owner's decision card
-  node src/cli.mjs ask <project> "<request>" [--plan <n>] [--level 1|2|3]
+                                                approves, 3: only the owner), shown on the owner's decision card;
+                                                --tool runs it on that tool instead of the member's own (Claude Code
+                                                when the tool is not available or signed in, or the project is
+                                                "sensitive"; the final review is always on Claude Code)
+  node src/cli.mjs ask <project> "<request>" [--plan <n>] [--level 1|2|3] [--tool claude|codex|grok]
                                                 queues a request for the project's team lead ("lead" in its settings):
                                                 the lead plans it into at most 3 tasks for the project's crew, reviews
-                                                their work first, and the manager does the final review
+                                                their work first, and the manager does the final review; --tool: the
+                                                tool of the tasks the lead plans
+  node src/cli.mjs tools [--json]               how Codex and Grok did on the crew's steps (data/manager/tools-quality.jsonl):
+                                                by tool and kind of task, how many, % approved with no correction, mean time
   node src/cli.mjs level <run id> <1|2|3|none>  sets (or clears) the approval level of a run
   node src/cli.mjs plan [list] [--project <id>] [--status <s>] [--priority <p>] [--all]
                                                 the planning board: open items by priority (--all: done and archived too)
@@ -93,18 +101,19 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 adds an item; statuses: proposed, triaged, approved, future, todo, queued,
                                                 in_progress, waiting_owner, done, discarded
   node src/cli.mjs plan set <n> [--title ...] [--description ...] [--project ...] [--priority ...] [--status ...] [--agent ...]
-                            [--run <id>] [--pr <url>] [--level 1|2|3|none] [--archive | --restore]
+                            [--tool claude|codex|grok|""] [--run <id>] [--pr <url>] [--level 1|2|3|none] [--archive | --restore]
                                                 changes item n (--run "" or --pr "" removes the link)
   node src/cli.mjs plan done <n>                marks item n as done
   node src/cli.mjs plan propose <project> "<short title>" --summary "<1-2 sentences>" [--agent <member>] [--priority ...]
                                                 for the crew: proposes an item (status "proposed", the author recorded);
                                                 the manager hears of it and triages it, the owner decides
   node src/cli.mjs plan triage <n> --recommend now|later|discard --level 1|2|3 [--agent <member>] [--priority ...]
-                            [--note "..."] [--risk "..."] [--order <position>]
+                            [--note "..."] [--risk "..."] [--order <position>] [--tool claude|codex|grok]
                                                 for the manager: the item then waits for the owner's decision (--risk:
                                                 one line on what to watch, shown on the owner's card; --level: its
-                                                approval level, also shown there)
-  node src/cli.mjs plan approve|later|discard <n> [--reason "..."] [--duplicate-of <m>]
+                                                approval level, also shown there; --tool: the tool suggested for its
+                                                task, which runs on it once approved)
+  node src/cli.mjs plan approve|later|discard <n> [--reason "..."] [--duplicate-of <m>] [--tool claude|codex|grok]
                                                 the decision: "approve" makes it a task for its agent (one approved task
                                                 per project at a time, the others wait in order), "later" leaves it for
                                                 the future, "discard" sets it aside with a reason (plan restore <n> brings
@@ -361,10 +370,10 @@ async function requestCommand() {
 async function planCommand() {
   const planning = await import('./planning.mjs');
   // The options that take a value.
-  const keys = ['title', 'description', 'project', 'priority', 'status', 'agent', 'run', 'pr', 'level', 'summary', 'recommend', 'note', 'risk', 'order', 'reason', 'by', 'duplicate-of'];
+  const keys = ['title', 'description', 'project', 'priority', 'status', 'agent', 'tool', 'run', 'pr', 'level', 'summary', 'recommend', 'note', 'risk', 'order', 'reason', 'by', 'duplicate-of'];
   const [action = 'list', ...args] = rest.filter((x, i) => !x.startsWith('--') && !keys.includes(rest[i - 1]?.slice(2)));
-  const fields = () => Object.fromEntries(['title', 'description', 'project', 'priority', 'status', 'agent', 'run', 'pr', 'level'].filter(k => option(`--${k}`) !== undefined).map(k => [k, option(`--${k}`)]));
-  const line = i => `#${String(i.id).padEnd(3)} ${i.priority.padEnd(6)} ${i.status.padEnd(13)} ${i.project}: ${i.title}${i.agent ? `  (${i.agent})` : ''}${i.recommend ? `  [recommended: ${i.recommend}]` : ''}${i.level ? `  [level ${i.level}]` : ''}${i.run ? `  [run ${i.run}${i.run_status ? `, ${i.run_status}` : ''}]` : ''}${i.pr ? `  ${i.pr}` : ''}${i.archived ? '  (archived)' : ''}`;
+  const fields = () => Object.fromEntries(['title', 'description', 'project', 'priority', 'status', 'agent', 'tool', 'run', 'pr', 'level'].filter(k => option(`--${k}`) !== undefined).map(k => [k, option(`--${k}`)]));
+  const line = i => `#${String(i.id).padEnd(3)} ${i.priority.padEnd(6)} ${i.status.padEnd(13)} ${i.project}: ${i.title}${i.agent ? `  (${i.agent}${i.tool ? `, on ${i.tool}` : ''})` : ''}${i.recommend ? `  [recommended: ${i.recommend}]` : ''}${i.level ? `  [level ${i.level}]` : ''}${i.run ? `  [run ${i.run}${i.run_status ? `, ${i.run_status}` : ''}]` : ''}${i.pr ? `  ${i.pr}` : ''}${i.archived ? '  (archived)' : ''}`;
   const notes = i => [
     i.description,
     i.proposed_by ? `Proposed by ${i.proposed_by}${i.proposed_run ? ` (run ${i.proposed_run})` : ''}.` : '',
@@ -397,11 +406,11 @@ async function planCommand() {
       return;
     }
     case 'triage':
-      show('Triaged', await change({ action: 'triage', id: which(), priority: option('--priority'), agent: option('--agent'), recommend: option('--recommend'), note: option('--note'), risk: option('--risk'), order: option('--order'), level: option('--level') }));
+      show('Triaged', await change({ action: 'triage', id: which(), priority: option('--priority'), agent: option('--agent'), recommend: option('--recommend'), note: option('--note'), risk: option('--risk'), order: option('--order'), level: option('--level'), tool: option('--tool') }));
       return;
     case 'approve':
     case 'later':
-      show(action === 'approve' ? 'Approved' : 'Later', await change({ action, id: which(), by, ...(action === 'approve' && has('--autopilot') ? { autopilot: true } : {}) }));
+      show(action === 'approve' ? 'Approved' : 'Later', await change({ action, id: which(), by, ...(action === 'approve' && has('--autopilot') ? { autopilot: true } : {}), ...(action === 'approve' ? { tool: option('--tool') } : {}) }));
       return;
     case 'discard': {
       const duplicate = option('--duplicate-of');
@@ -693,6 +702,21 @@ async function main() {
       console.log(`Chiefmate ${s.version}${s.update.waiting ? `, update waiting (${s.update.waiting} change(s))` : ''}`);
       for (const m of s.missions) console.log(`Mission ${m.id} (${m.project}): ${m.schedule}${m.next ? `, next ${formatDateTime(m.next)}` : ''}`);
       for (const a of s.crew) console.log(`Crew ${a.id}: ${a.status}${a.run ? ` (${a.run})` : ''}, ${a.tool && a.tool !== 'claude' ? `${a.tool}${a.model ? ` ${a.model}` : ''}` : a.model}${a.toolReason === 'expired' ? ` (${a.toolAsked} expired ${a.toolUntil})` : ''}`);
+      return;
+    }
+    case 'tools': {
+      // Read here: the records are a file of their own, with or without Chiefmate running.
+      const { qualitySummary, TOOL_NAMES } = await import('./tools.mjs');
+      const summary = qualitySummary();
+      if (has('--json')) return console.log(JSON.stringify(summary, null, 2));
+      const percent = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : '-');
+      const minutes = ms => (ms ? `${Math.round(ms / 60000)} min` : '-');
+      const row = (name, x) => `${name}: ${x.count} step(s), ${percent(x.clean, x.count)} approved with no correction, ${x.corrected} corrected by the review, ${x.failed} failed, mean ${minutes(x.meanMs)}`;
+      for (const x of summary) {
+        console.log(row(TOOL_NAMES[x.tool], x));
+        for (const k of x.kinds) console.log(`  ${row(k.kind, k)}`);
+      }
+      if (!summary.some(x => x.count)) console.log('No step has run on Codex or Grok yet: Claude Code does the work by default (--tool on task, ask, mission and plan).');
       return;
     }
     case 'mission': {

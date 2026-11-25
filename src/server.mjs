@@ -9,7 +9,7 @@ import { autopilotStatus, changeAutopilot } from './autopilot.mjs';
 import { answerRequest, chargeProfileId, inCharge, projectRequests } from './charge.mjs';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
-import { agentTool, toolModel } from './tools.mjs';
+import { agentTool, runTools, toolModel } from './tools.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
 import { addQuestion, decide, decisionCards, openPushes, openQuestions } from './decisions.mjs';
 import { listFolder, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
@@ -129,7 +129,9 @@ const summary = run => ({
   id: run.id, title: run.title, summary: run.summary ?? null, outcome: run.outcome ?? null, kind: run.kind, mission: run.mission, project: run.project, origin: run.origin, status: run.status,
   created: run.created, started: run.started, ended: run.ended, notBefore: run.notBefore, note: run.note, result: run.result,
   pullRequest: run.pullRequest, needsYou: (run.requests ?? []).filter(r => r.status === 'open').length,
-  steps: stepsOf(run).map(s => ({ agent: s.agent, status: s.status, review: s === run.review, role: s.role ?? null, task: s.task ?? null })),
+  steps: stepsOf(run).map(s => ({ agent: s.agent, status: s.status, review: s === run.review, role: s.role ?? null, task: s.task ?? null, tool: s.tool ?? null })),
+  // Codex or Grok, when the run's crew steps ran (or were chosen to run) on them: the cards, the queue and the log show it.
+  tools: runTools(run),
   // A request to a project's team lead, and what the lead decided: its plan and its opinion (src/leads.mjs).
   request: run.kind === 'ask' ? run.instruction : null,
   lead: run.lead ? { plan: run.lead.plan ?? null, opinion: run.lead.opinion ? clip(run.lead.opinion, 700) : null } : null,
@@ -245,6 +247,8 @@ const brief = body => ({
   summary: typeof body.summary === 'string' && body.summary.trim() ? body.summary : null,
   // The manager's approval level (1 to 3) for the owner's decision card.
   level: body.level ?? null,
+  // The tool of the run's crew steps (--tool): claude, codex or grok; none: each member's own.
+  tool: typeof body.tool === 'string' && body.tool.trim() ? body.tool : null,
 });
 
 /** A run's task, short, for "waiting for <who>: <task>". */
