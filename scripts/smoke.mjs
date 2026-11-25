@@ -1543,8 +1543,10 @@ try {
   const hook = settings.hooks?.PreToolUse?.[0]?.hooks?.[0]?.command ?? '';
   const goes = (command, cwd = repo) => !/"permissionDecision":"deny"/.test(execFileSync(hook, { shell: true, encoding: 'utf8', input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', tool_input: { command }, cwd }) }));
   expect(hook.includes('--grants') && !goes('git push origin feature') && !goes('git push origin main'), `the manager's push went without the owner: ${hook}`);
-  const made = pushRequestsFrom(log);
+  const history = path.join(pushDir, 'guard-history.jsonl');
+  const made = pushRequestsFrom(log, history);
   expect(made.length === 1 && made[0].branch === 'feature' && made[0].repo === 'example-org/sample' && !existsSync(log), `a refused push did not become one request: ${JSON.stringify(made)}`);
+  expect(readFileSync(history, 'utf8').trim().split('\n').length === 2, "the manager's refusals were not kept in its guard history");
   const pushes = openPushes();
   const cards = decisionCards({ config: { projects: {} }, attention: attentionItems({ config: { projects: {} }, pushes }), pushes });
   const card = cards.find(c => c.kind === 'push');

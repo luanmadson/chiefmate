@@ -1,6 +1,6 @@
 // The conversation with the manager: a Claude Code session that carries on from message to message.
 import { randomUUID } from 'node:crypto';
-import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { runClaude } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead } from './config.mjs';
@@ -37,10 +37,12 @@ const MANAGER_DIR = path.join(DATA, 'manager');
 const HANDOFF_FILE = path.join(MANAGER_DIR, 'handoff.md');
 const NOTES_FILE = path.join(MANAGER_DIR, 'notes.md');
 const conversationLog = () => path.join(ensureDir(MANAGER_DIR), 'conversation.jsonl');
+// The guard's refusals in the answer under way; once it ends, they move to guard-history.jsonl.
 const guardLog = () => path.join(ensureDir(MANAGER_DIR), 'guard.jsonl');
+const guardHistory = () => path.join(ensureDir(MANAGER_DIR), 'guard-history.jsonl');
 
 // In the conversation the manager works in Chiefmate's own folder: it never commits there, and never pushes (the guard,
-// guard.mjs, also refuses a publication written any other way; each refusal is noted in guard.jsonl). The one exception
+// guard.mjs, also refuses a publication written any other way; each refusal is kept in guard-history.jsonl). The one exception
 // is a push the owner allowed once on its card (src/decisions.mjs): while one is allowed, "git push" is left to the guard.
 const CHAT_DISALLOWED = ['Agent', 'WebSearch', 'WebFetch', 'Bash(git commit:*)', ...ALWAYS_DISALLOWED];
 
@@ -337,7 +339,12 @@ async function answer(items) {
     await processes(60_000).catch(() => {}); // the projects running on this computer, for the situation
     const prompt = `<situation>\n${situation(libraries)}\n</situation>\n\n${composeMessage(config.owner, items, state.manager.interrupted)}`;
     // What the guard refuses in this answer, read when it ends; and whether the owner allowed a push (the guard decides which).
-    rmSync(guardLog(), { force: true });
+    // A log left by an answer cut short goes to the history first, with its push requests.
+    try {
+      pushRequestsFrom(guardLog(), guardHistory());
+    } catch (error) {
+      console.error('Push requests:', error.message);
+    }
     const granted = readPushes(pushesFile()).some(g => g.status === 'allowed' && Date.parse(g.expires) > Date.now());
     const attempt = session => {
       // Interrupted while the situation was being gathered: nothing to stop.
@@ -416,7 +423,7 @@ async function answer(items) {
   } finally {
     // A push the guard refused that the owner could allow: a card in Decisions.
     try {
-      pushRequestsFrom(guardLog());
+      pushRequestsFrom(guardLog(), guardHistory());
     } catch (error) {
       console.error('Push requests:', error.message);
     }

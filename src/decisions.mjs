@@ -7,7 +7,7 @@
 // ("merge_by_owner": false) shows its pull requests as waiting for that review, with no Approve. A push the manager
 // tried and the guard refused becomes a card too: the owner allows that one push (src/guard.mjs, takeGrant) or refuses it.
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { markSeen } from './attention.mjs';
 import { loadConfig } from './config.mjs';
@@ -86,13 +86,16 @@ const cliPush = p => `node src/cli.mjs push "${p.dir.replaceAll('\\', '/')}" ${p
 export const openPushes = (list = readPushes(pushesFile())) => list.filter(p => p.status === 'open' && Date.now() - Date.parse(p.at) < PUSH_OPEN_FOR);
 
 /**
- * Turns what the guard refused in the manager's answer (its log, removed once read) into push requests: one per push
- * that could be allowed, unless the same one already waits. Returns the new requests.
+ * Turns what the guard refused in the manager's answer (its log, moved to "history" once read) into push requests: one
+ * per push that could be allowed, unless the same one already waits. Returns the new requests.
  */
-export function pushRequestsFrom(log) {
+export function pushRequestsFrom(log, history = null) {
   if (!existsSync(log)) return [];
-  const lines = readFileSync(log, 'utf8').split('\n').filter(Boolean);
+  const text = readFileSync(log, 'utf8');
+  // Every refusal stays on record, not only the pushes.
+  if (history && text.trim()) appendFileSync(history, text.endsWith('\n') ? text : `${text}\n`);
   rmSync(log, { force: true });
+  const lines = text.split('\n').filter(Boolean);
   const made = [];
   for (const line of lines) {
     let entry;
