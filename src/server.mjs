@@ -15,7 +15,7 @@ import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
 import { computer, processes, stoppable, stopProject } from './machine.mjs';
 import { chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
-import { mergeRun, previewMerge } from './merge.mjs';
+import { closeReplaced, mergeRun, previewClose, previewMerge } from './merge.mjs';
 import { awayInfo, reportEvent, setAway } from './news.mjs';
 import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
@@ -610,6 +610,10 @@ export function startServer() {
           // Merges a finished run's work with the owner's authorization (src/merge.mjs): "preview" only shows it.
           if (body.preview) return reply(res, 200, await previewMerge(body.run));
           return reply(res, 200, await mergeRun(body.run, { by: body.by === 'manager' ? 'manager' : 'owner' }));
+        case '/api/close-pr':
+          // Closes a run's pull request replaced by a newer run's (src/merge.mjs): "preview" only shows it.
+          if (body.preview) return reply(res, 200, previewClose(body.run, body.replacedBy));
+          return reply(res, 200, await closeReplaced(body.run, body.replacedBy, { by: body.by === 'manager' ? 'manager' : 'owner' }));
         case '/api/manager':
           // Accepted at any time: while the manager answers, the message waits in the queue.
           return reply(res, 202, { ok: true, ...sendToManager(body.message) });

@@ -151,6 +151,10 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 the pull request (or the branch delivered locally), the checks and the
                                                 review's verdict; with --yes, Chiefmate merges it (a pull request on
                                                 GitHub; a local branch into your clone's base branch, nothing pushed)
+  node src/cli.mjs close-pr <id> --replaced-by <id> [--yes]
+                                                a run's pull request replaced by a newer run's (same board item, or the
+                                                newer instruction names the old run): shows both; with --yes, closes it
+                                                on GitHub with a comment naming the new one (the branch stays)
   node src/cli.mjs update-check                 looks for an approved update of Chiefmate now (after a merge), instead of
                                                 within 10 minutes; it then installs as "auto_update_mode" says
   node src/cli.mjs update-now [--yes] [--interrupt-manager]
@@ -810,6 +814,22 @@ async function main() {
       }
       const m = await api('/api/merge', { run: id, by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' });
       console.log(m.kind === 'pr' ? `Merged: ${m.url}.` : `Merged: ${m.branch} into ${m.base}, in ${m.dir}. Nothing was sent to GitHub.`);
+      return;
+    }
+    case 'close-pr': {
+      // Never from a step of a run: the crew doesn't close pull requests.
+      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error('The crew never closes pull requests.');
+      const id = rest[0];
+      const newer = option('--replaced-by');
+      if (!id || id.startsWith('--') || !newer) throw new Error('Which runs? node src/cli.mjs close-pr <run> --replaced-by <newer run> [--yes]');
+      const c = await api('/api/close-pr', { run: id, replacedBy: newer, preview: !has('--yes'), by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' });
+      if (!has('--yes')) {
+        console.log(`${c.title} [${c.run}], project ${c.project}: ${c.url}`);
+        console.log(`Replaced by ${c.newTitle} [${c.replacedBy}]: ${c.newUrl} (${c.why}).`);
+        console.log('Nothing was closed. Add --yes to close it on GitHub with a comment naming the new one.');
+        return;
+      }
+      console.log(`Closed: ${c.url}, replaced by ${c.newUrl}. Its branch stays; it can be reopened on GitHub.`);
       return;
     }
     case 'update-check': {
