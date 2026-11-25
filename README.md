@@ -95,6 +95,14 @@ queue ─► fresh working copy ─► the crew, one after another ─► manage
 
 A one-off task follows the same path, with a single agent and, if you tick the box, the manager's review. A request to a project's team lead (`ask`) does too: the lead's planning first, then the tasks it planned, its first review and the manager's final review.
 
+### Titles and summaries
+
+Every run says what it does in a few words, so you understand it in seconds without reading the instruction:
+- **A short title and a summary.** When a run is queued, it gets a title (up to about 60 characters, in your language, saying what will be done, such as "Prompt builder: read from the library and highlight blocks") and a summary of one or two sentences (what it is and why). They come from the lightest model (`quick_model`, Haiku by default: one short call, with no tools) and, until it answers or when it can't, from the instruction's first sentence. The manager gives its own with `--title` and `--summary`, and then nothing is generated. A mission keeps its name, and its description as the summary.
+- **What the agent is doing now.** While a step works, Operations, the focus, the project's page and the agent's panel show one plain line, taken from its actions: "reading the code (runs.mjs)", "running the tests", "waiting for you".
+- **A final summary.** Every step's report starts with three parts: **What was done** (up to 3 short items), **What changes for you** (one sentence) and **Needs you?** (no, or yes and what). The app shows them first and folds the full report below. At the end, the run gets one too, written from its steps; the same summary opens the pull request's text.
+- **Everywhere.** The title and summary are what Operations, the focus, the project's page, Planning, the Log, the Windows notifications, the manager's notices and the manager's situation show. Older runs get theirs when the app lists them, and their final summary when you open them.
+
 Runs going on at the same time never share a working copy: each project has its own. The reference libraries are shared, so Chiefmate runs only one update of each library at a time, and a run that asks for a library while it is being updated gets that same update. The self-update pauses the runs going on and resumes them after it (or, in `"wait"` mode, waits until every run has ended: see "Chiefmate improves itself").
 
 ### What each step sees
@@ -292,6 +300,7 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `owner` | Your name, so the manager knows who it answers to |
 | `language` | `en` or `pt-BR`: the app, the notifications, the manager's answers and the reports |
 | `default_model` | The model for agents that don't set one |
+| `quick_model` | The model of the short calls that write the runs' titles, summaries and final summaries (`"haiku"` by default, with no tools); `false` turns them off, and the instruction's first sentence and the steps' own summaries are used instead |
 | `attribution` | `false` keeps the crew's commits and pull requests from crediting Claude (they are credited to you alone) |
 | `backup_dir` | A folder of your own, such as one in a private repository, where Chiefmate keeps an up-to-date copy of these settings |
 | `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. Optional: `crew` (its own crew), `lead` (its team lead, see "The crew"), `mcp` (external tools it releases), `prompt_block`, `prompt_modules` and `prompt_exclude` (the prompt builder), `dev_start` (the command that starts its development environment from its page, such as `npm run dev`). See also "Local delivery" below |
@@ -412,6 +421,7 @@ The self-update only touches Chiefmate's own files. Your settings, the history a
 - **Agents have limits.** They cannot push to GitHub, open or merge pull requests, or change the repository's address.
 - **Each step sees only its project.** Other projects' working copies and documentation, the libraries a project doesn't list and Chiefmate's `data/` are denied to the file tools by permission rules (see "What each step sees"). A shell command can still read them: this is not a sandbox.
 - **None of your own configuration.** Agents run without your Claude Code settings, hooks, plugins, skills, `~/.claude/CLAUDE.md` and MCP servers, and without the variables of your own Claude session. The only external tools are those in `mcp_servers`, released by project or agent.
+- **The short calls have no tools.** The titles, summaries and final summaries come from `quick_model` with every tool off (`--tools ""`), in a folder of Chiefmate's data, without your configuration: they only read the text they are given and write a few lines.
 - **Sign-ins are yours.** Agents never type passwords: they ask for you with `needs-you`, and the address opens in your browser. The address comes from the agent (only `http` and `https`), so look at it before you act on it. With `browser_cdp`, remote debugging leaves that browser open to any local program: use a profile of its own.
 - **Your data stays home.** Your settings, the history and the working copies (`config/chiefmate.json`, `data/`, `workspaces/`) never go to git.
 - **Stopping processes asks first.** The Projects section and `stop-project` show what will stop and end only those processes. They never stop Chiefmate, what started it, the crew at work (cancel the run for that) or a live session (end it in Operations).
@@ -430,6 +440,8 @@ node src/cli.mjs task <project> <agent> "..." queues a one-off task (--review: t
                                               --modules A,B: optional blocks of the prompt builder; --plan <n>)
 node src/cli.mjs ask <project> "..."          queues a request for the project's team lead, who plans it into at most
                                               3 tasks for the crew and reviews them first (--plan <n>)
+                                              mission, task and ask take --title "..." (at most about 60 characters) and
+                                              --summary "..." (one or two sentences): nothing is generated for them
 node src/cli.mjs plan [list]                  the planning board's open items (--project, --status, --priority; --all)
 node src/cli.mjs plan add <project> "..."     adds an item (--priority high|medium|low, --status, --description)
 node src/cli.mjs plan set <n> --status ...    changes an item (--title, --description, --project, --priority, --run,
