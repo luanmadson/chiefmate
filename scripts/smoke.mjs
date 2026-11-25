@@ -794,6 +794,88 @@ try {
   failures.push(`direct talk checks: ${error.message}`);
 }
 
+// A crew step on Codex and on Grok (src/tools.mjs), in this process, with stand-ins for both programs (nothing real
+// runs): the agent's instructions at the top of the prompt, the text and actions in the step's log, the session kept,
+// Chiefmate's guard given to Codex as its hook and Grok's deny rules noted as the guard's refusals, and an interruption
+// that waits for the action under way.
+try {
+  const { runTool } = await import(pathToFileURL(path.join(root, 'src', 'tools.mjs')).href);
+  const { t } = await import(pathToFileURL(path.join(root, 'src', 'i18n.mjs')).href);
+  const toolsDir = path.join(data, 'tools');
+  mkdirSync(toolsDir, { recursive: true });
+  const fakeCodex = path.join(toolsDir, 'fake-codex.mjs');
+  writeFileSync(fakeCodex, [
+    "const args = process.argv.slice(2);",
+    "let prompt = ''; process.stdin.on('data', d => (prompt += d)); process.stdin.on('end', () => {",
+    "  const say = e => process.stdout.write(JSON.stringify(e) + '\\n');",
+    "  const resume = args[1] === 'resume';",
+    "  say({ type: 'thread.started', thread_id: resume ? args[args.length - 2] : 'thread-smoke' });",
+    "  say({ type: 'item.completed', item: { id: 'w', type: 'error', message: '`--dangerously-bypass-hook-trust` is enabled.' } });",
+    "  say({ type: 'item.started', item: { id: 'c1', type: 'command_execution', command: 'powershell.exe -Command \\'npm test\\'' } });",
+    "  if (prompt.includes('SLOW')) { setTimeout(() => say({ type: 'item.completed', item: { id: 'c1', type: 'command_execution', command: 'npm test', exit_code: 0 } }), 700); setTimeout(() => {}, 30000); return; }",
+    "  say({ type: 'item.completed', item: { id: 'c1', type: 'command_execution', command: 'npm test', exit_code: 0 } });",
+    "  say({ type: 'item.completed', item: { id: 'f1', type: 'file_change', changes: [{ kind: 'update', path: process.cwd() + '/README.md' }] } });",
+    "  const hook = args.find(a => a.startsWith('hooks.PreToolUse=')) ?? '';",
+    "  const report = resume ? 'Resumed: ' + prompt.trim() : (prompt.startsWith('## Your role') ? 'ROLE ' : 'NO ROLE ') + (hook.includes('guard.mjs') ? 'GUARD' : 'NO GUARD') + (args.includes('workspace-write') || args.includes('sandbox_mode=\"workspace-write\"') ? ' SANDBOX' : '');",
+    "  say({ type: 'item.completed', item: { id: 'm1', type: 'agent_message', text: report } });",
+    "  say({ type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 4, output_tokens: 3 } });",
+    "});",
+  ].join('\n'));
+  const fakeGrok = path.join(toolsDir, 'fake-grok.mjs');
+  writeFileSync(fakeGrok, [
+    "import { readFileSync } from 'node:fs';",
+    "const args = process.argv.slice(2);",
+    "const prompt = readFileSync(args[args.indexOf('--prompt-file') + 1], 'utf8');",
+    "const say = e => process.stdout.write(JSON.stringify(e) + '\\n');",
+    "const id = args.includes('-r') ? args[args.indexOf('-r') + 1] : args[args.indexOf('-s') + 1];",
+    "say({ type: 'text', data: 'Checking ' }); say({ type: 'text', data: 'the tree.' });",
+    "say({ type: 'tool_call', toolCallId: 'g1', toolName: 'run_terminal_command', status: 'pending', rawInput: { command: 'git -C . push origin main' } });",
+    "say({ type: 'tool_call_update', toolCallId: 'g1', status: 'failed', content: [{ type: 'content', content: { type: 'text', text: 'Tool was not executed: Denied by permission policy: deny rule on bash matching \"*git *push*\"' } }] });",
+    "const env = ['GROK_CLAUDE_HOOKS_ENABLED', 'GROK_CURSOR_MCPS_ENABLED'].every(k => process.env[k] === '0') ? 'NO OWN CONFIG' : 'OWN CONFIG';",
+    "say({ type: 'text', data: (prompt.startsWith('## Your role') ? 'ROLE ' : 'NO ROLE ') + env + (args.filter(a => a === '--deny').length >= 6 ? ' DENY' : '') });",
+    "say({ type: 'usage', usage: { input_tokens: 7, cache_read_input_tokens: 5, output_tokens: 2 } });",
+    "say({ type: 'end', stopReason: 'end_turn', sessionId: id, usage: { input_tokens: 7, cache_read_input_tokens: 5, output_tokens: 2 }, num_turns: 2 });",
+  ].join('\n'));
+  process.env.CHIEFMATE_CODEX = fakeCodex;
+  process.env.CHIEFMATE_GROK = fakeGrok;
+  const base = { dir: toolsDir, system: 'You are the generalist.', model: 'claude-opus-5-5', maxMinutes: 5 };
+
+  const codexLog = path.join(toolsDir, '01-generalist.jsonl');
+  const events = [];
+  const codex = runTool('codex', { ...base, prompt: 'Do the task', session: { id: 'not-yet' }, log: codexLog, guardLog: path.join(toolsDir, '01-generalist.guard.jsonl'), onEvent: e => events.push(e) });
+  const done = await codex.promise;
+  expect(done.ok && done.text === 'ROLE GUARD SANDBOX' && done.session === 'thread-smoke', `the Codex step did not end with its report, its guard and its sandbox: ${JSON.stringify(done)}`);
+  expect(!codex.args.includes('-m') && codex.args.includes('--ignore-user-config'), "a Claude model went to Codex, or Codex read the owner's own configuration");
+  expect(done.tokens.input === 10 && done.tokens.cacheRead === 4 && done.turns === 1, `Codex's usage was not counted: ${JSON.stringify(done.tokens)}`);
+  expect(events.some(e => e.type === 'action' && e.doing === t('running the tests')) && events.some(e => e.type === 'action' && /README\.md/.test(e.text)) && !events.some(e => e.failed),
+    `the Codex step's actions were not described as Claude Code's are: ${JSON.stringify(events)}`);
+  const feed = readFileSync(codexLog, 'utf8').trim().split('\n').map(l => JSON.parse(l));
+  expect(feed.every(e => e.type === 'assistant') && feed.some(e => e.message.content[0].type === 'tool_use') && existsSync(path.join(toolsDir, '01-generalist.raw.jsonl')),
+    "the Codex step's log is not in the shape the agent's panel reads, or its raw output was not kept");
+  const again = await runTool('codex', { ...base, prompt: 'Use the other file', session: { id: done.session, resume: true }, log: codexLog, guardLog: 'g' }).promise;
+  expect(again.ok && again.text === 'Resumed: Use the other file' && again.session === 'thread-smoke', `the Codex step was not resumed in the same thread: ${JSON.stringify(again)}`);
+  const started = Date.now();
+  const slow = runTool('codex', { ...base, prompt: 'SLOW', session: { id: 'x' }, log: path.join(toolsDir, 'slow.jsonl'), guardLog: 'g', onEvent: e => e.type === 'action' && slow.interrupt() });
+  const stopped = await slow.promise;
+  const took = Date.now() - started;
+  expect(stopped.interrupted && !stopped.error && took >= 600 && took < 20_000, `the Codex step's interruption did not wait for the action under way (${took} ms): ${JSON.stringify(stopped)}`);
+
+  const grokLog = path.join(toolsDir, '02-writer.jsonl');
+  const guardLog = path.join(toolsDir, '02-writer.guard.jsonl');
+  const said = [];
+  const grok = await runTool('grok', { ...base, prompt: 'Write', session: { id: 'grok-session-1' }, log: grokLog, guardLog, onEvent: e => said.push(e) }).promise;
+  expect(grok.ok && grok.text === 'ROLE NO OWN CONFIG DENY' && grok.session === 'grok-session-1', `the Grok step did not end with its report, its deny rules and without the owner's configuration: ${JSON.stringify(grok)}`);
+  expect(said.some(e => e.type === 'say' && e.text === 'Checking the tree.') && said.some(e => e.failed && e.text.includes(t("Refused by Chiefmate's guard: {reason}", { reason: '' }).trim())),
+    `Grok's text was not put together, or its refusal was not shown as the guard's: ${JSON.stringify(said)}`);
+  const refusal = existsSync(guardLog) ? JSON.parse(readFileSync(guardLog, 'utf8').trim().split('\n')[0]) : null;
+  expect(refusal?.tool_input?.command === 'git -C . push origin main', `Grok's refusal was not noted as the guard notes its own: ${JSON.stringify(refusal)}`);
+  expect(existsSync(`${grokLog}.prompt.md`) && readFileSync(`${grokLog}.prompt.md`, 'utf8').includes('You are the generalist.'), "the Grok step's prompt file does not carry the agent's instructions");
+  delete process.env.CHIEFMATE_CODEX;
+  delete process.env.CHIEFMATE_GROK;
+} catch (error) {
+  failures.push(`crew tools checks: ${error.message}`);
+}
+
 // Updating without waiting, in this process, with made-up hooks (no git, no restart, no real run or answer): the runs
 // going on are asked to pause, the update waits for them and for the manager (interrupting it when asked), and when the
 // new version does not go in, the paused work and the manager's queue go on.

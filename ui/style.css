@@ -149,6 +149,10 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .empty { color: var(--muted); padding: 8px 0; }
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .model { display: inline-block; font: 11px/1.6 var(--mono); color: var(--accent); border: 1px solid var(--line-strong); padding: 0 6px; white-space: nowrap; }
+/* The tool a member runs on: Claude Code in the quiet line color, Codex and Grok outlined in brass. */
+.marks { display: inline-flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.tool-mark { display: inline-block; font: 11px/1.6 var(--mono); color: var(--muted); border: 1px solid var(--line); padding: 0 6px; white-space: nowrap; text-transform: uppercase; letter-spacing: .04em; }
+.tool-mark[data-tool="codex"], .tool-mark[data-tool="grok"] { color: var(--accent); border-color: var(--accent); }
 
 .button { appearance: none; border: 1px solid var(--accent); border-radius: 2px; background: var(--accent); color: var(--on-accent); font: inherit; font-size: 12.5px; font-weight: 600; letter-spacing: 0.02em; padding: 7px 15px; cursor: pointer; display: inline-block; }
 .button:hover { filter: brightness(1.08); text-decoration: none; }

@@ -96,13 +96,14 @@ export async function processList() {
   return (Array.isArray(raw) ? raw : [raw]).map(p => ({ ...p, name: p.name ?? '', cmd: p.cmd ?? '', ram: Number(p.ram) || 0 }));
 }
 
-/** The kinds of process the crew's work starts, and only those: git, Claude Code headless and Codex exec. */
+/** The kinds of process the crew's work starts, and only those: git, Claude Code headless, Codex exec and Grok headless. */
 export function crewKind(p) {
   const name = String(p.name).toLowerCase();
   // git's own daemons (fsmonitor, credential cache) outlive their parent by design: never orphans.
   if (/^git(-remote-https?)?\.exe$/.test(name)) return /--daemon\b/.test(p.cmd) ? null : 'git';
   if (name === 'claude.exe' && /\s-p(\s|$)|--output-format\s+stream-json/.test(p.cmd)) return 'claude';
   if (name === 'codex.exe' && /\bexec\b/.test(p.cmd)) return 'codex';
+  if (name === 'grok.exe' && /--prompt-file\b/.test(p.cmd)) return 'grok';
   return null;
 }
 

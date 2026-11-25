@@ -9,6 +9,8 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
+import { stepTool } from '../src/runs.mjs';
+import { agentTool, availableTools, codexEnvironment, codexEvents, codexGuard, codexStepArgs, GROK_DENY, grokEvents, grokStepArgs, toolAvailable, toolModel } from '../src/tools.mjs';
 import { parseLevel } from '../src/util.mjs';
 import { behindOrigin, fastForward, projectLibraries, sameRepository } from '../src/workspace.mjs';
 import { SAMPLE_CSV, sampleXlsx, zip } from './fixtures.mjs';
@@ -386,4 +388,108 @@ test("your clone moves forward only by a fast forward, with nothing of yours in 
   assert.equal(await fastForward(behindClone, 'FETCH_HEAD', 'main'), null);
   assert.ok(existsSync(path.join(behindClone, 'merged.md')));
   assert.deepEqual(await behindOrigin(behindClone, 'main'), { branch: 'main', behind: 0 });
+});
+
+// ---------- The crew's tools (src/tools.mjs): which one a member runs on, until when, and how each is started ----------
+
+test('a member runs on Claude Code unless it asks for Codex or Grok, and the manager and leads always do', () => {
+  const config = { tools: { grok: { available_until: '2026-12-17' } } };
+  const day = new Date(2026, 11, 1);
+  assert.equal(agentTool(config, { id: 'generalist' }, day).tool, 'claude');
+  assert.deepEqual(agentTool(config, { id: 'generalist', tool: 'codex' }, day), { tool: 'codex', asked: 'codex', until: null, reason: null });
+  assert.deepEqual(agentTool(config, { id: 'writer', tool: 'Grok' }, day), { tool: 'grok', asked: 'grok', until: '2026-12-17', reason: null });
+  assert.equal(agentTool(config, { id: 'manager', tool: 'codex' }, day).reason, 'lead');
+  assert.equal(agentTool(config, { id: 'lead', lead: true, tool: 'grok' }, day).reason, 'lead');
+  assert.deepEqual(agentTool(config, { id: 'x', tool: 'gemini' }, day), { tool: 'claude', asked: 'gemini', until: null, reason: 'unknown' });
+  assert.equal(agentTool({ tools: { codex: { enabled: false } } }, { id: 'x', tool: 'codex' }, day).reason, 'off');
+  assert.equal(stepTool(config, { id: 'generalist', tool: 'codex' }, true).tool, 'claude', 'the final review left Claude Code');
+});
+
+test("a tool's last day: still there on it, gone the day after, by itself", () => {
+  const config = { tools: { grok: { available_until: '2026-12-17' }, codex: { available_until: 'soon' } } };
+  assert.ok(toolAvailable(config, 'grok', new Date(2026, 11, 17, 23, 59)));
+  assert.ok(!toolAvailable(config, 'grok', new Date(2026, 11, 18, 0, 1)));
+  assert.deepEqual(availableTools(config, new Date(2026, 11, 18)), ['claude', 'codex'], 'an unreadable date must not take the tool away');
+  assert.deepEqual(agentTool(config, { id: 'writer', tool: 'grok' }, new Date(2026, 11, 18)), { tool: 'claude', asked: 'grok', until: '2026-12-17', reason: 'expired' });
+  assert.ok(toolAvailable({}, 'claude') && !toolAvailable({}, 'other'));
+});
+
+test("a tool's model: the member's own, never a Claude model on Codex or Grok", () => {
+  assert.equal(toolModel('codex', 'claude-opus-5-5'), null);
+  assert.equal(toolModel('grok', 'Opus'), null);
+  assert.equal(toolModel('codex', 'gpt-6.1'), 'gpt-6.1');
+  assert.equal(toolModel('claude', 'claude-opus-5-5'), 'claude-opus-5-5');
+});
+
+test('Codex: its sandbox, no own configuration, never asking, and the guard as its hook', () => {
+  const args = codexStepArgs({ dir: 'C:\\work\\demo', model: 'claude-opus-5-5', effort: 'high', session: { id: 'x' }, guardLog: 'C:\\data\\01-generalist.guard.jsonl' });
+  const value = flag => args[args.indexOf(flag) + 1];
+  assert.equal(args[0], 'exec');
+  assert.ok(args.includes('--ignore-user-config') && args.includes('--json') && args.at(-1) === '-');
+  assert.ok(args.includes('sandbox_mode="workspace-write"') && args.includes('approval_policy="never"'));
+  assert.ok(!args.some(a => /danger-full-access|bypass-approvals-and-sandbox/.test(a)), 'the sandbox was turned off');
+  assert.equal(value('-C'), 'C:\\work\\demo');
+  assert.ok(!args.includes('-m'), 'a Claude model went to Codex');
+  assert.ok(args.includes('model_reasoning_effort="high"'));
+  const hook = args.find(a => a.startsWith('hooks.PreToolUse='));
+  assert.ok(hook && hook.includes('matcher="Bash"') && hook.includes('guard.mjs') && hook.includes('01-generalist.guard.jsonl'), `no guard hook: ${hook}`);
+  assert.ok(args.includes('--dangerously-bypass-hook-trust'), "the guard's hook would not run without trust");
+  const resumed = codexStepArgs({ dir: 'C:\\work\\demo', session: { id: 'thread-1', resume: true }, guardLog: 'g' });
+  assert.deepEqual(resumed.slice(0, 2), ['exec', 'resume']);
+  assert.equal(resumed.at(-2), 'thread-1');
+  assert.ok(resumed.some(a => a.startsWith('hooks.PreToolUse=')), 'the guard left the resumed session');
+});
+
+test("Codex's guard hook: words quoted for PowerShell (or sh), as TOML", () => {
+  const value = codexGuard("C:\\Run's data\\g.jsonl");
+  const command = JSON.parse(value.match(/command=("(?:[^"\\]|\\.)*")/)[1]);
+  if (windows) assert.ok(command.startsWith("& '") && command.includes("Run''s data"), command);
+  else assert.ok(command.includes("Run'\\''s data"), command);
+});
+
+test('Grok: deny rules for every publication, its own session, no Claude or Cursor configuration', () => {
+  const args = grokStepArgs({ dir: '/w', model: 'grok-4.7', effort: 'deep', session: { id: 'u1' }, promptFile: '/p.md' });
+  const denied = args.flatMap((a, i) => (a === '--deny' ? [args[i + 1]] : []));
+  assert.deepEqual(denied, GROK_DENY);
+  assert.ok(args.includes('--always-approve') && args.includes('--no-memory') && args[args.indexOf('--output-format') + 1] === 'streaming-json');
+  assert.equal(args[args.indexOf('-s') + 1], 'u1');
+  assert.equal(args[args.indexOf('-m') + 1], 'grok-4.7');
+  assert.ok(!args.includes('--effort'), 'an effort Grok does not know was passed');
+  assert.equal(grokStepArgs({ dir: '/w', session: { id: 'u1', resume: true }, promptFile: '/p.md' }).at(-1), 'u1');
+  // Each rule is a glob over the whole line: these must be caught, the ordinary commands must not.
+  const glob = rule => new RegExp(`^${rule.slice(5, -1).replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
+  const caught = command => GROK_DENY.some(rule => glob(rule).test(command));
+  for (const c of ['git push', 'git -C x push origin main', 'bash -c "git push"', 'git remote set-url origin x', 'gh pr create', 'gh repo delete x', 'gh api -X POST repos/a/b/pulls',
+    'curl -X POST https://api.github.com/repos/a/b/pulls']) assert.ok(caught(c), `not refused: ${c}`);
+  for (const c of ['git status', 'git commit -m "Fix"', 'npm test', 'node src/cli.mjs plan list', 'git log --oneline']) assert.ok(!caught(c), `refused: ${c}`);
+});
+
+test("Codex's PATH leaves out Windows' app aliases, which its sandbox can't start", { skip: !windows }, () => {
+  const key = Object.keys(process.env).find(k => k.toLowerCase() === 'path');
+  const saved = process.env[key];
+  process.env[key] = ['C:\\Windows\\System32', 'C:\\Users\\x\\AppData\\Local\\Microsoft\\WindowsApps', 'C:\\Tools'].join(';');
+  try {
+    const env = codexEnvironment({ CHIEFMATE_RUN: 'r' });
+    assert.equal(env[key], 'C:\\Windows\\System32;C:\\Tools');
+    assert.equal(env.CHIEFMATE_RUN, 'r');
+  } finally {
+    process.env[key] = saved;
+  }
+});
+
+test("Codex's and Grok's events become the step's text and actions", () => {
+  assert.deepEqual(codexEvents({ type: 'thread.started', thread_id: 't1' }), [{ kind: 'start', session: 't1' }]);
+  const call = codexEvents({ type: 'item.started', item: { id: 'i1', type: 'command_execution', command: '"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command \'npm test\'' } });
+  assert.deepEqual(call, [{ kind: 'call', id: 'i1', tool: 'Bash', input: { command: 'npm test' } }]);
+  assert.equal(codexEvents({ type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: 'x', exit_code: 1, aggregated_output: 'boom' } })[0].failed, true);
+  assert.deepEqual(codexEvents({ type: 'item.completed', item: { type: 'error', message: '`--dangerously-bypass-hook-trust` is enabled.' } }), []);
+  assert.equal(codexEvents({ type: 'turn.completed', usage: { input_tokens: 5, cached_input_tokens: 2, output_tokens: 1 } }).at(-1).kind, 'end');
+  const grokCall = grokEvents({ type: 'tool_call', toolCallId: 'c1', toolName: 'run_terminal_command', rawInput: { command: 'git status' } });
+  assert.equal(grokCall[0].tool, 'Bash');
+  assert.equal(grokCall[0].input.command, 'git status');
+  const denied = grokEvents({ type: 'tool_call_update', toolCallId: 'c2', status: 'failed', content: [{ type: 'content', content: { type: 'text', text: 'Tool was not executed: Denied by permission policy: deny rule on bash matching "*git *push*"' } }] });
+  assert.ok(denied[0].denied && denied[0].failed);
+  const end = grokEvents({ type: 'end', stopReason: 'end_turn', sessionId: 's1', usage: { input_tokens: 3, output_tokens: 2 }, num_turns: 4 });
+  assert.deepEqual(end.map(e => e.kind), ['start', 'usage', 'end']);
+  assert.equal(grokEvents({ type: 'end', stopReason: 'max_tokens' }).at(-1).kind, 'fail');
 });

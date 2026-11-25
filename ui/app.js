@@ -154,6 +154,18 @@ function bytes(n) {
   const mb = (n ?? 0) / 1024 ** 2;
   return mb >= 1024 ? `${(mb / 1024).toLocaleString(locale(), { minimumFractionDigits: 1, maximumFractionDigits: 1 })} GB` : `${Math.round(mb)} MB`;
 }
+// The tool a member's steps run on (Claude Code, Codex or Grok), as a mark beside its model.
+const TOOL_LABELS = { claude: 'Claude', codex: 'Codex', grok: 'Grok' };
+function toolTitle(a) {
+  const name = TOOL_LABELS[a.tool] ?? a.tool;
+  if (a.toolReason === 'expired') return t('{tool} was available until {date}: back on Claude Code', { tool: TOOL_LABELS[a.toolAsked] ?? a.toolAsked, date: a.toolUntil });
+  if (a.toolReason === 'off' || a.toolReason === 'unknown') return t('{tool} is not available: on Claude Code', { tool: TOOL_LABELS[a.toolAsked] ?? a.toolAsked });
+  return a.toolUntil ? t('Runs on {tool} until {date}', { tool: name, date: a.toolUntil }) : t('Runs on {tool}', { tool: name });
+}
+const toolBadge = a => (a?.tool ? `<span class="tool-mark" data-tool="${esc(a.tool)}" title="${esc(toolTitle(a))}">${esc(TOOL_LABELS[a.tool] ?? a.tool)}</span>` : '');
+/** A model's short name; none: the tool's own default. */
+const modelLabel = a => (a.model ? shortModel(a.model) : t('default model'));
+
 const shortModel = m =>
   String(m ?? '').replace(/^claude-/, '').replace(/-(\d+)-(\d+)$/, ' $1.$2').replace(/-(\d+)$/, ' $1').replace(/^\w/, c => c.toUpperCase());
 
@@ -1104,7 +1116,7 @@ function drawBridge() {
   else if (online && !job && update.waiting && !['changes', 'merge'].includes(update.blocked)) updateButton = `<button type="button" class="button small" data-update-now="now">${esc(t('Update now'))}</button>`;
   const roster = others.map(a => {
     const s = agentStatus(a);
-    return `<li>${face(a, faceState(a), 30, `${t(a.name)}: ${s[0]}`)}<div><div class="roster-name"><span>${esc(t(a.name))}</span>${stateHtml(s)}</div><div class="hint">${esc(agentDetail(a))} · ${esc(shortModel(a.model))}</div></div></li>`;
+    return `<li>${face(a, faceState(a), 30, `${t(a.name)}: ${s[0]}`)}<div><div class="roster-name"><span>${esc(t(a.name))}</span>${stateHtml(s)}</div><div class="hint">${esc(agentDetail(a))} · ${esc(TOOL_LABELS[a.tool] && a.tool !== 'claude' ? `${TOOL_LABELS[a.tool]} · ` : '')}${esc(modelLabel(a))}</div></div></li>`;
   });
   const html = `
     <div class="bridge-head">${face(manager, faceState(manager), 72, `${t(manager.name)}: ${status[0]}`)}
@@ -1114,7 +1126,7 @@ function drawBridge() {
     <div class="label">${esc(t('Crew on board'))}</div>
     <ul class="roster">${roster.join('')}</ul>
     <div class="connection hint">${esc(claudeLine)}<br>${esc(accountLine)}${online && account.updated ? ` · ${esc(t('measured {when}', { when: relative(account.updated) }))}` : ''}${updateLine ? `<br>${esc(updateLine)}` : ''}${updateButton ? `<div class="actions left update-actions">${updateButton}</div>` : ''}</div>`;
-  const signature = JSON.stringify([online, (state?.crew ?? []).map(a => [a.id, a.status, a.run, a.last?.at, a.model]), claude, account, update, Math.floor(Date.now() / 60000)]);
+  const signature = JSON.stringify([online, (state?.crew ?? []).map(a => [a.id, a.status, a.run, a.last?.at, a.model, a.tool]), claude, account, update, Math.floor(Date.now() / 60000)]);
   draw('#bridge', signature, html);
 }
 
@@ -1582,7 +1594,7 @@ function drawCrew() {
     return `<article class="crew-card" style="--agent:${esc(a.color ?? '#8a93a0')}"${online ? opensPanel(a.runs?.[0]) : ''}>
       ${face(a, faceState(a), 72, `${t(a.name)}: ${status[0]}`)}
       <div>
-        <div class="crew-top"><div><h2>${esc(t(a.name))}</h2><div class="hint">${esc(t(a.title ?? ''))}</div></div><span class="model" title="${esc(a.model)}">${esc(shortModel(a.model))}</span></div>
+        <div class="crew-top"><div><h2>${esc(t(a.name))}</h2><div class="hint">${esc(t(a.title ?? ''))}</div></div><span class="marks">${toolBadge(a)}<span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></span></div>
         ${stateHtml(status)}
         ${busy ? `<div class="crew-now">${esc(agentDetail(a))}</div>` : ''}
         <p class="crew-role">${esc(t(a.role ?? ''))}</p>
@@ -1706,7 +1718,7 @@ async function refreshDetail(force = false) {
   const canResume = ['paused', 'waiting', 'failed', 'canceled'].includes(r.status);
   const canCancel = ['running', 'queued', 'waiting', 'paused'].includes(r.status);
   const reports = steps.map((s, i) => {
-    const facts = [s.model ? shortModel(s.model) : '', s.durationMs ? t('{minutes} min', { minutes: Math.round(s.durationMs / 60000) }) : '', s.turns ? t('{count} turns', { count: s.turns }) : '', s.subagents ? t('{count} subagent(s)', { count: s.subagents }) : ''].filter(Boolean);
+    const facts = [s.tool && s.tool !== 'claude' ? TOOL_LABELS[s.tool] ?? s.tool : '', s.model ? shortModel(s.model) : '', s.durationMs ? t('{minutes} min', { minutes: Math.round(s.durationMs / 60000) }) : '', s.turns ? t('{count} turns', { count: s.turns }) : '', s.subagents ? t('{count} subagent(s)', { count: s.subagents }) : ''].filter(Boolean);
     let body = s.report || s.error;
     if (!body) body = s.status === 'pending' ? t('Not started yet.') : s.status === 'running' ? t('Working…') : t('No report.');
     return `
@@ -2296,6 +2308,7 @@ function contextPartTitle(key) {
     case 'lead-review': return t("The team lead's plan and opinion");
     case 'reports': return t('The reports of the steps before');
     case 'rules': return t("Chiefmate's rules for the crew");
+    case 'tool': return t('The tool it runs on');
     default: return key;
   }
 }
@@ -2409,7 +2422,7 @@ function contextMemberHtml(m) {
       ${prompt}
       <div class="context-heading"><span>${esc(t('4. Model, folders, tools and external tools'))}</span></div>
       <dl class="facts project-facts">
-        <dt>${esc(t('Model'))}</dt><dd>${esc(m.model ? shortModel(m.model) : '—')}${m.effort ? ` · ${esc(t('effort {effort}', { effort: m.effort }))}` : ''} · ${esc(t('up to {minutes} min per step', { minutes: m.maxMinutes }))}</dd>
+        <dt>${esc(t('Model'))}</dt><dd>${m.tool && m.tool !== 'claude' ? `${toolBadge(m)} ` : ''}${esc(m.model ? shortModel(m.model) : '—')}${m.effort ? ` · ${esc(t('effort {effort}', { effort: m.effort }))}` : ''} · ${esc(t('up to {minutes} min per step', { minutes: m.maxMinutes }))}</dd>
         <dt>${esc(t('Working copy'))}</dt><dd><code>${esc(a.workingCopy)}</code></dd>
         <dt>${esc(t('Folders allowed'))}</dt><dd>${list(a.addDirs)}</dd>
         <dt>${esc(t('Paths denied'))}</dt><dd><details><summary>${esc(t('{count} rule(s)', { count: a.deniedPaths.length }))}</summary><pre class="context-text">${esc(a.deniedPaths.join('\n'))}</pre></details></dd>

@@ -1509,5 +1509,18 @@
   "Nothing was heard.": "Nada foi ouvido.",
   "The browser's voice service doesn't have this language.": "O serviço de voz do navegador não tem este idioma.",
   "Dictation stopped ({error}).": "O ditado parou ({error}).",
-  "Dictation is off. To turn it back on: \"ui\": { \"voice_input\": true } in config/chiefmate.json.": "Ditado desligado. Para religar: \"ui\": { \"voice_input\": true } em config/chiefmate.json."
+  "Dictation is off. To turn it back on: \"ui\": { \"voice_input\": true } in config/chiefmate.json.": "Ditado desligado. Para religar: \"ui\": { \"voice_input\": true } em config/chiefmate.json.",
+  "Sign in to {tool} so this step can run on it: in a terminal, run \"{command}\" (it opens your browser), then click \"I did it\". The step goes on by itself once you are signed in.": "Entre no {tool} para este passo rodar nele: num terminal, rode \"{command}\" (abre o seu navegador) e clique em \"Já fiz\". O passo segue sozinho assim que você entrar.",
+  "Waiting for you to sign in to {tool}": "Esperando você entrar no {tool}",
+  "{tool} is not available to the crew now: this step runs on Claude Code": "{tool} não está disponível para a equipe agora: este passo roda no Claude Code",
+  "{tool} is not signed in on this computer.": "{tool} não está conectado neste computador.",
+  "The action failed": "A ação falhou",
+  "Grok stopped: {reason}": "O Grok parou: {reason}",
+  "Refused by Chiefmate's guard: {reason}": "Recusado pela trava do Chiefmate: {reason}",
+  "{tool} was available until {date}: back on Claude Code": "{tool} esteve disponível até {date}: de volta ao Claude Code",
+  "{tool} is not available: on Claude Code": "{tool} não está disponível: no Claude Code",
+  "Runs on {tool} until {date}": "Roda no {tool} até {date}",
+  "Runs on {tool}": "Roda no {tool}",
+  "default model": "modelo padrão",
+  "The tool it runs on": "A ferramenta em que roda"
 }
