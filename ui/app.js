@@ -2432,7 +2432,7 @@ function drawPlanning(force = false) {
   const projects = planProjects();
   const filters = `<label><span>${esc(t('Project'))}</span><select data-plan-filter="project">${planOptions([['', t('All projects')], ...projects], planFilter.project)}</select></label>
     <label><span>${esc(t('Priority'))}</span><select data-plan-filter="priority">${planOptions([['', t('All priorities')], ...state.planning.priorities.map(p => [p, priorityLabel(p)])], planFilter.priority)}</select></label>
-    <label><span>${esc(t('Status'))}</span><select data-plan-filter="status">${planOptions([['open', t('Open (not completed)')], ['waiting', t('Needs you')], ['all', t('All')],...state.planning.statuses.map(s => [s, planState(s)[0]]), ['archived', t('Archived')]], planFilter.status)}</select></label>
+    <label><span>${esc(t('Status'))}</span><select data-plan-filter="status">${planOptions([['open', t('Open (not completed)')], ['waiting', t('Needs you')], ['all', t('All')], ...state.planning.statuses.map(s => [s, planState(s)[0]]), ['archived', t('Archived')]], planFilter.status)}</select></label>
     <label><span>${esc(t('Order'))}</span><select data-plan-filter="sort">${planOptions([['priority', t('By priority')], ['updated', t('Recently updated')], ['number', t('By number')]], planFilter.sort)}</select></label>`;
   if (!$('#planning-filters').contains(document.activeElement)) draw('#planning-filters', filters, filters);
 

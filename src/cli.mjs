@@ -98,7 +98,7 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 the future, "discard" sets it aside with a reason (plan restore <n> brings
                                                 it back)
   node src/cli.mjs plan order <n> <n> ...       puts these items first in the owner's order, in this order
-  node src/cli.mjs chat [n]                   the conversation with the manager: the last n messages (10), what it is
+  node src/cli.mjs chat [n]                     the conversation with the manager: the last n messages (10), what it is
                                                 doing now and the messages waiting in the queue
   node src/cli.mjs chat say "<message>"         writes to the manager; while it answers, the message waits in the queue
                                                 and goes with the others, in order, when the answer ends
@@ -273,7 +273,9 @@ async function planCommand() {
   // Through the running Chiefmate, else here.
   const change = async body => (await apiOr('/api/planning', body, async () => ({ item: await planning.changePlan(body) }))).item;
   // The manager triages and the owner decides: a step of a run only proposes.
-  if (process.env.CHIEFMATE_RUN && ['triage', 'approve', 'later', 'discard', 'restore', 'order'].includes(action)) {
+  const decided = ['proposed', 'triaged', 'approved', 'discarded'];
+  if (process.env.CHIEFMATE_RUN && (['triage', 'approve', 'later', 'discard', 'restore', 'order'].includes(action)
+    || (['add', 'set'].includes(action) && option('--status') && decided.includes(planning.parseStatus(option('--status')))))) {
     throw new Error('A step of a run only proposes items: node src/cli.mjs plan propose <project> "<title>" --summary "..." --agent <member>.');
   }
   const by = process.env.CHIEFMATE_MANAGER ? 'manager' : option('--by');
@@ -323,19 +325,19 @@ async function planCommand() {
     }
     case 'add': {
       const [project, ...title] = args;
-      show('Added', planning.addItem({ ...fields(), project, title: title.join(' ') }));
+      show('Added', await change({ action: 'add', ...fields(), project, title: title.join(' ') }));
       return;
     }
     case 'set': {
       if (!args[0]) throw new Error('Which item? node src/cli.mjs plan set <n> --status <s>');
-      let item = planning.updateItem(args[0], fields());
+      let item = await change({ action: 'set', id: args[0], ...fields() });
       if (has('--archive') || has('--restore')) item = planning.archiveItem(args[0], has('--archive'));
       show('Changed', item);
       return;
     }
     case 'done':
       if (!args[0]) throw new Error('Which item? node src/cli.mjs plan done <n>');
-      show('Done', planning.updateItem(args[0], { status: 'done' }));
+      show('Done', await change({ action: 'set', id: args[0], status: 'done' }));
       return;
     default:
       throw new Error('Use: plan [list] | add <project> "<title>" | set <n> [--status ...] | done <n> | propose <project> "<title>" | triage <n> | approve|later|discard|restore <n> | order <n> <n> ...');
