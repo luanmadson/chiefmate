@@ -3,8 +3,9 @@
 // the request in the run, shows it in the app (a band at the top, the window's icon and title) and in a Windows
 // notification, and opens the address in the owner's browser. With --wait, the command returns when the owner clicks
 // "I did it" (or a check the agent gave succeeds), or answers it from the agent's panel (the command hands the answer
-// over). A question (--options "A|B", --recommend, --why) always waits, with one button per option. While it waits, the step's time limit stands still; past the longest wait, the command returns and the
-// request stays open: the run is never canceled for it.
+// over). A question (--options "A|B", --recommend, --why) always waits, with one button per option. While it waits,
+// the step's time limit stands still; past the longest wait, the command returns and the request stays open: the run
+// is never canceled for it.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from './config.mjs';
