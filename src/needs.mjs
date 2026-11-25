@@ -2,8 +2,8 @@
 // The agent runs "node <chiefmate>/src/cli.mjs needs-you "<what to do>" [--url <address>] [--wait]". Chiefmate records
 // the request in the run, shows it in the app (a band at the top, the window's icon and title) and in a Windows
 // notification, and opens the address in the owner's browser. With --wait, the command returns when the owner clicks
-// "Done" (or a check the agent gave succeeds), or answers it from the agent's panel (the command hands the answer
-// over). While it waits, the step's time limit stands still; past the longest wait, the command returns and the
+// "I did it" (or a check the agent gave succeeds), or answers it from the agent's panel (the command hands the answer
+// over). A question (--options "A|B", --recommend, --why) always waits, with one button per option. While it waits, the step's time limit stands still; past the longest wait, the command returns and the
 // request stays open: the run is never canceled for it.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -16,6 +16,8 @@ import { listRuns, readRun, saveRun, stepsOf } from './store.mjs';
 import { agentSays } from './talk.mjs';
 import { browserPath, PROFILE_DIR } from './usagepage.mjs';
 import { clip, ensureDir, now } from './util.mjs';
+
+const OPTIONS_MAX = 6; // as the manager's questions (src/decisions.mjs)
 
 /** "needs_you": { "max_wait_minutes": 120 }: the longest a step waits for you before it goes on without you. */
 export const needsSettings = (config = loadConfig()) => ({ maxWaitMinutes: Math.max(1, Number(config.needs_you?.max_wait_minutes) || 120) });
@@ -60,24 +62,43 @@ export async function openForOwner(url, config = loadConfig()) {
   return 'browser';
 }
 
+const same = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+
+/**
+ * A question's options ("A|B" or a list), each once, and the recommended one among them. Without options, the request
+ * is an action the owner takes outside the app (answered with "I did it").
+ */
+function questionOf(options, recommend) {
+  const list = (Array.isArray(options) ? options : String(options ?? '').split('|')).map(o => clip(o, 60)).filter(Boolean);
+  const choices = list.filter((o, i) => list.findIndex(x => same(x, o)) === i);
+  if (!choices.length) return null;
+  if (choices.length < 2 || choices.length > OPTIONS_MAX) throw new Error(`Give 2 to ${OPTIONS_MAX} options, separated by "|".`);
+  const recommended = recommend ? choices.find(o => same(o, recommend)) : null;
+  if (recommend && !recommended) throw new Error(`The recommendation must be one of the options: ${choices.join(', ')}.`);
+  return { options: choices, recommend: recommended ?? null };
+}
+
 /** Records a request from a step and lets the owner know. Returns the request, with the longest wait. */
-export async function askOwner({ run: runId, step, what, url, wait = false, check = null }) {
+export async function askOwner({ run: runId, step, what, url, wait = false, check = null, options = null, recommend = null, why = null }) {
   const text = String(what ?? '').trim();
   if (!text) throw new Error(t('Say what the owner should do.'));
   if (url && !/^https?:\/\//i.test(String(url))) throw new Error(t('The address must start with http:// or https://.'));
+  const question = questionOf(options, recommend);
   const run = runId ? runFor(String(runId)) : null;
   if (!run) throw new Error(t('Only a step of a run can ask for you: no run was given.'));
   const n = Number(step) || null;
   const request = {
     id: randomUUID().slice(0, 8), step: n, agent: (n && stepsOf(run)[n - 1]?.agent) || liveOf(run.id)?.agent || null, what: clip(text, 500),
-    url: url ? String(url) : null, wait: !!wait, check: check ? clip(check, 300) : null, status: 'open', at: now(),
+    // A question always waits: its answer is what the step needs.
+    url: url ? String(url) : null, wait: !!wait || !!question, check: check ? clip(check, 300) : null, status: 'open', at: now(),
+    ...(question ? { ...question, why: why ? clip(String(why).trim(), 300) : null } : {}),
   };
   (run.requests ??= []).push(request);
   // The request is also part of the direct conversation: the owner can answer it from the agent's panel.
   agentSays(run, { step: n, agent: request.agent, text: request.what, kind: 'request', request: request.id });
   saveRun(run);
   notify(t('Needs you: {title}', { title: run.title }), request.what, 'chiefmate:operations', { urgent: true });
-  reportEvent('needs_you', `${request.agent ?? 'A step'} in run ${run.id} "${run.title}" (project ${run.project}) needs the owner: ${request.what}${request.url ? ` (address: ${request.url}, opened in the owner's browser)` : ''}${request.wait ? '. The step waits until the owner clicks Done in the app.' : '. The step goes on meanwhile.'}`);
+  reportEvent('needs_you', `${request.agent ?? 'A step'} in run ${run.id} "${run.title}" (project ${run.project}) needs the owner: ${request.what}${request.options ? ` (options: ${request.options.join(' | ')}${request.recommend ? `; recommends ${request.recommend}` : ''})` : ''}${request.url ? ` (address: ${request.url}, opened in the owner's browser)` : ''}${request.wait ? (request.options ? '. The step waits for the owner to choose in the app.' : '. The step waits until the owner clicks "I did it" in the app.') : '. The step goes on meanwhile.'}`);
   if (request.url) {
     try {
       request.opened = await openForOwner(request.url);
@@ -106,10 +127,12 @@ export function pollRequest(runId, id) {
   return { status: request.status, by: request.by ?? null, answer: request.answer ?? null, waitedMinutes: Math.floor(waited / 60_000), maxWaitMinutes: max / 60_000, timedOut: waited >= max };
 }
 
-/** "Done": the owner did it (or the agent's check succeeded). */
-export function finishRequest(runId, id, by = 'owner') {
+/** "I did it": the owner did it (or the agent's check succeeded); for a question, the option the owner chose. */
+export function finishRequest(runId, id, by = 'owner', answer = null) {
   const { run, request } = findRequest(runId, id);
-  if (request.status === 'open') Object.assign(request, { status: 'done', done: now(), by });
+  const choice = answer == null ? null : request.options?.find(o => same(o, answer));
+  if (answer != null && !choice) throw new Error(t('Answer with one of the options.'));
+  if (request.status === 'open') Object.assign(request, { status: 'done', done: now(), by }, choice ? { answer: choice } : {});
   saveRun(run);
   return request;
 }

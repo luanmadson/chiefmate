@@ -497,7 +497,7 @@ export function startServer() {
           return reply(res, 200, pollRequest(body.run, body.id));
         case '/api/needs-you/done':
           if (body.session) return reply(res, 200, finishSessionRequest(String(body.session), String(body.id ?? '')));
-          return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner'));
+          return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner', body.answer ?? null));
         case '/api/decide':
           // The owner's click on a decision card: approve (a merge goes through src/merge.mjs), later, discard or answer.
           return reply(res, 200, await decide({ card: body.card, action: body.action, option: body.option, reason: body.reason }, buildState().decisions));
