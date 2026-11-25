@@ -531,7 +531,8 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     mcpServers: mcp.servers,
     // For "needs-you": which run and step is asking, and where Chiefmate answers.
     env: { CHIEFMATE_RUN: run.id, CHIEFMATE_STEP: String(index + 1), CHIEFMATE_PORT: String(Number(process.env.CHIEFMATE_PORT) || config.port || 4747) },
-    attribution: config.attribution !== false,
+    // With no trace, commits never credit Claude, whatever the installation's setting.
+    attribution: config.attribution !== false && !noTrace(project),
     maxMinutes: agent.max_minutes ?? 60,
     isHeld: () => Date.now() < l.heldUntil,
     log: path.join(runDir(run.id), `${name}.jsonl`),
