@@ -22,7 +22,7 @@ import { readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.m
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
 import { clip, languageName, now, ROOT, slug, stamp } from './util.mjs';
 import {
-  advanceClone, baseBranch, changedFiles, checkoutBranch, commitPending, createBranch, deliverToClone, freeBranch, newCommits, noTrace,
+  advanceClone, baseBranch, changedFiles, checkoutBranch, commitPending, createBranch, deliverToClone, discardSince, freeBranch, headCommit, newCommits, noTrace,
   openPullRequest, prepareLibrary, prepareWorkspace, projectDir, runBranch, runChecks, traces,
 } from './workspace.mjs';
 
