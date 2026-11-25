@@ -2,7 +2,7 @@
 // waits for approval or the owner merges a run's work from the app, a step needs the owner, an update is installed or
 // blocked, a memory or usage alert, a live session ends, the crew proposes items for the planning board, the autopilot
 // finds a project's queue empty or sends its daily report, the watchdog finds Chiefmate stuck, the owner decides a card
-// in the app), Chiefmate tells the manager in a short system message, and
+// in the app, the agent in charge of a project sends a request from its talk with the owner), Chiefmate tells the manager in a short system message, and
 // the manager writes the owner a notice in the conversation (and triages the proposals). Events close together (within
 // WINDOW_MS) go as one message; while the manager answers, they wait in the conversation's queue. The setting
 // "manager_updates" turns this off or picks the events.
@@ -21,7 +21,7 @@ import { DATA, ensureDir, now, readJson, writeJson } from './util.mjs';
 export const NEWS_EVENTS = [
   'run_finished', 'run_failed', 'run_paused', 'pr_ready', 'merged', 'needs_you',
   'update_installed', 'update_blocked', 'memory_alert', 'usage_alert', 'session_ended', 'plan_proposed',
-  'idle', 'autopilot_report', 'watchdog', 'away', 'back', 'owner_decided',
+  'idle', 'autopilot_report', 'watchdog', 'away', 'back', 'owner_decided', 'owner_request',
 ];
 
 // The owner's own switch: always told to the manager, whatever "manager_updates" says.

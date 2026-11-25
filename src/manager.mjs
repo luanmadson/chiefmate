@@ -11,6 +11,7 @@ import { autopilotLine } from './autopilot.mjs';
 import { awayInfo, awayLine } from './news.mjs';
 import { computerLine, planLine } from './plan.mjs';
 import { questionsLine } from './decisions.mjs';
+import { requestsLine } from './charge.mjs';
 import { planningLine } from './planning.mjs';
 import { radarLine } from './radar.mjs';
 import { focus, maxParallel, queued } from './queue.mjs';
@@ -140,6 +141,8 @@ export function situation(libraries = []) {
   lines.push(radarLine(config.owner || 'the owner'));
   const questions = questionsLine();
   if (questions) lines.push(questions);
+  const requests = requestsLine(config);
+  if (requests) lines.push(requests);
   lines.push(autopilotLine(config, usage));
   const away = awayLine(config.owner || 'the owner');
   if (away) lines.push(away);

@@ -16,7 +16,7 @@ const option = name => {
 };
 const has = name => rest.includes(name);
 // The words of a command that are not options nor their values ("--title <text>").
-const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary'];
+const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--note', '--recommend', '--project'];
 const words = () => rest.filter((x, i) => !x.startsWith('--') && !VALUED.includes(rest[i - 1]));
 /** The title and summary given with --title and --summary: nothing is generated for them. */
 const brief = () => ({ title: option('--title'), summary: option('--summary') });
@@ -147,6 +147,16 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs ask-owner "<question>" [--context "<explanation>"] [--options "Yes|No|Wait"] [--recommend <option>] [--project <id>]
                                                 the manager's question for the owner: a card in the app with one button
                                                 per option; the answer comes back as "owner_decided" news
+  node src/cli.mjs request [list] [--project <id>] [--all]
+                                                the requests the agents in charge of the projects sent from their talk
+                                                with the owner (--all: answered ones too)
+  node src/cli.mjs request show <id>            one request: what the owner asked, the plan, size, risk, urgency, answers
+  node src/cli.mjs request <id> approve|hold|ask-owner|reject [--note "<why>"] [--recommend approve|hold|reject]
+                     [--title "..."] [--summary "..."]
+                                                the manager's answer: approve queues the work for the project (an "ask"
+                                                for a team lead, else a task with your review), hold leaves it waiting,
+                                                ask-owner makes it a card in Decisions, reject refuses it (--note is
+                                                required except to approve); the answer goes back to the conversation
   node src/cli.mjs merge <id> [--yes]           merges a finished run's work, only with the owner's authorization: shows
                                                 the pull request (or the branch delivered locally), the checks and the
                                                 review's verdict; with --yes, Chiefmate merges it (a pull request on
@@ -298,6 +308,36 @@ async function chatCommand() {
       for (const m of g.pending) console.log(m.from === 'chiefmate' ? `In the queue [${m.id}], Chiefmate's news for the manager since ${time(m.at)}: ${m.text}` : `In the queue [${m.id}], sent ${time(m.at)}${m.edited ? ', edited' : ''}: ${m.text}`);
     }
   }
+}
+
+/** "request": the requests of the projects' agents in charge (src/charge.mjs), listed, shown and answered by the manager. */
+async function requestCommand() {
+  const { readRequests } = await import('./charge.mjs');
+  const [first = 'list', second] = words();
+  const line = r => `#${String(r.id).padEnd(3)} ${r.status.padEnd(8)} ${r.project}: ${r.plan.replace(/\s+/g, ' ').slice(0, 100)}  (${r.size}, risk ${r.risk}${r.urgency ? ', now' : ''}${r.run ? `, run ${r.run}` : ''})`;
+  if (first === 'list') {
+    const all = readRequests().filter(r => (!option('--project') || r.project === option('--project')) && (has('--all') || ['pending', 'waiting', 'owner'].includes(r.status)));
+    if (!all.length) console.log(has('--all') ? 'No requests.' : 'No request waiting for an answer.');
+    for (const r of all) console.log(line(r));
+    return;
+  }
+  const id = first === 'show' ? second : first;
+  const r = readRequests().find(x => x.id === Number(String(id ?? '').replace(/^#/, '')));
+  if (!r) throw new Error(`Request ${id} not found. node src/cli.mjs request list`);
+  if (first === 'show' || !second) {
+    console.log(line(r));
+    console.log(`  Asked (by the owner, ${formatDateTime(r.at)}): ${r.asked}
+  Plan (${r.memberName ?? r.member ?? 'the agent in charge'}): ${r.plan}`);
+    for (const h of r.history ?? []) console.log(`  ${formatDateTime(h.at)} ${h.by}: ${h.action}${h.note ? ` (${h.note})` : ''}`);
+    if (!second && first !== 'show') console.log(`Answer with node src/cli.mjs request ${r.id} approve|hold|ask-owner|reject --note "<why>".`);
+    return;
+  }
+  // Only the manager (or the owner) answers: a step of a run never does.
+  if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error('A step of a run cannot answer the requests of the agents in charge.');
+  const result = await api('/api/request', { id: r.id, action: second, note: option('--note'), recommend: option('--recommend'), ...brief() });
+  const a = result.request;
+  console.log(`Request #${a.id}: ${a.status}${result.run ? `. Queued: ${result.run.title} [${result.run.id}]` : ''}${result.question ? `. Question #${result.question.id} waits for the owner in Decisions; the answer decides the request by itself.` : ''}`);
+  console.log('The answer went back to the conversation with the agent in charge.');
 }
 
 /**
@@ -675,6 +715,9 @@ async function main() {
     }
     case 'plan':
       await planCommand();
+      return;
+    case 'request':
+      await requestCommand();
       return;
     case 'radar':
       await radarCommand();
