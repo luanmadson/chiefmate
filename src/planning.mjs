@@ -221,8 +221,9 @@ function follow(item, run) {
   }
   // Its work discarded (from the app, or its pull request closed on GitHub without a merge, src/attention.mjs):
   // nothing waits for the owner's approval; the item is theirs to decide again (to do, without an agent to do it).
+  // A "now" becomes "later": the autopilot does not redo work the owner turned down.
   if (run.discarded && item.status === 'waiting_owner') {
-    Object.assign(item, { status: item.agent ? 'triaged' : 'todo', rank: null });
+    Object.assign(item, { status: item.agent ? 'triaged' : 'todo', rank: null, recommend: item.recommend === 'now' ? 'later' : item.recommend });
     changed = true;
   }
   if (changed) item.updated = now();
