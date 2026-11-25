@@ -527,7 +527,7 @@ async function sessionCommand() {
     const window = has('--window');
     const args = window ? sessions.sessionArgs({ ...profile, cwd: folder.dir }, config, prompt.blocksGiven ? '<first message>' : null)
       : profile.tool === 'codex' ? sessions.codexArgs({ ...profile, cwd: folder.dir })
-      : ['-p', '--output-format', 'stream-json', '--session-id', '<new>', '--setting-sources', 'project,local', '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: sessions.sessionMcp(config, profile).servers }), '--allowedTools', '(reading, editing, terminal)', ...sessions.sessionMcp(config, profile).tools, '--disallowedTools', ...sessions.ASK_FIRST];
+      : ['-p', '--output-format', 'stream-json', '--session-id', '<new>', '--setting-sources', 'project,local', '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: sessions.sessionMcp(config, profile).servers }), '--settings', '(with the guard, src/guard.mjs, before each command)', '--allowedTools', '(reading, editing, terminal)', ...sessions.sessionMcp(config, profile).tools, '--disallowedTools', ...sessions.ASK_FIRST];
     console.log(window ? 'In a window of its own.' : 'In the app: each message is one turn of the tool, resuming the same session; the message goes through standard input.');
     console.log(`Folder: ${folder.dir}${folder.copy ? " (Chiefmate's read-only copy of the library)" : ''}`);
     const mcp = sessions.sessionMcp(config, profile);

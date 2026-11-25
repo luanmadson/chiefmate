@@ -1473,6 +1473,7 @@ try {
   const fakeClaude = path.join(liveDir, 'fake-claude.mjs');
   writeFileSync(fakeClaude, [
     "import { appendFileSync } from 'node:fs';",
+    "import { execSync } from 'node:child_process';",
     "const args = process.argv.slice(2);",
     "const id = args.includes('--resume') ? args[args.indexOf('--resume') + 1] : args[args.indexOf('--session-id') + 1];",
     "let prompt = ''; process.stdin.on('data', d => (prompt += d)); process.stdin.on('end', () => {",
@@ -1483,6 +1484,12 @@ try {
     "  say({ type: 'assistant', message: { content: [{ type: 'text', text: (args.includes('--resume') ? 'Again: ' : 'First: ') + prompt.split('\\n')[0] }, { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'git status' } }] } });",
     "  say({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } });",
     "  const denials = prompt.includes('push it') ? [{ tool_name: 'Bash', tool_use_id: 't2', tool_input: { command: 'git push origin main' } }] : [];",
+    // As Claude Code does: the guard's hook runs before a command, through the shell, with the call on standard input.
+    "  if (prompt.includes('through the API')) {",
+    "    const hook = JSON.parse(args[args.indexOf('--settings') + 1]).hooks.PreToolUse[0].hooks[0].command;",
+    "    const run = command => execSync(hook, { input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't3', tool_input: { command } }), encoding: 'utf8' });",
+    `    appendFileSync(${JSON.stringify(path.join(liveDir, 'guard.txt'))},JSON.stringify([run('cd x && gh api repos/a/b/pulls -f title=T -f head=h'), run('git -C sub push origin main'), run('git status')]));`,
+    "  }",
     "  setTimeout(() => say({ type: 'result', subtype: 'success', result: 'done', session_id: id, num_turns: 1, permission_denials: denials }), prompt.includes('take long') ? 20000 : 300);",
     "});",
   ].join('\n'));
@@ -1540,6 +1547,27 @@ try {
     await idle(s.id);
     const allowed = called().at(-1);
     expect(allowed.prompt.includes('allowed this') && !allowed.args.includes('Bash(git push:*)'), 'the permission given did not reach the agent, or the push is still refused');
+
+    // The guard: a publication written any other way is refused too, and becomes a request; what was allowed goes.
+    const { publishing } = await import(pathToFileURL(path.join(root, 'src', 'guard.mjs')).href);
+    const rules = c => publishing(c).map(f => f.rule.slice(5, -3)).join();
+    const guarded = {
+      'git -C ../x push': 'git push', 'cd x && git --no-pager -c a=b push origin HEAD': 'git push', 'bash -c "git push"': 'git push', 'FOO=1 git.exe push': 'git push',
+      'gh api repos/a/b/pulls -f title=T': 'gh api', 'gh api -X POST repos/a/b/pulls': 'gh api', 'curl -X POST https://api.github.com/repos/a/b/pulls -d @pr.json': 'gh api',
+      'git -C x remote set-url origin u': 'git remote', 'gh pr create --fill': 'gh pr',
+      'git status && git log': '', 'git commit -m "explain git push"': '', 'gh api repos/a/b/pulls': '', 'curl https://api.github.com/repos/a/b': '',
+    };
+    const misread = Object.entries(guarded).filter(([c, r]) => rules(c) !== r);
+    expect(!misread.length, `the guard misreads what a command publishes: ${misread.map(([c]) => `${c} -> ${rules(c) || '(nothing)'}`).join('; ')}`);
+    sessions.sayToSession(s.id, 'Open it through the API');
+    await idle(s.id);
+    const hooked = JSON.parse(called().at(-1).args[called().at(-1).args.indexOf('--settings') + 1]).hooks?.PreToolUse?.[0]?.hooks?.[0]?.command ?? '';
+    const [api, sideways, plainGit] = JSON.parse(readFileSync(path.join(liveDir, 'guard.txt'), 'utf8'));
+    expect(hooked.includes('guard.mjs') && hooked.includes('--allow "Bash(git push:*)"') && JSON.parse(api).hookSpecificOutput?.permissionDecision === 'deny' && sideways === '' && plainGit === '',
+      `the guard did not refuse a pull request opened through the API, or refused what was allowed or harmless: ${JSON.stringify([hooked, api, sideways, plainGit])}`);
+    const viaApi = sessions.readSession(s.id).requests.find(r => r.kind === 'permission' && r.status === 'open' && r.rule === 'Bash(gh api:*)');
+    expect(viaApi?.explain?.summary === "Open a pull request on a/b through GitHub's API" && viaApi.explain.command.startsWith('cd x && gh api'), `what the guard refused did not become a request explained in plain words: ${JSON.stringify(viaApi)}`);
+    sessions.answerPermission(s.id, viaApi.id, false);
 
     sessions.sayToSession(s.id, 'Please take long');
     for (let i = 0; i < 50 && !sessions.turnOf(s.id)?.last; i++) await new Promise(r => setTimeout(r, 100));
