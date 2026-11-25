@@ -294,6 +294,20 @@
           </div>
           <div class="actions"><button type="submit" class="button" data-t="Save limits">Save limits</button></div>
         </form>
+        <div class="panel form" id="autopilot-panel">
+          <div id="autopilot"></div>
+          <form id="autopilot-form">
+            <div class="label" data-t="The autopilot's limits">The autopilot's limits</div>
+            <div class="fields">
+              <label><span data-t="Stop at this share of the 5-hour window (%)">Stop at this share of the 5-hour window (%)</span><input name="window" type="number" min="5" max="100" step="5" required></label>
+              <label><span data-t="Plan's week used by its end (%)">Plan's week used by its end (%)</span><input name="pace" type="number" min="5" max="100" step="5" required></label>
+              <label><span data-t="Quiet hours: from (empty: none)">Quiet hours: from (empty: none)</span><input name="quietFrom" type="time"></label>
+              <label><span data-t="Quiet hours: until">Quiet hours: until</span><input name="quietTo" type="time"></label>
+              <label><span data-t="Daily report at (empty: none)">Daily report at (empty: none)</span><input name="report" type="time"></label>
+            </div>
+            <div class="actions"><button type="submit" class="button" data-t="Save the autopilot's limits">Save the autopilot's limits</button></div>
+          </form>
+        </div>
         <div id="plan"></div>
         <form id="reset-form" class="panel form">
           <div class="label" data-t="Record a free reset">Record a free reset</div>

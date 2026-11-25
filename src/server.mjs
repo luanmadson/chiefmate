@@ -5,6 +5,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { attentionArchive, attentionItems, attentionSummary, markSeen } from './attention.mjs';
+import { autopilotStatus, changeAutopilot } from './autopilot.mjs';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
@@ -324,6 +325,8 @@ function buildState() {
       pace: weekPace(usage),
       reader: { ...readerSettings(config), signedIn: signedIn(), reading: isReading(), status: readerStatus() },
     },
+    // The autopilot (src/autopilot.mjs): its settings, whether it may act now and what it did today.
+    autopilot: autopilotStatus(config, usage),
     alerts: alerts(config, usage, machine),
     // What needs the owner, in three levels (src/attention.mjs): the band at the top, the sections, the title and the icon.
     attention: { items: attention, ...attentionSummary(attention), archived: attentionArchive().length },
@@ -602,6 +605,10 @@ export function startServer() {
           saveConfig(config);
           return reply(res, 200, config.limits);
         }
+        case '/api/autopilot':
+          // The autopilot's switch and limits, from the Usage section (src/autopilot.mjs).
+          changeAutopilot(body);
+          return reply(res, 200, autopilotStatus());
         case '/api/stop-project': {
           // With "preview", only lists what would stop. Otherwise stops the processes you confirmed, never Chiefmate or the crew.
           if (body.preview) return reply(res, 200, { processes: await stoppable(String(body.project ?? '')) });
