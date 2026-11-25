@@ -9,7 +9,7 @@
 // processes by its command line. Ending a session stops its processes and everything under it.
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, createWriteStream, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, createWriteStream, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -758,10 +758,17 @@ function appPhase(s) {
   return 'waiting';
 }
 
+// The last thing said in each session, read again only when its history grows (the app asks every few seconds).
+const saidCache = new Map();
 /** The last thing the agent said in a session, for the summaries. */
 function lastSaid(id) {
+  const size = existsSync(historyFile(id)) ? statSync(historyFile(id)).size : 0;
+  const cached = saidCache.get(id);
+  if (cached?.size === size) return cached.said;
   const { items } = sessionHistory(id, null, 60);
-  return [...items].reverse().find(e => e.kind === 'say')?.text ?? '';
+  const said = [...items].reverse().find(e => e.kind === 'say')?.text ?? cached?.said ?? '';
+  saidCache.set(id, { size, said });
+  return said;
 }
 
 /**
