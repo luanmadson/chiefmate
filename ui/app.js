@@ -706,7 +706,7 @@ function decisionCardHtml(c) {
     choices,
     // Someone else's review only informs: "Hide" sends it to the archive.
     c.seen ? '' : button('later', c.thirdParty ? t('Hide') : t('Not now'), ' secondary'),
-    button('discard', t('Discard'), ' danger'),
+    c.thirdParty ? '' : button('discard', t('Discard'), ' danger'),
     button('talk', t('Talk about this'), ' secondary'),
   ].join('');
   const about = [esc(c.label), c.at ? esc(relative(c.at)) : ''].filter(Boolean).join(' · ');

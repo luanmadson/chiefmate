@@ -1325,6 +1325,13 @@ try {
     refused = true;
   }
   expect(refused, 'a pull request someone else reviews was merged from its card');
+  refused = false;
+  try {
+    await decide({ card: shared.id, action: 'discard' }, cards);
+  } catch {
+    refused = true;
+  }
+  expect(refused, 'a pull request someone else reviews was closed from its card');
   const local = card('pr:d-local');
   expect(local?.label === t('Branch {branch} of {project}', { branch: 'cm/local', project: 'Proj' }) && local.approve && !cards.some(c => c.id === 'done:d-local'), `a branch delivered locally is not a card: ${JSON.stringify(local)}`);
   const asked = card(`question:${q.id}`);

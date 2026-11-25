@@ -190,6 +190,8 @@ export async function decide({ card, action, option, reason } = {}, cards = []) 
       return { card: c.id, done: 'merged', merge: await mergeRun(c.run, { by: 'owner' }) };
     }
     if (action === 'discard') {
+      // Someone else's review: its pull request is theirs to close.
+      if (c.thirdParty) throw new Error(t('Someone else reviews and merges the work of this project.'));
       const result = await discardRun(c.run);
       if (c.item) await decideItem(c.item, 'discard', { reason: clip(reason, 200) || 'Discarded by the owner', by: 'owner' }).catch(() => null);
       tell(`The owner discarded ${about} (run ${c.run}) from the app: ${result.kind === 'pr' ? `pull request ${result.url} closed on GitHub` : `branch ${result.branch} left unmerged`}.`);
