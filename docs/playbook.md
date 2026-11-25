@@ -8,7 +8,7 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
 
 | Place | What it holds |
 |---|---|
-| `src/server.mjs` | The app's web server and API. It listens on this computer only. |
+| `src/server.mjs` | The app's web server and API. It listens on this computer only. With `remote_access`, a second listener (also on 127.0.0.1) for Tailscale Serve alone: `remoteSettings` reads the setting, `remoteRefusal` checks the tailnet name, the Origin and the allowed `Tailscale-User-Login`, and `OPENS_ON_PC` lists the commands refused from another device. |
 | `src/runs.mjs` | How a run goes: the working copy, the crew in sequence, the review, the checks and the pull request. Several runs (of different projects) go on at once: what the app shows of each is in `live`, by run id. |
 | `src/queue.mjs`, `src/schedule.mjs` | One run per project at a time, runs of different projects side by side up to `max_parallel`; missions on their days and times. |
 | `src/sessions.mjs` | The live sessions: the profiles (the settings' own, then an automatic one per project and tool, never saved), the first message from the prompt builder; in the app, the conversation turn by turn (`deliverSession`: Claude Code through `runClaude` with `--resume`, Codex through `codex exec --json` and `codex exec resume`, `codexItem` for its events), the queue, the interruption, the permission requests (`ASK_FIRST`, `answerPermission`), the history (`data/sessions/<id>.jsonl`, `sessionHistory`) and the manager's lines (`sessionsLine`); in a window, the window (Windows Terminal or PowerShell, `openConsole`); and finding, measuring (`appSessionPids` for the turns in the app) and ending their processes. |
@@ -43,8 +43,9 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
 3. **No dependencies.** Node.js built-ins and plain browser APIs only. No build step. The one exception is optional: `playwright-core`, loaded on demand for the prompt builder's copy (and the sign-in browser), with a clear message when it is missing. Nothing else may need it.
 4. **Keep the settings compatible.** Installations update themselves, and their settings are not in this repository. A new setting needs a default in the code. Never rename or remove a setting without migrating it automatically.
 5. **Security is not negotiable.** Don't weaken any of these:
-   - the server listens on 127.0.0.1 only;
-   - the Host, Origin and `x-chiefmate` checks on every command;
+   - the server listens on 127.0.0.1 only, the remote access's listener too;
+   - the Host, Origin and `x-chiefmate` checks on every command, and on the remote access the tailnet name, the Origin and the allowed Tailscale login on every request;
+   - the safety headers on every answer (`SAFE_HEADERS` in `src/server.mjs`);
    - the tools agents may never use (`ALWAYS_DISALLOWED` in `src/runs.mjs`, and the conversation's list in `src/manager.mjs`);
    - the removal of the Claude session's variables in `src/claude.mjs`, and the flags that keep the user's own Claude Code configuration out of every step and every live Claude Code session (`--setting-sources project,local`, `claudeMdExcludes`, `--strict-mcp-config`; `sessionArgs` in `src/sessions.mjs` for a window, `claudeArgs` through `runClaude` for a session in the app);
    - what each step may see (`src/access.mjs`): only its project, its own documentation folder and the libraries it lists;

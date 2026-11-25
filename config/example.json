@@ -54,5 +54,11 @@
     "max_wait_minutes": 120
   },
   "manager_updates": true,
-  "auto_update_mode": "pause"
+  "auto_update_mode": "pause",
+  "remote_access": {
+    "enabled": false,
+    "host": "",
+    "logins": [],
+    "port": 4748
+  }
 }

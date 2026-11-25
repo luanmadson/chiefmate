@@ -76,6 +76,7 @@
   "Couldn't download the project: {output}": "Não consegui baixar o projeto: {output}",
   "Couldn't open the pull request: {output}": "Não consegui abrir o pull request: {output}",
   "Error {code}": "Erro {code}",
+  "This opens on the computer where Chiefmate runs: do it there.": "Isto abre no computador onde o Chiefmate roda: faça por lá.",
   "now": "agora",
   "Queued": "Na fila",
   "Waiting for the limit": "Aguardando o limite",

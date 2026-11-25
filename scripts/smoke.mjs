@@ -33,9 +33,11 @@ const feedLines = [
 ].map(e => JSON.stringify(e)).join('\n');
 const feedWhole = `${feedLines}\n`;
 writeFileSync(path.join(data, 'runs', 'smoke-feed', '01-generalist.jsonl'), `${feedWhole}{"type":"assistant","message":{"content":[{"type":"text","text":"half`);
+// The remote access through Tailscale Serve, made up: a second listener, with a tailnet name and a login of its own.
+const remote = { enabled: true, host: 'pc.smoke-tailnet.ts.net', logins: ['owner@example.com'], port: port + 1 };
 const child = spawn(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'server'], {
   cwd: root,
-  env: { ...process.env, CHIEFMATE_PORT: String(port), CHIEFMATE_SMOKE: '1' },
+  env: { ...process.env, CHIEFMATE_PORT: String(port), CHIEFMATE_SMOKE: '1', CHIEFMATE_REMOTE_ACCESS: JSON.stringify(remote) },
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });
@@ -214,6 +216,33 @@ try {
     }
     const interrupt = await post('/api/manager/interrupt', {});
     expect(interrupt.ok && (await interrupt.json()).interrupted === false, 'interrupting a manager that is not answering did something');
+    // The remote access: the headers Tailscale Serve would send, made up (fetch can't set Host, so node:http).
+    const http = await import('node:http');
+    const ask = (p, route, headers, body) => new Promise((resolve, reject) => {
+      const r = http.request({ host: '127.0.0.1', port: p, path: route, method: body ? 'POST' : 'GET', headers: body ? { 'content-type': 'application/json', ...headers } : headers }, res => {
+        let text = '';
+        res.on('data', d => (text += d));
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text }));
+      });
+      r.on('error', reject);
+      r.end(body ? JSON.stringify(body) : undefined);
+    });
+    const tailnet = { host: remote.host, 'tailscale-user-login': 'Owner@example.com' };
+    const command = { ...tailnet, origin: `https://${remote.host}`, 'x-chiefmate': '1' };
+    const page = await ask(remote.port, '/', tailnet);
+    expect(page.status === 200 && page.headers['x-content-type-options'] === 'nosniff' && /frame-ancestors 'none'/.test(page.headers['content-security-policy'] ?? ''),
+      `the app through the remote access answered ${page.status}, or without its safety headers`);
+    expect((await ask(remote.port, '/api/state', { host: remote.host })).status === 403, 'the remote access answered without a Tailscale login');
+    expect((await ask(remote.port, '/api/state', { ...tailnet, 'tailscale-user-login': 'someone@example.com' })).status === 403, 'the remote access answered a login not allowed');
+    expect((await ask(remote.port, '/api/state', { ...tailnet, host: `127.0.0.1:${remote.port}` })).status === 403, 'the remote access answered an address other than the tailnet name');
+    expect((await ask(remote.port, '/api/manager/interrupt', command, {})).status === 200, 'a command through the remote access, with the tailnet name and an allowed login, was refused');
+    expect((await ask(remote.port, '/api/manager/interrupt', { ...command, origin: 'https://evil.example' }, {})).status === 403, 'a command from another website through the remote access was not refused');
+    const { origin: _origin, ...noOrigin } = command;
+    expect((await ask(remote.port, '/api/manager/interrupt', noOrigin, {})).status === 403, 'a command without Origin through the remote access was not refused');
+    const opens = await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder' });
+    expect(opens.status === 403 && JSON.parse(opens.text).error?.includes('computer'), `opening a window on the computer from another device was not refused: ${opens.status}`);
+    expect((await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder', dryRun: true })).status !== 403, 'a dry run of opening a folder was refused through the remote access');
+    expect((await ask(port, '/api/state', tailnet)).status === 403, "the app's own port answered the tailnet name");
   }
 } catch (error) {
   failures.push(error.message);
@@ -1014,6 +1043,24 @@ try {
   }
 } catch (error) {
   failures.push(`live session checks: ${error.message}`);
+}
+
+// The remote access's settings: off by default, and off when incomplete (no tailnet name, no login, the app's own port).
+try {
+  const { remoteSettings } = await import(pathToFileURL(path.join(root, 'src', 'server.mjs')).href);
+  const quiet = console.error;
+  console.error = () => {};
+  try {
+    expect(remoteSettings(undefined, 4747) === null && remoteSettings({ enabled: false, host: 'pc.t.ts.net', logins: ['a@b.c'] }, 4747) === null, 'the remote access is on by default');
+    expect([{ host: 'localhost', logins: ['a@b.c'] }, { host: 'pc.t.ts.net', logins: [] }, { host: 'pc.t.ts.net', logins: ['a@b.c'], port: 4747 }]
+      .every(x => remoteSettings({ enabled: true, ...x }, 4747) === null), 'incomplete remote access settings were accepted');
+    const on = remoteSettings({ enabled: true, host: 'https://PC.t.ts.net/', logins: 'A@b.c' }, 4747);
+    expect(on?.host === 'pc.t.ts.net' && on.logins[0] === 'a@b.c' && on.port === 4748, `the remote access settings were read wrong: ${JSON.stringify(on)}`);
+  } finally {
+    console.error = quiet;
+  }
+} catch (error) {
+  failures.push(`remote access checks: ${error.message}`);
 }
 
 try {
