@@ -1460,5 +1460,21 @@
   "Talk, ask and plan here. It changes nothing by itself: what is to be done goes to the manager as a request, and the manager authorizes it, asks to wait or brings it to you.": "Converse, tire dúvidas e planeje aqui. Ele não muda nada sozinho: o que houver a fazer vai ao Gerente como pedido, e o Gerente autoriza, manda esperar ou traz para você.",
   "Start the conversation": "Começar a conversa",
   "Requests to the manager": "Pedidos ao Gerente",
-  "Answered ({count})": "Respondidos ({count})"
+  "Answered ({count})": "Respondidos ({count})",
+  "Dictation": "Ditado",
+  "The audio is transcribed by the browser's voice service (Google's in Chrome, Microsoft's in Edge, Apple's in Safari), not on this computer. Nothing is sent to anyone until you press Send.": "O áudio é transcrito pelo serviço de voz do navegador (o do Google no Chrome, o da Microsoft no Edge, o da Apple no Safari), não neste computador. Nada é enviado a ninguém até você tocar em Enviar.",
+  "One tap listens, another stops; a few seconds of silence stop it too. Ctrl+M does the same in the field.": "Um toque começa a ouvir, outro para; alguns segundos de silêncio também param. Ctrl+M faz o mesmo no campo.",
+  "Turn dictation off": "Desligar o ditado",
+  "Dictate": "Ditar",
+  "Stop dictating": "Parar o ditado",
+  "Dictate (Ctrl+M)": "Ditar (Ctrl+M)",
+  "Stop dictating (Ctrl+M)": "Parar o ditado (Ctrl+M)",
+  "Listening…": "Ouvindo…",
+  "The microphone is blocked for this page. Allow it in the browser to dictate.": "O microfone está bloqueado para esta página. Permita-o no navegador para ditar.",
+  "No microphone was found.": "Nenhum microfone foi encontrado.",
+  "The browser's voice service didn't answer. Dictation needs the internet.": "O serviço de voz do navegador não respondeu. O ditado precisa de internet.",
+  "Nothing was heard.": "Nada foi ouvido.",
+  "The browser's voice service doesn't have this language.": "O serviço de voz do navegador não tem este idioma.",
+  "Dictation stopped ({error}).": "O ditado parou ({error}).",
+  "Dictation is off. To turn it back on: \"ui\": { \"voice_input\": true } in config/chiefmate.json.": "Ditado desligado. Para religar: \"ui\": { \"voice_input\": true } em config/chiefmate.json."
 }
