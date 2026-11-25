@@ -92,7 +92,7 @@ queue ─► fresh working copy ─► the crew, one after another ─► manage
 3. **The crew in sequence.** Each agent does its part on the run's branch and leaves a report. The next one reads what came before.
 4. **The review.** The manager checks the work, fixes what is needed and writes the pull request text with its verdict.
 5. **The checks.** Chiefmate runs the project's checks, pushes the branch and opens the pull request. Agents cannot push anything to GitHub.
-6. **Your approval.** You review and merge on GitHub. From there, your project's own deployment does the rest.
+6. **Your approval.** You review and merge: on GitHub, with **Merge** in the run's page of the app, or by telling the manager "yes" for that run in the conversation. Nothing is merged without your authorization. From there, your project's own deployment does the rest.
 
 A one-off task follows the same path, with a single agent and, if you tick the box, the manager's review. A request to a project's team lead (`ask`) does too: the lead's planning first, then the tasks it planned, its first review and the manager's final review.
 
@@ -138,9 +138,17 @@ What needs you shows up as a notice with one of three levels, the same component
 | **Info** | Discreet grey | A task finished (in the last day), an update installed |
 
 - **Where you see them.** The band at the top shows the most urgent notice and how many others there are ("+2 more" opens them all). Operations, the project's page and Planning list their own notices at the top, and a run waiting for you gets a red edge. Each section in the menu has a square in the color of its most urgent notice, with how many there are. The window's title starts with `!!` (urgent) or `!` (important) and the notice's name, and its icon gets a square of that color.
-- **They go away when you act**: the request marked as done, the item of the board decided, the run redone, the memory back. A failed run asks for attention for 3 days, a pull request for a week (Chiefmate doesn't read whether you merged it: mark it as seen), a finished task for a day.
+- **They go away when you act**: the request marked as done, the item of the board decided, the run redone, the memory back. A failed run asks for attention for 3 days, a pull request for a week or until it is merged through Chiefmate (Chiefmate doesn't read a merge done on GitHub: mark it as seen), a finished task for a day.
 - **Mark as seen** fades a notice (an info one goes away): it stays in the list, out of the counts, the title and the icon. A step's request has no "seen": only **Mark as done** clears it (a live session's permission: **Allow**, or **Refuse** in its conversation).
 - **Calm by design.** The colors keep their contrast on the dark panels, the level is also written ("Urgent", "Important"), and the pulse stops when Windows is set to show fewer animations.
+
+### Merging with your authorization
+
+A finished run's work goes in only when you say so. Chiefmate merges it itself, so the crew and the manager still can't run `gh pr` or `git push`:
+- **From the app.** A finished run with a pull request (or a branch delivered locally) has **Merge** on its page in Operations. It shows what is merged and how many checks failed; your confirmation is the authorization.
+- **Through the manager.** When a run is ready and reviewed, the manager asks you in the conversation, naming the pull request or branch and the review's verdict (`node src/cli.mjs merge <id>` shows them). Only after your explicit "yes" for that run does it run `merge <id> --yes`. Without it, never.
+- **What a merge does.** A pull request is merged on GitHub (`gh pr merge --merge`); a merged pull request of Chiefmate itself is installed at once, as with `update-check`. A branch delivered locally is merged into the branch it started from in your clone (`local_clone`), with nothing sent to GitHub: the clone must have that branch checked out and no changes left to commit, and a merge with conflicts is undone.
+- **After it.** The run shows "Merged", by you or by the manager; its item on the board becomes done, and its pull request notice goes away. A merge from the app is news to the manager (`merged`). The crew can never merge: the command refuses to run inside a step.
 
 ### Talking to an agent at work
 
@@ -419,7 +427,7 @@ The conversation never makes you wait.
 
 The manager doesn't only answer: when something you should know about happens, it tells you in the conversation on its own.
 
-- **The events**, by the names `manager_updates` uses: a run finished (`run_finished`), failed (`run_failed`) or paused (`run_paused`); a pull request ready and waiting for your approval (`pr_ready`); a step or a live session that needs you (`needs_you`); an update installed (`update_installed`) or blocked (`update_blocked`); a memory alert (`memory_alert`) or an alert about the account's usage or the plan's free resets (`usage_alert`); a live session that ended on its own (`session_ended`; not one you ended from Chiefmate); a new proposal on the planning board (`plan_proposed`), which the manager triages before telling you what waits for your decision.
+- **The events**, by the names `manager_updates` uses: a run finished (`run_finished`), failed (`run_failed`) or paused (`run_paused`); a pull request ready and waiting for your approval (`pr_ready`); a run's work you merged from the app (`merged`); a step or a live session that needs you (`needs_you`); an update installed (`update_installed`) or blocked (`update_blocked`); a memory alert (`memory_alert`) or an alert about the account's usage or the plan's free resets (`usage_alert`); a live session that ended on its own (`session_ended`; not one you ended from Chiefmate); a new proposal on the planning board (`plan_proposed`), which the manager triages before telling you what waits for your decision.
 - **How it goes.** Chiefmate wakes the manager with a short system message that describes the events and is marked as not coming from you; the manager reads the situation, as with any message, and writes a short, clear notice: what happened and, when something needs you, what to do. It doesn't queue or change anything because of a notice alone.
 - **Grouped.** Events within a minute of the first one go together, as one message. If the manager is answering, they wait in the queue under the conversation ("news for the manager", which you can remove but not edit) and go with your queued messages; then the manager answers you and mentions them in the same reply. The news survives a restart, such as the one after an update; news older than an hour when Chiefmate starts is dropped.
 - **In the conversation**, a notice has a look of its own: a brass rule on the left, a "notice" tag and the events it is about.
@@ -454,7 +462,7 @@ Chiefmate can be one of its own projects. Its crew then works on Chiefmate the s
 1. **Add Chiefmate as a project** in your settings, pointing at your copy of this repository, with `"language": "en"`, `"checks": ["npm run check", "npm run smoke"]` and `"playbook": "docs/playbook.md"`. The [playbook](docs/playbook.md) tells the crew how Chiefmate is built and which rules a change must keep.
 2. **Ask for improvements**, in the Manager section or as a task on that project. Ideas for later go to the repository's issues: the manager can open them for you.
 3. **Or give it a routine**: a mission on that project, for example once a week, that works through the open issues.
-4. **Approve.** Every improvement arrives as a pull request. When you merge it, your installation updates itself within ten minutes (at once if the manager runs `node src/cli.mjs update-check` after the merge). It checks the new version first: if the checks fail, it stays on the current one and tells you. Once it restarts, the app window loads the new version by itself (it waits while you are writing or have a dialog open).
+4. **Approve.** Every improvement arrives as a pull request. When you merge it, your installation updates itself within ten minutes (at once when the merge goes through Chiefmate, or if the manager runs `node src/cli.mjs update-check` after a merge on GitHub). It checks the new version first: if the checks fail, it stays on the current one and tells you. Once it restarts, the app window loads the new version by itself (it waits while you are writing or have a dialog open).
 
 **The work going on doesn't hold the update back.** With `auto_update_mode` at `"pause"` (the default), and whenever you click **Update now** (in the Manager section, under "Crew on board", while an approved update waits) or run `node src/cli.mjs update-now --yes`:
 1. no new run starts and the manager starts no new answer: your messages wait in the queue;
@@ -470,6 +478,7 @@ The self-update only touches Chiefmate's own files. Your settings, the history a
 
 - **Only you reach the app.** It listens on this computer only, and it refuses commands sent by other websites open in your browser. Its answers can't be framed by other sites. With the optional remote access, your other devices reach it only through Tailscale Serve, with your Tailscale login (see "Remote access"). Any program on this computer can reach that second listener and claim a login, as it can already reach the app itself.
 - **Agents have limits.** They cannot push to GitHub, open or merge pull requests, or change the repository's address.
+- **Merging needs you.** Chiefmate merges a run's work only with your authorization (see "Merging with your authorization"). The crew never merges; the manager only asks.
 - **Each step sees only its project.** Other projects' working copies and documentation, the libraries a project doesn't list and Chiefmate's `data/` are denied to the file tools by permission rules (see "What each step sees"). A shell command can still read them: this is not a sandbox.
 - **None of your own configuration.** Agents run without your Claude Code settings, hooks, plugins, skills, `~/.claude/CLAUDE.md` and MCP servers, and without the variables of your own Claude session. The only external tools are those in `mcp_servers`, released by project or agent.
 - **The short calls have no tools.** The titles, summaries and final summaries come from `quick_model` with every tool off (`--tools ""`), in a folder of Chiefmate's data, without your configuration: they only read the text they are given and write a few lines.
@@ -522,6 +531,8 @@ node src/cli.mjs dev <project>                starts the project's development e
                                               its own (--dry-run shows what would run); dev stop <project> stops it
 node src/cli.mjs cancel <id>                  cancels a run
 node src/cli.mjs resume <id>                  resumes a run (--ignore-limits goes past the limits this one time)
+node src/cli.mjs merge <id> [--yes]           a finished run's merge: shows the pull request (or the local branch), the checks and
+                                              the review's verdict; with --yes, merges it (only with your authorization)
 node src/cli.mjs update-check                 looks for an approved update now (after a merge), instead of within 10 minutes
 node src/cli.mjs update-now [--yes]           installs the approved update now, pausing the work going on and resuming it
                                               after the restart (--interrupt-manager: doesn't wait for the manager's answer)

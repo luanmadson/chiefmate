@@ -23,6 +23,7 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
 | `src/usagepage.mjs` | The optional, read-only reading of the account's usage page on claude.ai, through Edge or Chrome. |
 | `src/claude.mjs` | Runs Claude Code headless (`claude -p`), without the user's own configuration, and follows each action and how full the context is; interrupts a step at a safe point (once its actions under way finish) and reads a step's log for the agent's panel. |
 | `src/access.mjs` | What each step may see: its folders, the permission rules that deny the rest, its MCP servers and the repository's instruction files. |
+| `src/merge.mjs` | Merging a finished run's work, only with the owner's authorization (the app's **Merge**, or the manager's `merge <id> --yes` after the owner's explicit yes): the pull request through `gh pr merge`, or the local branch into the owner's clone; then `run.merged`, the board's item done and, for Chiefmate, the update check. |
 | `src/needs.mjs` | When a step needs the owner (`needs-you`): the request, the notice, the address opened in the browser and "Done". |
 | `src/leads.mjs` | The projects' team leads (`projects.<id>.lead`; the member itself is built by `projectLead` in `src/config.mjs`): the project memory in `data/projects/<id>/memory.md`, read into the prompts and saved from the block the lead returns; the plan of a request (`ask`), at most `MAX_TASKS` tasks put in the run as steps; the lead's opinion for the final review; and the manager's line about each lead. |
 | `src/talk.mjs` | The owner's direct talk with an agent at work, from its panel in the app: the message (an answer to the agent's open request, or an interruption at a safe point and the same session resumed with it), the record in the run (`talk`), the section of the step's report and the manager's summary. |
@@ -49,7 +50,7 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
    - the tools agents may never use (`ALWAYS_DISALLOWED` in `src/runs.mjs`, and the conversation's list in `src/manager.mjs`);
    - the removal of the Claude session's variables in `src/claude.mjs`, and the flags that keep the user's own Claude Code configuration out of every step and every live Claude Code session (`--setting-sources project,local`, `claudeMdExcludes`, `--strict-mcp-config`; `sessionArgs` in `src/sessions.mjs` for a window, `claudeArgs` through `runClaude` for a session in the app);
    - what each step may see (`src/access.mjs`): only its project, its own documentation folder and the libraries it lists;
-   - the rule that only Chiefmate pushes branches and opens pull requests.
+   - the rule that only Chiefmate pushes branches and opens pull requests, and merges them only with the owner's authorization (`src/merge.mjs`; `cli.mjs merge` refuses to run inside a step).
 
    Any change in these places must be explained in the pull request, under a "Security" heading.
 6. **The look**: dark and formal, with thin lines, square corners and brass as the only accent color. No rounded, generic web look. The crew's faces are line art.
