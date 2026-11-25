@@ -31,6 +31,8 @@
 
 * { box-sizing: border-box; }
 html, body { height: 100%; }
+/* Phone browsers keep the font sizes as written (no font boosting on a narrow screen, nor in landscape) */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body {
   margin: 0; overflow: hidden; background: var(--bg); color: var(--text);
   font: 13.5px/1.55 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
@@ -119,6 +121,8 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .content { grid-area: content; position: relative; overflow: hidden; }
 .view { display: none; height: 100%; overflow-y: auto; padding: 22px 28px 32px; }
 .view.active { display: block; }
+/* The sections' addresses (#operations, #usage…) are also the ids of their contents: opening one keeps its screen at the top, with its title, instead of scrolling to them */
+#operations, #missions, #crew, #usage { scroll-margin-top: 100vh; }
 .view-header { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .view-header h1 { margin: 0; font-size: 19px; font-weight: 600; color: var(--strong); }
 .view-header p { margin: 3px 0 0; color: var(--muted); }
@@ -267,9 +271,10 @@ textarea { resize: vertical; min-height: 64px; }
 .suggestion { appearance: none; background: transparent; border: 1px solid var(--line-strong); border-radius: 2px; color: var(--muted); font: inherit; font-size: 12px; padding: 3px 9px; cursor: pointer; }
 .suggestion:hover { color: var(--text); border-color: var(--muted); }
 .side { display: flex; flex-direction: column; gap: 16px; min-height: 0; overflow-y: auto; }
-.bridge-head { display: grid; grid-template-columns: 72px 1fr; gap: 14px; align-items: center; padding-bottom: 14px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
+.bridge-head { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 14px; align-items: center; padding-bottom: 14px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
 .bridge-name { font-size: 15px; font-weight: 600; color: var(--strong); }
 .bridge-head .hint { margin: 2px 0 6px; }
+.bridge-head .state { white-space: normal; }
 .roster { list-style: none; margin: 0 0 12px; padding: 0; }
 .roster li { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--line); }
 .roster li:last-child { border-bottom: 0; }
@@ -297,7 +302,7 @@ textarea { resize: vertical; min-height: 64px; }
 .logbook-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
 .logbook-head .label { margin: 0; }
 .logbook { height: calc(100vh - 300px); min-height: 280px; overflow-y: auto; font: 12px/1.65 var(--mono); background: var(--bg); border: 1px solid var(--line); padding: 10px 12px; }
-.logbook div { display: grid; grid-template-columns: 52px 1fr; gap: 10px; }
+.logbook div { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; overflow-wrap: anywhere; }
 .logbook time { color: var(--faint); }
 .logbook .say { color: var(--muted); font-style: italic; }
 .table.queue td:first-child { width: 36px; color: var(--muted); }
@@ -776,3 +781,105 @@ details summary { cursor: pointer; }
 .radar-discarded ul { list-style: none; padding: 0; margin-top: 10px; }
 .radar-discarded li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 5px 0; border-top: 1px solid var(--line); }
 @media (max-width: 700px) { .radar-more dl { grid-template-columns: 1fr; } }
+
+/* Touch screens: buttons, tabs and fields of 44 px or more */
+@media (pointer: coarse) {
+  .button, .button.small, .decision-buttons .button, .tab, .away, .suggestion, select, input:not([type=checkbox], [type=radio], [type=range]) { min-height: 44px; }
+  .button, .button.small { display: inline-flex; align-items: center; justify-content: center; }
+  .suggestion { padding: 6px 12px; }
+}
+
+/* Narrow windows: the content column never grows wider than the screen (a phone would zoom the whole app out) */
+@media (max-width: 900px) {
+  .app { grid-template-columns: minmax(0, 1fr); }
+  .app > * { min-width: 0; }
+  .manager-grid, .operations-grid, .log-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Phones: the title bar, the notices, the screen and a bottom bar with the main sections; nothing wider than the screen */
+.nav-more { display: none; }
+@media (max-width: 600px) {
+  .app {
+    height: var(--app-h, 100dvh);
+    grid-template: "title" auto "alerts" auto "content" minmax(0, 1fr) "status" auto "nav" auto / minmax(0, 1fr);
+  }
+  .titlebar { height: calc(48px + env(safe-area-inset-top)); padding: env(safe-area-inset-top) max(12px, env(safe-area-inset-right)) 0 max(12px, env(safe-area-inset-left)); }
+  .project-jump { display: none; }
+  .away { min-width: 44px; justify-content: center; }
+  .statusbar { display: none; }
+  .statusbar.offline { display: flex; height: 28px; }
+
+  /* The bottom bar: Manager, Operations, Planning, Projects and More, each 56 px high, the marks on a line of their own */
+  .nav { flex-wrap: wrap; overflow: visible; border-bottom: 0; border-top: 1px solid var(--line-strong); padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  .nav > a, .nav-more {
+    flex: 1 1 0; min-width: 0; height: 56px; padding: 7px 2px 0; display: grid; grid-template: 22px 18px / 1fr auto auto 1fr; align-content: start; align-items: center; overflow: hidden; justify-items: center; column-gap: 4px;
+    border: 0; border-top: 2px solid transparent; background: transparent; color: var(--muted); font: inherit; font-size: 11.5px; white-space: nowrap; cursor: pointer;
+  }
+  .nav > a > span:first-child, .nav-more > span:first-child { grid-column: 1 / -1; max-width: 100%; overflow: hidden; text-overflow: ellipsis; line-height: 22px; }
+  .nav .counter { grid-area: 2 / 2; font-size: 10.5px; }
+  .nav .nav-attn { grid-area: 2 / 3; }
+  .nav > a.active, .nav-more.active { color: var(--strong); background: var(--raised); border-top-color: var(--accent); border-bottom: 0; }
+  .nav-more[aria-expanded="true"] { color: var(--strong); }
+  .nav-more:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+  .nav > a.nav-extra { display: none; }
+  /* More: the other sections, as full-width rows above the bar */
+  .nav.open > a.nav-extra { order: -1; flex: 1 1 100%; height: 48px; display: flex; justify-content: space-between; padding: 0 18px; font-size: 14px; border-top: 0; border-left: 2px solid transparent; border-bottom: 1px solid var(--line); }
+  .nav.open > a.nav-extra.active { border-left-color: var(--accent); }
+  .nav.open > a.nav-extra > span:first-child { flex: 1; }
+
+  /* The notices: closed, at most three lines of text each, so the band keeps its height; open, it scrolls */
+  .attn-band { position: relative; max-height: 40dvh; overflow-y: auto; }
+  .attn-band:not(:has([data-attn-more][aria-expanded="true"])) .attn-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+  .attn-band .attn-level { font-size: 10.5px; }
+  .attn-band .attn-actions .button, .attn-more .button { min-width: 44px; }
+  /* Closed, "+N more" sits beside the notice's buttons instead of a row of its own */
+  .attn-band:has(> .attn-more):not(:has([data-attn-more][aria-expanded="true"])) .attn-actions { min-height: 44px; padding-right: 118px; }
+  .attn-band:not(:has([data-attn-more][aria-expanded="true"])) > .attn-more { position: absolute; right: 14px; bottom: 9px; padding: 0; }
+
+  /* The toasts above the bottom bar; an agent's panel from the title bar down to the visible bottom (above the keyboard) */
+  .toast { bottom: calc(68px + env(safe-area-inset-bottom)); }
+  .agent-panel { top: calc(48px + env(safe-area-inset-top)); bottom: auto; height: calc(var(--app-h, 100dvh) - 48px - env(safe-area-inset-top)); width: 100vw; }
+
+  /* While typing, the bottom bar and the notices step aside for the keyboard */
+  html.typing .nav, html.typing .alerts, html.typing #view-manager .view-header, html.typing .suggestions { display: none; }
+  html.typing #view-manager .chat-column { height: calc(var(--view-h, 70dvh) - 24px); }
+
+  .view { padding: 12px 12px 16px; }
+  .view-header h1 { font-size: 18px; }
+  pre, code { overflow-wrap: anywhere; }
+
+  /* The manager: the conversation takes the screen, the message field fixed at its bottom; the bridge below it */
+  #view-manager .view-header { height: 44px; margin-bottom: 8px; padding-bottom: 0; align-items: center; flex-wrap: nowrap; border-bottom: 0; }
+  #view-manager .view-header p { display: none; }
+  .manager-grid { display: block; height: auto; min-height: 0; }
+  #view-manager .chat-column { height: calc(var(--view-h, 70dvh) - 80px); min-height: 200px; }
+  .chat { max-height: none; overscroll-behavior: contain; overflow-wrap: anywhere; }
+  .decisions { max-height: 45%; }
+  .side { margin-top: 16px; overflow: visible; }
+  /* The field with its buttons to the right, as in a messaging app; the suggestions in one row below, scrolling sideways */
+  .compose { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 8px; }
+  .compose textarea { grid-area: 1 / 1; min-height: 64px; height: 100%; }
+  .compose-footer { display: contents; }
+  .compose-buttons { grid-area: 1 / 2; flex-direction: column; justify-content: flex-end; margin-left: 0; }
+  .compose-buttons .button { min-width: 76px; }
+  .compose-footer > :first-child { grid-area: 2 / 1 / 3 / 3; min-width: 0; }
+  .suggestions { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .compose-footer > :first-child:empty { display: none; }
+  .suggestion { flex: none; }
+  /* A live session: its conversation fills the screen once its header scrolls away */
+  .live-session .chat-column { height: calc(var(--view-h, 70dvh) - 28px); min-height: 200px; }
+
+  /* Tables become cards: the main cell on top, the others below it, the buttons to the right */
+  .table:not(.inner) { display: block; overflow: visible; }
+  .table:not(.inner) thead { display: none; }
+  .table:not(.inner) > tbody { display: block; }
+  .table:not(.inner) > tbody > tr { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 10px; border-bottom: 1px solid var(--line); }
+  .table:not(.inner) > tbody > tr > td { display: block; padding: 0; border: 0; min-width: 0; background: transparent; box-shadow: none; }
+  .table:not(.inner) > tbody > tr > td:has(.primary), .table:not(.inner) > tbody > tr > td[colspan] { flex: 1 1 calc(100% - 60px); }
+  .table:not(.inner) > tbody > tr > td.row-actions { margin-left: auto; }
+  .table:not(.inner) > tbody > tr.selected { background: var(--raised); box-shadow: inset 2px 0 0 var(--accent); }
+  .table:not(.inner) > tbody > tr.next { background: var(--raised); box-shadow: inset 2px 0 0 var(--accent); }
+  .table:not(.inner) > tbody > tr > td.num { font-size: 12px; color: var(--muted); }
+  .table .run-line { max-width: 100%; white-space: normal; }
+  .table.inner { display: block; overflow-x: auto; }
+}
