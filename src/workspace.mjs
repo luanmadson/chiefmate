@@ -108,6 +108,32 @@ async function updateLibrary(id, source, onStep) {
   return dir;
 }
 
+/**
+ * A file's last commit in a library's copy: { hash, date, subject, approximate }, or null when git has none. The copy
+ * is shallow: when the commit found is where its history is cut, the history is deepened (at most 3 times 50 commits);
+ * "approximate" when it still is, as the file may have changed before that.
+ */
+export async function libraryFileCommit(dir, file, branch = 'main') {
+  await libraryJobs.get(path.basename(dir))?.catch(() => {});
+  const shallow = () => {
+    try {
+      return readFileSync(path.join(dir, '.git', 'shallow'), 'utf8').split(/\s+/).filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  const rel = path.relative(dir, file).split(path.sep).join('/');
+  for (let tries = 0; ; tries++) {
+    const line = await git(dir, 'log', '-1', '--format=%H%x09%cI%x09%s', '--', rel);
+    if (!line) return null;
+    const [hash, date, ...subject] = line.split('\t');
+    const commit = { hash, date, subject: subject.join('\t'), approximate: shallow().includes(hash) };
+    if (!commit.approximate || tries >= 3) return commit;
+    const r = await run('git', ['fetch', '--deepen=50', 'origin', branch], dir, { maxMinutes: 5 });
+    if (r.code !== 0) return commit;
+  }
+}
+
 export const createBranch = (dir, branch) => git(dir, 'checkout', '-B', branch);
 export const checkoutBranch = (dir, branch) => git(dir, 'checkout', branch);
 
