@@ -616,6 +616,7 @@ const newsEvent = kind => ({
   run_finished: t('run finished'), run_failed: t('run failed'), run_paused: t('run paused'), pr_ready: t('pull request ready'), merged: t('merged'),
   needs_you: t('needs you'), update_installed: t('update installed'), update_blocked: t('update blocked'),
   memory_alert: t('memory alert'), usage_alert: t('usage alert'), session_ended: t('live session ended'), plan_proposed: t('new proposal'),
+  idle: t('empty queue'), autopilot_report: t('autopilot report'),
 }[kind] ?? kind);
 
 let chatScrolled = false;

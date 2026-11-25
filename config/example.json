@@ -54,6 +54,13 @@
     "max_wait_minutes": 120
   },
   "manager_updates": true,
+  "autopilot": {
+    "enabled": false,
+    "week_pace": 0.95,
+    "stop_at_5h_window": 0.85,
+    "quiet_hours": "",
+    "daily_report": "08:00"
+  },
   "auto_update_mode": "pause",
   "remote_access": {
     "enabled": false,

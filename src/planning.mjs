@@ -172,7 +172,7 @@ const rankOf = i => i.rank ?? Number.MAX_SAFE_INTEGER;
 const byBoardOrder = (a, b) =>
   PRIORITIES.indexOf(a.priority) - PRIORITIES.indexOf(b.priority) || STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status) || rankOf(a) - rankOf(b) || a.id - b.id;
 // The owner's order for decisions and approved items: the rank (set by the manager's triage or by dragging), then the board's.
-const byRank = (a, b) => rankOf(a) - rankOf(b) || byBoardOrder(a, b);
+export const byRank = (a, b) => rankOf(a) - rankOf(b) || byBoardOrder(a, b);
 
 /** Every item, in the board's order: priority, then what needs the owner, then the number. */
 export const planItems = () => [...readBoard().items].sort(byBoardOrder);
@@ -419,8 +419,8 @@ export function triageItem(id, { priority, agent, recommend, note, order } = {})
 
 /**
  * A decision on an item: "approve" (it becomes a task for its agent, in the owner's order, one per project at a time),
- * "later" (future) or "discard" (with a reason; "restore" brings it back). by: who decided, the owner or the manager
- * (which discards proposals that make no sense or repeat another).
+ * "later" (future) or "discard" (with a reason; "restore" brings it back). by: who decided, the owner, the manager
+ * (which discards proposals that make no sense or repeat another) or the autopilot (src/autopilot.mjs).
  */
 export async function decideItem(id, decision, { reason, by = 'owner' } = {}) {
   const board = readBoard();
@@ -535,6 +535,9 @@ export async function changePlan(body = {}) {
     case 'triage':
       return triageItem(body.id, { priority: body.priority, agent: body.agent, recommend: body.recommend, note: body.note, order: body.order });
     case 'approve':
+      // The manager's approval for the owner, within the autopilot's limits only.
+      if (body.autopilot) return (await import('./autopilot.mjs')).autopilotApprove(body.id);
+    // falls through
     case 'later':
     case 'discard':
       return decideItem(body.id, body.action, { reason: body.reason, by: body.by === 'manager' ? 'manager' : 'owner' });

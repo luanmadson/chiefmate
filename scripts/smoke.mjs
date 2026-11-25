@@ -385,6 +385,46 @@ try {
   failures.push(`proposal checks: ${error.message}`);
 }
 
+// The autopilot, in this process with made-up settings and usage: its limits, the empty queue that wakes the manager
+// once, the approval it refuses and the daily report (the news never reaches the manager here; nothing starts).
+try {
+  process.env.CHIEFMATE_SMOKE = '1';
+  const autopilot = await import(pathToFileURL(path.join(root, 'src', 'autopilot.mjs')).href);
+  const planning = await import(pathToFileURL(path.join(root, 'src', 'planning.mjs')).href);
+  const { readState, saveState } = await import(pathToFileURL(path.join(root, 'src', 'store.mjs')).href);
+  const { newsMessage } = await import(pathToFileURL(path.join(root, 'src', 'manager.mjs')).href);
+  const defaults = autopilot.autopilotSettings({});
+  expect(!defaults.enabled && defaults.week_pace === 0.95 && defaults.stop_at_5h_window === 0.85 && !defaults.quiet_hours && defaults.daily_report === '08:00', `the autopilot's defaults are wrong: ${JSON.stringify(defaults)}`);
+  const quiet = autopilot.parseQuietHours('23:00-07:00');
+  const at = (h, m = 0) => new Date(2026, 0, 5, h, m);
+  expect(autopilot.inQuietHours(quiet, at(23, 30)) && autopilot.inQuietHours(quiet, at(6, 59)) && !autopilot.inQuietHours(quiet, at(7)) && !autopilot.parseQuietHours('soon'), 'the quiet hours across midnight are wrong');
+  const on = autopilot.autopilotSettings({ autopilot: { enabled: true, quiet_hours: '23:00-07:00' } });
+  const later = h => new Date(Date.now() + h * 3600_000).toISOString();
+  const week = (used, daysLeft) => ({ seven_day: { used, resets: later(daysLeft * 24) } });
+  expect(autopilot.blockReason(defaults, {})?.includes('off') && autopilot.blockReason(on, {}, at(2))?.includes('quiet hours'), 'the autopilot acted while off or in quiet hours');
+  expect(autopilot.blockReason(on, { five_hour: { used: 0.9, resets: later(2) } }, at(12))?.includes('5-hour'), 'the autopilot acted above the 5-hour limit');
+  expect(autopilot.blockReason(on, week(0.6, 3.5), at(12))?.includes('pace') && autopilot.blockReason(on, week(0.4, 3.5), at(12)) === null, "the week's pace is not respected");
+  const config = { owner: 'Owner', projects: { Auto: {} }, autopilot: { enabled: true, daily_report: false } };
+  const item = planning.proposeItem({ project: 'Auto', title: 'Smoke autopilot item', agent: 'someone', by: 'manager' });
+  planning.triageItem(item.id, { recommend: 'now' });
+  const idle = await autopilot.checkAutopilot({ config, usage: {}, runs: [] });
+  expect(idle.woke.join() === 'Auto', `an empty queue with an item triaged "now" did not wake the manager: ${JSON.stringify(idle)}`);
+  expect((await autopilot.checkAutopilot({ config, usage: {}, runs: [] })).woke.length === 0, 'the same empty queue woke the manager twice');
+  expect(!autopilot.idleProjects(config, [{ id: 'r', project: 'Auto', status: 'queued' }]).has('Auto'), 'a project with a run queued counted as idle');
+  const refused = async (cfg, usage) => autopilot.autopilotApprove(item.id, { config: cfg, usage }).then(() => false, () => true);
+  expect(await refused({ ...config, autopilot: { enabled: false } }, {}) && await refused(config, { five_hour: { used: 0.95, resets: later(1) } }), 'the autopilot approved while off or above its limits');
+  expect(newsMessage('Owner', [{ kind: 'idle', text: 'Empty', at: new Date().toISOString() }]).includes('plan approve <n> --autopilot'), 'the idle news does not tell the manager how to queue the next item');
+  const state = readState();
+  state.autopilot = { ...state.autopilot, log: [{ at: new Date().toISOString(), item: item.id, project: 'Auto', title: 'Smoke autopilot item', agent: 'someone' }] };
+  saveState(state);
+  const daily = { ...config, autopilot: { enabled: true, daily_report: '00:00' } };
+  const report = (await autopilot.checkAutopilot({ config: daily, usage: {}, runs: [{ id: 'r', project: 'Auto', status: 'running' }] })).report;
+  expect(report?.text?.includes(`#${item.id} Auto: "Smoke autopilot item"`), `the daily report does not list what the autopilot queued: ${JSON.stringify(report)}`);
+  expect((await autopilot.checkAutopilot({ config: daily, usage: {}, runs: [{ id: 'r', project: 'Auto', status: 'running' }] })).report === null, 'the daily report went twice in a day');
+} catch (error) {
+  failures.push(`autopilot checks: ${error.message}`);
+}
+
 // The direct talk with an agent at work, in this process: a made-up step going on (nothing real runs), then a
 // stand-in for Claude Code (a small script) interrupted at a safe point and resumed with the owner's message.
 try {
