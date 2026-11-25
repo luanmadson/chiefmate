@@ -455,7 +455,7 @@ async function main() {
         return;
       }
       const { startServer } = await import('./server.mjs');
-      const { server, port: p } = startServer();
+      const { port: p, close } = startServer();
       if (!process.env.CHIEFMATE_SMOKE) (await import('./config.mjs')).backupConfig();
       // The smoke test only needs the app and the API: no queue, no schedule, no updates.
       if (!process.env.CHIEFMATE_SMOKE) {
@@ -483,7 +483,7 @@ async function main() {
             nudgeQueue();
             deliverPending();
           },
-          beforeRestart: () => new Promise(resolve => server.close(() => resolve())),
+          beforeRestart: close,
         });
         deliverPending(); // messages left in the queue when Chiefmate stopped
         (await import('./news.mjs')).startNews(); // and the news for the manager, such as "update installed"

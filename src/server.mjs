@@ -42,8 +42,17 @@ const TYPES = {
   '.webmanifest': 'application/manifest+json',
 };
 
+// On every answer: no guessing of content types, no framing by other sites, no address sent to other sites.
+// ("same-origin", not "no-referrer": with "no-referrer" the browser sends "Origin: null" and the app's commands are refused.)
+const SAFE_HEADERS = {
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'same-origin',
+  'content-security-policy': "frame-ancestors 'none'",
+  'x-frame-options': 'DENY',
+};
+
 function reply(res, code, data) {
-  res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  res.writeHead(code, { ...SAFE_HEADERS, 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   res.end(JSON.stringify(data));
 }
 
@@ -53,7 +62,7 @@ function serveFile(res, pathname) {
   if (!file.startsWith(UI + path.sep)) return reply(res, 404, { error: 'not found' });
   try {
     const content = readFileSync(file);
-    res.writeHead(200, { 'content-type': TYPES[path.extname(file)] ?? 'application/octet-stream', 'cache-control': 'no-store' });
+    res.writeHead(200, { ...SAFE_HEADERS, 'content-type': TYPES[path.extname(file)] ?? 'application/octet-stream', 'cache-control': 'no-store' });
     res.end(content);
   } catch {
     reply(res, 404, { error: 'not found' });
@@ -305,15 +314,64 @@ function validLimits(body) {
   return limits;
 }
 
+/**
+ * The optional remote access through Tailscale Serve ("remote_access": { "enabled", "host", "logins", "port" }), or
+ * null when it is off. "host" is this computer's name in the tailnet (<pc>.<tailnet>.ts.net) and "logins" the
+ * Tailscale logins allowed in. Incomplete settings turn it off, with a message.
+ */
+export function remoteSettings(settings, mainPort) {
+  if (!settings?.enabled) return null;
+  const host = String(settings.host ?? '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/[/:].*$/, '');
+  const logins = [settings.logins ?? []].flat().map(x => String(x ?? '').trim().toLowerCase()).filter(Boolean);
+  const port = Number(settings.port) || 4748;
+  const problem = !/^[a-z0-9-]+(\.[a-z0-9-]+)*\.ts\.net$/.test(host) ? 'remote_access.host must be the computer\'s name in the tailnet, such as pc.tailnet.ts.net'
+    : !logins.length ? 'remote_access.logins must list the Tailscale logins allowed in'
+      : port === mainPort ? 'remote_access.port must differ from the app\'s own port' : '';
+  if (problem) {
+    console.error(`Remote access is off: ${problem}.`);
+    return null;
+  }
+  return { host, logins, port };
+}
+
+/**
+ * Why a request to the remote listener is refused, or '' when it may go on. Tailscale Serve sets
+ * Tailscale-User-Login and removes one sent by the device; Funnel (the public internet) and tagged devices send none.
+ * Host and Origin must be the tailnet name, so no other website can drive the app through the browser.
+ */
+export function remoteRefusal(req, remote) {
+  const hostname = String(req.headers.host ?? '').toLowerCase().replace(/:443$/, '');
+  if (hostname !== remote.host) return 'address not allowed';
+  const origin = req.headers.origin;
+  if (origin !== undefined && origin.toLowerCase() !== `https://${remote.host}`) return 'request refused';
+  if (req.method !== 'GET' && origin === undefined) return 'request refused';
+  const login = String(req.headers['tailscale-user-login'] ?? '').trim().toLowerCase();
+  if (!login || !remote.logins.includes(login)) return 'not allowed in';
+  return '';
+}
+
+// Commands that open a window or a program on the computer where Chiefmate runs: from another device, nobody would see
+// them, so they are refused there (their "dryRun" still answers).
+const OPENS_ON_PC = {
+  '/api/project/open': () => true,
+  '/api/project/dev': body => body.action === 'start',
+  '/api/session': body => !!body.window,
+  '/api/prompt-builder/session': body => !!body.window,
+};
+
 export function startServer() {
-  const port = Number(process.env.CHIEFMATE_PORT) || loadConfig().port || 4747;
+  const config = loadConfig();
+  const port = Number(process.env.CHIEFMATE_PORT) || config.port || 4747;
   const allowed = new Set([`localhost:${port}`, `127.0.0.1:${port}`]);
   checkClaude();
   setInterval(checkClaude, 10 * 60_000);
-  const server = http.createServer(async (req, res) => {
+  const handle = async (req, res, remote = null) => {
     try {
       // Guards against another website open in the browser trying to send commands here.
-      if (!allowed.has(req.headers.host)) return reply(res, 403, { error: 'address not allowed' });
+      if (remote) {
+        const refused = remoteRefusal(req, remote);
+        if (refused) return reply(res, 403, { error: refused });
+      } else if (!allowed.has(req.headers.host)) return reply(res, 403, { error: 'address not allowed' });
       const url = new URL(req.url, `http://${req.headers.host}`);
       if (req.method === 'GET') {
         if (url.pathname === '/api/health') return reply(res, 200, { ok: true, version: VERSION });
@@ -361,10 +419,13 @@ export function startServer() {
       }
       if (req.method !== 'POST') return reply(res, 405, { error: 'method not allowed' });
       const origin = req.headers.origin;
-      if (req.headers['x-chiefmate'] !== '1' || (origin && !allowed.has(origin.replace(/^https?:\/\//, '')))) {
+      if (req.headers['x-chiefmate'] !== '1' || (!remote && origin && !allowed.has(origin.replace(/^https?:\/\//, '')))) {
         return reply(res, 403, { error: 'request refused' });
       }
       const body = await readBody(req);
+      if (remote && !body.dryRun && OPENS_ON_PC[url.pathname]?.(body)) {
+        return reply(res, 403, { error: t('This opens on the computer where Chiefmate runs: do it there.') });
+      }
       switch (url.pathname) {
         case '/api/mission': {
           if (body.plan) planItem(body.plan); // the board's item to link must exist
@@ -516,7 +577,23 @@ export function startServer() {
     } catch (error) {
       reply(res, 400, { error: error.message });
     }
-  });
+  };
+  const server = http.createServer((req, res) => handle(req, res));
   server.listen(port, '127.0.0.1');
-  return { server, port };
+  // The remote access: a second listener, also on this computer only, for Tailscale Serve alone. The smoke test's
+  // temporary Chiefmate never opens the installation's: it takes its own from CHIEFMATE_REMOTE_ACCESS.
+  const remote = remoteSettings(process.env.CHIEFMATE_SMOKE ? JSON.parse(process.env.CHIEFMATE_REMOTE_ACCESS || 'null') : config.remote_access, port);
+  let remoteServer = null;
+  if (remote) {
+    remoteServer = http.createServer((req, res) => handle(req, res, remote));
+    remoteServer.on('error', error => console.error(`Remote access is off: ${error.message}`));
+    remoteServer.listen(remote.port, '127.0.0.1', () => console.log(`Remote access through Tailscale Serve at https://${remote.host} (127.0.0.1:${remote.port})`));
+  }
+  // Both listeners (such as before a restart for an update), so the next Chiefmate can open them.
+  const close = () => {
+    remoteServer?.close();
+    remoteServer?.closeAllConnections();
+    return new Promise(resolve => server.close(() => resolve()));
+  };
+  return { server, port, remote, close };
 }

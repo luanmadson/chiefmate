@@ -352,6 +352,7 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `auto_update_mode` | How the self-update installs an approved update (see "Chiefmate improves itself"): `"pause"` (the default) pauses the work going on at a safe point, installs and resumes it by itself; `"wait"` installs only once no run is going on and the manager is free |
 | `manager_updates` | The manager's news in the conversation (see "News from the manager"): `true` (the default, every event), `false` (none) or a list of the events that wake it, such as `["run_failed", "pr_ready", "needs_you"]` |
 | `usage_reader` | The optional reading of your usage page on claude.ai (see below): `{ "enabled": false, "every_hours": 4 }`, and `browser` with the path to Edge or Chrome if it isn't found |
+| `remote_access` | The optional use from your laptop and phone through Tailscale Serve (see "Remote access" below): `{ "enabled": false, "host": "<pc>.<tailnet>.ts.net", "logins": ["<your Tailscale login>"], "port": 4748 }`. Off by default; read when Chiefmate starts |
 
 The libraries are read from a copy that Chiefmate refreshes from GitHub before use, in `workspaces/.library/`, so the crew can read them but never change the original. To have the crew change a library, add its repository as a project too: the changes then arrive as pull requests, like everything else.
 
@@ -361,6 +362,16 @@ The libraries are read from a copy that Chiefmate refreshes from GitHub before u
 - `clone_filter` (such as `"blob:none"`) makes a partial copy of a very large repository.
 
 **Projects on this computer.** The Projects section finds a project's processes by its folders: `local_clone`, `repository` when it is a folder, `Documents/GitHub/<repository name>` in your user folder when it exists, the working copy in `workspaces/` and any extra folders in the project's `local_dirs`. The development environment started from the project's page counts too, with everything it started.
+
+**Remote access (optional).** To use the app from your laptop or phone, with this computer on, Chiefmate works behind [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve): your devices join one private network (a tailnet), and Serve gives the app a private HTTPS address that only that network reaches. Nothing opens to the internet, and the app still listens on this computer only.
+1. Install Tailscale on this computer, the laptop and the phone, signed in with the same account (with two-factor sign-in on). On this computer, turn on **Run unattended** and turn off key expiry for it in the admin console.
+2. In the admin console, turn on MagicDNS and HTTPS certificates. Give this computer a neutral name: it appears in public certificate logs.
+3. Let only your own user reach this computer, on port 443, in the access rules. Allow by user, not by tag: tagged devices send no identity, and Chiefmate refuses them.
+4. Run `tailscale serve --bg 4748` once (it survives restarts).
+5. In the settings, set `remote_access` with `"enabled": true`, `host` (this computer's name in the tailnet, such as `pc.tailnet.ts.net`) and `logins` (your Tailscale login, such as `you@example.com`), and restart Chiefmate.
+6. Open `https://<host>` on the other device. On the phone, "Add to home screen" makes it an app.
+
+Chiefmate then opens a second listener, on `127.0.0.1:4748`, for Serve alone. It answers only when the address is the tailnet name, a command comes from that same address (Origin) with the `x-chiefmate` header, and the `Tailscale-User-Login` that Serve adds is one of `logins`. Serve removes that header when a device sends it, and Funnel (the public internet) sends none, so a Funnel turned on by mistake is refused too. What opens a window or a program on this computer (a folder, VS Code, a development environment, a session in a window) is refused from there: do it on the computer. The app's own port refuses the tailnet name, so pointing Serve at it doesn't work.
 
 **To put a project under Chiefmate:**
 1. add it to `projects`;
@@ -457,7 +468,7 @@ The self-update only touches Chiefmate's own files. Your settings, the history a
 
 ## Security
 
-- **Only you reach the app.** It listens on this computer only, and it refuses commands sent by other websites open in your browser.
+- **Only you reach the app.** It listens on this computer only, and it refuses commands sent by other websites open in your browser. Its answers can't be framed by other sites. With the optional remote access, your other devices reach it only through Tailscale Serve, with your Tailscale login (see "Remote access"). Any program on this computer can reach that second listener and claim a login, as it can already reach the app itself.
 - **Agents have limits.** They cannot push to GitHub, open or merge pull requests, or change the repository's address.
 - **Each step sees only its project.** Other projects' working copies and documentation, the libraries a project doesn't list and Chiefmate's `data/` are denied to the file tools by permission rules (see "What each step sees"). A shell command can still read them: this is not a sandbox.
 - **None of your own configuration.** Agents run without your Claude Code settings, hooks, plugins, skills, `~/.claude/CLAUDE.md` and MCP servers, and without the variables of your own Claude session. The only external tools are those in `mcp_servers`, released by project or agent.
