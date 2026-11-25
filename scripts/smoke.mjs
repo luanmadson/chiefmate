@@ -121,6 +121,12 @@ try {
     expect(/phone && i\.level === 'info'/.test(appJs.slice(appJs.indexOf('function drawAlerts'), appJs.indexOf('function drawNavAttention'))), "a phone's band also shows the info notices");
     // A project's page: its tabs (the prompt builder's screen moves into the last one) and the prompt shown by blocks.
     const html = await (await fetch(`${base}/`)).text();
+    // The decisions in a tab of their own, and the focus mode: the conversation alone, nothing over it or beside it;
+    // an urgent tab pulses, and stands still (lit) with reduced motion.
+    expect(['view-decisions', 'decisions', 'focus-mode', 'focus-bar'].every(id => html.includes(`id="${id}"`)) && html.includes('href="#decisions"')
+      && !/id="chat"[^]*?<\/section>/.exec(html)?.[0].includes('id="decisions"'), 'the app lacks the Decisions tab or the focus mode, or the decisions are still in the conversation');
+    expect(/html\.chat-focus \.titlebar, html\.chat-focus \.nav, html\.chat-focus \.alerts, html\.chat-focus \.statusbar/.test(styles)
+      && /prefers-reduced-motion: reduce\) \{ \.nav a\[data-level="urgent"\][^}]*animation: none/.test(styles), 'the focus mode leaves a bar or band on screen, or an urgent tab pulses with reduced motion');
     expect(['project-status', 'project-actions', 'project-more', 'project-needs', 'project-overview', 'project-crew', 'project-tasks', 'project-planning', 'project-context', 'project-builder', 'builder-body', 'builder-view', 'builder-edit']
       .every(id => html.includes(`id="${id}"`)), "the app's page lacks a part of the project's page or of the prompt builder");
     const unsigned = await fetch(`${base}/api/limits`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
@@ -1332,11 +1338,16 @@ try {
 try {
   process.env.CHIEFMATE_SMOKE = '1';
   const src = file => pathToFileURL(path.join(root, 'src', file)).href;
-  const { addQuestion, decide, decisionCards, openQuestions } = await import(src('decisions.mjs'));
+  const { addQuestion, decide, decisionCards, openQuestions, verdictRecommendation } = await import(src('decisions.mjs'));
   const { attentionItems } = await import(src('attention.mjs'));
   const { readRun, saveRun } = await import(src('store.mjs'));
   const { planItems, proposeItem, triageItem } = await import(src('planning.mjs'));
   const { t } = await import(src('i18n.mjs'));
+  // The recommendation is read after its label in the manager's verdict, not from its first line ("What I fixed: ...").
+  const advice = verdictRecommendation(['**What I fixed:** a conflict.', '**Risks:** low.', '**Recommendation:** approve with caveats: check the phone.'].join('\n\n'));
+  const inline = verdictRecommendation('What I fixed: nothing. Risks: none. Recommendation: do not approve, the tests fail.');
+  expect(advice.short === t('Approve with caveats') && advice.text.startsWith('Approve with caveats: check') && inline.short === t('Do not approve'),
+    `the recommendation was not read from the verdict: ${JSON.stringify([advice, inline])}`);
   const config = { projects: { 'zz-p': { name: 'Proj', local_clone: path.join(data, 'no-clone') }, 'zz-q': { name: 'Shared', merge_by_owner: false } } };
   const at = new Date(Date.now() - 3600_000).toISOString();
   const made = [

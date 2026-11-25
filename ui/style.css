@@ -77,6 +77,11 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .nav a.running { color: var(--text); }
 .nav a > span:first-child { flex: 1; }
 .nav-attn:empty { display: none; }
+.nav-group { margin: 14px 18px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.nav a[data-level="urgent"]:not(.active) { color: var(--strong); animation: tab-pulse 2.4s ease-in-out infinite; }
+.nav a[data-level="important"]:not(.active) { color: var(--text); }
+@keyframes tab-pulse { 50% { background: var(--urgent-bg); } }
+@media (prefers-reduced-motion: reduce) { .nav a[data-level="urgent"]:not(.active) { animation: none; background: var(--urgent-bg); } }
 
 /* Attention: one component for the whole app. A notice (.attn) and its mark (.attn-mark), colored by data-level. */
 .alerts { grid-area: alerts; min-width: 0; }
@@ -202,7 +207,12 @@ textarea { resize: vertical; min-height: 64px; }
 .option input { width: auto; margin: 0; }
 
 /* Manager */
-.manager-grid { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 20px; height: calc(100% - 82px); min-height: 440px; }
+/* The conversation fills its page; the lines of a message stop at a reading width on wide screens */
+#view-manager.active { display: flex; flex-direction: column; overflow: hidden; }
+#view-manager .chat-column { flex: 1 1 auto; min-height: 0; }
+.view-header-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.view-header-actions .short { display: none; }
+.chat .msg-body { max-width: 860px; }
 .chat-column { display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--line); background: var(--panel); }
 .chat { flex: 1; overflow-y: auto; min-height: 0; }
 .msg { padding: 14px 18px; border-bottom: 1px solid var(--line); }
@@ -226,12 +236,11 @@ textarea { resize: vertical; min-height: 64px; }
 .queued-msg.news { border-left-color: var(--accent); }
 .news-event { font: 11.5px var(--mono); }
 .news-event time { color: var(--faint); }
-/* Decisions (src/decisions.mjs): cards above the conversation, colored by level, with large buttons; the detail folded */
-.decisions { flex: none; max-height: 52%; overflow-y: auto; border-bottom: 1px solid var(--line-strong); background: var(--bg); }
-.decisions[hidden] { display: none; }
-.decisions-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 8px 18px; background: var(--panel); border-bottom: 1px solid var(--line); }
-.decisions-head .label { margin: 0; }
-.decision { padding: 10px 18px 12px; background: var(--attn-bg); border-left: 4px solid var(--attn); border-bottom: 1px solid var(--line); }
+/* Decisions (src/decisions.mjs), in their own tab: compact cards colored by level (what, where, the recommendation's
+   verdict and the buttons); what changes, the risk and the rest folded under Details */
+.decisions { max-width: 980px; border: 1px solid var(--line); border-bottom: 0; background: var(--bg); }
+.decisions > .empty { border: 0; border-bottom: 1px solid var(--line); }
+.decision { padding: 12px 18px; background: var(--attn-bg); border-left: 4px solid var(--attn); border-bottom: 1px solid var(--line); }
 .decision[data-seen] { background: transparent; border-left-color: var(--line-strong); }
 .decision[data-seen] .attn-mark { animation: none; opacity: 0.5; }
 .decision-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: var(--muted); }
@@ -240,23 +249,23 @@ textarea { resize: vertical; min-height: 64px; }
 .decision[data-seen] .decision-kind { color: var(--muted); }
 .decision-about { color: var(--text); }
 .decision-title { margin-top: 4px; font-size: 14.5px; font-weight: 600; color: var(--strong); }
-.decision-what { margin: 4px 0 0; color: var(--text); }
+.decision-verdict { margin-top: 2px; font-size: 13px; color: var(--accent); }
+.decision-what { margin: 6px 0 0; color: var(--text); }
 .decision-facts { display: grid; gap: 3px; margin: 8px 0 0; font-size: 12.5px; }
 .decision-facts div { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 10px; }
 .decision-facts dt { color: var(--muted); }
 .decision-facts dd { margin: 0; color: var(--text); }
-.decision-third { margin: 8px 0 0; font-size: 12.5px; color: var(--muted); }
+.decision-third { margin: 6px 0 0; font-size: 12.5px; color: var(--muted); }
 .decision-detail { margin-top: 8px; font-size: 12.5px; }
 .decision-detail > summary { color: var(--muted); }
+.decision-detail[open] { padding-bottom: 4px; }
 .decision-detail-body { margin: 6px 0; padding: 8px 12px; background: var(--panel); border: 1px solid var(--line); }
 .decision-detail-body p:last-child { margin-bottom: 0; }
+/* Buttons of 36 px (44 px on a touch screen), as wide as their label */
 .decision-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-.decision-buttons .button { min-width: 96px; min-height: 36px; padding: 8px 15px; font-size: 13px; }
-.decisions-later > summary { padding: 8px 18px; color: var(--muted); font-size: 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
-/* The phone's folds (the bar, the one-line cards, the short labels): hidden on wider screens */
-.decisions-bar, .decision-line, .decision-buttons .short { display: none; }
-.decision-chevron { flex: none; width: 7px; height: 7px; margin: 0 4px 3px; border-right: 1px solid var(--muted); border-bottom: 1px solid var(--muted); transform: rotate(45deg); }
-[aria-expanded="true"] > .decision-chevron { margin-bottom: -3px; transform: rotate(-135deg); }
+.decision-buttons .button { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 0 14px; font-size: 13px; }
+.decision-buttons .short { display: none; }
+.decisions-later > summary { padding: 10px 18px; color: var(--muted); font-size: 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .chat-queue { max-height: 32vh; overflow-y: auto; border-top: 1px solid var(--line); background: var(--raised); }
 .chat-queue[hidden] { display: none; }
 .chat-queue-head { display: flex; gap: 10px; align-items: baseline; padding: 8px 18px 0; }
@@ -274,7 +283,9 @@ textarea { resize: vertical; min-height: 64px; }
 .suggestions { display: flex; flex-wrap: wrap; gap: 6px; }
 .suggestion { appearance: none; background: transparent; border: 1px solid var(--line-strong); border-radius: 2px; color: var(--muted); font: inherit; font-size: 12px; padding: 3px 9px; cursor: pointer; }
 .suggestion:hover { color: var(--text); border-color: var(--muted); }
-.side { display: flex; flex-direction: column; gap: 16px; min-height: 0; overflow-y: auto; }
+.operations-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 20px; align-items: start; }
+.side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+@media (max-width: 1100px) { .operations-layout { grid-template-columns: minmax(0, 1fr); } }
 .bridge-head { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 14px; align-items: center; padding-bottom: 14px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
 .bridge-name { font-size: 15px; font-weight: 600; color: var(--strong); }
 .bridge-head .hint { margin: 2px 0 6px; }
@@ -445,11 +456,9 @@ details summary { cursor: pointer; }
   .nav a { border-left: 0; border-bottom: 2px solid transparent; white-space: nowrap; }
   .nav a.active { border-bottom-color: var(--accent); }
   .nav-footer { display: none; }
-  .manager-grid, .operations-grid, .log-grid { grid-template-columns: 1fr; height: auto; }
-  .chat { max-height: 55vh; }
-  .decisions { max-height: none; }
+  .operations-grid, .log-grid { grid-template-columns: 1fr; height: auto; }
+  .nav-group { display: none; }
   .decision-facts div { grid-template-columns: 1fr; gap: 0; }
-  .decision-buttons .button { flex: 1 1 calc(50% - 8px); }
   .view { padding: 16px; }
   .presence .state { display: none; }
   .away { padding: 4px 7px; }
@@ -476,14 +485,14 @@ details summary { cursor: pointer; }
 .plan-recommend { font-size: 12px; color: var(--accent); }
 .plan-recommend.recommend-discard { color: var(--muted); }
 .plan-decide { display: flex; gap: 8px; flex-shrink: 0; }
-.plan-decide .button { min-width: 92px; padding: 9px 16px; }
+.plan-decide .button { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 0 14px; }
 .plan-reason { display: block; font-size: 12px; color: var(--muted); margin-top: 6px; }
 .plan-turn { margin: -8px 0 18px; font-size: 12px; }
 .plan-quick .tab { background: transparent; border-top: 0; border-left: 0; border-right: 0; font: inherit; font-size: 12.5px; cursor: pointer; }
 .plan-row.plan-triaged td { background: var(--important-bg); }
 .plan-row.plan-triaged td:first-child { box-shadow: inset 2px 0 0 var(--important); color: var(--important); }
 .plan-row.plan-discarded .primary { color: var(--muted); text-decoration: line-through; }
-@media (max-width: 700px) { .plan-decision { flex-wrap: wrap; } .plan-decide { width: 100%; } }
+@media (max-width: 700px) { .plan-decision { flex-wrap: wrap; } }
 .plan-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0 16px; margin-bottom: 8px; }
 .plan-filters label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
 .plan-table td:first-child { width: 44px; color: var(--muted); }
@@ -764,7 +773,6 @@ details summary { cursor: pointer; }
   .plan-table .plan-row.plan-triaged, .plan-table .plan-row.plan-waiting_owner { background: var(--important-bg); box-shadow: inset 2px 0 0 var(--important); }
   .plan-table .plan-row.editing { background: var(--raised); }
   .plan-table .plan-row.editing td:nth-child(2) { flex-basis: 100%; }
-  .plan-decide .button { flex: 1; min-width: 0; }
 }
 
 /* The project radar: a plain summary, the potential x effort chart, then the cards, highest potential first. */
@@ -825,7 +833,7 @@ details summary { cursor: pointer; }
 @media (max-width: 900px) {
   .app { grid-template-columns: minmax(0, 1fr); }
   .app > * { min-width: 0; }
-  .manager-grid, .operations-grid, .log-grid { grid-template-columns: minmax(0, 1fr); }
+  .operations-grid, .log-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* Phones: the title bar, the notices, the screen and a bottom bar with the main sections; nothing wider than the screen */
@@ -844,11 +852,12 @@ details summary { cursor: pointer; }
   /* The bottom bar: Manager, Operations, Planning, Projects and More, each 56 px high, the marks on a line of their own */
   .nav { flex-wrap: wrap; overflow: visible; border-bottom: 0; border-top: 1px solid var(--line-strong); padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
   .nav > a, .nav-more {
-    flex: 1 1 0; min-width: 0; height: 56px; padding: 7px 2px 0; display: grid; grid-template: 22px 18px / 1fr auto auto 1fr; align-content: start; align-items: center; overflow: hidden; justify-items: center; column-gap: 4px;
+    flex: 1 1 0; min-width: 0; height: 56px; padding: 7px 2px 0; display: grid; grid-template: 22px 18px / 1fr auto auto 1fr; align-content: start; align-items: center; overflow: hidden; justify-items: center; gap: 2px 4px;
     border: 0; border-top: 2px solid transparent; background: transparent; color: var(--muted); font: inherit; font-size: 11.5px; white-space: nowrap; cursor: pointer;
   }
   .nav > a > span:first-child, .nav-more > span:first-child { grid-column: 1 / -1; max-width: 100%; overflow: hidden; text-overflow: ellipsis; line-height: 22px; }
-  .nav .counter { grid-area: 2 / 2; font-size: 11px; }
+  /* The tab's count and its mark side by side on one line of their own, the same in every tab ("More" is a button) */
+  .nav .counter { grid-area: 2 / 2; font-size: 11px; line-height: 17px; }
   .nav .nav-attn { grid-area: 2 / 3; }
   .nav > a.active, .nav-more.active { color: var(--strong); background: var(--raised); border-top-color: var(--accent); border-bottom: 0; }
   .nav-more[aria-expanded="true"] { color: var(--strong); }
@@ -876,7 +885,7 @@ details summary { cursor: pointer; }
   /* With the keyboard open, the bottom bar and the notices step aside; in a conversation, so do the title bar, the headers
      and the decisions: its last messages and the field take the whole visible area, Send always beside the field */
   html.typing .nav, html.typing .alerts, html.typing .suggestions { display: none; }
-  html.typing-chat .titlebar, html.typing-chat .view-header, html.typing-chat #session-page,
+  html.typing-chat .titlebar, html.typing-chat .view-header, html.typing-chat .focus-bar, html.typing-chat #session-page,
   html.typing-chat #view-project > :not(#project-live), html.typing-chat #project-live-list, html.typing-chat .live-head { display: none; }
   html.typing-chat .app { padding-top: env(safe-area-inset-top); }
   html.typing-chat .view.active { padding-top: 0; padding-bottom: 0; overflow: hidden; } /* the same width: the messages don't reflow */
@@ -889,64 +898,37 @@ details summary { cursor: pointer; }
   .view-header h1 { font-size: 18px; }
   pre, code { overflow-wrap: anywhere; }
 
-  /* The manager: the conversation takes the screen, the message field fixed at its bottom; the bridge below it */
+  /* The conversation takes the screen, the message field fixed at its bottom */
   #view-manager .view-header { height: 44px; margin-bottom: 6px; padding-bottom: 0; align-items: center; flex-wrap: nowrap; border-bottom: 0; }
   #view-manager .view-header p { display: none; }
-  .manager-grid { display: block; height: auto; min-height: 0; }
-  #view-manager .chat-column { height: calc(var(--view-h, 70dvh) - 70px); min-height: 200px; }
+  #view-manager .view-header-actions { flex-wrap: nowrap; gap: 6px; }
+  #view-manager .view-header-actions .button { padding: 0 10px; }
+  .view-header-actions .long { display: none; }
+  .view-header-actions .short { display: inline; }
+  #view-manager .chat-column { min-height: 200px; }
   .chat { max-height: none; overscroll-behavior: contain; overflow-wrap: anywhere; }
   .msg { padding: 10px 12px; }
   .msg-head { margin-bottom: 4px; }
 
-  /* Decisions: a one-line bar ("3 decisions") folding its list; each card one line (title, where, the recommendation),
-     unfolding to its explanation and short buttons. At most 40% of the conversation's height, scrolling inside. */
-  .decisions { max-height: 40%; overscroll-behavior: contain; }
-  .decisions-head { display: none; }
-  .decisions-bar {
-    position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 0 12px;
-    border: 0; border-left: 3px solid var(--attn); background: var(--panel); color: var(--strong); font: inherit; font-size: 13px; font-weight: 600; text-align: left; cursor: pointer;
-  }
-  .decisions-bar-text { flex: 1; min-width: 0; }
-  .decisions.open .decisions-bar { border-bottom: 1px solid var(--line); }
-  .decisions:not(.open) .decisions-list { display: none; }
-  .decision { padding: 0; border-left-width: 3px; }
-  .decision-line { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 6px 12px 6px 9px; border: 0; background: transparent; color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
-  /* Folded: the title takes at most 62% of the line, so where and the recommendation stay in sight; unfolded, all of it */
-  .decision-line-text { flex: 1; min-width: 0; display: flex; gap: 6px; white-space: nowrap; }
-  .decision-line-text > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .decision-line-title { flex: 0 1 auto; max-width: 62%; font-weight: 600; color: var(--strong); }
-  .decision-line-about { flex: 1 1 0; color: var(--muted); }
-  .decision[data-open] .decision-line-text { display: block; white-space: normal; }
-  .decision[data-open] .decision-line-title { max-width: none; }
-  .decisions-bar:focus-visible, .decision-line:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
-  .decision:not([data-open]) > :not(.decision-line), .decision > .decision-head, .decision > .decision-title { display: none; }
-  .decision[data-open] { padding-bottom: 10px; }
-  .decision > :not(.decision-line) { margin-left: 9px; margin-right: 12px; }
-  .decision-what { margin-top: 0; font-size: 13px; }
-  .decision-facts, .decision-third, .decision-detail { margin-top: 6px; }
+  /* Decisions: the same compact cards, the buttons with their short labels ("Later", "Talk") */
+  .decisions { border-left: 0; border-right: 0; margin: 0 -12px; }
+  .decision { padding: 10px 12px 12px; border-left-width: 3px; }
+  .decision-head .decision-about { flex: 1 1 100%; }
   .decision-facts div { display: block; }
   .decision-facts dt { display: inline; }
   .decision-facts dt::after { content: ": "; }
   .decision-facts dd { display: inline; }
-  .decisions:has(.decision[data-open]) { max-height: 45%; }
-  /* Unfolded, the buttons come right under the line, the explanation below them */
-  .decision[data-open] { display: flex; flex-direction: column; }
-  .decision[data-open] > * { order: 2; }
-  .decision[data-open] > .decision-line { order: 0; }
-  .decision[data-open] > .decision-buttons { order: 1; margin: 0 12px 4px 9px; }
-  .decision-buttons { gap: 6px; margin-top: 8px; }
-  .decision-buttons .button { flex: none; min-width: 0; min-height: 44px; padding: 0 12px; }
+  .decision-buttons { gap: 6px; }
+  .decision-buttons .button { min-height: 44px; padding: 0 12px; }
   .decision-buttons .long { display: none; }
   .decision-buttons .short { display: inline; }
   .decisions-later > summary { padding: 13px 12px; }
-  html.typing .decisions { display: none; }
-  .side { margin-top: 16px; overflow: visible; }
   /* The field with its buttons to the right, as in a messaging app; the suggestions in one row below, scrolling sideways */
   .compose { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 8px; }
   .compose textarea { grid-area: 1 / 1; min-height: 64px; height: 100%; max-height: calc(5lh + 18px); resize: none; }
   .compose-footer { display: contents; }
-  .compose-buttons { grid-area: 1 / 2; flex-direction: column; justify-content: flex-end; margin-left: 0; }
-  .compose-buttons .button { min-width: 76px; }
+  .compose .compose-buttons { grid-area: 1 / 2; flex-direction: column; justify-content: flex-end; margin-left: 0; }
+  .compose .compose-buttons .button { min-width: 76px; }
   .compose-footer > :first-child { grid-area: 2 / 1 / 3 / 3; min-width: 0; }
   .suggestions { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
   .compose-footer > :first-child:empty { display: none; }
@@ -978,7 +960,7 @@ details summary { cursor: pointer; }
   .state, .live-summary, .radar-score, .radar-trend, .report-full > summary { font-size: 13px; }
   .label, .table th, .msg-author, .attn-level, .context-heading { font-size: 11px; }
   .button { font-size: 14px; }
-  .button.small, .suggestion, .tab, .plan-quick .tab, .menu-item, .decision-line, .decisions-bar, .decision-what, .autopilot-today li, .facts, .crew-card .facts { font-size: 14px; }
+  .button.small, .suggestion, .tab, .plan-quick .tab, .menu-item, .decision-verdict, .decision-what, .autopilot-today li, .facts, .crew-card .facts { font-size: 14px; }
   .nav > a, .nav-more { font-size: 12px; }
   .live-title, .mission h2, .crew-card h2, .radar-head h3, .detail h2 { font-size: 16px; }
 
@@ -1038,8 +1020,8 @@ details summary { cursor: pointer; }
   .project-head-top { flex-wrap: nowrap; }
   .project-head-top > :first-child { min-width: 0; }
   .project-head-top p { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
-  .project-main-actions { grid-template-columns: minmax(0, 1fr); gap: 8px; }
-  .action-big { padding: 10px 14px; }
+  .project-main-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .action-big { padding: 8px 12px; min-height: 44px; justify-content: center; }
 
   /* Fields in the app's own look (Safari draws a gray bubble otherwise); tabs scroll without a bar */
   select, select.inline-select { appearance: none; -webkit-appearance: none; padding-right: 30px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238a93a0'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; text-overflow: ellipsis; }
@@ -1051,4 +1033,31 @@ details summary { cursor: pointer; }
   .nav .attn-mark[data-level="info"] { display: none; }
   .nav.open { box-shadow: 0 -12px 28px rgba(0, 0, 0, 0.45); }
   .nav.open > a.nav-extra { color: var(--text); }
+}
+
+/* Focus mode (html.chat-focus, setFocusMode in ui/app.js): the conversation alone on the whole window. No title bar,
+   menu, notices nor status bar; one thin line on top with the manager's state, the sections that need you (their marks)
+   and the way out. The messages in a centered column on wide screens. */
+.focus-bar { display: none; }
+html.chat-focus .app { grid-template: "content" minmax(0, 1fr) / minmax(0, 1fr); }
+html.chat-focus .titlebar, html.chat-focus .nav, html.chat-focus .alerts, html.chat-focus .statusbar, html.chat-focus #view-manager .view-header { display: none; }
+html.chat-focus #view-manager { padding: 0; }
+html.chat-focus .focus-bar {
+  display: flex; align-items: center; gap: 14px; flex: none; min-height: 44px; padding: 4px 16px;
+  padding-top: max(4px, env(safe-area-inset-top)); background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.focus-bar-state { flex: none; font-size: 12.5px; }
+.focus-chips { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; overflow-x: auto; scrollbar-width: none; }
+.focus-chips .hint { font-size: 12.5px; }
+.focus-chip { display: inline-flex; align-items: center; gap: 7px; flex: none; min-height: 30px; padding: 0 10px; border: 1px solid var(--line-strong); color: var(--text); font-size: 12.5px; }
+.focus-chip:hover { background: var(--hover); border-color: var(--muted); text-decoration: none; }
+.focus-chip:has([data-level="urgent"]) { border-color: var(--urgent); color: var(--strong); }
+.focus-chip:has([data-level="important"]) { border-color: rgba(232, 189, 95, 0.55); }
+html.chat-focus #view-manager .chat-column { width: min(100%, 1000px); margin: 0 auto; border-top: 0; border-bottom: 0; }
+.button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
+@media (max-width: 600px) {
+  html.chat-focus .focus-bar { gap: 10px; padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(8px, env(safe-area-inset-right)); }
+  html.chat-focus .focus-bar-state .state { font-size: 0; gap: 0; } /* the dot only: the room is for the marks */
+  html.chat-focus #view-manager .chat-column { margin: 0; border-left: 0; border-right: 0; padding-bottom: env(safe-area-inset-bottom); }
+  .focus-chip { min-height: 36px; font-size: 13.5px; }
 }
