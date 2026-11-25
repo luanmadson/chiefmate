@@ -389,6 +389,44 @@ function drawPresence() {
   draw('#presence', html, html);
 }
 
+// A crescent moon in line art.
+const MOON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 10.2A6 6 0 0 1 5.8 2.5a6 6 0 1 0 7.7 7.7z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>';
+
+/** The away mode's button (src/news.mjs): tells the manager the owner stepped out or is back. */
+function drawAway() {
+  const button = $('#away');
+  button.hidden = !online;
+  if (!online) return;
+  const away = state.away;
+  const label = away ? t('Away since {time}', { time: clockTime(away.since) }) : t('Away mode');
+  const help = away
+    ? t('Away mode is on: notices that can wait are kept for you ({count} so far). Click when you are back: the manager writes you a summary.', { count: away.held })
+    : t('Stepping out or going to sleep? The manager is told, the work goes on alone, and notices that can wait come as a summary when you are back.');
+  button.setAttribute('aria-pressed', String(!!away));
+  button.title = help;
+  button.setAttribute('aria-label', `${label}. ${help}`);
+  draw('#away', label, `${MOON}<span class="away-label">${esc(label)}</span>`);
+}
+
+$('#away').addEventListener('click', async () => {
+  const on = !state?.away;
+  const button = $('#away');
+  button.disabled = true;
+  try {
+    await api('/api/away', { on });
+    if (on) toast(t('Away mode on: the manager knows, and notices that can wait are kept for a summary.'));
+    else {
+      toast(t('Welcome back: the manager is writing the summary of the time away.'));
+      location.hash = '#manager';
+    }
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
 /** The project in focus: the run going on now, else the next one in the queue. */
 function drawFocus() {
   const f = online ? state.focus : null;
@@ -617,6 +655,7 @@ const newsEvent = kind => ({
   needs_you: t('needs you'), update_installed: t('update installed'), update_blocked: t('update blocked'),
   memory_alert: t('memory alert'), usage_alert: t('usage alert'), session_ended: t('live session ended'), plan_proposed: t('new proposal'),
   idle: t('empty queue'), autopilot_report: t('autopilot report'), watchdog: t('watchdog'),
+  away: t('away mode on'), back: t('back from away mode'),
 }[kind] ?? kind);
 
 let chatScrolled = false;
@@ -3062,6 +3101,7 @@ document.addEventListener('click', event => {
 function drawOffline() {
   online = false;
   drawPresence();
+  drawAway();
   drawFocus();
   drawAlerts();
   drawNavAttention();
@@ -3128,6 +3168,7 @@ async function refresh() {
   if (fresh && state.now) skew = new Date(state.now).getTime() - Date.now();
   $('#version').textContent = `Chiefmate ${state.version}`;
   drawPresence();
+  drawAway();
   drawFocus();
   drawAlerts();
   drawNavAttention();

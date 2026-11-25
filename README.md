@@ -435,11 +435,21 @@ The conversation never makes you wait.
 
 The manager doesn't only answer: when something you should know about happens, it tells you in the conversation on its own.
 
-- **The events**, by the names `manager_updates` uses: a run finished (`run_finished`), failed (`run_failed`) or paused (`run_paused`); a pull request ready and waiting for your approval (`pr_ready`); a run's work you merged from the app (`merged`); a step or a live session that needs you (`needs_you`); an update installed (`update_installed`) or blocked (`update_blocked`); a memory alert (`memory_alert`) or an alert about the account's usage or the plan's free resets (`usage_alert`); a live session that ended on its own (`session_ended`; not one you ended from Chiefmate); a new proposal on the planning board (`plan_proposed`), which the manager triages before telling you what waits for your decision; what the watchdog found and did (`watchdog`); with the autopilot on, a project's queue that emptied with items triaged "do now" (`idle`), which the manager may put on the queue, and the autopilot's daily report (`autopilot_report`).
+- **The events**, by the names `manager_updates` uses: a run finished (`run_finished`), failed (`run_failed`) or paused (`run_paused`); a pull request ready and waiting for your approval (`pr_ready`); a run's work you merged from the app (`merged`); a step or a live session that needs you (`needs_you`); an update installed (`update_installed`) or blocked (`update_blocked`); a memory alert (`memory_alert`) or an alert about the account's usage or the plan's free resets (`usage_alert`); a live session that ended on its own (`session_ended`; not one you ended from Chiefmate); a new proposal on the planning board (`plan_proposed`), which the manager triages before telling you what waits for your decision; what the watchdog found and did (`watchdog`); with the autopilot on, a project's queue that emptied with items triaged "do now" (`idle`), which the manager may put on the queue, and the autopilot's daily report (`autopilot_report`); you stepping out or coming back (`away`, `back`; see "Away mode").
 - **How it goes.** Chiefmate wakes the manager with a short system message that describes the events and is marked as not coming from you; the manager reads the situation, as with any message, and writes a short, clear notice: what happened and, when something needs you, what to do. It doesn't queue or change anything because of a notice alone.
 - **Grouped.** Events within a minute of the first one go together, as one message. If the manager is answering, they wait in the queue under the conversation ("news for the manager", which you can remove but not edit) and go with your queued messages; then the manager answers you and mentions them in the same reply. The news survives a restart, such as the one after an update; news older than an hour when Chiefmate starts is dropped.
 - **In the conversation**, a notice has a look of its own: a brass rule on the left, a "notice" tag and the events it is about.
 - **Each notice is a turn of the manager**, so it counts on your account's usage like a message of yours. To have fewer, list only the events you care about in `manager_updates`, or set it to `false`. The Windows notifications don't change.
+
+### Away mode
+
+The **Away mode** button, at the top of every screen next to the manager's face, is for when you step out or go to sleep. One click and the manager is told (`away`), and answers in a line or two with what goes on alone meanwhile; the button turns brass and shows since when you are away.
+
+- **The work goes on alone**: runs, the queue, missions and the autopilot carry on as usual.
+- **What can wait, waits.** The news that only informs (a run finished, failed or paused, a pull request ready, an update, a memory or usage alert, a live session that ended, the autopilot's report) doesn't wake the manager; it is kept for later. The Windows notifications that aren't urgent don't show either (they stay in the records). A step that needs you, the watchdog, new proposals and the autopilot's empty queues still reach the manager, which does its own part (the triage, the next item) and asks you nothing that can wait.
+- **Back.** Click the button again: the manager gets everything kept meanwhile (`back`) and writes you one summary, the most important first, with what waits for you and the questions it kept. The app opens the conversation.
+
+`away` and `back` always reach the manager, whatever `manager_updates` says.
 
 ### The conversation's context
 

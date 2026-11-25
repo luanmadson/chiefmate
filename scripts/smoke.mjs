@@ -123,6 +123,12 @@ try {
       const faded = after.items.find(i => i.id === proposal.id);
       expect(faded?.seen && after.counts.important === state.attention.counts.important - 1, 'a notice marked as seen did not fade');
     }
+    // Away mode from the app's button: on, in /api/state, then off (the smoke test's server tells no manager).
+    const awayOn = await (await post('/api/away', { on: true })).json();
+    const awayState = (await (await fetch(`${base}/api/state`)).json()).away;
+    const awayOff = await (await post('/api/away', { on: false })).json();
+    expect(awayOn.away?.since && awayState?.since === awayOn.away.since && awayOff.away === null && state.away === null, `the away mode's button did not turn it on and off: ${JSON.stringify({ awayOn, awayState, awayOff })}`);
+    expect(html.includes('id="away"'), "the app's title bar has no away mode button");
     expect((await post('/api/stop-project', { project: 'none' })).status === 400, 'stopping a project without a confirmed list was not refused');
     expect((await post('/api/reset-grants', { action: 'used', index: 9999 })).status === 400, 'marking a free reset that does not exist was not refused');
     // Updates are off in the smoke test: "update now" and "update check" answer so, and nothing is fetched or installed.
@@ -375,6 +381,26 @@ try {
   }
   expect(locked, "Chiefmate's news could be edited as if the owner had written it");
   removePending(joined.id);
+  // Away mode: the manager is told whatever "manager_updates" says; while away, the events that only inform wait and
+  // the others still go; back, the held ones go with "back", for the summary. Still into the busy manager's queue.
+  const { readPending } = await import(pathToFileURL(path.join(root, 'src', 'store.mjs')).href);
+  const settle = () => new Promise(resolve => setTimeout(resolve, 100));
+  const away = { owner: 'Owner', manager_updates: ['run_failed', 'needs_you'] };
+  const gone = news.setAway(true, away);
+  await settle();
+  const leaving = readPending().find(m => m.from === 'chiefmate');
+  expect(gone?.since && gone.held === 0 && leaving?.events.map(e => e.kind).join() === 'away' && composeMessage('Owner', [leaving]).includes('For the away event'), `turning away mode on did not tell the manager: ${JSON.stringify(leaving)}`);
+  removePending(leaving.id);
+  news.reportEvent('run_failed', 'Run d failed', { config: away });
+  news.reportEvent('needs_you', 'Run e needs Owner', { config: away });
+  const urgent = await news.flushNews();
+  expect(news.awayInfo()?.held === 1 && urgent?.events.map(e => e.kind).join() === 'needs_you' && composeMessage('Owner', [urgent]).includes('Owner is away'), `while away, an event that only informs was not held, or one that needs the owner was: ${JSON.stringify(urgent)}`);
+  removePending(urgent.id);
+  news.setAway(false, away);
+  await settle();
+  const summary = readPending().find(m => m.from === 'chiefmate');
+  expect(!news.awayInfo() && summary?.events.map(e => e.kind).join() === 'run_failed,back' && composeMessage('Owner', [summary]).includes('summary of the time away'), `back from away mode, the held events did not go with "back": ${JSON.stringify(summary)}`);
+  removePending(summary.id);
   const { watchEnded } = await import(pathToFileURL(path.join(root, 'src', 'sessions.mjs')).href);
   watchEnded([{ id: 's1', status: 'open' }, { id: 's2', status: 'open' }]);
   const ended = watchEnded([{ id: 's1', status: 'ended', name: 'X', tool: 'claude' }, { id: 's2', status: 'ended', endedBy: 'owner' }]);

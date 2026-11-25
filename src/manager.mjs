@@ -8,6 +8,7 @@ import { formatDateTime, formatDuration, formatNumber, formatPercent, t } from '
 import { LEAD, leadSituation } from './leads.mjs';
 import { processes } from './machine.mjs';
 import { autopilotLine } from './autopilot.mjs';
+import { awayInfo, awayLine } from './news.mjs';
 import { computerLine, planLine } from './plan.mjs';
 import { planningLine } from './planning.mjs';
 import { focus, maxParallel, queued } from './queue.mjs';
@@ -132,6 +133,8 @@ export function situation(libraries = []) {
   lines.push(sessionsLine(config));
   lines.push(planningLine(config.owner || 'the owner'));
   lines.push(autopilotLine(config, usage));
+  const away = awayLine(config.owner || 'the owner');
+  if (away) lines.push(away);
   lines.push(contextLine());
   const delivery = p => (p.deliver === 'local' ? `, local delivery: the result is a branch in ${p.local_clone ?? 'the working copy'}, nothing goes to GitHub` : ', delivered as a pull request');
   lines.push(`Projects: ${Object.entries(config.projects ?? {}).map(([id, p]) => `${id} (${p.name}, ${p.repository}${delivery(p)}${p.docs ? `, personal docs in ${p.docs}` : ''})`).join('; ') || 'none'}.`);
@@ -249,7 +252,7 @@ export function interruptManager() {
 const isNews = m => m.from === 'chiefmate';
 
 /** Chiefmate's news for the manager: marked as a system message, not the owner's, with what to do with it. */
-export function newsMessage(owner, events, alongside = false) {
+export function newsMessage(owner, events, alongside = false, away = awayInfo()) {
   const head = `[System message from Chiefmate, not from ${owner}] ${events.length === 1 ? 'An event' : `${events.length} events`} ${owner} should know about${events.length > 1 ? ', oldest first' : ''}:`;
   const lines = events.map(e => `- [${formatDateTime(e.at)}] ${e.kind}: ${e.text}`);
   const ask = alongside
@@ -269,7 +272,14 @@ export function newsMessage(owner, events, alongside = false) {
   const watchdog = events.some(e => e.kind === 'watchdog')
     ? `\n\nFor the watchdog events: the watchdog checks Chiefmate from outside every 10 minutes and, when it is stuck, its rescuer acts with a closed list of safe actions. Tell ${owner} in a few lines what was found, what was done and what needs them. Don't restart Chiefmate or stop processes yourself.`
     : '';
-  return `${head}\n${lines.join('\n')}\n\n${ask}${triage}${idle}${report}${watchdog}`;
+  // The away mode (src/news.mjs): leaving, away (only what can't wait arrives) and back, with the summary.
+  const leaving = events.some(e => e.kind === 'away');
+  const absence = events.some(e => e.kind === 'back')
+    ? `\n\nFor the back event: ${owner} is back. Instead of separate notices, write the summary of the time away: what was done, what failed, what waits for ${owner} (pull requests, decisions in Planning, requests) and the questions you kept for them. Most important first, short and grouped; the events held while they were away are listed above. Check the records when the events are not enough.`
+    : leaving || away
+      ? `\n\n${owner} is away (away mode${away ? `, since ${formatDateTime(away.since)}` : ''}): they stepped out or are asleep, and will read this later. The work goes on alone. Do your own part (the triage, the autopilot) without asking ${owner} anything that can wait, and keep what is not urgent for the summary when they are back. ${leaving ? 'For the away event: reply in one or two lines with what goes on alone meanwhile (the runs, the queue, the autopilot), nothing else.' : 'Reply in a line or two.'}`
+      : '';
+  return `${head}\n${lines.join('\n')}\n\n${ask}${triage}${idle}${report}${watchdog}${absence}`;
 }
 
 /** The text the manager receives: your message, or the queue in order with the time of each one, and Chiefmate's news. */

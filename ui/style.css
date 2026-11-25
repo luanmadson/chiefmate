@@ -52,6 +52,12 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .brand { display: flex; align-items: center; gap: 10px; font-size: 12px; font-weight: 600; letter-spacing: 0.22em; color: var(--strong); }
 .titlebar-right { display: flex; align-items: center; gap: 18px; min-width: 0; }
 .clock { font: 12px var(--mono); color: var(--muted); white-space: nowrap; }
+/* Away mode: the owner stepped out or went to sleep; brass while it is on */
+.away { appearance: none; display: inline-flex; align-items: center; gap: 6px; flex: none; background: transparent; border: 1px solid var(--line-strong); border-radius: 0; color: var(--muted); font: inherit; font-size: 12px; padding: 3px 9px; cursor: pointer; white-space: nowrap; }
+.away:hover { color: var(--text); border-color: var(--muted); background: var(--hover); }
+.away[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
+.away svg { width: 13px; height: 13px; flex: none; }
+.away:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 .presence { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
 .presence .state { overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
 .focus { flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: 10px; margin: 0 20px; padding-left: 16px; border-left: 1px solid var(--line); font-size: 12px; white-space: nowrap; overflow: hidden; }
@@ -390,8 +396,15 @@ details summary { cursor: pointer; }
   .chat { max-height: 55vh; }
   .view { padding: 16px; }
   .presence .state { display: none; }
+  .away { padding: 4px 7px; }
+  .away .away-label { display: none; }
   .focus { margin: 0 12px; padding-left: 12px; }
   .focus .label { display: none; }
+}
+/* Phones: the title bar keeps the away button and the manager's face; the phone shows the time */
+@media (max-width: 600px) {
+  .clock { display: none; }
+  .titlebar-right { gap: 10px; }
 }
 
 /* Planning */

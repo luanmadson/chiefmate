@@ -1,8 +1,9 @@
 // Windows notifications (the toasts in the corner of the screen). Clicking one opens the app on the right section
-// ("chiefmate:operations", registered by scripts/install.ps1) or the address given, such as a pull request.
+// ("chiefmate:operations", registered by scripts/install.ps1) or the address given, such as a pull request. While the
+// owner is away (away mode, src/news.mjs), only the urgent ones show: the rest are only recorded, for the summary.
 import { spawn } from 'node:child_process';
 import { t } from './i18n.mjs';
-import { recordNotification } from './store.mjs';
+import { readState, recordNotification } from './store.mjs';
 
 const xml = s =>
   String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
@@ -29,6 +30,7 @@ export function notify(title, text, target = 'chiefmate:operations', { urgent = 
   recordNotification(title, text, urgent ? 'urgent' : null);
   // The smoke test shows nothing on the owner's screen.
   if (process.platform !== 'win32' || process.env.CHIEFMATE_SMOKE) return;
+  if (!urgent && readState().away) return;
   const toast = toastXml(title, text, target, { urgent });
   const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', SCRIPT], {
     env: { ...process.env, CHIEFMATE_TOAST: toast },
