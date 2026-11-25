@@ -411,6 +411,15 @@ The Planning section is your board: what is to be done in each project, kept by 
   - The quick filters above the list show the **Proposed items**, what **Needs you** (decisions and pull requests) and the **Discarded items**, with their counts; a project's page shows its decisions pending under what waits for you.
 - **Where it lives:** `data/plan.json`, outside the repository. The first time, if the manager kept a board in `data/manager/plan.md` (a Markdown table with the columns #, Projeto, Item, Prioridade, Situação), Chiefmate imports it, keeping the numbers; a status it doesn't recognize goes into the description, and the item stays "to do" or the closest status.
 
+## Project radar
+
+The Radar section keeps ideas for new systems and sites with high potential. They belong to no project: they are Chiefmate's own, and you choose when to turn one into a project.
+
+- **Each idea** has a short title, a one-sentence summary, the problem and its audience, the fundamentals (the size of the market or the demand, competitors with links, the search trend or interest, the revenue model, your advantage, the risks), scores from 1 to 5 for potential, effort and risk, its sources with links, the date and a status: new, in study, chosen, discarded or became a project. An optional trend series (such as a search index by year) draws a small line on its card.
+- **In the app:** a plain summary first (how many new ideas wait for you), a chart of potential by effort (the best bets are up and to the left; click a point to see its card), then the cards, highest potential first, with the status as a colored label and the fundamentals and sources folded under each card. Three large buttons decide: **I want this** puts a proposal on the planning board (under the project `radar`, high priority) for the manager to turn into a project; **Later** leaves the idea in study; **Discard** moves it to the bottom of the page, where **Back to the radar** brings it back. The menu shows how many new ideas there are.
+- **Who feeds it:** the manager and a weekly mission, with the `radar` commands (see "Command line"). Every idea needs at least one source with an http(s) link, and an idea whose title is already on the radar (discarded ones included) is refused. A step of a run only adds and updates ideas: the decisions are yours. The manager's situation says how many new ideas wait for you and which chosen ones are waiting to become projects; once the new project exists, the manager marks the idea with `radar set <n> --status project --project <id>`.
+- **Where it lives:** `data/radar.json`, outside the repository.
+
 ## Usage and limits
 
 Chiefmate measures what really counts on a subscription plan: your account's usage in the 5-hour window and in the plan's week, which Claude Code reports on every run. There are no spending caps in dollars.
@@ -554,6 +563,16 @@ node src/cli.mjs plan approve|later|discard <n>
 node src/cli.mjs plan approve <n> --autopilot for the manager, with the autopilot on: puts an item triaged "now" on the
                                               queue of a project whose queue is empty, within the autopilot's limits
 node src/cli.mjs plan order <n> <n> ...       puts these items first in your order
+node src/cli.mjs radar [list]                 the project radar, highest potential first (--status <s>; --all: discarded too)
+node src/cli.mjs radar show <n>               an idea with its fundamentals and sources
+node src/cli.mjs radar add "<title>" --summary "..." --potential 1-5 --effort 1-5 --risk 1-5 --source "<name> <https://...>"
+                                              adds an idea (repeat --source and --competitor "<name> <https://...>"; also
+                                              --problem, --audience, --market, --trend, --revenue, --advantage, --risks,
+                                              --series "2024:40,2025:55"; or --file <idea.json>)
+node src/cli.mjs radar set <n> ...            changes an idea (the same options, --status, --project)
+node src/cli.mjs radar choose|later|discard|restore <n>
+                                              your decision: "choose" puts a proposal on the planning board for the
+                                              manager to turn the idea into a project (discard: --reason "...")
 node src/cli.mjs chat [n]                     the conversation with the manager: the last n messages, what it is doing, the queue
 node src/cli.mjs chat say "..."               writes to the manager; while it answers, the message waits in the queue
 node src/cli.mjs chat edit <id> "..."         changes a message still in the queue (chat remove <id> takes it out)
@@ -618,7 +637,7 @@ English is the source. The app, the notifications and the reports follow `langua
 | `agents/` | The crew, one file per agent |
 | `config/` | `example.json`, and your `chiefmate.json` (not in git) |
 | `scripts/` | Installation on Windows, launchers and checks |
-| `data/` (not in git) | Runs, each step's log and context, the live sessions' first messages and records, the prompt builder's last choice per project, the planning board (`plan.json`), the team leads' project memories (`projects/<id>/memory.md`), the history of the changes made in each project's Context tab (`projects/<id>/context-history.jsonl`), the conversation with the manager, your account's usage, the schedule's and the alerts' state, the watchdog's state and logs (`watch/`) and, if you use the claude.ai reading, its browser profile |
+| `data/` (not in git) | Runs, each step's log and context, the live sessions' first messages and records, the prompt builder's last choice per project, the planning board (`plan.json`), the project radar (`radar.json`), the team leads' project memories (`projects/<id>/memory.md`), the history of the changes made in each project's Context tab (`projects/<id>/context-history.jsonl`), the conversation with the manager, your account's usage, the schedule's and the alerts' state, the watchdog's state and logs (`watch/`) and, if you use the claude.ai reading, its browser profile |
 | `workspaces/` (not in git) | The projects' working copies |
 
 Chiefmate has no dependencies besides Node.js. It drives Claude Code (`claude -p`), which uses your account's login and plan. The only optional one is `playwright-core`, for copying the prompt builder from Google Docs (and, if present, for the browser that opens for sign-ins): Chiefmate loads it only when needed and says how to install it when it is missing.

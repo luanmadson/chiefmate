@@ -195,6 +195,38 @@ try {
     expect(later?.status === 'future' && later.rank === null, `"later" did not leave the item for the future: ${JSON.stringify(later)}`);
     expect((await post('/api/planning', { action: 'reorder', ids: [999] })).status === 400, 'reordering an item that does not exist was not refused');
     expect(['proposed', 'triaged', 'approved', 'discarded'].every(s => state.planning.statuses.includes(s)), 'the board has no statuses for the proposals');
+    // The project radar: ideas added with scores and sources, ordered by potential, and the owner's decisions ("I want
+    // this" puts a proposal on the planning board, under "radar", for the manager).
+    expect(Array.isArray(state.radar?.ideas) && state.radar.statuses?.join() === 'new,studying,chosen,discarded,project', '/api/state has no project radar');
+    const ideaOf = async r => (r.ok ? (await r.json()).idea : { error: (await r.json()).error });
+    const idea = {
+      action: 'add', title: 'Smoke idea', summary: 'One sentence.', potential: 3, effort: 2, risk: 4, problem: 'A problem.', market: 'Large.',
+      competitors: ['Rival https://example.com/rival', 'No site'], sources: ['A study https://example.com/study'], series: '2024:40,2025:55',
+    };
+    const smokeIdea = await ideaOf(await post('/api/radar', idea));
+    expect(smokeIdea?.id === 1 && smokeIdea.status === 'new' && smokeIdea.scores.potential === 3 && smokeIdea.sources[0]?.url === 'https://example.com/study'
+      && smokeIdea.fundamentals.competitors.length === 2 && smokeIdea.fundamentals.competitors[1].url === '' && smokeIdea.series.at(-1)?.value === 55, `a radar idea was not added: ${JSON.stringify(smokeIdea)}`);
+    expect((await post('/api/radar', { ...idea, title: 'smoke  IDEA' })).status === 400, 'a radar idea repeating a title was not refused');
+    expect((await post('/api/radar', { ...idea, title: 'No source', sources: [] })).status === 400, 'a radar idea without a source was not refused');
+    expect((await post('/api/radar', { ...idea, title: 'Bad link', sources: ['Click javascript:alert(1)'] })).status === 400, 'a source without an http(s) link was not refused');
+    expect((await post('/api/radar', { ...idea, title: 'Bad competitor', competitors: [{ name: 'X', url: 'javascript:alert(1)' }] })).status === 400, 'a competitor with a script link was not refused');
+    expect((await post('/api/radar', { ...idea, title: 'Bad score', potential: 6 })).status === 400, 'a score above 5 was not refused');
+    const second = await ideaOf(await post('/api/radar', { ...idea, title: 'Smoke better idea', potential: 5 }));
+    const ideas = (await (await fetch(`${base}/api/state`)).json()).radar.ideas;
+    expect(ideas.map(i => i.id).join() === `${second.id},1`, `the radar is not ordered by potential: ${ideas.map(i => i.id)}`);
+    const chosen = await ideaOf(await post('/api/radar', { action: 'choose', id: second.id }));
+    const chosenItem = (await (await fetch(`${base}/api/state`)).json()).planning.items.find(i => i.id === chosen?.plan);
+    expect(chosen?.status === 'chosen' && chosenItem?.project === 'radar' && chosenItem.status === 'proposed' && chosenItem.description.includes(`radar idea #${second.id}`), `"I want this" did not put the idea on the planning board: ${JSON.stringify({ chosen, chosenItem })}`);
+    expect((await post('/api/radar', { action: 'choose', id: second.id })).status === 400, 'an idea was chosen twice');
+    await post('/api/planning', { action: 'discard', id: chosen?.plan, reason: 'Smoke.' }); // out of the proposals checked below
+    const inStudy = await ideaOf(await post('/api/radar', { action: 'later', id: 1 }));
+    expect(inStudy?.status === 'studying', `"Later" did not leave the idea in study: ${JSON.stringify(inStudy)}`);
+    const discarded = await ideaOf(await post('/api/radar', { action: 'discard', id: 1, reason: 'Too crowded.' }));
+    expect(discarded?.status === 'discarded' && discarded.discard_reason === 'Too crowded.', `an idea was not discarded: ${JSON.stringify(discarded)}`);
+    const restored = await ideaOf(await post('/api/radar', { action: 'restore', id: 1 }));
+    expect(restored?.status === 'new' && !restored.discard_reason, `a discarded idea did not come back: ${JSON.stringify(restored)}`);
+    const became = await ideaOf(await post('/api/radar', { action: 'set', id: second.id, status: 'virou projeto', project: 'sample' }));
+    expect(became?.status === 'project' && became.project === 'sample', `an idea was not marked as a project: ${JSON.stringify(became)}`);
     // The agent's panel: the step's log read live, from where it stopped, and the direct talk refused off a step.
     const feed = await (await fetch(`${base}/api/run/smoke-feed/feed`)).json();
     expect(feed.step === 1 && feed.items?.length === 2 && feed.items[0].type === 'say' && feed.items[1].tool === 'Bash', `the agent's panel did not read the step's log: ${JSON.stringify(feed.items)}`);
@@ -285,6 +317,20 @@ try {
       rescueRefused = /rescuer's and the owner's/.test(String(error.stderr));
     }
     expect(rescueRefused, 'a rescue action ran inside a step');
+
+    // The radar from the command line: added (through the running Chiefmate), listed, and the owner's decisions
+    // refused inside a step.
+    const cliAdded = cli(['radar', 'add', 'Smoke CLI idea', '--summary', 'From the command line.', '--potential', '4', '--effort', '3', '--risk', '2',
+      '--source', 'Report https://example.com/report', '--source', 'Survey https://example.com/survey', '--competitor', 'Rival https://example.com/r'], { CHIEFMATE_RUN: 'x' });
+    expect(/^Added #3 /.test(cliAdded) && /Smoke CLI idea/.test(cli(['radar', 'list'])), `the radar command did not add or list an idea: ${cliAdded}`);
+    expect(/Sources: Report https:\/\/example.com\/report; Survey/.test(cli(['radar', 'show', '3'])), "the radar command does not show an idea's sources");
+    let decisionRefused = false;
+    try {
+      cli(['radar', 'choose', '3'], { CHIEFMATE_RUN: 'x' });
+    } catch (error) {
+      decisionRefused = /only adds and updates/.test(String(error.stderr));
+    }
+    expect(decisionRefused, "a step of a run made the owner's decision on a radar idea");
   }
 } catch (error) {
   failures.push(error.message);
@@ -433,6 +479,15 @@ try {
   expect(line.includes('#3 Sample: First thing') && line.includes('waiting for Owner: #7'), `the manager's summary of the board is wrong: ${line}`);
 } catch (error) {
   failures.push(`planning checks: ${error.message}`);
+}
+
+// The manager's line about the radar (the ideas the server checks above added, in the same records).
+try {
+  const { radarLine } = await import(pathToFileURL(path.join(root, 'src', 'radar.mjs')).href);
+  const line = radarLine('Owner');
+  expect(/^Project radar \(node src\/cli.mjs radar\): 2 new idea\(s\) waiting for Owner: #3 Smoke CLI idea \(potential 4/.test(line), `the manager's line about the radar is wrong: ${line}`);
+} catch (error) {
+  failures.push(`radar checks: ${error.message}`);
 }
 
 // Proposals in this process: the author is the step's agent, the manager's summary lists them, and approved items
