@@ -8,6 +8,7 @@ import { attentionArchive, attentionItems, attentionSummary, markSeen } from './
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
+import { addQuestion, decide, decisionCards, openQuestions } from './decisions.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
 import { computer, processes, stoppable, stopProject } from './machine.mjs';
@@ -286,7 +287,8 @@ function buildState() {
   const machine = computer(config, queue);
   const needs = [...openRequests(runs), ...sessionRequests()].sort((a, b) => b.at.localeCompare(a.at));
   const items = planItems();
-  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo });
+  const questions = openQuestions();
+  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo, questions });
   const lastOf = id => runs.find(r => r.mission === id && !['queued', 'waiting'].includes(r.status));
   return {
     now: now(),
@@ -325,6 +327,8 @@ function buildState() {
     alerts: alerts(config, usage, machine),
     // What needs the owner, in three levels (src/attention.mjs): the band at the top, the sections, the title and the icon.
     attention: { items: attention, ...attentionSummary(attention), archived: attentionArchive().length },
+    // The owner's decisions as cards (src/decisions.mjs): pull requests and branches to merge, proposals, the manager's questions.
+    decisions: decisionCards({ config, attention, items, questions }),
     // The owner's planning board (data/plan.json): every item, archived ones included, in the board's order.
     planning: { items, priorities: PRIORITIES, statuses: STATUSES },
     // The project radar (data/radar.json): ideas for new projects, highest potential first.
@@ -491,6 +495,12 @@ export function startServer() {
         case '/api/needs-you/done':
           if (body.session) return reply(res, 200, finishSessionRequest(String(body.session), String(body.id ?? '')));
           return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner'));
+        case '/api/decide':
+          // The owner's click on a decision card: approve (a merge goes through src/merge.mjs), later, discard or answer.
+          return reply(res, 200, await decide({ card: body.card, action: body.action, option: body.option, reason: body.reason }, buildState().decisions));
+        case '/api/ask-owner':
+          // The manager's question for the owner, shown as a card with one button per option.
+          return reply(res, 200, { question: addQuestion(body) });
         case '/api/attention/seen':
           // Marks notices as seen: they fade (an info notice goes to the archive).
           return reply(res, 200, { seen: markSeen(Array.isArray(body.ids) ? body.ids : [body.id]) });

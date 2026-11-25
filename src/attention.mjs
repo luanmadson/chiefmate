@@ -29,9 +29,14 @@ const ago = (iso, span) => iso && Date.now() - Date.parse(iso) <= span;
  * The notices now, most urgent first: { id, level, kind, title, text, view, project, run, at, seen, seenable }.
  * "view" is the app's place that deals with it; a request of a step carries what "Mark as done" needs.
  */
-export function attentionItems({ config, runs = [], needs = [], usage = {}, machine, items = [], update = {} }) {
+export function attentionItems({ config, runs = [], needs = [], usage = {}, machine, items = [], update = {}, questions = [] }) {
   const list = [];
   const add = item => list.push({ project: null, run: null, at: null, seenable: true, ...item });
+  // Someone else reviews the project's work ("merge_by_owner": false): its pull requests only inform, until merged or closed.
+  const byOther = project => config?.projects?.[project]?.merge_by_owner === false;
+  const prNotice = (project, title) => (byOther(project)
+    ? { level: 'info', title: t('Waiting for a third-party review'), lasting: true }
+    : { level: 'important', title });
 
   // Urgent: a step or a live session waits for the owner (a session's permission asked included).
   for (const n of needs) {
@@ -95,6 +100,7 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
     add({
       id: `plan:${i.id}:${i.pr ?? ''}`, level: 'important', kind: i.pr ? 'pr' : 'proposal', title: i.pr ? t('Pull request waiting for your approval') : t('Waiting for your action'),
       text: `#${i.id} ${i.title}`, view: 'planning', project: i.project || null, at: i.updated ?? null, url: i.pr ?? null,
+      ...(i.pr || i.run ? prNotice(i.project, i.pr ? t('Pull request waiting for your approval') : t('Waiting for your action')) : {}),
     });
   }
   for (const i of items.filter(i => !i.archived && i.status === 'triaged')) {
@@ -103,19 +109,24 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
       text: `#${i.id} ${i.title}`, view: 'planning', project: i.project || null, at: i.triaged_at ?? i.updated ?? null,
     });
   }
-  // Important: a pull request of the last week not on the board.
-  const onBoard = new Set(waiting.map(i => i.pr).filter(Boolean));
+  // Important: a pull request (or a branch delivered to the owner's clone) of the last week not on the board.
+  const onBoard = new Set(waiting.flatMap(i => [i.pr, i.run]).filter(Boolean));
   for (const r of runs) {
-    if (r.status !== 'done' || !r.pullRequest || r.merged || onBoard.has(r.pullRequest) || !ago(r.ended, PR_FOR)) continue;
-    add({ id: `pr:${r.id}`, level: 'important', kind: 'pr', title: t('Pull request waiting for your approval'), text: r.title, view: 'log', project: r.project, run: r.id, at: r.ended, url: r.pullRequest });
+    if (r.status !== 'done' || !(r.pullRequest || r.delivered) || r.merged || r.discarded || onBoard.has(r.pullRequest) || onBoard.has(r.id) || !ago(r.ended, PR_FOR)) continue;
+    const title = r.pullRequest ? t('Pull request waiting for your approval') : t('Branch waiting for your approval');
+    add({ id: `pr:${r.id}`, kind: 'pr', text: r.title, view: 'log', project: r.project, run: r.id, at: r.ended, url: r.pullRequest ?? null, ...prNotice(r.project, title) });
+  }
+  // Important: a question the manager asked the owner (cli.mjs ask-owner), answered with one click on its card.
+  for (const q of questions) {
+    add({ id: `question:${q.id}`, level: 'important', kind: 'question', title: t('Question from the manager'), text: q.question, view: 'manager', project: q.project ?? null, at: q.at });
   }
   // Important: an approved update that could not be installed.
   if (update.waiting && update.blocked) {
     add({ id: `update:${update.blocked}`, level: 'important', kind: 'update', title: t('Update blocked'), text: t('An approved update of Chiefmate was not installed. See why under the manager.'), view: 'manager' });
   }
-  // Info: a task finished in the last day (without a pull request: that one is above), an update installed.
+  // Info: a task finished in the last day (without a pull request or branch to approve: that one is above), an update installed.
   for (const r of runs) {
-    if (r.status !== 'done' || r.pullRequest || !ago(r.ended, DONE_FOR)) continue;
+    if (r.status !== 'done' || r.pullRequest || list.some(i => i.id === `pr:${r.id}`) || !ago(r.ended, DONE_FOR)) continue;
     add({ id: `done:${r.id}`, level: 'info', kind: 'done', title: t('Task finished'), text: r.title, view: 'log', project: r.project, run: r.id, at: r.ended });
   }
   const state = readState();
@@ -144,7 +155,7 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
     } else if (kept) continue;
     const settled = resolution(i, runs, items);
     if (settled) toArchive(i, settled);
-    else if (i.level === 'info' && (seen[i.id] || (i.at && !ago(i.at, DONE_FOR)))) toArchive(i, seen[i.id] ? 'seen' : 'expired');
+    else if (i.level === 'info' && (seen[i.id] || (!i.lasting && i.at && !ago(i.at, DONE_FOR)))) toArchive(i, seen[i.id] ? 'seen' : 'expired');
     else active.push(i);
   }
   // Shown last time and gone now: its cause ended (for an info notice, its day).

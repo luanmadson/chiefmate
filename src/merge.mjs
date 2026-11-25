@@ -1,7 +1,8 @@
 // Merging a run's work, only with the owner's authorization: the owner's click in the app, or the manager after the
 // owner's explicit "yes" in the conversation for that run ("cli.mjs merge <run> --yes"). Chiefmate merges it itself, so
 // "gh pr" and "git push" stay denied to the crew and the manager: a pull request through "gh pr merge"; a branch
-// delivered locally, into the branch it started from in the owner's clone, with nothing sent to GitHub.
+// delivered locally, into the branch it started from in the owner's clone, with nothing sent to GitHub. Discarding the
+// work (the owner's click on a decision card, src/decisions.mjs) closes the pull request, or leaves the branch unmerged.
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
@@ -28,7 +29,7 @@ async function target(run, config) {
 }
 
 /** The final review's verdict, from the pull request text Chiefmate wrote (in either language). */
-function verdict(run) {
+export function verdict(run) {
   const file = path.join(runDir(run.id), 'pull-request.md');
   if (!existsSync(file)) return null;
   const text = readFileSync(file, 'utf8');
@@ -88,4 +89,25 @@ export async function mergeRun(id, { by = 'owner' } = {}, config = loadConfig())
   }
   if (where.kind === 'pr') checkNow().catch(error => console.error('Update check:', error.message));
   return { run: run.id, ...where, merged: run.merged };
+}
+
+/**
+ * Discards a finished run's work on the owner's click: its pull request is closed on GitHub (it can be reopened there,
+ * and its branch stays); a local branch is left in the owner's clone, unmerged. Then "run.discarded".
+ */
+export async function discardRun(id, config = loadConfig()) {
+  const run = readRun(String(id ?? ''));
+  const where = await target(run, config).catch(error => {
+    // A local branch outside the owner's clone can still be discarded: nothing is touched.
+    if (run && !run.merged && run.status === 'done' && run.delivered) return { kind: 'local', branch: run.branch };
+    throw error;
+  });
+  if (where.kind === 'pr') {
+    const dir = existsSync(projectDir(run.project)) ? projectDir(run.project) : ROOT;
+    const r = await exec('gh', ['pr', 'close', where.url], dir);
+    if (r.code !== 0 && !/already closed/i.test(r.output)) throw new Error(t("GitHub didn't close the pull request: {output}", { output: clip(r.output, 500) }));
+  }
+  run.discarded = { at: now(), by: 'owner', how: where.kind };
+  saveRun(run);
+  return { run: run.id, ...where, discarded: run.discarded };
 }
