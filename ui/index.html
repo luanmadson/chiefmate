@@ -20,13 +20,15 @@
     </header>
 
     <nav class="nav" aria-label="Sections" data-t-label="Sections">
-      <a href="#manager" data-view="manager"><span data-t="Manager">Manager</span><span class="counter" id="counter-manager"></span></a>
+      <a href="#manager" data-view="manager"><span data-t="Conversation">Conversation</span><span class="counter" id="counter-manager"></span></a>
+      <a href="#decisions" data-view="decisions"><span data-t="Decisions">Decisions</span><span class="counter" id="counter-decisions"></span></a>
       <a href="#operations" data-view="operations"><span data-t="Operations">Operations</span><span class="counter" id="counter-operations"></span></a>
-      <a href="#planning" data-view="planning"><span data-t="Planning">Planning</span><span class="counter" id="counter-planning"></span></a>
+      <a href="#planning" data-view="planning" class="nav-extra"><span data-t="Planning">Planning</span><span class="counter" id="counter-planning"></span></a>
+      <a href="#projects" data-view="projects"><span data-t="Projects">Projects</span><span class="counter" id="counter-projects"></span></a>
+      <div class="nav-group" data-t="More">More</div>
       <a href="#radar" data-view="radar" class="nav-extra"><span data-t="Radar">Radar</span><span class="counter" id="counter-radar"></span></a>
       <a href="#missions" data-view="missions" class="nav-extra"><span data-t="Missions">Missions</span></a>
       <a href="#crew" data-view="crew" class="nav-extra"><span data-t="Crew">Crew</span></a>
-      <a href="#projects" data-view="projects"><span data-t="Projects">Projects</span><span class="counter" id="counter-projects"></span></a>
       <a href="#builder" data-view="builder" class="nav-extra"><span data-t="Builder">Builder</span></a>
       <a href="#log" data-view="log" class="nav-extra"><span data-t="Log">Log</span></a>
       <a href="#usage" data-view="usage" class="nav-extra"><span data-t="Usage">Usage</span></a>
@@ -40,32 +42,40 @@
       <section class="view" id="view-manager">
         <div class="view-header">
           <div>
-            <h1 data-t="Manager">Manager</h1>
+            <h1 data-t="Conversation">Conversation</h1>
             <p data-t="Talk to Chiefmate. It answers you, hands work to the crew and reports back.">Talk to Chiefmate. It answers you, hands work to the crew and reports back.</p>
           </div>
-          <button type="button" class="button secondary" id="new-conversation" data-t="New conversation">New conversation</button>
-        </div>
-        <div class="manager-grid">
-          <div class="chat-column">
-            <section id="decisions" class="decisions" aria-live="polite" hidden></section>
-            <div id="chat" class="chat" aria-live="polite"></div>
-            <div id="chat-queue" class="chat-queue" hidden></div>
-            <form id="manager-form" class="compose">
-              <textarea id="message" rows="3" placeholder="Write to the manager. Enter sends; Shift+Enter starts a new line." data-t-placeholder="Write to the manager. Enter sends; Shift+Enter starts a new line."></textarea>
-              <div class="compose-footer">
-                <div id="suggestions" class="suggestions"></div>
-                <div class="compose-buttons">
-                  <button type="button" class="button danger" id="interrupt" data-t="Interrupt" hidden>Interrupt</button>
-                  <button type="submit" class="button" id="send" data-t="Send">Send</button>
-                </div>
-              </div>
-            </form>
+          <div class="view-header-actions">
+            <button type="button" class="button secondary" id="focus-mode" aria-pressed="false"><span class="long" data-t="Focus on the conversation">Focus on the conversation</span><span class="short" data-t="Focus">Focus</span></button>
+            <button type="button" class="button secondary" id="new-conversation"><span class="long" data-t="New conversation">New conversation</span><span class="short" data-t="New">New</span></button>
           </div>
-          <aside class="side">
-            <div id="bridge" class="panel bridge"></div>
-            <div id="situation" class="panel situation"></div>
-          </aside>
         </div>
+        <!-- Focus mode: only the conversation, with one thin line for what needs you and the way out -->
+        <div id="focus-bar" class="focus-bar" aria-live="polite"></div>
+        <div class="chat-column">
+          <div id="chat" class="chat" aria-live="polite"></div>
+          <div id="chat-queue" class="chat-queue" hidden></div>
+          <form id="manager-form" class="compose">
+            <textarea id="message" rows="3" placeholder="Write to the manager. Enter sends; Shift+Enter starts a new line." data-t-placeholder="Write to the manager. Enter sends; Shift+Enter starts a new line."></textarea>
+            <div class="compose-footer">
+              <div id="suggestions" class="suggestions"></div>
+              <div class="compose-buttons">
+                <button type="button" class="button danger" id="interrupt" data-t="Interrupt" hidden>Interrupt</button>
+                <button type="submit" class="button" id="send" data-t="Send">Send</button>
+              </div>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="view" id="view-decisions">
+        <div class="view-header">
+          <div>
+            <h1 data-t="Decisions">Decisions</h1>
+            <p data-t="What waits for your yes or no. Each card says what it is and what the manager recommends; the rest is under Details.">What waits for your yes or no. Each card says what it is and what the manager recommends; the rest is under Details.</p>
+          </div>
+        </div>
+        <section id="decisions" class="decisions" aria-live="polite"></section>
       </section>
 
       <section class="view" id="view-operations">
@@ -75,7 +85,13 @@
             <p data-t="What the crew is doing right now, step by step, and what is in the queue.">What the crew is doing right now, step by step, and what is in the queue.</p>
           </div>
         </div>
-        <div id="operations"></div>
+        <div class="operations-layout">
+          <div id="operations"></div>
+          <aside class="side">
+            <div id="bridge" class="panel bridge"></div>
+            <div id="situation" class="panel situation"></div>
+          </aside>
+        </div>
       </section>
 
       <section class="view" id="view-planning">

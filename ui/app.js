@@ -258,7 +258,7 @@ function member(id, project) {
     ?? state?.teams?.flatMap(x => x.members).find(a => a.id === id)
     ?? (id === 'manager' ? FALLBACK_MANAGER : { id, name: id });
 }
-const agentName = (id, project) => t(member(id, project).name ?? id);
+const agentName = (id, project) => (id ? t(member(id, project).name ?? id) : ''); // none: an item with no agent yet
 const faceState = agent => (online ? agent.status ?? 'idle' : 'offline');
 const stepFace = step => ({
   running: step.review || step.role === 'review' ? 'reviewing' : step.role === 'plan' ? 'planning' : 'working', done: 'done', failed: 'failed', pending: 'queued',
@@ -324,7 +324,7 @@ const toolName = tool => (tool === 'codex' ? 'Codex' : 'Claude Code');
 
 // A project's page is "#project/<id>", and each of its tabs "#project/<id>/<tab>"; the prompt builder is "#builder",
 // or "#builder/<id>" for a project (also shown in the project's "builder" tab).
-const VIEWS = ['manager', 'operations', 'planning', 'radar', 'missions', 'crew', 'projects', 'builder', 'log', 'usage', 'project', 'session'];
+const VIEWS = ['manager', 'decisions', 'operations', 'planning', 'radar', 'missions', 'crew', 'projects', 'builder', 'log', 'usage', 'project', 'session'];
 const pageProject = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length).split('/')[0]) : null);
 const PROJECT_TABS = ['overview', 'live', 'crew', 'tasks', 'planning', 'context', 'builder'];
 const pageTab = () => {
@@ -343,13 +343,60 @@ const touchScreen = () => matchMedia('(pointer: coarse)').matches;
 const phoneQuery = matchMedia('(max-width: 600px)'); // the phone layout of ui/style.css
 /** In a message field, Enter sends and Shift+Enter starts a new line; on a touch screen, Enter starts a new line and the Send button sends. */
 const enterSends = event => event.key === 'Enter' && !event.shiftKey && !event.isComposing && !touchScreen();
+/** The fields' hints: "Enter sends" only where there is a keyboard to press it (not on a touch screen nor a phone's layout). */
+function drawPlaceholders() {
+  const touch = touchScreen() || phoneQuery.matches || (navigator.maxTouchPoints > 0 && matchMedia('(hover: none)').matches);
+  $('#message').placeholder = touch ? t('Write to the manager.') : t('Write to the manager. Enter sends; Shift+Enter starts a new line.');
+  $('#live-text').placeholder = touch ? t('Write to the agent.') : t('Write to the agent. Enter sends; Shift+Enter starts a new line.');
+  $('#agent-form').text.placeholder = touch ? t('Write to the agent.') : t('Write to the agent. Enter sends, Shift+Enter breaks the line.');
+}
 /** Phones: the bottom bar holds the main sections, and "More" opens the others above it. */
 function setNavMore(open) {
   $('#nav-more').setAttribute('aria-expanded', String(open));
   $('.nav').classList.toggle('open', open);
 }
+// Focus mode: the conversation alone, on the whole window (html.chat-focus). The other sections only show, on one
+// thin line above it, the ones that need you, with their marks; Esc or "Leave focus" brings everything back.
+const FOCUS_KEY = 'chiefmate.focus';
+const focusMode = () => document.documentElement.classList.contains('chat-focus');
+function setFocusMode(on) {
+  document.documentElement.classList.toggle('chat-focus', on);
+  $('#focus-mode').setAttribute('aria-pressed', String(on));
+  try {
+    if (on) localStorage.setItem(FOCUS_KEY, '1');
+    else localStorage.removeItem(FOCUS_KEY);
+  } catch {
+    // no storage (a private window): the mode lasts until the page is reloaded
+  }
+  if (state) {
+    drawAlerts();
+    drawFocusBar();
+  }
+  if (on && !touchScreen()) $('#message').focus();
+}
+$('#focus-mode').addEventListener('click', () => setFocusMode(!focusMode()));
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && focusMode() && !document.querySelector('dialog[open]') && !agentPanel.run) setFocusMode(false);
+});
+$('#focus-bar').addEventListener('click', event => {
+  if (event.target.closest('[data-focus-leave]')) return setFocusMode(false);
+  if (event.target.closest('a[href]')) setFocusMode(false); // a section that needs you: it opens, with everything back
+});
+
+/** The focus mode's line: the manager's state, the sections that need you (each with its mark) and the way out. */
+function drawFocusBar() {
+  if (!focusMode()) return draw('#focus-bar', '', '');
+  const chips = navSections().filter(x => x.view !== 'manager' && x.mark)
+    .map(x => `<a class="focus-chip" href="#${x.view}">${x.mark}<span>${esc(x.name)}</span></a>`).join('');
+  const html = `<span class="focus-bar-state">${stateHtml(presence().slice(0, 2))}</span>
+    <span class="focus-chips">${chips || `<span class="hint">${esc(t('Nothing needs you now.'))}</span>`}</span>
+    <button type="button" class="button secondary small" data-focus-leave title="Esc">${esc(t('Leave focus'))}</button>`;
+  draw('#focus-bar', html, html);
+}
+
 function showView() {
   const view = currentView();
+  if (view !== 'manager' && focusMode()) setFocusMode(false);
   if (view !== 'session' && !(view === 'project' && pageTab() === 'live')) stopLive();
   if (view === 'session' && state) drawSessionPage();
   for (const v of VIEWS) $(`#view-${v}`).classList.toggle('active', v === view);
@@ -375,7 +422,10 @@ function showView() {
   }
 }
 window.addEventListener('hashchange', showView);
-phoneQuery.addEventListener('change', () => state && drawAlerts());
+phoneQuery.addEventListener('change', () => {
+  drawPlaceholders();
+  if (state) drawAlerts();
+});
 
 /** A project's name that opens its page; any other name (an old board's project, a library) stays plain text. */
 const projectLink = (id, label = projectName(id)) =>
@@ -394,8 +444,8 @@ $('#project-jump').addEventListener('change', event => {
 
 // ---------- Fixed parts: presence, counters and the status bar ----------
 
-function drawPresence() {
-  const manager = member('manager');
+/** The manager's presence in words: [text, kind, the face's look]. */
+function presence() {
   let text, kind, look;
   if (!online) [text, kind, look] = [t('No connection to Chiefmate'), 'error', 'offline'];
   else if (state.ai.claude.found === false) [text, kind, look] = [t('Claude Code not found'), 'error', 'offline'];
@@ -404,7 +454,12 @@ function drawPresence() {
   else if (going().length) [text, kind, look] = [t('On duty: {title}', { title: going()[0].title }), 'info', 'working'];
   else if (state.manager.responding) [text, kind, look] = [t('Thinking…'), 'info', 'thinking'];
   else [text, kind, look] = [t('Online · waiting for you'), 'ok', 'idle'];
-  const html = `${face(manager, look, 22, text)}${stateHtml([text, kind])}`;
+  return [text, kind, look];
+}
+
+function drawPresence() {
+  const [text, kind, look] = presence();
+  const html = `${face(member('manager'), look, 22, text)}${stateHtml([text, kind])}`;
   draw('#presence', html, html);
 }
 
@@ -584,17 +639,20 @@ const unseen = list => list.filter(i => !i.seen);
 const topLevel = list => LEVELS.find(l => list.some(i => i.level === l && !i.seen)) ?? null;
 const ofProject = (id, name) => i => i.project === id || (name && i.project === name);
 
-/** The mark: a square in the level's color, with a count when there is more than one. */
-function attnMark(list, label = '') {
+/** The mark: a square in the level's color, with a count when there is more than one ("count": always, as in the menu). */
+function attnMark(list, label = '', count = false) {
   const level = topLevel(list);
   if (!level) return '';
   const n = unseen(list).length;
   const text = [levelName(level), label, n > 1 ? t('{count} notices', { count: n }) : ''].filter(Boolean).join(' · ');
-  return `<span class="attn-mark" data-level="${level}" role="img" aria-label="${esc(text)}" title="${esc(text)}">${n > 1 ? n : ''}</span>`;
+  return `<span class="attn-mark" data-level="${level}" role="img" aria-label="${esc(text)}" title="${esc(text)}">${n > 1 || count ? n : ''}</span>`;
 }
 
-/** A notice: its level, what happened, where and when, and what to do (act, open, or mark as seen). */
-function attnNotice(i) {
+/**
+ * A notice: its level, what happened, where and when, and what to do (act, open, or mark as seen). "brief" (the band at
+ * the top): a permission asked without its facts nor Allow, only the way to the page that shows them.
+ */
+function attnNotice(i, brief = false) {
   const r = i.request;
   const where = [r?.agent ? agentName(r.agent, i.project) : '', i.project ? projectName(i.project) : '', i.at ? relative(i.at) : ''].filter(Boolean).join(' · ');
   const links = [
@@ -603,15 +661,16 @@ function attnNotice(i) {
     i.url ? `<a href="${esc(i.url)}" target="_blank" rel="noopener">${esc(t('Open the pull request'))}</a>` : '',
   ].filter(Boolean);
   const open = i.view === 'log' && i.run ? `href="#log" data-select="${esc(i.run)}"` : `href="#${esc(i.view)}"`;
-  // A notice with a decision card: "Decide" opens it on the manager's page.
-  const decide = !r && currentView() !== 'manager' && decisionsNow().some(c => c.id === i.id);
-  const actions = r
-    ? needsButtons({ ...r, project: i.project }, ' small')
-    : decide ? `<a class="button small" href="#manager">${esc(t('Decide'))}</a>`
+  // A notice with a decision card: "Decide" opens it in Decisions.
+  const decide = !r && currentView() !== 'decisions' && decisionsNow().some(c => c.id === i.id);
+  const actions = r && brief && r.kind === 'permission'
+    ? `<a class="button small" href="${esc(sessionHash({ id: r.session, project: i.project }))}">${esc(t('See'))}</a>`
+    : r ? needsButtons({ ...r, project: i.project }, ' small')
+    : decide ? `<a class="button small" href="#decisions">${esc(t('Decide'))}</a>`
     : `${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
   return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
       <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
-      <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}${where || links.length ? `<span class="hint">${[esc(where), ...links].filter(Boolean).join(' · ')}</span>` : ''}${permissionFacts(r?.explain, r?.id)}</div>
+      <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}${where || links.length ? `<span class="hint">${[esc(where), ...links].filter(Boolean).join(' · ')}</span>` : ''}${brief ? '' : permissionFacts(r?.explain, r?.id)}</div>
       <div class="attn-actions">${actions}</div>
     </div>`;
 }
@@ -655,9 +714,16 @@ function archiveHtml(items) {
 let attnOpen = false; // the band shows every notice, not only the most urgent
 /** The band at the top: the most urgent notice and how many others, opening into all of them. Nothing is paused. */
 function drawAlerts() {
-  // On a phone's manager page, the notices that have a decision card are left to the cards, right below.
-  const carded = phoneQuery.matches && currentView() === 'manager' ? new Set(decisionsNow().map(c => c.id)) : new Set();
-  const list = attnItems().filter(i => !carded.has(i.id));
+  // The notices with a decision card are left to the Decisions tab, and those a page lists (Operations, Planning, a
+  // project) to that page. The conversation shows only its own notices (the others mark their tabs), and none in focus
+  // mode. A permission asked shows there without its facts, as a way to them. On a phone, the band keeps its room for
+  // what needs the owner: the info notices stay in each section's list.
+  const phone = phoneQuery.matches;
+  const carded = cardedIds();
+  const view = currentView();
+  const listed = { operations: ['operations', 'log'], planning: ['planning'] }[view] ?? [];
+  const skip = i => (view === 'manager' ? i.view !== 'manager' : listed.includes(i.view) || (view === 'project' && ofProject(pageProject())(i)));
+  const list = focusMode() ? [] : attnItems().filter(i => !carded.has(i.id) && !(phone && i.level === 'info') && !skip(i));
   const fresh = unseen(list);
   if (!fresh.length && !attnOpen) return draw('#alerts', '', '');
   const others = fresh.length - 1;
@@ -667,25 +733,41 @@ function drawAlerts() {
   const all = fresh.some(i => i.seenable) ? `<button type="button" class="button secondary small" data-attn-seen="${esc(fresh.filter(i => i.seenable).map(i => i.id).join(' '))}">${esc(t('Mark all as seen'))}</button>` : '';
   const shown = attnOpen ? list : fresh.slice(0, 1);
   const html = `<div class="attn-band" data-level="${topLevel(list) ?? 'info'}"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>
-      ${shown.map(attnNotice).join('') || `<div class="attn" data-level="info"><div class="attn-text">${esc(t('Nothing needs you now.'))}</div></div>`}
+      ${shown.map(i => attnNotice(i, true)).join('') || `<div class="attn" data-level="info"><div class="attn-text">${esc(t('Nothing needs you now.'))}</div></div>`}
       ${toggle || (attnOpen && all) ? `<div class="attn-more">${attnOpen ? attnArchivedLink() : ''}${toggle}${attnOpen ? all : ''}</div>` : ''}
     </div>`;
   draw('#alerts', html, html);
 }
 
-/** A mark beside each section in the menu: the color of its most urgent notice and how many there are. */
+/** The notices that have a decision card: they count in the Decisions tab, not in their own section's. */
+const cardedIds = () => new Set(decisionsNow().map(c => c.id));
+
+/** Each section of the menu with what needs you there: the decision cards for Decisions, the notices for the others. */
+function navSections() {
+  const carded = cardedIds();
+  const list = attnItems().filter(i => !carded.has(i.id));
+  return [...document.querySelectorAll('.nav a[data-view]')].map(a => {
+    const view = a.dataset.view;
+    const name = a.firstElementChild?.textContent ?? '';
+    const items = view === 'decisions' ? decisionsNow().filter(c => !c.seen) : list.filter(i => i.view === view);
+    return { a, view, name, items, level: topLevel(items), mark: attnMark(items, name, true) };
+  });
+}
+
+/** A mark beside each section in the menu: the color of its most urgent notice and how many there are (urgent pulses). */
 function drawNavAttention() {
-  const list = attnItems();
-  for (const a of document.querySelectorAll('.nav a[data-view]')) {
+  const sections = navSections();
+  for (const { a, mark, level } of sections) {
     let slot = a.querySelector('.nav-attn');
     if (!slot) a.append((slot = Object.assign(document.createElement('span'), { className: 'nav-attn' })));
-    const html = attnMark(list.filter(i => i.view === a.dataset.view), a.firstElementChild?.textContent ?? '');
-    if (slot.innerHTML !== html) slot.innerHTML = html;
+    if (slot.innerHTML !== mark) slot.innerHTML = mark;
+    if (level) a.dataset.level = level;
+    else delete a.dataset.level;
   }
   // On phones, "More" carries the marks of the sections it holds.
-  const extra = new Set([...document.querySelectorAll('.nav a.nav-extra')].map(a => a.dataset.view));
-  const more = attnMark(list.filter(i => extra.has(i.view)), t('More'));
+  const more = attnMark(sections.filter(x => x.a.classList.contains('nav-extra')).flatMap(x => x.items), t('More'), true);
   if ($('#nav-more-attn').innerHTML !== more) $('#nav-more-attn').innerHTML = more;
+  drawFocusBar();
 }
 
 function drawStatusbar() {
@@ -719,8 +801,9 @@ function drawClock() {
 
 // ---------- Decisions: what waits for your decision, as cards ----------
 // Built by the server (src/decisions.mjs) from the notices: a pull request or branch to merge, a proposal the manager
-// triaged, a question the manager asked. The essentials first (what, what changes, the risk, the recommendation), the
-// detail folded, the buttons large. "Not now" fades a card to the end, under "Left for later".
+// triaged, a question the manager asked. They have a tab of their own (Decisions), as compact cards: what it is, where,
+// the recommendation's verdict and the buttons; what changes, the risk and the rest folded under Details. "Not now"
+// fades a card to the end, under "Left for later".
 
 const decisionsNow = () => (online ? state?.decisions ?? [] : []);
 const decisionKind = c => ({ merge: c.thirdParty ? t('Waiting for a third-party review') : t('Merge'), decision: t('Proposal'), question: t('Question') })[c.kind] ?? '';
@@ -750,60 +833,38 @@ function decisionCardHtml(c) {
     button('talk', label(t('Talk about this'), t('Talk')), ' secondary'),
   ].join('');
   const about = [esc(c.label), c.at ? esc(relative(c.at)) : ''].filter(Boolean).join(' · ');
-  // Phones show the card folded into one line (what, where, the recommendation); a tap unfolds the rest.
-  // The recommendation's verdict only ("Do it now", not its reason); the whole of it shows unfolded.
-  // Where: the card's label ("PR #34 of Chiefmate"), the head that names it being hidden there; a question, its project.
-  const where = c.kind !== 'question' && c.label ? c.label : c.project ? projectName(c.project) : '';
-  const line = [where ? esc(where) : '',c.recommend ? esc(t('Recommends: {what}', { what: c.recommend.split(': ')[0] })) : ''].filter(Boolean).join(' · ');
+  // The recommendation's verdict only ("Approve with caveats", src/decisions.mjs); its reason is under Details.
+  const verdict = c.recommendShort || c.recommend;
+  const detail = [
+    c.what && c.what !== c.title ? `<p class="decision-what">${esc(c.what)}</p>` : '',
+    facts.length ? `<dl class="decision-facts">${facts.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('')}</dl>` : '',
+    c.detail ? `<div class="decision-detail-body">${md(c.detail)}</div>` : '',
+    links.length ? `<div class="hint">${links.join(' · ')}</div>` : '',
+  ].join('');
   return `<article class="decision" data-level="${esc(c.level)}" data-card="${esc(c.id)}"${c.seen ? ' data-seen' : ''}>
-      <button type="button" class="decision-line" data-decision-fold="${esc(c.id)}" aria-expanded="false"><span class="attn-mark" data-level="${esc(c.level)}" aria-hidden="true"></span><span class="decision-line-text"><span class="decision-line-title">${esc(c.title)}</span>${line ? ` <span class="decision-line-about">${line}</span>` : ''}</span><span class="decision-chevron" aria-hidden="true"></span></button>
       <div class="decision-head"><span class="attn-mark" data-level="${esc(c.level)}" aria-hidden="true"></span><span class="decision-kind">${esc(decisionKind(c))}</span><span class="decision-about">${about}</span>${c.seen ? `<span class="tag">${esc(t('left for later'))}</span>` : ''}</div>
       <div class="decision-title">${esc(c.title)}</div>
-      ${c.what && c.what !== c.title ? `<p class="decision-what">${esc(c.what)}</p>` : ''}
-      ${facts.length ? `<dl class="decision-facts">${facts.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('')}</dl>` : ''}
+      ${verdict ? `<div class="decision-verdict">${esc(t('Recommends: {what}', { what: verdict }))}</div>` : ''}
       ${c.thirdParty ? `<p class="decision-third">${esc(t('Someone else reviews and merges the work of this project: nothing for you to approve here.'))}</p>` : ''}
-      ${c.detail || links.length ? `<details class="decision-detail" data-detail="${esc(c.id)}"><summary>${esc(t('Details'))}</summary>${c.detail ? `<div class="decision-detail-body">${md(c.detail)}</div>` : ''}${links.length ? `<div class="hint">${links.join(' · ')}</div>` : ''}</details>` : ''}
       <div class="decision-buttons">${buttons}</div>
+      ${detail ? `<details class="decision-detail" data-detail="${esc(c.id)}"><summary>${esc(t('Details'))}</summary>${detail}</details>` : ''}
     </article>`;
 }
 
-/** The cards above the conversation with the manager: the ones not decided yet, then the ones left for later. */
+/** The Decisions tab: the cards not decided yet, then the ones left for later (folded). */
 function drawDecisions() {
   const cards = decisionsNow();
   const box = $('#decisions');
-  box.hidden = !cards.length;
   const fresh = cards.filter(c => !c.seen);
   const later = cards.filter(c => c.seen);
-  const head = `<div class="decisions-head">${attnMark(fresh)}<span class="label">${esc(t('Waiting for your decision ({count})', { count: fresh.length }))}</span></div>`;
-  // Phones: a bar in its place ("3 decisions"), folded until tapped, so the conversation keeps the screen.
-  const count = fresh.length ? (fresh.length === 1 ? t('1 decision') : t('{count} decisions', { count: fresh.length })) : t('Left for later ({count})', { count: later.length });
-  const level = topLevel(fresh) ?? 'info';
-  const bar = `<button type="button" class="decisions-bar" data-level="${level}" data-decisions-fold aria-expanded="false" aria-controls="decisions-list"><span class="attn-mark" data-level="${level}" aria-hidden="true"></span><span class="decisions-bar-text">${esc(count)}</span><span class="decision-chevron" aria-hidden="true"></span></button>`;
   const rest = later.length ? `<details class="decisions-later" data-detail="later"><summary>${esc(t('Left for later ({count})', { count: later.length }))}</summary>${later.map(decisionCardHtml).join('')}</details>` : '';
-  const html = cards.length ? `${head}${bar}<div class="decisions-list" id="decisions-list">${fresh.map(decisionCardHtml).join('')}${rest}</div>` : '';
+  const html = cards.length
+    ? `${fresh.map(decisionCardHtml).join('')}${rest}`
+    : `<div class="panel empty">${esc(t('Nothing waits for your decision. New pull requests, proposals and questions from the manager show up here.'))}</div>`;
   // What you opened stays open when the cards are drawn again.
   const opened = [...box.querySelectorAll('details[open]')].map(d => d.dataset.detail);
   if (draw('#decisions', JSON.stringify([cards, language()]), html)) {
     for (const d of box.querySelectorAll('details')) if (opened.includes(d.dataset.detail)) d.open = true;
-  }
-  foldDecisions();
-}
-
-let decisionsOpen = false; // phones: the bar's list is unfolded
-const unfoldedCards = new Set(); // phones: the cards unfolded to their explanation and buttons
-/** Puts the phone's folds (the bar, each card) back on the cards as drawn. */
-function foldDecisions() {
-  const box = $('#decisions');
-  // The conversation keeps its last message in sight while the folds change its height.
-  const chat = $('#chat');
-  const atBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 80;
-  queueMicrotask(() => atBottom && (chat.scrollTop = chat.scrollHeight));
-  box.classList.toggle('open', decisionsOpen);
-  box.querySelector('[data-decisions-fold]')?.setAttribute('aria-expanded', String(decisionsOpen));
-  for (const card of box.querySelectorAll('.decision')) {
-    const open = unfoldedCards.has(card.dataset.card);
-    card.toggleAttribute('data-open', open);
-    card.querySelector('[data-decision-fold]')?.setAttribute('aria-expanded', String(open));
   }
 }
 
@@ -818,30 +879,12 @@ function talkAbout(c) {
 }
 
 $('#decisions').addEventListener('click', async event => {
-  if (event.target.closest('[data-decisions-fold]')) {
-    decisionsOpen = !decisionsOpen;
-    return foldDecisions();
-  }
-  const fold = event.target.closest('[data-decision-fold]');
-  if (fold) {
-    const id = fold.dataset.decisionFold;
-    if (!unfoldedCards.delete(id)) unfoldedCards.add(id);
-    foldDecisions();
-    // Unfolded, the card comes up under the bar, so its explanation and buttons are in sight.
-    const box = $('#decisions');
-    if (unfoldedCards.has(id)) box.scrollTop += fold.closest('.decision').getBoundingClientRect().top - box.getBoundingClientRect().top - box.querySelector('.decisions-bar').offsetHeight;
-    return;
-  }
   const button = event.target.closest('[data-decide]');
   if (!button) return;
   const c = decisionsNow().find(x => x.id === button.dataset.card);
   if (!c) return;
   const action = button.dataset.decide;
-  if (action === 'talk') {
-    decisionsOpen = false; // phones: the list folds, the conversation and its field come forward
-    foldDecisions();
-    return talkAbout(c);
-  }
+  if (action === 'talk') return talkAbout(c);
   // Merging and closing a pull request are confirmed: the click is your authorization (src/merge.mjs).
   const how = c.url ? t('Chiefmate merges the pull request on GitHub.') : t('Chiefmate merges the branch into the branch checked out in your clone; nothing is sent to GitHub.');
   if (c.kind === 'merge' && action === 'approve' && !(await confirmDialog(t('Approve and merge'), `${c.label}: ${c.title}. ${how}`, t('Approve')))) return;
@@ -1013,20 +1056,17 @@ function drawBridge() {
   draw('#bridge', signature, html);
 }
 
+/** Beside Operations: what its list doesn't show (the next mission, the account's usage, the contexts' fill). */
 function drawSituation() {
   const runs = going();
-  const sessions = (state.sessions?.open ?? []).filter(x => x.status !== 'login');
   const { account } = state.usage;
   const next = nextMission();
   const html = `
     <div class="label">${esc(t('Situation'))}</div>
-    <div class="block"><div class="hint">${esc(t('Operations'))}</div><div class="value">${runs.length ? runs.map(a => `${esc(a.title)}<br><span class="hint">${esc(projectName(a.project))} · ${esc(a.agent ? agentName(a.agent, a.project) : t('preparing'))}, ${esc(t('step {n} of {total}', { n: a.step ?? 1, total: a.steps.length }))}${a.doing ? ` · ${esc(a.doing)}` : ''}</span>`).join('<br>') : esc(t('Nothing running'))}</div></div>
-    ${sessions.length ? `<div class="block"><div class="hint">${esc(t('Live sessions'))}</div><div class="value">${sessions.map(x => esc(`${x.name} (${toolName(x.tool)})`)).join('<br>')}</div></div>` : ''}
-    <div class="block"><div class="hint">${esc(t('Queue'))}</div><div class="value">${state.queue.length ? esc(t('{count} run(s)', { count: state.queue.length })) : esc(t('Empty'))}</div></div>
     <div class="block"><div class="hint">${esc(t('Next scheduled mission'))}</div><div class="value">${next ? `${esc(next.name)}<br><span class="num hint">${shortDate(next.next)} (${esc(relative(next.next))})</span>` : esc(t('None'))}</div></div>
     <div class="block">${meter(t('Account, 5-hour window'), account.five_hour?.used, percent(account.five_hour?.used))}${meter(t("Plan's week"), account.seven_day?.used, percent(account.seven_day?.used))}</div>
     <div class="block">${managerContextMeter()}${runs.filter(a => a.agent).map(agentContextMeter).join('')}</div>`;
-  draw('#situation', JSON.stringify([runs.map(a => [a.id, a.title, a.step, a.agent, a.context, a.doing]), sessions.map(x => x.id), state.manager.context, state.queue.length, next?.next, account.updated, Math.floor(Date.now() / 60000)]), html);
+  draw('#situation', JSON.stringify([runs.map(a => [a.id, a.title, a.step, a.agent, a.context, a.doing]), state.manager.context, state.queue.length, next?.next, account.updated, Math.floor(Date.now() / 60000)]), html);
 }
 
 // ---------- Operations ----------
@@ -1171,7 +1211,8 @@ function drawOperations() {
     for (const key of Object.keys(signatures)) if (key.startsWith('#op-')) delete signatures[key];
   }
   // What needs you in the crew's work (requests, failed runs, pull requests, finished tasks), above the runs.
-  const notices = attnList(attnItems().filter(i => ['operations', 'log'].includes(i.view)), t('Waiting for you'), { archived: true });
+  const carded = cardedIds(); // the pull requests waiting for you are in Decisions
+  const notices = attnList(attnItems().filter(i => ['operations', 'log'].includes(i.view) && !carded.has(i.id)), t('Waiting for you'), { archived: true });
   draw('#op-attention', notices, notices);
   drawQueue();
   drawSessions();
@@ -3078,7 +3119,7 @@ function drawPlanning(force = false) {
       <ol>${deciding.map(decision).join('')}</ol></div>`
     : '';
   const turn = approved.length
-    ? `<div class="plan-turn hint">${esc(t('Approved, waiting their turn:'))} ${approved.map(i => `<span class="num">#${i.id}</span> ${esc(i.title)} (${esc(agentName(i.agent, i.project))})`).join(' · ')}</div>`
+    ? `<div class="plan-turn hint">${esc(t('Approved, waiting their turn:'))} ${approved.map(i => `<span class="num">#${i.id}</span> ${esc(i.title)}${i.agent ? ` (${esc(agentName(i.agent, i.project))})` : ''}`).join(' · ')}</div>`
     : '';
   // The other notices of the board (pull requests, items waiting for your action) as attention notices; the
   // proposals to decide are in the Decide block.
@@ -3597,13 +3638,16 @@ async function refresh() {
   if (!started) {
     await setLanguage(next.language);
     translatePage();
-    if (touchScreen()) { // no Enter to explain there
-      $('#message').placeholder = t('Write to the manager.');
-      for (const area of [$('#live-text'), $('#agent-form').text]) area.placeholder = t('Write to the agent.');
-    }
+    drawPlaceholders();
     drawSuggestions();
     drawClock();
     started = true;
+    // Focus mode as it was left, on the conversation only
+    try {
+      if (localStorage.getItem(FOCUS_KEY) && currentView() === 'manager') setFocusMode(true);
+    } catch {
+      // no storage
+    }
     serverStarted = next.started;
   } else if ((next.language || 'en') !== language()) {
     location.reload();

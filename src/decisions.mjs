@@ -75,6 +75,29 @@ const firstLine = text => String(text ?? '').split('\n').map(l => l.trim()).find
 const plainVerdict = text => String(text ?? '').replace(/[*_`>#]/g, '').replace(/\s+/g, ' ').trim();
 const verdicts = new Map(); // run id -> the final review's verdict, read once (the file doesn't change after the run)
 
+/**
+ * The recommendation in the manager's verdict, which also says what it fixed and the risks: { short, text }. "short"
+ * is the verdict alone ("Approve with caveats"), "text" the recommendation's own words. Looked for after a
+ * "Recommendation:" label (in English or Portuguese), else in the verdict's last paragraph.
+ */
+export function verdictRecommendation(review) {
+  const lines = String(review ?? '').split('\n').map(l => plainVerdict(l).replace(/^[-+•]\s*/, '')).filter(Boolean);
+  const label = /^(?:my\s+|minha\s+|i\s+)?(?:recommend(?:ation)?|recomenda[çc][ãa]o|recomendo)\b\s*[:—–-]?\s*/i;
+  const at = lines.findIndex(l => label.test(l));
+  let text = at >= 0 ? lines[at].replace(label, '') || lines[at + 1] || '' : '';
+  if (!text) {
+    const inline = /\b(?:recommendation|recomenda[çc][ãa]o)\s*[:—–]\s*(.+)$/i.exec(lines.join(' '));
+    text = inline ? inline[1] : lines.at(-1) ?? '';
+  }
+  text = text.trim().replace(/^./, c => c.toUpperCase());
+  const v = text.toLowerCase();
+  let short = '';
+  if (/\b(do not|don't|not)\s+approv|\bn[ãa]o\s+aprov|\breject|\brecus/.test(v)) short = t('Do not approve');
+  else if (/\bcaveat|ressalva|\bwith conditions|\bcom condi/.test(v)) short = t('Approve with caveats');
+  else if (/\bapprove|\baprov/.test(v)) short = t('Approve');
+  return { short: short || clip(text.split(/[.:;,(]/)[0], 60), text: clip(text, 240) };
+}
+
 function runVerdict(run) {
   if (!verdicts.has(run.id)) verdicts.set(run.id, verdict(run));
   return verdicts.get(run.id);
@@ -107,12 +130,13 @@ function mergeCard(notice, run, item, config) {
     needs,
   ].filter(Boolean).join(' ');
   const how = run.pullRequest ? t('Chiefmate merges the pull request on GitHub.') : t('Chiefmate merges the branch into the branch checked out in your clone; nothing is sent to GitHub.');
+  const advice = review ? verdictRecommendation(review) : null;
   return {
     id: notice.id, kind: 'merge', level: notice.level, seen: !!notice.seen, at: notice.at, project, label,
     title: run.title, what: clip(run.summary || run.title, 300),
     change: !byOwner ? '' : inClone ? [how, run.outcome?.change].filter(Boolean).join(' ') : t("The branch is in the crew's working copy, not in a clone of yours (local_clone): merge it by hand."),
     risk: risk || t('No risk noted.'),
-    recommend: review ? clip(plainVerdict(review), 240) : '',
+    recommend: advice?.text ?? '', recommendShort: advice?.short ?? '',
     detail: [review ? `${t("Manager's verdict")}:\n${review}` : '', run.outcome?.done?.length ? `${t('What was done')}:\n- ${run.outcome.done.join('\n- ')}` : ''].filter(Boolean).join('\n\n'),
     url: run.pullRequest ?? null, run: run.id, item: item?.id ?? null, approve: byOwner && inClone, thirdParty: !byOwner,
   };
@@ -126,7 +150,7 @@ function decisionCard(notice, item, config) {
     title: item.title, what: clip(firstLine(item.description) || item.title, 300),
     change: t("It becomes a task for {agent}, with the manager's review: one per project at a time, in your order.", { agent: item.agent ?? '-' }),
     risk: item.recommend_risk || t('No risk noted.'),
-    recommend: [recommend, item.recommend_note].filter(Boolean).join(': '),
+    recommend: [recommend, item.recommend_note].filter(Boolean).join(': '), recommendShort: recommend,
     detail: item.description && item.description !== firstLine(item.description) ? item.description : '',
     agent: item.agent ?? null, item: item.id, approve: true,
   };
@@ -136,7 +160,7 @@ function questionCard(notice, q, config) {
   return {
     id: notice.id, kind: 'question', level: notice.level, seen: !!notice.seen, at: q.at, project: q.project,
     label: q.project ? t('Question from the manager about {project}', { project: projectName(config, q.project) }) : t('Question from the manager'),
-    title: q.question, what: q.context, change: '', risk: '', recommend: q.recommend ?? '', detail: '',
+    title: q.question, what: q.context, change: '', risk: '', recommend: q.recommend ?? '', recommendShort: q.recommend ?? '', detail: '',
     question: q.id, options: q.options, approve: false,
   };
 }
