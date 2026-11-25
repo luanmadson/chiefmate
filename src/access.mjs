@@ -15,7 +15,8 @@ export function rulePath(p) {
   return `/${posix}`;
 }
 
-const denyRules = (p, folder = true) => {
+/** The rules that keep a folder (or a file) out of reach: neither read nor changed. */
+export const denyRules = (p, folder = true) => {
   const target = folder ? `${rulePath(p)}/**` : rulePath(p);
   return [`Read(${target})`, `Edit(${target})`];
 };

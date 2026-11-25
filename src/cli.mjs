@@ -163,6 +163,13 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 item triaged "now" on the queue, within these limits; with no option, its
                                                 settings, whether it may act now and what it did in the last day
   node src/cli.mjs usage-reader on|off|now      turns the reading of claude.ai's usage page on or off, or reads it now
+  node src/cli.mjs watch [--dry-run] [--json]   the watchdog's check, run every 10 minutes by the Windows task "Watchdog":
+                                                whether Chiefmate answers, a stuck queue, run or update, the live sessions,
+                                                memory and orphan processes; when Chiefmate is stuck, it calls the rescuer.
+                                                --dry-run only shows what it sees
+  node src/cli.mjs rescue restart|stop-orphans [<pid> ...]|resume <run> [--dry-run]
+                                                the rescuer's safe actions (yours too): restart Chiefmate, stop the orphan
+                                                processes left by the crew, resume a paused or failed run (once a day)
   node src/cli.mjs notify "<title>" "<text>"    tests a Windows notification`;
 
 /** The API when Chiefmate is running, else the same work done here. */
@@ -781,6 +788,41 @@ The reading is off until you turn it on: node src/cli.mjs usage-reader on`);
       const { enabled, everyHours } = reader.readerSettings();
       console.log(`Reading of claude.ai: ${enabled ? `on, every ${everyHours} h` : 'off'}${reader.signedIn() ? '' : ' (not signed in: node src/cli.mjs claude-login)'}`);
       console.log(JSON.stringify(reader.readerStatus(), null, 2));
+      return;
+    }
+    case 'watch': {
+      const { watchOnce } = await import('./watch.mjs');
+      const r = await watchOnce({ dryRun: has('--dry-run') });
+      if (has('--json')) {
+        console.log(JSON.stringify({ health: r.health, problems: r.problems, orphans: r.orphans, rescue: r.rescue, told: r.told }, null, 2));
+        return;
+      }
+      console.log(r.health ? 'Chiefmate answers.' : "Chiefmate doesn't answer.");
+      for (const p of r.problems) console.log(`[${p.level}] ${p.text}`);
+      if (!r.problems.length) console.log('No problem found.');
+      if (r.rescue) console.log(`Rescuer: ${r.rescue.ok ? r.rescue.summary : `could not act (${r.rescue.error})`}${r.rescue.needs ? `\nNeeds you: ${r.rescue.needs}` : ''}`);
+      else if (r.told.length) console.log('The owner and the manager were told.');
+      return;
+    }
+    case 'rescue': {
+      // The owner's and the rescuer's: never a step of a run, nor the manager (a restart would end its own answer).
+      if ((process.env.CHIEFMATE_RUN || process.env.CHIEFMATE_MANAGER) && !process.env.CHIEFMATE_RESCUER) throw new Error("The rescue actions are the watchdog's rescuer's and the owner's only.");
+      const watch = await import('./watch.mjs');
+      const [action, ...args] = words();
+      const dryRun = has('--dry-run');
+      if (action === 'restart') {
+        const r = await watch.rescueRestart({ dryRun });
+        const what = `${r.stop ? `Chiefmate's server (process ${r.stop})` : 'nothing (Chiefmate was not running)'}${r.crew.length ? ` and the crew's processes under it: ${r.crew.join(', ')}` : ''}`;
+        console.log(r.dryRun ? `Would stop ${what}, then start Chiefmate (${r.start}).` : `Stopped ${what}. Chiefmate ${r.started ? 'started and answers' : 'did not answer within a minute after starting'}.`);
+      } else if (action === 'stop-orphans') {
+        const list = await watch.rescueStopOrphans(args, { dryRun });
+        if (!list.length) console.log('No orphan process found.');
+        for (const p of list) console.log(`${dryRun ? 'Would stop' : 'Stopped'} ${p.name} ${p.pid} (${machineBytes(p.ram)}): ${p.command}`);
+      } else if (action === 'resume') {
+        if (!args[0]) throw new Error('Which run? node src/cli.mjs rescue resume <run>');
+        const r = await watch.rescueResume(args[0], { dryRun });
+        console.log(r.dryRun ? `Would resume ${r.run} (${r.status}).` : `Run ${r.run}: ${r.status}.`);
+      } else throw new Error('Use: rescue restart | stop-orphans [<pid> ...] | resume <run> [--dry-run]');
       return;
     }
     case 'notify':

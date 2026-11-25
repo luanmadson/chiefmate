@@ -13,6 +13,7 @@ import { LEAD, memoryInfo } from './leads.mjs';
 import { computer, processes, stoppable, stopProject } from './machine.mjs';
 import { chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
 import { mergeRun, previewMerge } from './merge.mjs';
+import { reportEvent } from './news.mjs';
 import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { changePlan, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
@@ -560,6 +561,9 @@ export function startServer() {
           const pending = url.pathname.endsWith('/edit') ? editPending(id, body.message) : removePending(id);
           return pending ? reply(res, 200, { pending }) : reply(res, 404, { error: t('This message is no longer in the queue: it was delivered or removed.') });
         }
+        case '/api/watchdog':
+          // The watchdog (src/watch.mjs), a process apart from Chiefmate, tells the manager what it found and did.
+          return reply(res, 200, { event: reportEvent('watchdog', clip(String(body.text ?? ''), 3000)) });
         case '/api/update-now':
           // Installs the approved update now, pausing the work going on (src/update.mjs); "interruptManager" interrupts
           // the manager's answer instead of waiting for it.

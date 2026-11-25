@@ -264,11 +264,69 @@ try {
     expect(opens.status === 403 && JSON.parse(opens.text).error?.includes('computer'), `opening a window on the computer from another device was not refused: ${opens.status}`);
     expect((await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder', dryRun: true })).status !== 403, 'a dry run of opening a folder was refused through the remote access');
     expect((await ask(port, '/api/state', tailnet)).status === 403, "the app's own port answered the tailnet name");
+
+    // The watchdog: its news for the manager (never delivered here), a look that changes nothing, and the rescue
+    // actions refused inside a step.
+    expect((await post('/api/watchdog', { text: 'smoke' })).status === 200, "the watchdog's news was refused");
+    const cli = (args, env = {}) => execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), ...args], { env: { ...process.env, CHIEFMATE_PORT: String(port), ...env }, stdio: 'pipe', windowsHide: true, encoding: 'utf8' });
+    const look = JSON.parse(cli(['watch', '--dry-run', '--json']));
+    expect(look.health === true && Array.isArray(look.problems) && !look.rescue && !look.problems.some(p => p.id === 'server_down'), `the watchdog's look is wrong: ${JSON.stringify(look)}`);
+    expect(!existsSync(path.join(data, 'watch', 'state.json')), "the watchdog's dry run saved its state");
+    let rescueRefused = false;
+    try {
+      cli(['rescue', 'restart', '--dry-run'], { CHIEFMATE_RUN: 'x' });
+    } catch (error) {
+      rescueRefused = /rescuer's and the owner's/.test(String(error.stderr));
+    }
+    expect(rescueRefused, 'a rescue action ran inside a step');
   }
 } catch (error) {
   failures.push(error.message);
 } finally {
   child.kill();
+}
+
+// The watchdog's checks, in this process with made-up states: no AI, nothing stopped, nothing told.
+try {
+  const watch = await import(pathToFileURL(path.join(root, 'src', 'watch.mjs')).href);
+  const at = Date.parse('2026-01-05T12:00:00Z');
+  const ago = minutes => new Date(at - minutes * 60_000).toISOString();
+  const memory = { free: 8, total: 16 };
+  const healthy = { running: [], queue: [], parallel: { max: 3 }, update: { waiting: 0, installing: null, mode: 'pause' }, sessions: { open: [] }, computer: { chiefmate: { ram: 1 } } };
+  const ids = problems => problems.map(p => `${p.id}:${p.level}`).join(',');
+  expect(watch.findProblems({ health: true, state: healthy, memory, at }).length === 0, 'the watchdog found a problem in a healthy Chiefmate');
+  expect(ids(watch.findProblems({ health: false, state: null, memory, at })) === 'server_down:stuck', 'the watchdog missed a Chiefmate that does not answer');
+  const stuckQueue = { ...healthy, queue: [{ id: 'q1', title: 'Q', project: 'p', status: 'queued' }, { id: 'q2', title: 'W', project: 'p2', status: 'waiting' }] };
+  expect(ids(watch.findProblems({ health: true, state: stuckQueue, memory, at })) === 'queue_stuck:pending', 'a queue seen stuck once was not left pending');
+  expect(ids(watch.findProblems({ health: true, state: stuckQueue, memory, seen: { queue_stuck: ago(20) }, at })) === 'queue_stuck:stuck', 'a queue stuck for 20 minutes was missed');
+  expect(watch.findProblems({ health: true, state: { ...stuckQueue, update: { ...healthy.update, installing: { since: ago(5) } } }, memory, seen: { queue_stuck: ago(20) }, at }).length === 0, 'a queue held by an update was taken as stuck');
+  const silent = { ...healthy, running: [{ id: 'r1', title: 'R', project: 'p', stepStarted: ago(90), actions: [{ at: ago(70) }] }] };
+  expect(ids(watch.findProblems({ health: true, state: silent, memory, at })) === 'run_silent:r1:stuck', 'a run silent for 70 minutes was missed');
+  expect(watch.findProblems({ health: true, state: { ...silent, running: [{ ...silent.running[0], needsYou: 1 }] }, memory, at }).length === 0, 'a run waiting for the owner was taken as silent');
+  expect(ids(watch.findProblems({ health: true, state: { ...healthy, update: { ...healthy.update, installing: { since: ago(80), stage: 'pausing' } } }, memory, at })) === 'update_stuck:stuck', 'an update installing for 80 minutes was missed');
+  const waiting = { ...healthy, update: { ...healthy.update, waiting: 2, blocked: 'changes' } };
+  expect(ids(watch.findProblems({ health: true, state: waiting, memory, seen: { update_waiting: ago(150) }, at })) === 'update_waiting:warn', 'a blocked update waiting for hours was not a warning');
+  expect(watch.findProblems({ health: true, state: { ...waiting, update: { waiting: 2, mode: 'wait' }, running: [{ id: 'r', project: 'p', actions: [{ at: ago(1) }] }] }, memory, seen: { update_waiting: ago(150) }, at }).length === 0, 'an update waiting for the crew in "wait" mode was taken as a problem');
+  expect(ids(watch.findProblems({ health: true, state: healthy, memory: { free: 1, total: 16 }, at })) === 'memory_low:warn', 'low memory was missed');
+  // Orphans: only the crew's kinds of process, alive for long, whose parent is gone or took a newer process's id.
+  const list = [
+    { pid: 1, parent: 0, name: 'explorer.exe', cmd: '', created: ago(600) },
+    { pid: 10, parent: 99, name: 'git.exe', cmd: 'git fetch', created: ago(40) },
+    { pid: 11, parent: 99, name: 'git.exe', cmd: 'git fetch', created: ago(5) },
+    { pid: 12, parent: 1, name: 'git.exe', cmd: 'git status', created: ago(40) },
+    { pid: 13, parent: 99, name: 'claude.exe', cmd: 'claude', created: ago(40) },
+    { pid: 14, parent: 99, name: 'claude.exe', cmd: 'claude -p --output-format stream-json', created: ago(40) },
+    { pid: 15, parent: 16, name: 'codex.exe', cmd: 'codex exec --json', created: ago(40) },
+    { pid: 16, parent: 1, name: 'cmd.exe', cmd: 'cmd', created: ago(10) },
+    { pid: 17, parent: 99, name: 'node.exe', cmd: 'node src/cli.mjs server', created: ago(40) },
+  ];
+  expect(watch.orphansIn(list, at).map(p => p.pid).join(',') === '10,14,15', `the orphans are wrong: ${watch.orphansIn(list, at).map(p => p.pid)}`);
+  const prompt = watch.rescuePrompt({ problems: [{ level: 'stuck', text: 'Something stuck.' }] }, { owner: 'Owner', language: 'pt-BR' });
+  expect(/rescue restart/.test(prompt) && /stop-orphans/.test(prompt) && /rescue resume/.test(prompt) && /Never change a file/.test(prompt) && /Brazilian Portuguese/.test(prompt), "the rescuer's instructions lack its closed list or rules");
+  const defaults = watch.watchSettings({ default_model: 'm' });
+  expect(defaults.rescuer && defaults.model === 'm' && defaults.maxMinutes === 15 && defaults.everyMinutes === 60, `the watchdog's defaults are wrong: ${JSON.stringify(defaults)}`);
+} catch (error) {
+  failures.push(`watchdog checks: ${error.message}`);
 }
 
 // The queue of messages, in this process: a busy manager (made up, nothing runs) keeps them in order and is stopped.

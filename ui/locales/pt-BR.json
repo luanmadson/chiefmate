@@ -1075,5 +1075,19 @@
   "The pull request {address} is merged on GitHub.": "O merge do pull request {address} é feito no GitHub.",
   "The branch {branch} is merged into {base} in {path}. Nothing is sent to GitHub.": "O branch {branch} é juntado a {base} em {path}. Nada vai para o GitHub.",
   "{count} check(s) failed.": "{count} verificação(ões) falharam.",
-  "Merged.": "Merge feito."
+  "Merged.": "Merge feito.",
+  "Chiefmate watchdog": "Vigia do Chiefmate",
+  "watchdog": "vigia",
+  "Chiefmate doesn't answer: it is stopped or hung.": "O Chiefmate não responde: está parado ou travado.",
+  "The queue is stuck: {count} run(s) ready and nothing starts.": "A fila está parada: {count} execução(ões) pronta(s) e nada começa.",
+  "The run \"{title}\" has done nothing for {minutes} min.": "A execução \"{title}\" não faz nada há {minutes} min.",
+  "An update of Chiefmate has been installing for {minutes} min.": "Uma atualização do Chiefmate está sendo instalada há {minutes} min.",
+  "An approved update has been waiting for hours.": "Uma atualização aprovada espera há horas.",
+  "The live session \"{name}\" has not started.": "A sessão ao vivo \"{name}\" não começou.",
+  "The live session \"{name}\" ended its last turn with an error.": "A sessão ao vivo \"{name}\" terminou a última vez com erro.",
+  "Chiefmate itself uses {mb} MB of memory.": "O próprio Chiefmate usa {mb} MB de memória.",
+  "Only {percent}% of the memory is free.": "Só {percent}% da memória está livre.",
+  "{count} orphan process(es) left by the crew.": "{count} processo(s) órfão(s) deixado(s) pela equipe.",
+  "Chiefmate still does not answer.": "O Chiefmate continua sem responder.",
+  "The rescuer could not act: {error}": "O Socorrista não conseguiu agir: {error}"
 }
