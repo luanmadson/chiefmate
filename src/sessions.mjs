@@ -679,9 +679,11 @@ function explainCommand(command, dir) {
   const plain = args.filter(a => !a.startsWith('-'));
   if (program === 'git' && group === 'push') return explainPush(args, dir);
   if (program === 'gh' && group === 'pr') {
-    const [action = 'status', number] = plain;
+    const [action = 'status', ...rest] = plain;
+    // The number, given alone (12, #12) or in its address (…/pull/12), wherever it comes among the options.
+    const number = rest.find(a => /^#?\d+$/.test(a))?.replace('#', '') ?? rest.map(a => /\/pull\/(\d+)/.exec(a)?.[1]).find(Boolean);
     const repo = ghRepo();
-    const pr = /^#?\d+$/.test(number ?? '') ? t('pull request #{number}', { number: number.replace('#', '') }) : t('the pull request of this branch');
+    const pr = number ? t('pull request #{number}', { number }) : t('the pull request of this branch');
     const notCode = t('Nothing in the code changes.');
     const of = {
       create: () => ({ summary: t('Open a pull request on {repo}', { repo }), change: t('A proposal of change appears there, with a title and a description, and whoever follows the repository is notified.'), undo: t('Partly: it can be closed, but it stays visible.'), risk: 'low', why: t('Nothing goes into the code until someone merges it.') }),
