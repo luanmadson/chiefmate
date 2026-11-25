@@ -211,6 +211,8 @@
   "Log": "Registro",
   "Talk to Chiefmate. It answers you, hands work to the crew and reports back.": "Converse com o Chiefmate. Ele responde, distribui o trabalho para a equipe e presta contas.",
   "Write to the manager. Enter sends; Shift+Enter starts a new line.": "Escreva ao gerente. Enter envia; Shift+Enter quebra a linha.",
+  "Write to the manager.": "Escreva ao gerente.",
+  "Write to the agent.": "Escreva ao agente.",
   "What the crew is doing right now, step by step, and what is in the queue.": "O que a equipe está fazendo agora, passo a passo, e o que está na fila.",
   "Complete jobs for the crew, each with its own schedule. Every mission ends in a pull request for you to approve.": "Trabalhos completos da equipe, cada um com a sua agenda. Toda missão termina num pull request para você aprovar.",
   "Who is on board, what each one is doing and the model behind them. Give any of them a one-off task.": "Quem está a bordo, o que cada um está fazendo e o modelo por trás de cada um. Passe uma tarefa avulsa a qualquer um deles.",

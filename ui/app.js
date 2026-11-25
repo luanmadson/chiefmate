@@ -338,6 +338,8 @@ const pageLiveSession = () => (location.hash.startsWith('#project/') ? decodeURI
 const currentView = () => (pageProject() ? 'project' : pageSession() ? 'session' : builderHash() ? 'builder' : VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
 const touchScreen = () => matchMedia('(pointer: coarse)').matches;
 const phoneQuery = matchMedia('(max-width: 600px)'); // the phone layout of ui/style.css
+/** In a message field, Enter sends and Shift+Enter starts a new line; on a touch screen, Enter starts a new line and the Send button sends. */
+const enterSends = event => event.key === 'Enter' && !event.shiftKey && !event.isComposing && !touchScreen();
 /** Phones: the bottom bar holds the main sections, and "More" opens the others above it. */
 function setNavMore(open) {
   $('#nav-more').setAttribute('aria-expanded', String(open));
@@ -1416,6 +1418,7 @@ async function sendLive() {
   try {
     const m = await api('/api/session/say', { id: liveChat.id, text });
     $('#live-text').value = '';
+    fitField($('#live-text'));
     if (m.queued) toast(t('In the queue: it goes when the agent finishes this turn.'));
     await pollLive();
     refresh();
@@ -3505,7 +3508,7 @@ $('#agent-form').addEventListener('submit', event => {
   sendToAgent();
 });
 $('#agent-form').text.addEventListener('keydown', event => {
-  if (event.key === 'Enter' && !event.shiftKey) {
+  if (enterSends(event)) {
     event.preventDefault();
     sendToAgent();
   }
@@ -3579,6 +3582,10 @@ async function refresh() {
   if (!started) {
     await setLanguage(next.language);
     translatePage();
+    if (touchScreen()) { // no Enter to explain there
+      $('#message').placeholder = t('Write to the manager.');
+      for (const area of [$('#live-text'), $('#agent-form').text]) area.placeholder = t('Write to the agent.');
+    }
     drawSuggestions();
     drawClock();
     started = true;
@@ -3640,6 +3647,7 @@ async function sendMessage(text) {
   try {
     const sent = await api('/api/manager', { message });
     $('#message').value = '';
+    fitField($('#message'));
     if (sent.queued) toast(t('In the queue: it goes when the manager finishes this answer.'));
     setTimeout(refresh, 300);
   } catch (error) {
@@ -3732,7 +3740,7 @@ $('#manager-form').addEventListener('submit', event => {
   sendMessage($('#message').value);
 });
 $('#message').addEventListener('keydown', event => {
-  if (event.key === 'Enter' && !event.shiftKey) {
+  if (enterSends(event)) {
     event.preventDefault();
     sendMessage($('#message').value);
   }
@@ -3743,7 +3751,7 @@ $('#live-form').addEventListener('submit', event => {
   sendLive();
 });
 $('#live-text').addEventListener('keydown', event => {
-  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+  if (enterSends(event)) {
     event.preventDefault();
     sendLive();
   }
@@ -4024,22 +4032,75 @@ document.addEventListener('keydown', event => {
 });
 
 // Phones: the app fits the visible area (above the on-screen keyboard too), and the conversations take the height
-// of their screen (--view-h). While typing, the bottom bar and the notices step aside (html.typing).
+// of their screen (--view-h). With the keyboard open over a field, the app is in typing mode: the bottom bar and the
+// notices step aside (html.typing); in a conversation, so do the headers and the decisions, leaving its last messages
+// and the field (html.typing-chat). The keyboard is open when the visible area is well shorter than the screen.
+const root = document.documentElement;
+const typingField = el => !!el?.matches?.('textarea, input:not([type=checkbox], [type=radio], [type=button], [type=submit], [type=range], [type=file])');
+const screenSize = { width: 0, height: 0 }; // the tallest visible area seen at this width: the screen without the keyboard
+function keyboardOpen() {
+  if (!window.visualViewport) return true; // no way to tell: the focus decides
+  if (innerWidth !== screenSize.width) Object.assign(screenSize, { width: innerWidth, height: 0 });
+  const visible = visualViewport.height * visualViewport.scale;
+  screenSize.height = Math.max(screenSize.height, innerHeight, visible);
+  return screenSize.height - visible > 120;
+}
+let typingFrom = null; // the screen and its scroll before typing in a conversation, given back after
+function fitTyping() {
+  const field = document.activeElement;
+  const typing = touchScreen() && typingField(field) && keyboardOpen();
+  const chat = typing && !!field.closest('.chat-column');
+  if (root.classList.contains('typing') === typing && root.classList.contains('typing-chat') === chat) return;
+  const view = $('.view.active');
+  if (chat && !typingFrom) typingFrom = { view, top: view.scrollTop };
+  root.classList.toggle('typing', typing);
+  root.classList.toggle('typing-chat', chat);
+  for (const area of [$('#message'), $('#live-text')]) fitField(area);
+  root.style.setProperty('--view-h', `${Math.round($('.content').clientHeight)}px`); // now, not a frame later
+  if (chat) view.scrollTop = 0;
+  else if (typingFrom) {
+    if (typingFrom.view === view) view.scrollTop = typingFrom.top;
+    typingFrom = null;
+  }
+}
 if (window.visualViewport) {
   const fit = () => {
     if (visualViewport.scale > 1.01) return; // zoomed in by the owner: leave the layout as it is
-    document.documentElement.style.setProperty('--app-h', `${Math.round(visualViewport.height)}px`);
+    root.style.setProperty('--app-h', `${Math.round(visualViewport.height)}px`);
     if (scrollY) scrollTo(0, 0);
+    fitTyping();
   };
   visualViewport.addEventListener('resize', fit);
   fit();
 }
-new ResizeObserver(([entry]) => document.documentElement.style.setProperty('--view-h', `${Math.round(entry.contentRect.height)}px`)).observe($('.content'));
-const typingField = el => !!el?.matches?.('textarea, input:not([type=checkbox], [type=radio], [type=button], [type=submit], [type=range], [type=file])');
-document.addEventListener('focusin', event => document.documentElement.classList.toggle('typing', touchScreen() && typingField(event.target)));
-document.addEventListener('focusout', () => setTimeout(() => {
-  if (!typingField(document.activeElement)) document.documentElement.classList.remove('typing');
-}, 0));
+new ResizeObserver(([entry]) => root.style.setProperty('--view-h', `${Math.round(entry.contentRect.height)}px`)).observe($('.content'));
+document.addEventListener('focusin', fitTyping);
+document.addEventListener('focusout', () => setTimeout(fitTyping, 0));
+
+// A conversation whose box changes height (the keyboard, the field growing) keeps the same last line in view.
+const feedBottoms = new WeakMap();
+const keepBottom = new ResizeObserver(entries => {
+  for (const { target: feed } of entries) {
+    const was = feedBottoms.get(feed);
+    if (!feed.clientHeight) continue; // hidden with its screen
+    if (was?.height !== feed.clientHeight) feed.scrollTop = feed.scrollHeight - feed.clientHeight - (was?.below ?? 0);
+  }
+});
+for (const feed of [$('#chat'), $('#live-feed')]) {
+  // How far the last line seen is from the end, and the box's height then
+  const remember = () => feed.clientHeight && feedBottoms.set(feed, { below: feed.scrollHeight - feed.scrollTop - feed.clientHeight, height: feed.clientHeight });
+  feed.addEventListener('scroll', remember, { passive: true });
+  keepBottom.observe(feed);
+}
+
+/** Phones: a conversation's field grows with its text up to five lines (its max-height), then scrolls inside. */
+function fitField(area) {
+  area.style.height = '';
+  if (phoneQuery.matches && area.scrollHeight > area.clientHeight) area.style.height = `${area.scrollHeight + area.offsetHeight - area.clientHeight}px`;
+}
+for (const area of [$('#message'), $('#live-text')]) area.addEventListener('input', () => fitField(area));
+// While typing, Send doesn't take the focus: the keyboard stays open for the next message.
+for (const button of [$('#send'), $('#live-send')]) button.addEventListener('mousedown', event => root.classList.contains('typing') && event.preventDefault());
 
 showView();
 drawClock();
