@@ -735,7 +735,9 @@ function decisionCardHtml(c) {
   const about = [esc(c.label), c.at ? esc(relative(c.at)) : ''].filter(Boolean).join(' · ');
   // Phones show the card folded into one line (what, where, the recommendation); a tap unfolds the rest.
   // The recommendation's verdict only ("Do it now", not its reason); the whole of it shows unfolded.
-  const line = [c.project ? esc(projectName(c.project)) : '', c.recommend ? esc(t('Recommends: {what}', { what: c.recommend.split(': ')[0] })) : ''].filter(Boolean).join(' · ');
+  // Where: the card's label ("PR #34 of Chiefmate"), the head that names it being hidden there; a question, its project.
+  const where = c.kind !== 'question' && c.label ? c.label : c.project ? projectName(c.project) : '';
+  const line = [where ? esc(where) : '',c.recommend ? esc(t('Recommends: {what}', { what: c.recommend.split(': ')[0] })) : ''].filter(Boolean).join(' · ');
   return `<article class="decision" data-level="${esc(c.level)}" data-card="${esc(c.id)}"${c.seen ? ' data-seen' : ''}>
       <button type="button" class="decision-line" data-decision-fold="${esc(c.id)}" aria-expanded="false"><span class="attn-mark" data-level="${esc(c.level)}" aria-hidden="true"></span><span class="decision-line-text"><span class="decision-line-title">${esc(c.title)}</span>${line ? ` <span class="decision-line-about">${line}</span>` : ''}</span><span class="decision-chevron" aria-hidden="true"></span></button>
       <div class="decision-head"><span class="attn-mark" data-level="${esc(c.level)}" aria-hidden="true"></span><span class="decision-kind">${esc(decisionKind(c))}</span><span class="decision-about">${about}</span>${c.seen ? `<span class="tag">${esc(t('left for later'))}</span>` : ''}</div>
