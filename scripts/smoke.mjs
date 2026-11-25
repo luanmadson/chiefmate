@@ -1477,7 +1477,7 @@ try {
   const checked = [];
   const ask = {
     pr: async url => (checked.push(url), url.endsWith('/1') ? 'merged' : url.endsWith('/2') ? 'closed' : 'open'),
-    branch: async r => (checked.push(r.branch), r.branch === 'cm/merged'),
+    branch: async r => (checked.push(r.branch), r.branch === 'cm/merged' ? 'branch' : null),
   };
   await checkPullRequests([], {}, ask);
   const at = new Date(Date.now() - 3600_000).toISOString();
@@ -1549,6 +1549,7 @@ try {
   saveRun({ id: 'o-pr', project: 'p', title: 'Merged on GitHub', status: 'done', created: at, ended: at, pullRequest: 'https://github.com/o/r/pull/1', plan: onGitHub.id });
   saveRun({ id: 'o-local', project: 'p', title: 'Merged in the clone', status: 'done', created: at, ended: at, branch: 'cm/merged', delivered: 'C:/clone', plan: inClone.id });
   expect(planItem(onGitHub.id).status === 'waiting_owner' && planItem(inClone.id).status === 'waiting_owner', 'a board item with work to merge is not waiting for the owner');
+  await checkPullRequests([{ run: readRun('o-local') }], {}, ask);
   attentionItems({ config: {}, runs: [readRun('o-pr'), readRun('o-local')], items: [planItem(onGitHub.id), planItem(inClone.id)] });
   expect(readRun('o-pr').merged?.by === 'outside' && readRun('o-pr').merged.how === 'pr' && readRun('o-local').merged?.how === 'local',
     `work merged outside Chiefmate did not mark its run as merged: ${JSON.stringify([readRun('o-pr').merged, readRun('o-local').merged])}`);
@@ -1998,6 +1999,64 @@ try {
   expect(existsSync(path.join(clone, 'b.txt')) && git('branch', '--show-current').trim() === 'main', "the run's branch was not merged into the clone's base branch");
   expect(readRun('smoke-merge').merged?.by === 'manager', 'the merge was not recorded in the run');
   expect(await mergeRun('smoke-merge', {}, config).then(() => false, e => /already/.test(e.message)), 'a run was merged twice');
+
+  // Actual Git checks behind Decisions, including the gap between the last refresh and an Approve click.
+  const { attentionArchive, attentionItems, checkPullRequests, pullRequestTargets } = await import(pathToFileURL(path.join(root, 'src', 'attention.mjs')).href);
+  const { decide, decisionCards } = await import(pathToFileURL(path.join(root, 'src', 'decisions.mjs')).href);
+  const { addItem, planItem } = await import(pathToFileURL(path.join(root, 'src', 'planning.mjs')).href);
+  const { saveRun } = await import(pathToFileURL(path.join(root, 'src', 'store.mjs')).href);
+  const project = 'local-sample';
+  const localConfig = { projects: { [project]: { ...config.projects[project], main_branch: 'current' } } };
+  const item = addItem({ project, title: 'Deleted local delivery' });
+  const deliveredCommit = git('rev-parse', 'chiefmate/smoke').trim();
+  git('checkout', '-q', '-b', 'other');
+  writeFileSync(path.join(clone, 'other.txt'), 'other branch only\n');
+  git('add', 'other.txt');
+  git('commit', '-q', '-m', 'other branch');
+  const other = git('rev-parse', 'HEAD').trim();
+  git('branch', 'wip/pending', other);
+  git('branch', 'wip/deleted', other);
+  git('branch', 'wip/merged-then-deleted', deliveredCommit);
+  git('branch', '-D', 'wip/deleted', 'wip/merged-then-deleted');
+  git('update-ref', 'refs/remotes/origin/wip/deleted', other);
+  writeFileSync(path.join(clone, 'a.txt'), 'owner edit\n');
+  const localRun = (name, fields = {}) => saveRun({
+    id: `smoke-${name}`, title: name, project, status: 'done', created: new Date().toISOString(), ended: new Date().toISOString(),
+    branch: `wip/${name}`, base: 'main', delivered: clone, ...fields,
+  });
+  const integrated = localRun('integrated', { branch: 'chiefmate/smoke' });
+  const removed = localRun('deleted', { plan: item.id });
+  const integratedAndRemoved = localRun('merged-then-deleted', { deliveredCommit });
+  const pending = localRun('pending');
+  const wrongClone = localRun('other-clone', { delivered: path.join(clone, 'elsewhere') });
+  const view = () => ({ config: localConfig, runs: [integrated, removed, integratedAndRemoved, pending, wrongClone].map(r => readRun(r.id)), items: [planItem(item.id)] });
+  const cards = () => {
+    const state = view();
+    return decisionCards({ ...state, attention: attentionItems(state), questions: [], pushes: [] });
+  };
+  const before = cards();
+  expect(before.length === 5, 'local cards disappeared before Git was checked');
+  const state = view();
+  await checkPullRequests(pullRequestTargets(attentionItems(state), state.runs, state.items), localConfig);
+  const after = cards();
+  expect(after.length === 2 && after.some(c => c.run === pending.id) && after.some(c => c.run === wrongClone.id), 'the Git check settled the wrong local cards');
+  expect(readRun(integrated.id).merged?.by === 'outside' && readRun(integratedAndRemoved.id).merged?.by === 'outside', 'the Git check missed a local merge');
+  expect(readRun(removed.id).discarded?.by === 'outside' && planItem(item.id).status === 'todo', 'the deleted branch did not return its board item for a decision');
+  const removedCard = before.find(c => c.run === removed.id);
+  expect(attentionArchive().find(n => n.id === removedCard.id)?.reason === 'deleted', 'the deleted branch was not archived');
+  expect((await decide({ card: removedCard.id, action: 'approve' }, after)).done === 'branch_deleted', 'approving a recently archived local card failed');
+  expect((await decide({ card: `pr:${integrated.id}`, action: 'approve' }, after)).done === 'already_merged', 'approving an already integrated card failed');
+
+  const redo = localRun('pending-redo', { branch: pending.branch, plan: item.id });
+  const redoView = { config: localConfig, runs: [redo], items: [planItem(item.id)] };
+  expect(decisionCards({ ...redoView, attention: attentionItems(redoView), questions: [], pushes: [] }).some(c => c.run === redo.id), 'a new local delivery inherited the previous card archive');
+
+  const approveIntegrated = localRun('approve-integrated', { branch: integrated.branch });
+  const approveRemoved = localRun('approve-deleted');
+  expect((await mergeRun(approveIntegrated.id, {}, localConfig)).merged?.by === 'outside', 'approval tried to merge an already integrated branch');
+  expect((await mergeRun(approveRemoved.id, {}, localConfig)).discarded?.by === 'outside', 'approval failed on a deleted local branch');
+  expect(git('rev-parse', 'HEAD').trim() === other && readFileSync(path.join(clone, 'a.txt'), 'utf8') === 'owner edit\n', 'settling local deliveries changed the clone');
+
   let refused = false;
   try {
     execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'merge', 'smoke-merge', '--yes'], { env: { ...process.env, CHIEFMATE_RUN: 'x', CHIEFMATE_MANAGER: '' }, stdio: 'pipe', windowsHide: true });

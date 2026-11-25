@@ -12,7 +12,7 @@
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { markSeen } from './attention.mjs';
+import { attentionArchive, markSeen } from './attention.mjs';
 import { ownerAnswered } from './charge.mjs';
 import { loadConfig } from './config.mjs';
 import { GRANT_MINUTES, plainPush, pushFacts, readPushes, repoOf, samePath } from './guard.mjs';
@@ -22,6 +22,7 @@ import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { decideItem } from './planning.mjs';
 import { readRun } from './store.mjs';
+import { localDeliveryClone } from './workspace.mjs';
 import { clip, DATA, ensureDir, now, parseLevel, readJson, ROOT, writeJson } from './util.mjs';
 
 const QUESTIONS_MAX = 200;
@@ -215,8 +216,7 @@ function mergeCard(notice, run, item, config) {
     : t('Branch {branch} of {project}', { branch: run.branch ?? '-', project: name });
   const byOwner = mergedByOwner(config, project);
   // A branch left in the crew's working copy (no local_clone) is merged by hand, not from here (src/merge.mjs).
-  const clone = config.projects?.[project]?.local_clone;
-  const inClone = !!run.pullRequest || (!!clone && path.resolve(clone) === path.resolve(run.delivered));
+  const inClone = !!run.pullRequest || !!localDeliveryClone(run, config);
   const failed = (run.checks ?? []).filter(c => !c.ok).length;
   const review = runVerdict(run);
   const needs = run.outcome?.needs && !/^(no|não|nao|none|nenhum)\b/i.test(run.outcome.needs) ? run.outcome.needs : '';
@@ -317,8 +317,17 @@ const tell = text => reportEvent('owner_decided', text);
  * answer to a question), reason }. The card is checked against "cards", what is pending now.
  */
 export async function decide({ card, action, option, reason } = {}, cards = []) {
-  const c = cards.find(x => x.id === String(card ?? ''));
-  if (!c) throw new Error(t('This decision is no longer pending.'));
+  const id = String(card ?? '');
+  const c = cards.find(x => x.id === id);
+  if (!c) {
+    if (action === 'approve') {
+      const archived = attentionArchive().find(i => i.id === id && i.run && !i.url && (i.reason === 'branch' || i.reason === 'deleted'));
+      const run = archived && readRun(archived.run);
+      if (run?.merged?.by === 'outside' && run.merged.how === 'local') return { card: id, done: 'already_merged' };
+      if (run?.discarded?.by === 'outside' && run.discarded.how === 'local') return { card: id, done: 'branch_deleted' };
+    }
+    throw new Error(t('This decision is no longer pending.'));
+  }
   const about = `${c.label} "${c.title}"`;
   if (action === 'later') {
     markSeen([c.id]);
@@ -328,7 +337,8 @@ export async function decide({ card, action, option, reason } = {}, cards = []) 
   if (c.kind === 'merge') {
     if (action === 'approve') {
       if (!c.approve) throw new Error(t('Someone else reviews and merges the work of this project.'));
-      return { card: c.id, done: 'merged', merge: await mergeRun(c.run, { by: 'owner' }) };
+      const merge = await mergeRun(c.run, { by: 'owner' });
+      return { card: c.id, done: merge.discarded ? 'branch_deleted' : merge.merged.by === 'outside' ? 'already_merged' : 'merged', merge };
     }
     if (action === 'discard') {
       // Someone else's review: its pull request is theirs to close.

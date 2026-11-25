@@ -1022,6 +1022,7 @@ export async function execute(run) {
       let onto = null; // "deliver_branch": "current" and the move forward went through
       if (project.local_clone) {
         log(t('Handing the branch to your clone of {name}', { name: project.name }));
+        run.deliveredCommit = await headCommit(dir);
         await deliverToClone(dir, run.branch, project.local_clone);
         where = t('the branch {branch} of your clone ({path})', { branch: run.branch, path: project.local_clone });
         if (project.deliver_branch === 'current') {
