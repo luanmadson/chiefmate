@@ -337,6 +337,7 @@ const pageSession = () => (location.hash.startsWith('#session/') ? decodeURIComp
 const pageLiveSession = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length).split('/')[2] ?? '') : '');
 const currentView = () => (pageProject() ? 'project' : pageSession() ? 'session' : builderHash() ? 'builder' : VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
 const touchScreen = () => matchMedia('(pointer: coarse)').matches;
+const phoneQuery = matchMedia('(max-width: 600px)'); // the phone layout of ui/style.css
 /** Phones: the bottom bar holds the main sections, and "More" opens the others above it. */
 function setNavMore(open) {
   $('#nav-more').setAttribute('aria-expanded', String(open));
@@ -352,6 +353,7 @@ function showView() {
   for (const a of document.querySelectorAll('.nav a')) a.classList.toggle('active', a.dataset.view === section);
   $('#nav-more').classList.toggle('active', !!document.querySelector('.nav a.nav-extra.active'));
   setNavMore(false);
+  if (state) drawAlerts();
   $('#project-jump').value = pageProject() ?? '';
   // Not on a touch screen: the keyboard would cover half of it at every visit.
   if (view === 'manager' && !touchScreen()) setTimeout(() => $('#message').focus(), 0);
@@ -368,6 +370,7 @@ function showView() {
   }
 }
 window.addEventListener('hashchange', showView);
+phoneQuery.addEventListener('change', () => state && drawAlerts());
 
 /** A project's name that opens its page; any other name (an old board's project, a library) stays plain text. */
 const projectLink = (id, label = projectName(id)) =>
@@ -635,7 +638,9 @@ function archiveHtml(items) {
 let attnOpen = false; // the band shows every notice, not only the most urgent
 /** The band at the top: the most urgent notice and how many others, opening into all of them. Nothing is paused. */
 function drawAlerts() {
-  const list = attnItems();
+  // On a phone's manager page, the notices that have a decision card are left to the cards, right below.
+  const carded = phoneQuery.matches && currentView() === 'manager' ? new Set(decisionsNow().map(c => c.id)) : new Set();
+  const list = attnItems().filter(i => !carded.has(i.id));
   const fresh = unseen(list);
   if (!fresh.length && !attnOpen) return draw('#alerts', '', '');
   const others = fresh.length - 1;
@@ -714,19 +719,27 @@ function decisionCardHtml(c) {
     c.run ? `<a href="#log" data-select="${esc(c.run)}">${esc(t('See the run'))}</a>` : '',
     c.item ? `<a href="#planning">${esc(t('See on the board'))}</a>` : '',
   ].filter(Boolean);
-  const button = (action, label, kind = '', extra = '') => `<button type="button" class="button${kind}" data-decide="${esc(action)}" data-card="${esc(c.id)}"${extra}>${esc(label)}</button>`;
+  // A label with a short form, shown on phones instead: "Not now" becomes "Later".
+  const label = (long, short = long) => (short === long ? esc(long) : `<span class="long">${esc(long)}</span><span class="short">${esc(short)}</span>`);
+  const button = (action, text, kind = '', extra = '') => `<button type="button" class="button${kind}" data-decide="${esc(action)}" data-card="${esc(c.id)}"${extra}>${text}</button>`;
   const choices = c.kind === 'question'
-    ? c.options.map(o => button('answer', o, o === c.recommend ? '' : ' secondary', ` data-option="${esc(o)}"${o === c.recommend ? ` title="${esc(t('Recommended by the manager'))}"` : ''}`)).join('')
-    : c.approve ? button('approve', t('Approve')) : '';
+    ? c.options.map(o => button('answer', esc(o), o === c.recommend ? '' : ' secondary', ` data-option="${esc(o)}"${o === c.recommend ? ` title="${esc(t('Recommended by the manager'))}"` : ''}`)).join('')
+    : c.approve ? button('approve', label(t('Approve'))) : '';
   const buttons = [
     choices,
     // Someone else's review only informs: "Hide" sends it to the archive.
-    c.seen ? '' : button('later', c.thirdParty ? t('Hide') : t('Not now'), ' secondary'),
-    c.thirdParty ? '' : button('discard', t('Discard'), ' danger'),
-    button('talk', t('Talk about this'), ' secondary'),
+    c.seen ? '' : button('later', c.thirdParty ? label(t('Hide')) : label(t('Not now'), t('Later')), ' secondary'),
+    c.thirdParty ? '' : button('discard', label(t('Discard')), ' danger'),
+    button('talk', label(t('Talk about this'), t('Talk')), ' secondary'),
   ].join('');
   const about = [esc(c.label), c.at ? esc(relative(c.at)) : ''].filter(Boolean).join(' · ');
+  // Phones show the card folded into one line (what, where, the recommendation); a tap unfolds the rest.
+  // The recommendation's verdict only ("Do it now", not its reason); the whole of it shows unfolded.
+  // Where: the card's label ("PR #34 of Chiefmate"), the head that names it being hidden there; a question, its project.
+  const where = c.kind !== 'question' && c.label ? c.label : c.project ? projectName(c.project) : '';
+  const line = [where ? esc(where) : '',c.recommend ? esc(t('Recommends: {what}', { what: c.recommend.split(': ')[0] })) : ''].filter(Boolean).join(' · ');
   return `<article class="decision" data-level="${esc(c.level)}" data-card="${esc(c.id)}"${c.seen ? ' data-seen' : ''}>
+      <button type="button" class="decision-line" data-decision-fold="${esc(c.id)}" aria-expanded="false"><span class="attn-mark" data-level="${esc(c.level)}" aria-hidden="true"></span><span class="decision-line-text"><span class="decision-line-title">${esc(c.title)}</span>${line ? ` <span class="decision-line-about">${line}</span>` : ''}</span><span class="decision-chevron" aria-hidden="true"></span></button>
       <div class="decision-head"><span class="attn-mark" data-level="${esc(c.level)}" aria-hidden="true"></span><span class="decision-kind">${esc(decisionKind(c))}</span><span class="decision-about">${about}</span>${c.seen ? `<span class="tag">${esc(t('left for later'))}</span>` : ''}</div>
       <div class="decision-title">${esc(c.title)}</div>
       ${c.what && c.what !== c.title ? `<p class="decision-what">${esc(c.what)}</p>` : ''}
@@ -745,12 +758,35 @@ function drawDecisions() {
   const fresh = cards.filter(c => !c.seen);
   const later = cards.filter(c => c.seen);
   const head = `<div class="decisions-head">${attnMark(fresh)}<span class="label">${esc(t('Waiting for your decision ({count})', { count: fresh.length }))}</span></div>`;
+  // Phones: a bar in its place ("3 decisions"), folded until tapped, so the conversation keeps the screen.
+  const count = fresh.length ? (fresh.length === 1 ? t('1 decision') : t('{count} decisions', { count: fresh.length })) : t('Left for later ({count})', { count: later.length });
+  const level = topLevel(fresh) ?? 'info';
+  const bar = `<button type="button" class="decisions-bar" data-level="${level}" data-decisions-fold aria-expanded="false" aria-controls="decisions-list"><span class="attn-mark" data-level="${level}" aria-hidden="true"></span><span class="decisions-bar-text">${esc(count)}</span><span class="decision-chevron" aria-hidden="true"></span></button>`;
   const rest = later.length ? `<details class="decisions-later" data-detail="later"><summary>${esc(t('Left for later ({count})', { count: later.length }))}</summary>${later.map(decisionCardHtml).join('')}</details>` : '';
-  const html = cards.length ? head + fresh.map(decisionCardHtml).join('') + rest : '';
+  const html = cards.length ? `${head}${bar}<div class="decisions-list" id="decisions-list">${fresh.map(decisionCardHtml).join('')}${rest}</div>` : '';
   // What you opened stays open when the cards are drawn again.
   const opened = [...box.querySelectorAll('details[open]')].map(d => d.dataset.detail);
   if (draw('#decisions', JSON.stringify([cards, language()]), html)) {
     for (const d of box.querySelectorAll('details')) if (opened.includes(d.dataset.detail)) d.open = true;
+  }
+  foldDecisions();
+}
+
+let decisionsOpen = false; // phones: the bar's list is unfolded
+const unfoldedCards = new Set(); // phones: the cards unfolded to their explanation and buttons
+/** Puts the phone's folds (the bar, each card) back on the cards as drawn. */
+function foldDecisions() {
+  const box = $('#decisions');
+  // The conversation keeps its last message in sight while the folds change its height.
+  const chat = $('#chat');
+  const atBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 80;
+  queueMicrotask(() => atBottom && (chat.scrollTop = chat.scrollHeight));
+  box.classList.toggle('open', decisionsOpen);
+  box.querySelector('[data-decisions-fold]')?.setAttribute('aria-expanded', String(decisionsOpen));
+  for (const card of box.querySelectorAll('.decision')) {
+    const open = unfoldedCards.has(card.dataset.card);
+    card.toggleAttribute('data-open', open);
+    card.querySelector('[data-decision-fold]')?.setAttribute('aria-expanded', String(open));
   }
 }
 
@@ -765,12 +801,30 @@ function talkAbout(c) {
 }
 
 $('#decisions').addEventListener('click', async event => {
+  if (event.target.closest('[data-decisions-fold]')) {
+    decisionsOpen = !decisionsOpen;
+    return foldDecisions();
+  }
+  const fold = event.target.closest('[data-decision-fold]');
+  if (fold) {
+    const id = fold.dataset.decisionFold;
+    if (!unfoldedCards.delete(id)) unfoldedCards.add(id);
+    foldDecisions();
+    // Unfolded, the card comes up under the bar, so its explanation and buttons are in sight.
+    const box = $('#decisions');
+    if (unfoldedCards.has(id)) box.scrollTop += fold.closest('.decision').getBoundingClientRect().top - box.getBoundingClientRect().top - box.querySelector('.decisions-bar').offsetHeight;
+    return;
+  }
   const button = event.target.closest('[data-decide]');
   if (!button) return;
   const c = decisionsNow().find(x => x.id === button.dataset.card);
   if (!c) return;
   const action = button.dataset.decide;
-  if (action === 'talk') return talkAbout(c);
+  if (action === 'talk') {
+    decisionsOpen = false; // phones: the list folds, the conversation and its field come forward
+    foldDecisions();
+    return talkAbout(c);
+  }
   // Merging and closing a pull request are confirmed: the click is your authorization (src/merge.mjs).
   const how = c.url ? t('Chiefmate merges the pull request on GitHub.') : t('Chiefmate merges the branch into the branch checked out in your clone; nothing is sent to GitHub.');
   if (c.kind === 'merge' && action === 'approve' && !(await confirmDialog(t('Approve and merge'), `${c.label}: ${c.title}. ${how}`, t('Approve')))) return;
