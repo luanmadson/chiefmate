@@ -65,7 +65,7 @@ function startScheduledRun(id, mission, last) {
     }
     nudgeQueue();
   } catch (error) {
-    notify(t('Chiefmate hit an error'), t('{title}: {error}', { title: mission.name ?? id, error: error.message }));
+    notify(t('Chiefmate hit an error'), t('{title}: {error}', { title: mission.name ?? id, error: error.message }), 'chiefmate:missions', { urgent: true });
   }
 }
 

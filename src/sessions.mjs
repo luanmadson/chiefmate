@@ -279,7 +279,7 @@ export async function openSession(profileId, { origin = 'app', prompt: written =
     session.status = 'login';
     session.requests.push({ id: id.slice(-8), what, check: 'codex login status', status: 'open', at: now() });
     saveSession(session);
-    notify(t('Needs you: {title}', { title: profile.name }), what, 'chiefmate:operations');
+    notify(t('Needs you: {title}', { title: profile.name }), what, 'chiefmate:operations', { urgent: true });
     reportEvent('needs_you', `The live session "${profile.name}" (Codex) waits for the owner to sign in to Codex ("codex login" in a terminal); it opens by itself afterwards.`);
     return session;
   }

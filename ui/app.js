@@ -181,6 +181,22 @@ const runLabel = r => (r?.needsYou && ['running', 'queued', 'waiting', 'paused']
 
 const stateHtml = ([label, kind]) => `<span class="state state-${kind}">${esc(label)}</span>`;
 
+/** A final summary (of a step or a run): what was done, what changes for you, and whether you are needed. */
+function outcomeHtml(o) {
+  if (!o) return '';
+  return `<div class="outcome">
+      <div><span class="label">${esc(t('What was done'))}</span>${o.done?.length ? `<ul>${o.done.map(d => `<li>${esc(d)}</li>`).join('')}</ul>` : '<p>—</p>'}</div>
+      <div><span class="label">${esc(t('What changes for you'))}</span><p>${esc(o.change || '—')}</p></div>
+      <div><span class="label">${esc(t('Needs you?'))}</span><p>${o.needs ? `${stateHtml([t('Yes'), 'warn'])} ${esc(o.needs)}` : esc(t('No'))}</p></div>
+    </div>`;
+}
+
+/** A run's summary, one line under its title in the lists (whole on hover). */
+const summaryLine = r => (r.summary ? `<span class="secondary run-line" title="${esc(r.summary)}">${esc(r.summary)}</span>` : '');
+
+/** A run's title for a link (the planning board's items), from the runs the app knows; else its id. */
+const runTitle = id => allRuns().find(r => r.id === id)?.title ?? id;
+
 function originLabel(origin) {
   switch (origin) {
     case 'app': return t('From the app');
@@ -383,7 +399,7 @@ function drawFocus() {
     return;
   }
   const parts = [kindLabel(f.kind), f.title];
-  if (f.state === 'running') parts.push(f.agent ? agentName(f.agent, f.project) : t('preparing'), t('for {time}', { time: elapsed(f.since) }));
+  if (f.state === 'running') parts.push(f.agent ? agentName(f.agent, f.project) : t('preparing'), ...(f.doing ? [f.doing] : []), t('for {time}', { time: elapsed(f.since) }));
   else {
     parts.unshift(t('Next in the queue'));
     if (f.agent) parts.push(agentName(f.agent, f.project));
@@ -392,7 +408,7 @@ function drawFocus() {
   const others = f.others ?? [];
   if (others.length) parts.push(t('and {count} more: {list}', { count: others.length, list: others.map(o => o.projectName).join(', ') }));
   const html = `${label}${f.state === 'running' ? liveDot() : ''}<span class="focus-project">${projectLink(f.project, f.projectName)}</span><span class="focus-detail">${parts.map(esc).join(' · ')}</span>`;
-  $('#focus').title = [f.projectName, ...parts].join(' · ');
+  $('#focus').title = [f.projectName, ...parts, f.summary].filter(Boolean).join(' · ');
   draw('#focus', html, html);
 }
 
@@ -426,9 +442,11 @@ function drawFavicon(mode) {
     g.drawImage(baseIcon, 0, 0, 32, 32);
     g.fillStyle = '#0b0d10';
     g.fillRect(17, 17, 15, 15);
-    g.fillStyle = g.strokeStyle = '#c9a45d';
+    // The colors of the attention levels (style.css): urgent red, important lit brass, info grey.
+    g.fillStyle = g.strokeStyle = mode === 'urgent' ? '#ff5c52' : mode === 'important' ? '#e8bd5f' : mode === 'info' ? '#8a93a0' : '#c9a45d';
     if (mode === 'running') g.fillRect(19, 19, 11, 11);
-    else if (mode === 'needs') {
+    else if (mode === 'info') g.fillRect(21, 21, 7, 7);
+    else if (mode === 'urgent' || mode === 'important') {
       g.fillRect(17, 17, 15, 15);
       g.fillStyle = '#0b0d10';
       g.fillRect(23, 19, 3, 7);
@@ -455,29 +473,99 @@ function drawTitle() {
   if (runs.length > 1) title = `● ${[t('{count} running', { count: runs.length }), waiting, 'Chiefmate'].filter(Boolean).join(' · ')}`;
   else if (a) title = `● ${[`${a.agent ? agentName(a.agent, a.project) : t('preparing')} ${a.step ?? 1}/${a.steps.length}`, waiting, 'Chiefmate'].filter(Boolean).join(' · ')}`;
   else if (count) title = `○ ${waiting} · Chiefmate`;
-  const needs = online ? state?.needs?.length ?? 0 : 0;
-  if (needs) title = `! ${t('Needs you ({count})', { count: needs })} · ${title.replace(/^[●○] /, '')}`;
+  // The most urgent notice first: "!!" when urgent, "!" when important (the info ones stay out of the title).
+  const fresh = unseen(attnItems());
+  const level = topLevel(fresh);
+  const first = fresh.find(i => i.level === level);
+  if (level === 'urgent' || level === 'important') {
+    const more = fresh.filter(i => i.level !== 'info').length - 1;
+    title = `${level === 'urgent' ? '!!' : '!'} ${first.title}${more > 0 ? ` (+${more})` : ''} · ${title.replace(/^[●○] /, '')}`;
+  }
   if (document.title !== title) document.title = title;
-  drawFavicon(needs ? 'needs' : a ? 'running' : count ? 'queued' : '');
-  // The badge on the app's icon in the taskbar, where the browser supports it.
+  drawFavicon(level === 'urgent' || level === 'important' ? level : a ? 'running' : count ? 'queued' : level ?? '');
+  // The badge on the app's icon in the taskbar, where the browser supports it: the urgent and important notices.
+  const needs = fresh.filter(i => i.level !== 'info').length;
   if (needs !== drawTitle.badge && 'setAppBadge' in navigator) {
     (needs ? navigator.setAppBadge(needs) : navigator.clearAppBadge()).catch(() => {});
     drawTitle.badge = needs;
   }
 }
 
-/** The band of alerts at the top: low memory, the account's usage, free resets. They warn; nothing is paused. */
+// ---------- Attention: what needs you, in three levels ----------
+// One component for the whole app (the mark and the notice, styled by "data-level"): urgent (bright red, a soft
+// pulse), important (lit brass) and info (discreet). The server decides the level (src/attention.mjs).
+
+const LEVELS = ['urgent', 'important', 'info'];
+const levelName = level => ({ urgent: t('Urgent'), important: t('Important'), info: t('For your information') })[level] ?? '';
+const attnItems = () => (online ? state?.attention?.items ?? [] : []);
+const unseen = list => list.filter(i => !i.seen);
+const topLevel = list => LEVELS.find(l => list.some(i => i.level === l && !i.seen)) ?? null;
+const ofProject = (id, name) => i => i.project === id || (name && i.project === name);
+
+/** The mark: a square in the level's color, with a count when there is more than one. */
+function attnMark(list, label = '') {
+  const level = topLevel(list);
+  if (!level) return '';
+  const n = unseen(list).length;
+  const text = [levelName(level), label, n > 1 ? t('{count} notices', { count: n }) : ''].filter(Boolean).join(' · ');
+  return `<span class="attn-mark" data-level="${level}" role="img" aria-label="${esc(text)}" title="${esc(text)}">${n > 1 ? n : ''}</span>`;
+}
+
+/** A notice: its level, what happened, where and when, and what to do (act, open, or mark as seen). */
+function attnNotice(i) {
+  const r = i.request;
+  const where = [r?.agent ? agentName(r.agent, i.project) : '', i.project ? projectName(i.project) : '', i.at ? relative(i.at) : ''].filter(Boolean).join(' · ');
+  const links = [
+    r?.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : '',
+    r?.openError ? esc(r.openError) : '',
+    i.url ? `<a href="${esc(i.url)}" target="_blank" rel="noopener">${esc(t('Open the pull request'))}</a>` : '',
+  ].filter(Boolean);
+  const open = i.view === 'log' && i.run ? `href="#log" data-select="${esc(i.run)}"` : `href="#${esc(i.view)}"`;
+  const actions = r
+    ? `<button type="button" class="button small" ${r.session ? `data-needs-session="${esc(r.session)}"` : `data-needs-done="${esc(r.run)}"`} data-request="${esc(r.id)}">${esc(t('Mark as done'))}</button>`
+    : `${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
+  return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
+      <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
+      <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}${where || links.length ? `<span class="hint">${[esc(where), ...links].filter(Boolean).join(' · ')}</span>` : ''}</div>
+      <div class="attn-actions">${actions}</div>
+    </div>`;
+}
+
+/** A list of notices under a label ("Waiting for you"), for a section or a project; empty when there are none. */
+function attnList(list, label) {
+  if (!list.length) return '';
+  const head = `<div class="attn-head">${attnMark(list)}<span class="label">${esc(t('{label} ({count})', { label, count: unseen(list).length }))}</span></div>`;
+  return `<div class="attn-list"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>${head}${list.map(attnNotice).join('')}</div>`;
+}
+
+let attnOpen = false; // the band shows every notice, not only the most urgent
+/** The band at the top: the most urgent notice and how many others, opening into all of them. Nothing is paused. */
 function drawAlerts() {
-  const list = online ? state.alerts ?? [] : [];
-  const needs = (online ? state.needs ?? [] : []).map(n => `
-    <div class="needs" role="alert">
-      <div class="needs-text"><span class="needs-label">${esc(t('Needs you'))}</span>${esc(t('{task}: {what}', { task: n.title, what: n.what }))}
-        <span class="hint">${esc([n.agent ? agentName(n.agent, n.project) : '', projectName(n.project), relative(n.at)].filter(Boolean).join(' · '))}${n.url ? ` · <a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${n.openError ? ` · ${esc(n.openError)}` : ''}</span>
-      </div>
-      <button type="button" class="button" ${n.session ? `data-needs-session="${esc(n.session)}"` : `data-needs-done="${esc(n.run)}"`} data-request="${esc(n.id)}">${esc(t('Mark as done'))}</button>
-    </div>`).join('');
-  const html = needs + list.map(a => `<a class="alert" href="#${esc(a.view ?? 'manager')}">${stateHtml([a.text, a.level === 'critical' ? 'error' : 'warn'])}</a>`).join('');
+  const list = attnItems();
+  const fresh = unseen(list);
+  if (!fresh.length && !attnOpen) return draw('#alerts', '', '');
+  const others = fresh.length - 1;
+  const toggle = list.length > 1 || attnOpen
+    ? `<button type="button" class="button secondary small" data-attn-more aria-expanded="${attnOpen}">${esc(attnOpen ? t('Show less') : others > 0 ? t('+{count} more', { count: others }) : t('See all'))}</button>`
+    : '';
+  const all = fresh.some(i => i.seenable) ? `<button type="button" class="button secondary small" data-attn-seen="${esc(fresh.filter(i => i.seenable).map(i => i.id).join(' '))}">${esc(t('Mark all as seen'))}</button>` : '';
+  const shown = attnOpen ? list : fresh.slice(0, 1);
+  const html = `<div class="attn-band" data-level="${topLevel(list) ?? 'info'}"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>
+      ${shown.map(attnNotice).join('') || `<div class="attn" data-level="info"><div class="attn-text">${esc(t('Nothing needs you now.'))}</div></div>`}
+      ${toggle || (attnOpen && all) ? `<div class="attn-more">${toggle}${attnOpen ? all : ''}</div>` : ''}
+    </div>`;
   draw('#alerts', html, html);
+}
+
+/** A mark beside each section in the menu: the color of its most urgent notice and how many there are. */
+function drawNavAttention() {
+  const list = attnItems();
+  for (const a of document.querySelectorAll('.nav a[data-view]')) {
+    let slot = a.querySelector('.nav-attn');
+    if (!slot) a.append((slot = Object.assign(document.createElement('span'), { className: 'nav-attn' })));
+    const html = attnMark(list.filter(i => i.view === a.dataset.view), a.firstElementChild?.textContent ?? '');
+    if (slot.innerHTML !== html) slot.innerHTML = html;
+  }
 }
 
 function drawStatusbar() {
@@ -661,13 +749,13 @@ function drawSituation() {
   const next = nextMission();
   const html = `
     <div class="label">${esc(t('Situation'))}</div>
-    <div class="block"><div class="hint">${esc(t('Operations'))}</div><div class="value">${runs.length ? runs.map(a => `${esc(a.title)}<br><span class="hint">${esc(projectName(a.project))} · ${esc(a.agent ? agentName(a.agent, a.project) : t('preparing'))}, ${esc(t('step {n} of {total}', { n: a.step ?? 1, total: a.steps.length }))}</span>`).join('<br>') : esc(t('Nothing running'))}</div></div>
+    <div class="block"><div class="hint">${esc(t('Operations'))}</div><div class="value">${runs.length ? runs.map(a => `${esc(a.title)}<br><span class="hint">${esc(projectName(a.project))} · ${esc(a.agent ? agentName(a.agent, a.project) : t('preparing'))}, ${esc(t('step {n} of {total}', { n: a.step ?? 1, total: a.steps.length }))}${a.doing ? ` · ${esc(a.doing)}` : ''}</span>`).join('<br>') : esc(t('Nothing running'))}</div></div>
     ${sessions.length ? `<div class="block"><div class="hint">${esc(t('Live sessions'))}</div><div class="value">${sessions.map(x => esc(`${x.name} (${toolName(x.tool)})`)).join('<br>')}</div></div>` : ''}
     <div class="block"><div class="hint">${esc(t('Queue'))}</div><div class="value">${state.queue.length ? esc(t('{count} run(s)', { count: state.queue.length })) : esc(t('Empty'))}</div></div>
     <div class="block"><div class="hint">${esc(t('Next scheduled mission'))}</div><div class="value">${next ? `${esc(next.name)}<br><span class="num hint">${shortDate(next.next)} (${esc(relative(next.next))})</span>` : esc(t('None'))}</div></div>
     <div class="block">${meter(t('Account, 5-hour window'), account.five_hour?.used, percent(account.five_hour?.used))}${meter(t("Plan's week"), account.seven_day?.used, percent(account.seven_day?.used))}</div>
     <div class="block">${managerContextMeter()}${runs.filter(a => a.agent).map(agentContextMeter).join('')}</div>`;
-  draw('#situation', JSON.stringify([runs.map(a => [a.id, a.step, a.agent, a.context]), sessions.map(x => x.id), state.manager.context, state.queue.length, next?.next, account.updated, Math.floor(Date.now() / 60000)]), html);
+  draw('#situation', JSON.stringify([runs.map(a => [a.id, a.title, a.step, a.agent, a.context, a.doing]), sessions.map(x => x.id), state.manager.context, state.queue.length, next?.next, account.updated, Math.floor(Date.now() / 60000)]), html);
 }
 
 // ---------- Operations ----------
@@ -685,7 +773,7 @@ function drawQueue() {
   };
   const rows = list.map((r, i) => `<tr class="${i === 0 ? 'next' : ''}">
       <td class="num">${i + 1}</td>
-      <td>${i === 0 ? `<span class="tag">${esc(t('Next'))}</span>` : ''}<span class="primary">${esc(r.title)}</span><span class="secondary">${esc([projectName(r.project), r.note].filter(Boolean).join(' · '))}</span></td>
+      <td>${i === 0 ? `<span class="tag">${esc(t('Next'))}</span>` : ''}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), r.note].filter(Boolean).join(' · '))}</span></td>
       <td>${stateHtml(runState(r.status))}</td>
       <td class="num">${r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? `${shortDate(r.notBefore)} (${esc(relative(r.notBefore))})` : esc(expected(r))}</td>
       <td class="row-actions"><button type="button" class="button danger small" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button></td>
@@ -694,7 +782,7 @@ function drawQueue() {
     ? `<div class="label" style="margin-top:24px">${esc(t('Queue'))}</div>
     <table class="table queue"><thead><tr><th>#</th><th>${esc(t('Run'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Expected start'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
     : '';
-  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.status, r.notBefore, r.note]), Math.floor(Date.now() / 60000)]), html);
+  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note]), Math.floor(Date.now() / 60000)]), html);
 }
 
 /** A run going on: who is at work, the step out of how many, the time counting and the last action, all live. */
@@ -708,7 +796,8 @@ function liveCard(a, key) {
       ${face(working, look, 56, `${who}: ${t('Running')}`)}
       <div class="live-main">
         <div class="live-label">${online ? liveDot() : ''}<span class="label">${esc(t('Running now'))}</span></div>
-        <div class="live-title">${esc(a.title)}</div>
+        <div class="live-title" title="${esc(a.title)}">${esc(a.title)}</div>
+        ${a.summary ? `<div class="live-summary" title="${esc(a.summary)}">${esc(a.summary)}</div>` : ''}
         <div class="hint">${esc([projectName(a.project), kindLabel(a.kind), t('started at {time}', { time: clockTime(a.started) })].join(' · '))}</div>
       </div>
       <div class="live-clock"><span class="label">${esc(t('Elapsed'))}</span><strong>${ticking(a.started)}</strong></div>
@@ -720,10 +809,11 @@ function liveCard(a, key) {
     </div>`;
 }
 
+/** What the agent is doing now, in plain words; the last action itself shows on hover and in the logbook. */
 function lastAction(a) {
   const p = a.actions.at(-1);
-  const text = p ? p.text : t('Preparing…');
-  return `<span class="label">${esc(t('Last action'))}</span><time>${p ? clockTime(p.at) : ''}</time><span class="text${p?.type === 'say' ? ' say' : ''}" title="${esc(text)}">${esc(text)}</span>`;
+  const text = a.doing || (p ? p.text : t('Preparing…'));
+  return `<span class="label">${esc(t('Doing now'))}</span><time>${p ? clockTime(p.at) : ''}</time><span class="text" title="${esc(p ? `${t('Last action')}: ${p.text}` : text)}">${esc(text)}</span>`;
 }
 
 // Operations is drawn in parts, each with its own signature (all with ids starting "op-"): what changes often (the
@@ -753,11 +843,14 @@ function runBlock(a) {
 
 function drawRun(a) {
   const k = opKey(a.id);
+  // A run waiting for you stands out with the urgent level.
+  const block = $(`#${k}-live`)?.closest('.run-block');
+  if (block && block.dataset.level !== (a.needsYou ? 'urgent' : '')) block.dataset.level = a.needsYou ? 'urgent' : '';
   const statuses = a.steps.map(s => s.status);
   const working = a.agent ? member(a.agent, a.project) : null;
-  if (draw(`#${k}-live`, JSON.stringify([online, a.title, a.step, a.agent, a.stepStarted, statuses, working?.status]), liveCard(a, k))) delete signatures[`#${k}-last`];
+  if (draw(`#${k}-live`, JSON.stringify([online, a.title, a.summary, a.step, a.agent, a.stepStarted, statuses, working?.status]), liveCard(a, k))) delete signatures[`#${k}-last`];
   const last = a.actions.at(-1);
-  draw(`#${k}-last`, JSON.stringify([last?.at, last?.text]), lastAction(a));
+  draw(`#${k}-last`, JSON.stringify([last?.at, last?.text, a.doing]), lastAction(a));
   const steps = a.steps.map((s, i) => `<li${s.status === 'running' ? opensPanel(a.id) : ''}>${face(member(s.agent, a.project), online ? stepFace(s) : 'offline', 30)}<div><div class="name">${i + 1}. ${esc(agentName(s.agent, a.project))}${stepRole(s) ? `, ${esc(stepRole(s))}` : ''}</div><div class="hint">${esc(runState(s.status)[0])}${s.status === 'running' && a.stepStarted ? ` · ${ticking(a.stepStarted)}` : ''}</div></div></li>`);
   draw(`#${k}-steps`, JSON.stringify([online, statuses, a.stepStarted]), steps.join(''));
   draw(`#${k}-lead`, JSON.stringify([a.request, a.lead, statuses]), leadPlan(a));
@@ -802,10 +895,13 @@ function drawOperations() {
     ? `<div class="hint run-count">${esc(t('{count} of at most {max} runs at once, one per project.', { count: runs.length, max: parallel }))}</div>`
     : '';
   // With several runs, each logbook is shorter, so every run fits in view one after another.
-  const skeleton = `${head}${runs.length ? `<div class="runs${runs.length > 1 ? ' several' : ''}">${runs.map(runBlock).join('')}</div>` : '<div class="panel" id="op-idle"></div>'}<div id="op-queue"></div><div id="op-sessions"></div>`;
+  const skeleton = `<div id="op-attention"></div>${head}${runs.length ? `<div class="runs${runs.length > 1 ? ' several' : ''}">${runs.map(runBlock).join('')}</div>` : '<div class="panel" id="op-idle"></div>'}<div id="op-queue"></div><div id="op-sessions"></div>`;
   if (draw('#operations', JSON.stringify([runs.map(a => a.id), parallel]), skeleton)) {
     for (const key of Object.keys(signatures)) if (key.startsWith('#op-')) delete signatures[key];
   }
+  // What needs you in the crew's work (requests, failed runs, pull requests, finished tasks), above the runs.
+  const notices = attnList(attnItems().filter(i => ['operations', 'log'].includes(i.view)), t('Waiting for you'));
+  draw('#op-attention', notices, notices);
   drawQueue();
   drawSessions();
   if (!runs.length) {
@@ -988,7 +1084,7 @@ function drawLog() {
     const details = [kindLabel(r.kind), projectName(r.project), originLabel(r.origin), r.pullRequest ? t('pull request opened') : ''].filter(Boolean).join(' · ');
     return `<tr class="clickable${r.id === selectedRun ? ' selected' : ''}" data-select="${esc(r.id)}">
       <td class="num">${shortDate(r.created)}</td>
-      <td><span class="primary">${esc(r.title)}</span><span class="secondary">${esc(details)}</span></td>
+      <td><span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc(details)}</span></td>
       <td>${stateHtml(runLabel(r))}</td>
       <td class="num">${r.started ? esc(elapsed(r.started, r.ended ?? Date.now())) : '—'}</td>
     </tr>`;
@@ -996,7 +1092,7 @@ function drawLog() {
   const html = list.length
     ? `<table class="table"><thead><tr><th>${esc(t('Date'))}</th><th>${esc(t('Run'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Time'))}</th></tr></thead><tbody>${rows.join('')}</tbody></table>`
     : `<div class="empty">${esc(t('No runs yet.'))}</div>`;
-  draw('#log-list', JSON.stringify([selectedRun, list.map(r => [r.id, r.status, r.ended, r.pullRequest, r.needsYou]), Math.floor(Date.now() / 60000)]), html);
+  draw('#log-list', JSON.stringify([selectedRun, list.map(r => [r.id, r.title, r.summary, r.status, r.ended, r.pullRequest, r.needsYou]), Math.floor(Date.now() / 60000)]), html);
 }
 
 async function refreshDetail(force = false) {
@@ -1026,7 +1122,9 @@ async function refreshDetail(force = false) {
       <div class="report">
         <div class="report-top"><div class="report-who">${face(member(s.agent, r.project), stepFace(s), 26)}<strong>${i + 1}. ${esc(agentName(s.agent, r.project))}${stepRole(s) ? `, ${esc(stepRole(s))}` : ''}</strong></div>${stateHtml(runState(s.status))}</div>
         <div class="hint num">${facts.map(esc).join(' · ')}${s.status !== 'pending' ? ` · <button type="button" class="button secondary small" data-context="${esc(r.id)}" data-step="${i + 1}">${esc(t('Context received'))}</button>` : ''}</div>
-        <div class="body">${md(body)}</div>
+        ${s.outcome
+          ? `${outcomeHtml(s.outcome)}<details class="report-full"><summary>${esc(t('Full report'))}</summary><div class="body">${md(body)}</div></details>`
+          : `<div class="body">${md(body)}</div>`}
       </div>`;
   });
   // What the crew asked of the owner during the run.
@@ -1038,9 +1136,11 @@ async function refreshDetail(force = false) {
     : '';
   const html = `
     <h2>${esc(r.title)}</h2>
+    ${r.summary ? `<p class="run-summary">${esc(r.summary)}</p>` : ''}
     <div class="hint">${stateHtml(runLabel({ ...r, needsYou: (r.requests ?? []).filter(x => x.status === 'open').length }))} · <span class="num">${shortDate(r.created)}</span> · ${esc(projectName(r.project))} · ${esc(originLabel(r.origin))}${r.started ? ` · <span class="num">${esc(elapsed(r.started, r.ended ?? Date.now()))}</span>` : ''}</div>
     ${r.result ? `<p>${esc(r.result)}</p>` : ''}${r.note ? `<p class="hint">${esc(r.note)}</p>` : ''}
-    ${r.instruction ? `<p class="hint">${esc(t('Instruction: {text}', { text: r.instruction }))}</p>` : ''}
+    ${r.outcome ? `<div class="label">${esc(t('Final summary'))}</div>${outcomeHtml(r.outcome)}` : ''}
+    ${r.instruction ? `<details class="report-full"><summary>${esc(t('Full instruction'))}</summary><p class="hint">${esc(r.instruction)}</p></details>` : ''}
     <div class="actions left">
       ${r.pullRequest ? `<a class="button" href="${esc(r.pullRequest)}" target="_blank" rel="noopener">${esc(t('Open pull request'))}</a>` : ''}
       ${canResume ? `<button type="button" class="button secondary" data-resume="${esc(r.id)}">${esc(t('Resume'))}</button>` : ''}
@@ -1275,19 +1375,9 @@ function drawProjectMore(id, info) {
   draw('#project-more', html, html);
 }
 
-/** What waits for you in this project, at the top: the crew's requests and the board's items waiting for you. */
+/** What waits for you in this project, at the top: its notices (requests, failures, pull requests, the board's items). */
 function drawProjectNeeds(id, p) {
-  const needs = (online ? state.needs ?? [] : []).filter(n => n.project === id);
-  const items = projectOpenItems(id, p).filter(i => ['triaged', 'waiting_owner'].includes(i.status));
-  const rows = [
-    ...needs.map(n => `<div class="project-need">
-      <div><span class="primary">${esc(n.what)}</span><span class="hint">${esc(n.title)}${n.url ? ` · <a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}</span></div>
-      <button type="button" class="button small" ${n.session ? `data-needs-session="${esc(n.session)}"` : `data-needs-done="${esc(n.run)}"`} data-request="${esc(n.id)}">${esc(t('Mark as done'))}</button></div>`),
-    ...items.map(i => `<div class="project-need">
-      <div><span class="primary">#${i.id} ${esc(i.title)}</span><span class="hint">${esc(i.status === 'triaged' ? t('A proposal waiting for your decision') : t('On the board, waiting for you'))}</span></div>
-      <a class="button secondary small" href="${i.status === 'triaged' ? '#planning' : projectHash(id, 'planning')}">${esc(i.status === 'triaged' ? t('Decide') : t('See'))}</a></div>`),
-  ];
-  const html = rows.length ? `<div class="project-needs" role="alert"><div class="label">${esc(t('Waiting for you ({count})', { count: rows.length }))}</div>${rows.join('')}</div>` : '';
+  const html = attnList(attnItems().filter(ofProject(id, p.name)), t('Waiting for you'));
   draw('#project-needs', html, html);
 }
 
@@ -1342,19 +1432,19 @@ function drawProjectRuns(id) {
   const queue = online ? queueOrder().filter(r => r.project === id) : [];
   const live = runs.map(a => `<div class="project-run"${a.agent ? opensPanel(a.id) : ''}>
       ${face(a.agent ? member(a.agent, a.project) : member('manager'), a.agent ? faceState(member(a.agent, a.project)) : 'working', 30)}
-      <div style="min-width:0"><div class="name">${liveDot()} ${esc(a.title)}</div><div class="hint">${esc(stepLine(a))} · ${ticking(a.started)}</div></div>
+      <div style="min-width:0"><div class="name">${liveDot()} ${esc(a.title)}</div><div class="hint">${esc(stepLine(a))} · ${ticking(a.started)}</div>${a.doing ? `<div class="hint">${esc(t('Now: {what}', { what: a.doing }))}</div>` : ''}</div>
       <button type="button" class="button danger small" data-cancel="${esc(a.id)}">${esc(t('Cancel run'))}</button>
     </div>`);
   const waiting = queue.map(r => `<div class="project-run">
       <span></span>
-      <div style="min-width:0"><div class="name">${esc(r.title)}</div><div class="hint">${stateHtml(runLabel(r))}${r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? ` · ${esc(t('not before {when}', { when: shortDate(r.notBefore) }))}` : ''}</div></div>
+      <div style="min-width:0"><div class="name" title="${esc(r.summary ?? '')}">${esc(r.title)}</div><div class="hint">${stateHtml(runLabel(r))}${r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? ` · ${esc(t('not before {when}', { when: shortDate(r.notBefore) }))}` : ''}</div></div>
       <button type="button" class="button danger small" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button>
     </div>`);
   const html = `<div class="panel">
       <div class="label">${esc(t('Running now'))}</div>${live.join('') || `<div class="hint">${esc(t('Nothing running for this project.'))}</div>`}
       <div class="label" style="margin-top:16px">${esc(t('Queue'))}</div>${waiting.join('') || `<div class="hint">${esc(t('Nothing in the queue for this project.'))}</div>`}
     </div>`;
-  draw('#project-runs', JSON.stringify([online, runs.map(a => [a.id, a.step, a.agent, a.status, member(a.agent ?? 'manager', a.project).status]), queue.map(r => [r.id, r.status, r.notBefore, r.needsYou])]), html);
+  draw('#project-runs', JSON.stringify([online, runs.map(a => [a.id, a.title, a.step, a.agent, a.status, a.doing, member(a.agent ?? 'manager', a.project).status]), queue.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.needsYou])]), html);
 }
 
 /** The project's latest runs, each with its result and a link to its reports in the Log. */
@@ -1362,7 +1452,7 @@ function drawProjectHistory(info) {
   const list = info?.history ?? [];
   const rows = list.map(r => `<tr>
       <td class="num">${shortDate(r.created)}</td>
-      <td><span class="primary">${esc(r.title)}</span><span class="secondary">${esc(r.result ?? r.note ?? '')}</span></td>
+      <td><span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc(r.outcome?.change || r.result || r.note || '')}</span></td>
       <td>${stateHtml(runLabel(r))}</td>
       <td class="num">${r.started ? esc(elapsed(r.started, r.ended ?? Date.now())) : '—'}</td>
       <td class="row-actions"><div class="plan-actions">${r.pullRequest ? prLink(r.pullRequest) : ''}<a href="#log" class="button secondary small" data-select="${esc(r.id)}">${esc(t('Reports'))}</a></div></td>
@@ -2326,7 +2416,7 @@ function prLink(pr) {
 
 function planLinks(i) {
   const parts = [];
-  if (i.run) parts.push(`<a href="#log" data-select="${esc(i.run)}" class="num">${esc(i.run)}</a>${i.run_status ? ` ${stateHtml(runState(i.run_status))}` : ''}`);
+  if (i.run) parts.push(`<a href="#log" data-select="${esc(i.run)}" title="${esc(i.run)}">${esc(runTitle(i.run))}</a>${i.run_status ? ` ${stateHtml(runState(i.run_status))}` : ''}`);
   if (i.pr) parts.push(prLink(i.pr));
   return parts.map(p => `<div>${p}</div>`).join('') || '<span class="hint">—</span>';
 }
@@ -2388,11 +2478,11 @@ function drawPlanning(force = false) {
   const waiting = waitingItems();
   const deciding = decisionItems();
   const approved = approvedItems();
+  // The menu shows how many wait for you with the attention mark (drawNavAttention).
   const needs = waiting.length + deciding.length;
-  draw('#counter-planning', String(needs), needs ? String(needs) : '');
   $('#counter-planning').parentElement.title = needs ? t('{count} item(s) waiting for you', { count: needs }) : '';
 
-  // First, what needs you: the decisions (in your order, which you can drag), then the work waiting for your action.
+  // First, what needs you: the decisions (in your order, which you can drag), then the other notices.
   const decision = i => discarding === i.id
     ? `<li class="plan-decision" data-item="${i.id}"><div class="plan-decision-text"><span class="primary">#${i.id} ${esc(i.title)}</span>
         <label class="plan-reason"><span>${esc(t('Why discard it? (optional, one line)'))}</span><input type="text" maxlength="200" data-discard-reason></label></div>
@@ -2409,18 +2499,17 @@ function drawPlanning(force = false) {
         <div class="plan-decide"><button type="button" class="button" data-plan-decide="approve">${esc(t('Do'))}</button><button type="button" class="button secondary" data-plan-decide="later">${esc(t('Later'))}</button><button type="button" class="button danger" data-plan-decide="discard">${esc(t('Discard'))}</button></div>
       </li>`;
   const decisions = deciding.length
-    ? `<div class="panel plan-waiting plan-decisions"><div class="label">${esc(t('Decide ({count})', { count: deciding.length }))}</div>
+    ? `<div class="panel plan-decisions"><div class="label">${esc(t('Decide ({count})', { count: deciding.length }))}</div>
       <p class="hint">${esc(t('Proposals from the crew, triaged by the manager. "Do" makes a task for the agent shown; one at a time per project, in this order.'))}</p>
       <ol>${deciding.map(decision).join('')}</ol></div>`
     : '';
   const turn = approved.length
     ? `<div class="plan-turn hint">${esc(t('Approved, waiting their turn:'))} ${approved.map(i => `<span class="num">#${i.id}</span> ${esc(i.title)} (${esc(agentName(i.agent, i.project))})`).join(' · ')}</div>`
     : '';
-  const action = waiting.length
-    ? `<div class="panel plan-waiting"><div class="label">${esc(t('Waiting for your action ({count})', { count: waiting.length }))}</div><ul>${waiting.map(i =>
-      `<li><span class="num">#${i.id}</span> <span class="hint">${projectLink(i.project)}</span> <span class="primary">${esc(i.title)}</span>${i.pr ? ` · ${prLink(i.pr)}` : ''}</li>`).join('')}</ul></div>`
-    : '';
-  const highlight = decisions + turn + action;
+  // The other notices of the board (pull requests, items waiting for your action) as attention notices; the
+  // proposals to decide are in the Decide block.
+  const notices = attnList(attnItems().filter(i => i.view === 'planning' && i.kind !== 'decision'), t('Waiting for you'));
+  const highlight = decisions + turn + notices;
   if (!$('#planning-waiting').contains(document.activeElement) && !dragging) draw('#planning-waiting', highlight, highlight);
 
   // Quick filters: the proposals, what waits for you and what was discarded, each with its count.
@@ -2631,11 +2720,12 @@ function drawAgentHead(f) {
   const where = [projectName(f.project), t('Step {n} of {total}', { n: f.step, total: f.total })].join(' · ');
   const html = `${face(who, look, 40)}<div style="min-width:0">
       <div class="name">${esc(f.agent ? agentName(f.agent, f.project) : t('Chiefmate, preparing the working copy'))}</div>
-      <div class="hint" title="${esc(f.title)}">${esc(f.title)}</div>
+      <div class="hint" title="${esc([f.title, f.summary].filter(Boolean).join(' · '))}">${esc(f.title)}</div>
+      ${f.live && f.doing ? `<div class="hint">${esc(t('Now: {what}', { what: f.doing }))}</div>` : ''}
       <div class="hint">${esc(where)}${f.live && f.stepStatus === 'running' && f.stepStarted ? ` · ${ticking(f.stepStarted)}` : ''}</div>
       ${stateHtml(status)}
     </div>`;
-  draw('#agent-head', JSON.stringify([online, f.run, f.step, f.agent, f.stepStatus, f.live, f.status]), html);
+  draw('#agent-head', JSON.stringify([online, f.run, f.title, f.doing, f.step, f.agent, f.stepStatus, f.live, f.status]), html);
   $('#agent-form').querySelector('button').disabled = !f.talking;
   $('#agent-form-hint').textContent = f.talking
     ? t('Your message reaches the agent at a safe point: it answers here and goes on with its work.')
@@ -2734,6 +2824,7 @@ function drawOffline() {
   drawPresence();
   drawFocus();
   drawAlerts();
+  drawNavAttention();
   drawStatusbar();
   drawTitle();
   if (state) {
@@ -2786,6 +2877,7 @@ async function refresh() {
   drawPresence();
   drawFocus();
   drawAlerts();
+  drawNavAttention();
   drawCounters();
   drawTitle();
   drawStatusbar();
@@ -2992,7 +3084,7 @@ document.addEventListener('click', event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-needs-done],[data-needs-session],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live]');
   if (!target) return;
   // A project's name inside a row that opens on a click (Projects) goes to its page, and nothing else.
   if (event.target.closest('a.project-link') && !target.matches('a')) return;
@@ -3085,6 +3177,12 @@ document.addEventListener('click', async event => {
     } else if (target.dataset.needsSession) {
       await api('/api/needs-you/done', { session: target.dataset.needsSession, id: target.dataset.request });
       toast(t('Marked as done. The session opens now.'));
+    } else if (target.dataset.attnSeen) {
+      await api('/api/attention/seen', { ids: target.dataset.attnSeen.split(' ') });
+      await refresh();
+    } else if (target.hasAttribute('data-attn-more')) {
+      attnOpen = !attnOpen;
+      drawAlerts();
     } else if (target.dataset.sessionOpen) {
       target.disabled = true;
       const session = await api('/api/session', { profile: target.dataset.sessionOpen });

@@ -10,6 +10,7 @@ import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
+import { readState, saveState } from './store.mjs';
 import { now, ROOT } from './util.mjs';
 import { run } from './workspace.mjs';
 
@@ -161,6 +162,8 @@ async function apply(job) {
   updateInfo.blocked = null;
   notify(t('Chiefmate updated'), t('The improvements you approved are installed. Chiefmate restarts by itself.'));
   const changes = (await git('log', '--format=%s', '--no-merges', `${before}..HEAD`)).output.trim().split(/\r?\n/).filter(Boolean).slice(0, 5);
+  // For the app's info notice "Update installed", after the restart.
+  saveState({ ...readState(), last_update: { at: now(), changes } });
   const paused = job.paused.length ? ` The ${job.paused.length} run(s) paused for it resume by themselves after the restart, each step in its own session.` : '';
   reportEvent('update_installed', `Chiefmate installed an approved update (${behind} change(s)${changes.length ? `: ${changes.join('; ')}` : ''}) and restarts by itself.${paused}`);
   await restart(hooks.beforeRestart);

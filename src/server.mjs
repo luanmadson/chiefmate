@@ -2,6 +2,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { attentionItems, attentionSummary, markSeen } from './attention.mjs';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
@@ -16,7 +17,7 @@ import { openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
-import { activeRun, createRun, liveRuns } from './runs.mjs';
+import { activeRun, createRun, describeLater, doingNow, liveRuns, needsBrief, outcomeLater } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { endSession, finishSessionRequest, openSession, planSession, profileFor, sessionRequests, sessionsState } from './sessions.mjs';
 import { talkTo } from './talk.mjs';
@@ -78,7 +79,7 @@ function readBody(req) {
 }
 
 const summary = run => ({
-  id: run.id, title: run.title, kind: run.kind, mission: run.mission, project: run.project, origin: run.origin, status: run.status,
+  id: run.id, title: run.title, summary: run.summary ?? null, outcome: run.outcome ?? null, kind: run.kind, mission: run.mission, project: run.project, origin: run.origin, status: run.status,
   created: run.created, started: run.started, ended: run.ended, notBefore: run.notBefore, note: run.note, result: run.result,
   pullRequest: run.pullRequest, needsYou: (run.requests ?? []).filter(r => r.status === 'open').length,
   steps: stepsOf(run).map(s => ({ agent: s.agent, status: s.status, review: s === run.review, role: s.role ?? null, task: s.task ?? null })),
@@ -136,7 +137,7 @@ function runFeed(id, params) {
   const from = params.has('from') ? Number(params.get('from')) : null;
   const { items, next } = file ? readFeed(file, projectDir(run.project), from) : { items: [], next: 0 };
   return {
-    run: id, title: run.title, project: run.project, status: run.status, live: !!l, talking: !!l?.talking && l.step === n,
+    run: id, title: run.title, summary: run.summary ?? null, doing: l ? doingNow(l) : null, project: run.project, status: run.status, live: !!l, talking: !!l?.talking && l.step === n,
     step: n, current, total: steps.length, agent: step?.agent ?? null, stepStatus: step?.status ?? null, stepStarted: step?.started ?? null,
     review: step === run.review, items, next, talk: (run.talk ?? []).slice(-80), requests: (run.requests ?? []).filter(r => r.status === 'open'),
   };
@@ -155,8 +156,14 @@ async function projectPage(id) {
   return { ...info, history };
 }
 
+/** The title and summary given with a new run ("title", "summary"): nothing is generated for what is given. */
+const brief = body => ({
+  title: typeof body.title === 'string' && body.title.trim() ? body.title : null,
+  summary: typeof body.summary === 'string' && body.summary.trim() ? body.summary : null,
+});
+
 /** A run's task, short, for "waiting for <who>: <task>". */
-const shortTask = r => clip(String(r.instruction ?? '').split('\n')[0].trim() || r.title, 60);
+const shortTask = r => clip(r.title, 70);
 
 /**
  * Each crew member's presence: what they are doing now, their last work and their work this week.
@@ -230,11 +237,17 @@ function buildState() {
   const goingIds = new Set(going.map(x => x.run.id));
   const running = going.map(({ l, run }) => ({
     ...summary(run), step: l.step, agent: l.agent, stepStarted: l.started, context: l.context, actions: l.actions.slice(-80), talking: !!l.talking,
+    doing: doingNow(l),
   }));
   const queue = queued();
   const conversation = readConversation();
+  // The runs the app lists without a title and summary of their own (older ones) get them, one at a time.
+  for (const r of [...queue, ...runs.slice(0, 30)]) if (needsBrief(r)) describeLater(r.id, r);
   const usage = readUsage();
   const machine = computer(config, queue);
+  const needs = [...openRequests(runs), ...sessionRequests()].sort((a, b) => b.at.localeCompare(a.at));
+  const items = planItems();
+  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo });
   const lastOf = id => runs.find(r => r.mission === id && !['queued', 'waiting'].includes(r.status));
   return {
     now: now(),
@@ -253,7 +266,7 @@ function buildState() {
     })),
     crew: (general = crew(agents, config, runs, going.map(x => x.run), queue, conversation)),
     teams: teams(config, agents, general, runs, going.map(x => x.run), queue, conversation),
-    needs: [...openRequests(runs), ...sessionRequests()].sort((a, b) => b.at.localeCompare(a.at)),
+    needs,
     prompts: { ...builderStatus(config), syncing: isSyncing(), cdp: !!config.browser_cdp },
     focus: focus(config),
     // Every run going on (one per project, up to "max_parallel"); "current" is the oldest, for older readers of the API.
@@ -271,8 +284,10 @@ function buildState() {
       reader: { ...readerSettings(config), signedIn: signedIn(), reading: isReading(), status: readerStatus() },
     },
     alerts: alerts(config, usage, machine),
+    // What needs the owner, in three levels (src/attention.mjs): the band at the top, the sections, the title and the icon.
+    attention: { items: attention, ...attentionSummary(attention) },
     // The owner's planning board (data/plan.json): every item, archived ones included, in the board's order.
-    planning: { items: planItems(), priorities: PRIORITIES, statuses: STATUSES },
+    planning: { items, priorities: PRIORITIES, statuses: STATUSES },
     manager: {
       messages: conversation.slice(-80), responding: chat.responding, interrupting: chat.interrupting, since: chat.since, partial: chat.partial,
       actions: chat.actions.slice(-12), lastAction: chat.actions.at(-1) ?? null, pending: readPending(), context: managerContext(),
@@ -329,7 +344,11 @@ export function startServer() {
         if (page) return reply(res, 200, await projectPage(decodeURIComponent(page[1])));
         if (url.pathname.startsWith('/api/run/')) {
           const run = readRun(decodeURIComponent(url.pathname.slice('/api/run/'.length)));
-          return run ? reply(res, 200, run) : reply(res, 404, { error: t('Run not found.') });
+          if (!run) return reply(res, 404, { error: t('Run not found.') });
+          // Opened in the app: what an older run is missing (title, summary, final summary) is generated now.
+          describeLater(run.id, run);
+          outcomeLater(run.id);
+          return reply(res, 200, run);
         }
         if (!url.pathname.startsWith('/api/')) return serveFile(res, url.pathname);
         return reply(res, 404, { error: 'not found' });
@@ -343,7 +362,7 @@ export function startServer() {
       switch (url.pathname) {
         case '/api/mission': {
           if (body.plan) planItem(body.plan); // the board's item to link must exist
-          const run = createRun({ kind: 'mission', missionId: body.mission, origin: body.origin ?? 'app', plan: body.plan ?? null });
+          const run = createRun({ kind: 'mission', missionId: body.mission, origin: body.origin ?? 'app', plan: body.plan ?? null, ...brief(body) });
           nudgeQueue();
           return reply(res, 200, summary(run));
         }
@@ -351,7 +370,7 @@ export function startServer() {
           if (body.plan) planItem(body.plan);
           const run = createRun({
             kind: 'task', projectId: body.project, agent: body.agent, instruction: body.instruction, review: !!body.review, origin: body.origin ?? 'app',
-            modules: body.modules ?? [], plan: body.plan ?? null,
+            modules: body.modules ?? [], plan: body.plan ?? null, ...brief(body),
             // From the app's prompt builder: the steps get this prompt instead of the one put together from the document.
             prompt: typeof body.prompt === 'string' ? body.prompt : null,
           });
@@ -361,7 +380,7 @@ export function startServer() {
         case '/api/ask': {
           // A request for a project's team lead, who plans it into tasks for the project's crew.
           if (body.plan) planItem(body.plan);
-          const run = createRun({ kind: 'ask', projectId: body.project, instruction: body.request, origin: body.origin ?? 'app', plan: body.plan ?? null });
+          const run = createRun({ kind: 'ask', projectId: body.project, instruction: body.request, origin: body.origin ?? 'app', plan: body.plan ?? null, ...brief(body) });
           nudgeQueue();
           return reply(res, 200, summary(run));
         }
@@ -372,6 +391,9 @@ export function startServer() {
         case '/api/needs-you/done':
           if (body.session) return reply(res, 200, finishSessionRequest(String(body.session), String(body.id ?? '')));
           return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner'));
+        case '/api/attention/seen':
+          // Marks notices as seen: they fade (an info notice goes away).
+          return reply(res, 200, { seen: markSeen(Array.isArray(body.ids) ? body.ids : [body.id]) });
         case '/api/run/talk':
           return reply(res, 200, talkTo(body.run, body.text));
         case '/api/session': {

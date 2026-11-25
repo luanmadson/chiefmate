@@ -10,7 +10,7 @@ import { processes } from './machine.mjs';
 import { computerLine, planLine } from './plan.mjs';
 import { planningLine } from './planning.mjs';
 import { focus, maxParallel, queued } from './queue.mjs';
-import { activeRun, ALWAYS_DISALLOWED, liveRuns, prepareLibraries } from './runs.mjs';
+import { activeRun, ALWAYS_DISALLOWED, doingNow, liveRuns, prepareLibraries } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { sessionsLine } from './sessions.mjs';
 import { talkSituation } from './talk.mjs';
@@ -103,7 +103,7 @@ export function situation(libraries = []) {
   const going = liveRuns();
   lines.push(
     going.length
-      ? `Running (${going.length} of at most ${maxParallel(config)} at once, one per project): ${going.map(l => `${l.title} (project ${l.project}, step ${l.step ?? '-'}: ${l.agent ?? 'preparing'}), run ${l.run}`).join('; ')}.`
+      ? `Running (${going.length} of at most ${maxParallel(config)} at once, one per project): ${going.map(l => `${l.title} (project ${l.project}, step ${l.step ?? '-'}: ${l.agent ?? 'preparing'}${doingNow(l) ? `, ${doingNow(l)}` : ''}), run ${l.run}`).join('; ')}.`
       : `Running: nothing (up to ${maxParallel(config)} runs of different projects go on at once).`,
   );
   const queue = queued();
