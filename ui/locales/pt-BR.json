@@ -947,6 +947,7 @@
   "Full instruction": "Instrução completa",
   "Now: {what}": "Agora: {what}",
   "Run failed": "Execução falhou",
+  "Usage reading failed": "Falha na leitura do uso",
   "Only {percent} of the memory is free.": "Só {percent} da memória está livre.",
   "The week is almost used up: a good time to use a free reset.": "A semana está quase no fim do limite: boa hora para usar uma redefinição grátis.",
   "Pull request waiting for your approval": "Pull request esperando sua aprovação",

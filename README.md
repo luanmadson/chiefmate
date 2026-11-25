@@ -134,7 +134,7 @@ What needs you shows up as a notice with one of three levels, the same component
 | Level | Looks like | For example |
 |---|---|---|
 | **Urgent** | Bright red, with a soft pulse | A step asks for you ("needs you"), a run failed, the account above 90%, less than 15% of memory free, a free reset expiring within a day |
-| **Important** | Lit brass | A pull request waiting for your approval, an item of the board waiting for your decision, an update that could not be installed, the account above 70%, a free reset expiring within 3 days |
+| **Important** | Lit brass | A pull request waiting for your approval, an item of the board waiting for your decision, an update that could not be installed, the reading of the usage page failing, the account above 70%, a free reset expiring within 3 days |
 | **Info** | Discreet grey | A task finished (in the last day), an update installed |
 
 - **Where you see them.** The band at the top shows the most urgent notice and how many others there are ("+2 more" opens them all). Operations, the project's page and Planning list their own notices at the top, and a run waiting for you gets a red edge. Each section in the menu has a square in the color of its most urgent notice, with how many there are. The window's title starts with `!!` (urgent) or `!` (important) and the notice's name, and its icon gets a square of that color.

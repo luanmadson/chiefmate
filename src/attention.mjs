@@ -4,6 +4,7 @@
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
 import { RAM_LOW, availableResets, current } from './plan.mjs';
 import { readState, saveState } from './store.mjs';
+import { readerSettings, readerStatus } from './usagepage.mjs';
 
 export const LEVELS = ['urgent', 'important', 'info'];
 const HOUR = 3600_000;
@@ -75,6 +76,11 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
   const week = usage.seven_day;
   if (resets.length && current(week) && week.used >= 0.9) {
     add({ id: `reset-suggest:${week.resets ?? ''}`, level: 'important', kind: 'reset', title: t('Free reset available'), text: t('The week is almost used up: a good time to use a free reset.'), view: 'usage' });
+  }
+  // Important: the reading of the account's usage page fails (the usage shown may be stale).
+  const reader = readerStatus();
+  if (readerSettings(config).enabled && reader.error) {
+    add({ id: `reader:${reader.error}`, level: 'important', kind: 'reader', title: t('Usage reading failed'), text: t('Reading claude.ai: {problem}', { problem: reader.error }), view: 'usage' });
   }
   // Important: the board's items waiting for the owner: a pull request to approve, or a proposal to decide.
   const waiting = items.filter(i => !i.archived && i.status === 'waiting_owner');
