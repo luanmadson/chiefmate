@@ -1001,7 +1001,8 @@ try {
   const liveConfig = {
     owner: 'Owner', language: 'en', default_model: 'm', projects: {}, mcp_servers: { pw: { command: 'npx', args: ['pw'] }, other: { command: 'x' } },
     sessions: { pair: { name: 'Pair', tool: 'claude', cwd: liveDir, model: 'm', mcp: ['pw'] }, cx: { name: 'Cx', tool: 'codex', cwd: liveDir } },
-  };  const idle = async id => {
+  };
+  const idle = async id => {
     for (let i = 0; i < 150 && (sessions.turnOf(id) || (sessions.readSession(id)?.queue ?? []).length); i++) await new Promise(r => setTimeout(r, 100));
   };
   const called = () => readFileSync(calls, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
