@@ -625,7 +625,7 @@ function finishTurn(id, turn, r) {
     const request = { id: randomUUID().slice(0, 8), kind: 'permission', ...ask, status: 'open', at: now() };
     (session.requests ??= []).push(request);
     remember(id, { kind: 'permission', request: request.id, status: 'open', text: request.what });
-    notify(t('Needs you: {title}', { title: session.name }), t('The agent asks to: {what}', { what: request.what }), 'chiefmate:operations', { urgent: true });
+    notify(t('Needs you: {title}', { title: session.name }), t('The agent asks to: {what}', { what: request.explain?.summary ?? request.what }), 'chiefmate:operations', { urgent: true });
   }
   saveSession(session);
   deliverSession(id);
@@ -640,9 +640,142 @@ function permissionOf(denial, dir) {
     // Any part of a compound command ("cd x && git push") may be the one refused.
     const parts = command.split(/&&|\|\||[;|\n]/).map(p => p.trim());
     const rule = ASK_FIRST.find(r => parts.some(p => p.startsWith(r.slice(5, -3)))) ?? `Bash(${command.trim().split(/\s+/).slice(0, 2).join(' ')}:*)`;
-    return { tool, rule, what: t('Ran: {command}', { command: clip(command, 200) }) };
+    const part = parts.find(p => p.startsWith(rule.slice(5, -3))) ?? command;
+    return { tool, rule, what: t('Ran: {command}', { command: clip(command, 200) }), explain: { ...explainCommand(part, dir), command: clip(command, 2000) } };
   }
-  return { tool, rule: tool, what: describeAction(tool, input, dir) };
+  const what = describeAction(tool, input, dir);
+  return { tool, rule: tool, what, explain: { summary: what, where: dir ?? '', ...unknownEffect(), command: clip(JSON.stringify(input), 2000) } };
+}
+
+// ---------- Permission requests, in plain words ----------
+// What the owner reads before allowing: what happens, where, what changes, whether it can be undone, and the risk
+// (low, medium, high or unknown). The command itself stays folded under it.
+
+const readOnly = () => ({ change: t('Nothing: it only reads.'), undo: t('There is nothing to undo.'), risk: 'low', why: t('It only reads.') });
+const unknownEffect = () => ({ change: t('It depends on the command: see it below.'), undo: t('It depends on the command.'), risk: 'unknown', why: t('Allow it only if you understand the command.') });
+
+/** A command line's words, quotes taken off. */
+const words = text => (String(text).match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map(w => w.replace(/^(["'])(.*)\1$/, '$2'));
+
+/** A git answer in a folder, or '' (no folder, not a repository, no such thing). */
+function gitOut(dir, ...args) {
+  if (!dir || !existsSync(dir)) return '';
+  const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+  return r.status === 0 ? String(r.stdout).trim() : '';
+}
+
+/** "owner/name" for a GitHub address, the address itself otherwise. */
+const repoLabel = url => /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(url ?? '')?.[1] ?? url ?? '';
+
+/** The command refused (git push, gh pr, gh repo, git remote or any other), explained. */
+function explainCommand(command, dir) {
+  const [program, group, ...args] = words(command);
+  const origin = () => repoLabel(gitOut(dir, 'remote', 'get-url', 'origin')) || (dir ? path.basename(dir) : '?');
+  // gh's repository: -R owner/name or --repo owner/name, else this folder's own.
+  const ghRepo = () => {
+    const i = args.findIndex(a => a === '-R' || a === '--repo');
+    return args.find(a => a.startsWith('--repo='))?.slice(7) || (i >= 0 ? args[i + 1] : '') || origin();
+  };
+  const plain = args.filter(a => !a.startsWith('-'));
+  if (program === 'git' && group === 'push') return explainPush(args, dir);
+  if (program === 'gh' && group === 'pr') {
+    const [action = 'status', number] = plain;
+    const repo = ghRepo();
+    const pr = /^#?\d+$/.test(number ?? '') ? t('pull request #{number}', { number: number.replace('#', '') }) : t('the pull request of this branch');
+    const notCode = t('Nothing in the code changes.');
+    const of = {
+      create: () => ({ summary: t('Open a pull request on {repo}', { repo }), change: t('A proposal of change appears there, with a title and a description, and whoever follows the repository is notified.'), undo: t('Partly: it can be closed, but it stays visible.'), risk: 'low', why: t('Nothing goes into the code until someone merges it.') }),
+      merge: () => ({ summary: t('Merge {pr} into the code of {repo}', { pr, repo }), change: t('Its changes go into the target branch (usually the main one).'), undo: t('Hard: only with a new change that reverts it.'), risk: 'high', why: t('It changes the code others use; whatever updates itself from it gets it straight away.') }),
+      close: () => ({ summary: t('Close {pr} on {repo}, without merging', { pr, repo }), change: t('The proposal stops; its changes do not go into the code.'), undo: t('Yes: it can be reopened.'), risk: 'low', why: notCode }),
+      reopen: () => ({ summary: t('Reopen {pr} on {repo}', { pr, repo }), change: t('The proposal is open for review again.'), undo: t('Yes: it can be closed again.'), risk: 'low', why: notCode }),
+      comment: () => ({ summary: t('Publish a comment on {pr} on {repo}', { pr, repo }), change: t('The text appears there and notifies the people in the pull request.'), undo: t('Partly: it can be deleted, but the notifications have already gone.'), risk: 'medium', why: t('Others read it straight away.') }),
+      review: () => ({ ...of.comment(), summary: t('Publish a review of {pr} on {repo}', { pr, repo }) }),
+      edit: () => ({ summary: t('Change the details of {pr} on {repo} (title, description, labels)', { pr, repo }), change: t('Only the pull request changes; the code stays as it is.'), undo: t('Yes: it can be changed back.'), risk: 'low', why: notCode }),
+      ready: () => ({ ...of.edit(), summary: t('Mark {pr} on {repo} as ready for review', { pr, repo }) }),
+      checkout: () => ({ summary: t('Bring the code of {pr} to this folder', { pr }), change: t('This folder switches to the pull request branch; nothing changes online.'), undo: t('Yes: switching back to the previous branch.'), risk: 'low', why: t('Only this computer changes.') }),
+    };
+    if (['view', 'list', 'status', 'diff', 'checks'].includes(action)) return { summary: t('Only look at pull requests on {repo}', { repo }), where: repo, ...readOnly() };
+    return { where: repo, ...(of[action]?.() ?? { summary: t('Act on pull requests on {repo} ({action})', { repo, action }), ...unknownEffect() }) };
+  }
+  if (program === 'gh' && group === 'repo') {
+    const [action = 'view', name] = plain;
+    const repo = name && !['view', 'list'].includes(action) ? name : ghRepo();
+    if (['view', 'list'].includes(action)) return { summary: t('Only look at repositories on GitHub'), where: repo, ...readOnly() };
+    if (action === 'create') {
+      const created = name || (dir ? path.basename(dir) : '?');
+      const visible = args.includes('--public') ? 'public' : args.some(a => a === '--private' || a === '--internal') ? 'private' : '';
+      const sent = args.includes('--push') ? ` ${t('The code of this folder goes to it.')}` : '';
+      return {
+        summary: visible === 'public' ? t('Create the public repository {name} on GitHub', { name: created }) : t('Create the repository {name} on GitHub', { name: created }),
+        where: t('Your GitHub account'),
+        change: (visible === 'public' ? t('A new repository appears on your account, visible to anyone on the internet.') : t('A new repository appears on your account.')) + sent,
+        undo: t('Yes: the repository can be deleted afterwards.'),
+        ...(visible === 'public' ? { risk: 'high', why: t('Whatever goes to it becomes public.') }
+          : visible ? { risk: 'low', why: t('Only whoever you choose sees it.') }
+          : { risk: 'medium', why: t('The command does not say whether it is public or private.') }),
+      };
+    }
+    const settings = { change: t('The repository changes for everyone who uses it.'), undo: t('Yes: the settings can be changed back.'), risk: 'medium', why: t('Others may notice the change (address, access).') };
+    const of = {
+      delete: () => ({ summary: t('Delete the repository {repo} from GitHub', { repo }), change: t('The repository disappears, with its issues and pull requests.'), undo: t('No: a deleted repository does not come back from here.'), risk: 'high', why: t('Everything that exists only there is lost.') }),
+      fork: () => ({ summary: t('Copy {repo} to your account', { repo }), change: t('A copy appears on your account; the original does not change.'), undo: t('Yes: the copy can be deleted.'), risk: 'low', why: t('The original stays as it is.') }),
+      clone: () => ({ summary: t('Download a copy of {repo} to this computer', { repo }), change: t('A new folder appears on this computer; nothing changes online.'), undo: t('Yes: deleting the folder.'), risk: 'low', why: t('Only this computer changes.') }),
+      edit: () => ({ summary: t('Change the settings of {repo} on GitHub', { repo }), ...settings, ...(args.some(a => a.startsWith('--visibility')) ? { risk: 'high', why: t('It can make the repository public or private.') } : {}) }),
+      rename: () => ({ summary: t('Rename {repo} on GitHub', { repo }), ...settings }),
+      archive: () => ({ summary: t('Archive {repo} on GitHub (read-only from then on)', { repo }), ...settings }),
+    };
+    return { where: repo, ...(of[action]?.() ?? { summary: t('Act on repositories on GitHub ({action})', { action }), ...unknownEffect() }) };
+  }
+  if (program === 'git' && group === 'remote') {
+    const [action, name = 'origin', url] = plain;
+    const where = dir ?? '';
+    if (!action || ['show', 'get-url'].includes(action)) return { summary: t('Only look at where this folder sends its code'), where, ...readOnly() };
+    const old = gitOut(dir, 'remote', 'get-url', name) || '?';
+    const local = { risk: 'low', why: t('Nothing leaves this computer now.') };
+    const of = {
+      add: () => ({ summary: t('Add {url} as a place where this folder can send its code ({name})', { url: url ?? '?', name }), change: t('Nothing is sent now; later sends may go there.'), undo: t('Yes: removing it again.'), ...local }),
+      'set-url': () => ({ summary: t('Change where this folder sends its code ({name}): {url}', { name, url: url ?? '?' }), change: t('The next sends go to {url} instead of {old}.', { url: url ?? '?', old }), undo: t('Yes: setting the previous address back ({old}).', { old }), risk: 'medium', why: t('Code may end up in the wrong place if the address is not the one you expect.') }),
+      remove: () => ({ summary: t('Remove {name} from the places this folder sends its code', { name }), change: t('This folder forgets the address {old}; nothing changes online.', { old }), undo: t('Yes: adding it again.'), ...local }),
+      rename: () => ({ summary: t('Rename the destination {name} to {new}', { name, new: url ?? '?' }), change: t('Only the name changes; the address stays.'), undo: t('Yes: renaming it back.'), ...local }),
+    };
+    of.rm = of.remove;
+    return { where, ...(of[action]?.() ?? { summary: t('Change where this folder sends its code ({action})', { action }), ...unknownEffect() }) };
+  }
+  return { summary: t('Run a command the agent may not run on its own'), where: dir ?? '', ...unknownEffect() };
+}
+
+/** git push: which branch goes where, how many commits, and whether it forces, deletes or reaches the main branch. */
+function explainPush(args, dir) {
+  const [remote = 'origin', spec = ''] = args.filter(a => !a.startsWith('-'));
+  const current = gitOut(dir, 'rev-parse', '--abbrev-ref', 'HEAD');
+  const repo = repoLabel(gitOut(dir, 'remote', 'get-url', remote)) || remote;
+  const every = args.some(a => a === '--all' || a === '--mirror');
+  const deleting = args.some(a => a === '--delete' || a === '-d') || spec.startsWith(':');
+  const forcing = args.some(a => /^(-f|--force|--force-with-lease(=.*)?|--force-if-includes|--mirror)$/.test(a)) || spec.startsWith('+');
+  const [source, target] = spec.replace(/^[+:]/, '').split(':');
+  let branch = (target ?? source ?? '').replace(/^refs\/heads\//, '');
+  if (!branch || branch === 'HEAD') branch = current || '?';
+  const where = `${repo} · ${every ? t('every branch') : t('branch {branch}', { branch })}`;
+  if (deleting) return { summary: t('Delete branch {branch} from {repo}', { branch, repo }), where, change: t('The branch disappears from the repository online; the copy on this computer, if there is one, stays.'), undo: t('Yes, while the branch is on this computer: sending it again brings it back.'), risk: 'medium', why: t('Whoever was using that branch loses it.') };
+  const known = !every && gitOut(dir, 'rev-parse', '--verify', '--quiet', `refs/remotes/${remote}/${branch}`);
+  const count = known ? gitOut(dir, 'rev-list', '--count', `${remote}/${branch}..${source && source !== 'HEAD' ? source : 'HEAD'}`) : '';
+  const main = /^(main|master)$/.test(branch);
+  const change = [
+    every ? t('The commits saved only on this computer go there, visible to whoever has access to the repository.')
+      : !known && current ? t('Branch {branch} does not exist there yet: it is created with all its commits, visible to whoever has access to the repository.', { branch })
+      : Number(count) > 0 ? t('The commits saved only on this computer ({count}) go there, visible to whoever has access to the repository.', { count })
+      : t('The commits saved only on this computer go there, visible to whoever has access to the repository.'),
+    main ? t('It is the main branch: the change takes effect straight away, without a pull request.') : '',
+    forcing ? t('It is a forced send: the branch history there is replaced, and commits that exist only there are lost.') : '',
+  ].filter(Boolean).join(' ');
+  return {
+    summary: every ? t('Send every branch to {repo}', { repo }) : t('Send the commits of branch {branch} to {repo}', { branch, repo }),
+    where, change,
+    undo: forcing ? t('No: what is replaced may not come back.') : t('Partly: a new commit can undo the changes, but what was sent stays in the history.'),
+    ...(forcing ? { risk: 'high', why: t('Work that exists only in the repository online can be lost.') }
+      : main ? { risk: 'high', why: t('It changes the main branch, which others, and whatever updates itself from it, use straight away.') }
+      : { risk: 'medium', why: t('The code becomes visible to others (to everyone, if the repository is public): check that nothing private goes with it.') }),
+  };
 }
 
 // ---------- Codex, headless ----------

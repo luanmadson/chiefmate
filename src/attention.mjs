@@ -43,8 +43,8 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
   for (const n of needs) {
     add({
       id: `needs:${n.run ?? n.session}:${n.id}`, level: 'urgent', kind: 'needs', title: n.kind === 'permission' ? t('Asks your permission') : t('Needs you'),
-      text: t('{task}: {what}', { task: n.title, what: n.what }), view: 'operations', project: n.project ?? null, run: n.run ?? null, at: n.at, seenable: false,
-      request: { id: n.id, kind: n.kind ?? null, run: n.run ?? null, session: n.session ?? null, url: n.url ?? null, openError: n.openError ?? null, agent: n.agent ?? null },
+      text: t('{task}: {what}', { task: n.title, what: n.explain?.summary ?? n.what }), view: 'operations', project: n.project ?? null, run: n.run ?? null, at: n.at, seenable: false,
+      request: { id: n.id, kind: n.kind ?? null, run: n.run ?? null, session: n.session ?? null, url: n.url ?? null, openError: n.openError ?? null, agent: n.agent ?? null, explain: n.explain ?? null },
     });
   }
   // Urgent: a run failed (until a newer run of the same work starts, or 3 days go by).
