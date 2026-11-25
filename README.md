@@ -515,6 +515,7 @@ Every message field (the conversation with the manager, the live sessions, the a
 - **Where it works:** in browsers with speech recognition (Chrome, Edge, Safari, also on phones), on `localhost` or over https (the remote access). Elsewhere, such as Firefox, the button doesn't show.
 - **Privacy:** the browser sends the audio to its maker's voice service (Google's in Chrome, Microsoft's in Edge, Apple's in Safari) to be transcribed; Chiefmate never receives the audio, only the text you send. The first use says so once, with **Turn dictation off**; `"ui": { "voice_input": false }` in the settings does the same, and `true` brings it back.
 
+### News from the manager
 
 The manager doesn't only answer: when something you should know about happens, it tells you in the conversation on its own.
 
