@@ -1579,6 +1579,85 @@ function drawUsage() {
   }
 }
 
+// ---------- The autopilot ----------
+
+/** Why the autopilot waits now (src/autopilot.mjs, blockInfo). */
+function autopilotWait(b) {
+  switch (b?.reason) {
+    case 'quiet': return t('Waiting: quiet hours ({hours}).', { hours: b.quiet });
+    case 'window': return t('Waiting: the 5-hour window is at {used}, and the autopilot stops at {limit}.', { used: percent(b.used), limit: percent(b.limit) });
+    case 'week': return t("Waiting: the plan's week is at {used} with {elapsed} of it gone, ahead of the pace that ends it at {target}.", { used: percent(b.used), elapsed: percent(b.elapsed), target: percent(b.target) });
+    default: return '';
+  }
+}
+
+function autopilotItemState(status) {
+  if (status === 'archived') return [t('Archived item'), 'neutral'];
+  if (status === 'removed') return [t('Off the board'), 'neutral'];
+  return planState(status);
+}
+
+function drawAutopilot() {
+  const a = state.autopilot;
+  if (!a) return;
+  const now = !a.enabled ? [t('Off'), 'neutral'] : a.blocked ? [t('On, waiting'), 'warn'] : [t('On, ready'), 'ok'];
+  const line = !a.enabled
+    ? t('Nothing goes on the queue without you. Approved items still start by themselves, one per project at a time.')
+    : a.blocked ? autopilotWait(a.blocked)
+    : t('When the queue of a project empties, the manager puts its next item triaged "do now" on the queue.');
+  const items = a.queued.map(e => `<li>
+      <span>${clockTime(e.at)}</span>
+      <span><span class="primary">#${e.item} ${esc(e.title)}</span><span class="secondary">${projectLink(e.project)} · ${esc(e.agent ?? '')}${e.pr ? ` · <a href="${esc(e.pr)}" target="_blank" rel="noopener">${esc(t('Pull request'))}</a>` : ''}</span></span>
+      ${stateHtml(autopilotItemState(e.status))}
+    </li>`);
+  const woke = [...new Set(a.wakes.map(w => w.project))];
+  const html = `<div class="label">${esc(t('Autopilot'))}</div>
+    <div class="autopilot-head">
+      ${stateHtml(now)}
+      <button type="button" class="button ${a.enabled ? 'secondary' : ''} small" data-autopilot="${a.enabled ? 'off' : 'on'}">${esc(a.enabled ? t('Turn off') : t('Turn on'))}</button>
+    </div>
+    <p>${esc(line)}</p>
+    ${a.enabled && !a.idle_news ? `<p class="hint state-warn">${esc(t('The "empty queue" news is off in manager_updates: the manager is never woken, so only the items you approved start.'))}</p>` : ''}
+    <div class="label autopilot-today-label">${esc(t('Today'))}</div>
+    ${items.length ? `<ul class="autopilot-today">${items.join('')}</ul>` : `<p class="hint">${esc(t('It put nothing on the queue today.'))}</p>`}
+    <p class="hint">${esc(woke.length ? t('It woke the manager {count} time(s) for an empty queue: {projects}.', { count: a.wakes.length, projects: woke.map(projectName).join(', ') }) : t('It woke the manager for no empty queue today.'))}${items.length ? ` <a href="#planning">${esc(t('See on the board'))}</a>` : ''}</p>
+    <p class="hint">${esc(t('Items recommended "later" always wait for you. With the away mode on, it carries on within these limits; the daily report tells you what it did.'))}</p>`;
+  draw('#autopilot', html, html);
+  // the form follows the settings (changed here, on the command line or by hand) unless it is being edited
+  const form = $('#autopilot-form');
+  const settings = JSON.stringify([a.stop_at_5h_window, a.week_pace, a.quiet_hours, a.daily_report]);
+  if (!form.contains(document.activeElement) && form.dataset.filled !== settings) {
+    const [from = '', to = ''] = a.quiet_hours ? a.quiet_hours.split('-').map(x => x.trim().padStart(5, '0')) : [];
+    form.window.value = Math.round(a.stop_at_5h_window * 100);
+    form.pace.value = Math.round(a.week_pace * 100);
+    form.quietFrom.value = from;
+    form.quietTo.value = to;
+    form.report.value = a.daily_report ? a.daily_report.padStart(5, '0') : '';
+    form.dataset.filled = settings;
+  }
+}
+
+$('#autopilot-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.target;
+  const from = form.quietFrom.value;
+  const to = form.quietTo.value;
+  if (!from !== !to) return toast(t('Fill in both quiet hours, or leave both empty.'));
+  try {
+    await api('/api/autopilot', {
+      stop_at_5h_window: Number(form.window.value) / 100,
+      week_pace: Number(form.pace.value) / 100,
+      quiet_hours: from ? `${from}-${to}` : 'off',
+      daily_report: form.report.value || 'off',
+    });
+    delete form.dataset.filled;
+    toast(t("Autopilot's limits saved."));
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
 // ---------- Projects on this computer ----------
 
 const expanded = new Set();
@@ -3463,6 +3542,7 @@ async function refresh() {
   drawCrew();
   drawLog();
   drawUsage();
+  drawAutopilot();
   drawComputer();
   drawPlan();
   drawPlanning();
@@ -3707,7 +3787,7 @@ document.addEventListener('click', event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live]');
   if (!target) return;
   // A project's name inside a row that opens on a click (Projects) goes to its page, and nothing else.
   if (event.target.closest('a.project-link') && !target.matches('a')) return;
@@ -3850,6 +3930,10 @@ document.addEventListener('click', async event => {
       toast(library ? t("Updating the library's copy…") : t('Copying the prompt builder…'));
       const status = await api('/api/prompts-sync', {});
       toast(status.ok ? (library ? t('Document updated from the library.') : t('Prompt builder copied.')) : status.error);
+    } else if (target.dataset.autopilot) {
+      const on = target.dataset.autopilot === 'on';
+      await api('/api/autopilot', { enabled: on });
+      toast(on ? t('Autopilot turned on.') : t('Autopilot turned off.'));
     } else if (target.dataset.reader) {
       const action = target.dataset.reader;
       await api('/api/usage-reader', action === 'now' ? { read: true } : { enabled: action === 'on' });

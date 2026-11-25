@@ -3,8 +3,8 @@
 // approves for the owner, marked as the autopilot's. Approved items waiting their turn start at once, with no manager.
 // Only within limits: the 5-hour window, the week's pace (a target share of the plan's week by its end) and optional
 // quiet hours. Once a day, the manager gets what was done alone ("autopilot_report") and tells the owner in a few lines.
-import { loadConfig } from './config.mjs';
-import { formatDateTime, formatPercent } from './i18n.mjs';
+import { loadConfig, saveConfig } from './config.mjs';
+import { formatDateTime, formatPercent, t } from './i18n.mjs';
 import { newsSettings, reportEvent } from './news.mjs';
 import { current, weekPace } from './plan.mjs';
 import { byRank, CLOSED, decideItem, planItem, planItems, startApproved } from './planning.mjs';
@@ -53,18 +53,95 @@ export function autopilotSettings(config = loadConfig()) {
   };
 }
 
-/** Why the autopilot can't put anything on the queue now, or null when it can. */
-export function blockReason(settings, usage = readUsage(), at = new Date()) {
-  if (!settings.enabled) return 'the autopilot is off';
-  if (inQuietHours(settings.quiet_hours, at)) return `quiet hours (${settings.quiet_hours.text})`;
+/**
+ * Why the autopilot can't put anything on the queue now, for the app: { reason: "off" | "quiet" | "window" | "week",
+ * and its values }, or null when it can.
+ */
+export function blockInfo(settings, usage = readUsage(), at = new Date()) {
+  if (!settings.enabled) return { reason: 'off' };
+  if (inQuietHours(settings.quiet_hours, at)) return { reason: 'quiet', quiet: settings.quiet_hours.text };
   const w = usage.five_hour;
-  if (current(w) && w.used >= settings.stop_at_5h_window) return `the 5-hour window is at ${formatPercent(w.used)} (the autopilot stops at ${formatPercent(settings.stop_at_5h_window)})`;
+  if (current(w) && w.used >= settings.stop_at_5h_window) return { reason: 'window', used: w.used, limit: settings.stop_at_5h_window };
   // The week's pace: a straight line from 0 to week_pace at the end of the week; above it, the autopilot waits.
   const pace = weekPace(usage);
-  if (pace && pace.used > settings.week_pace * pace.elapsed) {
-    return `the plan's week is at ${formatPercent(pace.used)} with ${formatPercent(pace.elapsed)} of it gone, ahead of the pace that ends it at ${formatPercent(settings.week_pace)}`;
-  }
+  if (pace && pace.used > settings.week_pace * pace.elapsed) return { reason: 'week', used: pace.used, elapsed: pace.elapsed, target: settings.week_pace };
   return null;
+}
+
+/** The same, in words for the manager, or null when it can. */
+export function blockReason(settings, usage = readUsage(), at = new Date()) {
+  const b = blockInfo(settings, usage, at);
+  switch (b?.reason) {
+    case 'off': return 'the autopilot is off';
+    case 'quiet': return `quiet hours (${b.quiet})`;
+    case 'window': return `the 5-hour window is at ${formatPercent(b.used)} (the autopilot stops at ${formatPercent(b.limit)})`;
+    case 'week': return `the plan's week is at ${formatPercent(b.used)} with ${formatPercent(b.elapsed)} of it gone, ahead of the pace that ends it at ${formatPercent(b.target)}`;
+    default: return null;
+  }
+}
+
+/**
+ * Changes the settings (the app's panel and "cli.mjs autopilot"): any of { enabled, week_pace, stop_at_5h_window
+ * (shares from 0.05 to 1), quiet_hours ("23:00-07:00"; "" or "off": none), daily_report ("08:00"; false or "off": none) }.
+ * Saved at once and read again on every check: no restart (with dryRun, only validated). Returns the new "autopilot".
+ */
+export function changeAutopilot(body, { config = loadConfig(), dryRun = false } = {}) {
+  const changes = { ...config.autopilot };
+  if (body.enabled !== undefined) changes.enabled = body.enabled === true;
+  for (const key of ['week_pace', 'stop_at_5h_window']) {
+    if (body[key] === undefined) continue;
+    const n = Number(body[key]);
+    if (body[key] === '' || body[key] === null || !Number.isFinite(n)) throw new Error(t('The limits are shares from 0.05 to 1, such as 0.85.'));
+    changes[key] = Math.min(1, Math.max(0.05, n));
+  }
+  if (body.quiet_hours !== undefined) {
+    const quiet = String(body.quiet_hours ?? '').trim();
+    if (quiet && quiet !== 'off' && !parseQuietHours(quiet)) throw new Error(t('Quiet hours as HH:MM-HH:MM, such as 23:00-07:00, or off.'));
+    changes.quiet_hours = quiet === 'off' ? '' : quiet;
+  }
+  if (body.daily_report !== undefined) {
+    const report = body.daily_report === false ? 'off' : String(body.daily_report ?? '').trim();
+    if (report && report !== 'off' && minutesOf(report) == null) throw new Error(t('The daily report as HH:MM, such as 08:00, or off.'));
+    changes.daily_report = !report || report === 'off' ? false : report;
+  }
+  if (JSON.stringify(changes) !== JSON.stringify(config.autopilot ?? {})) {
+    config.autopilot = changes;
+    if (!dryRun) saveConfig(config);
+  }
+  return config.autopilot ?? {};
+}
+
+/**
+ * For the app's Usage section: the settings, whether it may act now (blocked: blockInfo, or null), whether the "idle"
+ * news reaches the manager, and what it did today (since midnight): the items it queued, with where each is now, and
+ * the empty queues it woke the manager for.
+ */
+export function autopilotStatus(config = loadConfig(), usage = readUsage(), at = new Date()) {
+  const s = autopilotSettings(config);
+  const news = newsSettings(config);
+  const a = readState().autopilot ?? {};
+  const midnight = new Date(at);
+  midnight.setHours(0, 0, 0, 0);
+  const today = list => (list ?? []).filter(e => Date.parse(e.at) >= midnight.getTime());
+  const where = e => {
+    try {
+      const i = planItem(e.item);
+      return { status: i.archived ? 'archived' : i.status, pr: i.pr ?? null };
+    } catch {
+      return { status: 'removed', pr: null };
+    }
+  };
+  return {
+    enabled: s.enabled,
+    week_pace: s.week_pace,
+    stop_at_5h_window: s.stop_at_5h_window,
+    quiet_hours: s.quiet_hours?.text ?? '',
+    daily_report: s.daily_report,
+    idle_news: news.enabled && news.events.has('idle'),
+    blocked: blockInfo(s, usage, at),
+    queued: today(a.log).map(e => ({ at: e.at, item: e.item, project: e.project, title: e.title, agent: e.agent, ...where(e) })),
+    wakes: today(a.wakes).map(e => ({ at: e.at, project: e.project, items: e.items ?? [] })),
+  };
 }
 
 /** The projects in the settings with nothing queued, waiting, going on or paused. */

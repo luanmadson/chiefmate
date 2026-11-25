@@ -878,18 +878,11 @@ The reading is off until you turn it on: node src/cli.mjs usage-reader on`);
     case 'autopilot': {
       const autopilot = await import('./autopilot.mjs');
       const config = loadConfig();
-      const changes = { ...config.autopilot };
+      const changes = {};
       if (rest[0] === 'on' || rest[0] === 'off') changes.enabled = rest[0] === 'on';
-      for (const [o, key] of [['--week-pace', 'week_pace'], ['--window-5h', 'stop_at_5h_window']]) if (option(o) !== undefined) changes[key] = Number(option(o));
-      if (option('--quiet') !== undefined) {
-        if (option('--quiet') !== 'off' && !autopilot.parseQuietHours(option('--quiet'))) throw new Error('Quiet hours as HH:MM-HH:MM, such as 23:00-07:00, or off.');
-        changes.quiet_hours = option('--quiet') === 'off' ? '' : option('--quiet');
-      }
-      if (option('--report') !== undefined) changes.daily_report = option('--report') === 'off' ? false : option('--report');
-      if (JSON.stringify(changes) !== JSON.stringify(config.autopilot ?? {})) {
-        config.autopilot = changes;
-        saveConfig(config); // read again on every check: no restart needed
-      }
+      for (const [o, key] of [['--week-pace', 'week_pace'], ['--window-5h', 'stop_at_5h_window'], ['--quiet', 'quiet_hours'], ['--report', 'daily_report']]) if (option(o) !== undefined) changes[key] = option(o);
+      // validated and saved as in the app (read again on every check: no restart needed)
+      autopilot.changeAutopilot(changes, { config });
       console.log(JSON.stringify(config.autopilot ?? {}, null, 2));
       console.log(autopilot.autopilotLine(config));
       return;

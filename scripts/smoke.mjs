@@ -131,6 +131,12 @@ try {
     const awayOff = await (await post('/api/away', { on: false })).json();
     expect(awayOn.away?.since && awayState?.since === awayOn.away.since && awayOff.away === null && state.away === null, `the away mode's button did not turn it on and off: ${JSON.stringify({ awayOn, awayState, awayOff })}`);
     expect(html.includes('id="away"'), "the app's title bar has no away mode button");
+    // The autopilot's panel in the Usage section: its state, and limits refused before anything is saved.
+    const ap = state.autopilot;
+    expect(ap && typeof ap.enabled === 'boolean' && ap.stop_at_5h_window > 0 && ap.week_pace > 0 && Array.isArray(ap.queued) && Array.isArray(ap.wakes) && (ap.enabled || ap.blocked?.reason === 'off'),
+      `/api/state has no autopilot's state: ${JSON.stringify(ap)}`);
+    expect(html.includes('id="autopilot"') && html.includes('id="autopilot-form"'), "the Usage section has no autopilot's panel");
+    expect((await post('/api/autopilot', { quiet_hours: 'soon' })).status === 400 && (await post('/api/autopilot', { week_pace: 'much' })).status === 400, "the autopilot's invalid limits were not refused");
     expect((await post('/api/stop-project', { project: 'none' })).status === 400, 'stopping a project without a confirmed list was not refused');
     expect((await post('/api/reset-grants', { action: 'used', index: 9999 })).status === 400, 'marking a free reset that does not exist was not refused');
     // Updates are off in the smoke test: "update now" and "update check" answer so, and nothing is fetched or installed.
@@ -563,6 +569,12 @@ try {
   expect(autopilot.blockReason(defaults, {})?.includes('off') && autopilot.blockReason(on, {}, at(2))?.includes('quiet hours'), 'the autopilot acted while off or in quiet hours');
   expect(autopilot.blockReason(on, { five_hour: { used: 0.9, resets: later(2) } }, at(12))?.includes('5-hour'), 'the autopilot acted above the 5-hour limit');
   expect(autopilot.blockReason(on, week(0.6, 3.5), at(12))?.includes('pace') && autopilot.blockReason(on, week(0.4, 3.5), at(12)) === null, "the week's pace is not respected");
+  expect(autopilot.blockInfo(on, { five_hour: { used: 0.9, resets: later(2) } }, at(12))?.reason === 'window' && autopilot.blockInfo(on, {}, at(2))?.quiet === '23:00-07:00', "the autopilot's reason to wait, for the app, is wrong");
+  // The app's switch and limits, validated only (dryRun: the settings are the installation's own).
+  const changed = autopilot.changeAutopilot({ enabled: true, week_pace: '0.8', stop_at_5h_window: 2, quiet_hours: '22:00-06:30', daily_report: 'off' }, { config: { autopilot: { enabled: false } }, dryRun: true });
+  expect(changed.enabled === true && changed.week_pace === 0.8 && changed.stop_at_5h_window === 1 && changed.quiet_hours === '22:00-06:30' && changed.daily_report === false, `the autopilot's settings from the app are wrong: ${JSON.stringify(changed)}`);
+  const invalid = body => { try { autopilot.changeAutopilot(body, { config: {}, dryRun: true }); return false; } catch { return true; } };
+  expect(invalid({ quiet_hours: '7-8' }) && invalid({ daily_report: '25:00' }) && invalid({ week_pace: '' }), "the autopilot's invalid settings were accepted");
   const config = { owner: 'Owner', projects: { Auto: {} }, autopilot: { enabled: true, daily_report: false } };
   const item = planning.proposeItem({ project: 'Auto', title: 'Smoke autopilot item', agent: 'someone', by: 'manager' });
   planning.triageItem(item.id, { recommend: 'now' });
@@ -580,6 +592,8 @@ try {
   const report = (await autopilot.checkAutopilot({ config: daily, usage: {}, runs: [{ id: 'r', project: 'Auto', status: 'running' }] })).report;
   expect(report?.text?.includes(`#${item.id} Auto: "Smoke autopilot item"`), `the daily report does not list what the autopilot queued: ${JSON.stringify(report)}`);
   expect((await autopilot.checkAutopilot({ config: daily, usage: {}, runs: [{ id: 'r', project: 'Auto', status: 'running' }] })).report === null, 'the daily report went twice in a day');
+  const today = autopilot.autopilotStatus(daily, {});
+  expect(today.queued.some(e => e.item === item.id && e.status === planning.planItem(item.id).status) && today.wakes.some(w => w.project === 'Auto') && today.blocked === null, `the app does not get what the autopilot did today: ${JSON.stringify(today)}`);
 } catch (error) {
   failures.push(`autopilot checks: ${error.message}`);
 }
