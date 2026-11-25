@@ -978,6 +978,23 @@ try {
   expect(args.includes('--strict-mcp-config') && JSON.parse(args[args.indexOf('--mcp-config') + 1]).mcpServers.browser, 'the MCP servers do not come only from Chiefmate');
   expect(settings.claudeMdExcludes?.includes(userFolder), "the user's ~/.claude/CLAUDE.md is not excluded");
 
+  // The guard of the crew and the manager: a publication written any way is refused and noted; nothing else is.
+  const { crewGuard } = await import(src('runs.mjs'));
+  const guardDir = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-guard-'));
+  try {
+    const guardLog = path.join(guardDir, 'guard.jsonl');
+    const guarded = JSON.parse(claudeArgs({ model: 'm', hooks: crewGuard(guardLog) }).find((a, i, all) => all[i - 1] === '--settings'));
+    const hook = guarded.hooks?.PreToolUse?.[0]?.hooks?.[0]?.command ?? '';
+    const refuses = command => /"permissionDecision":"deny"/.test(execFileSync(hook, { shell: true, encoding: 'utf8', input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', tool_input: { command } }) }));
+    const publish = ['git -C . push origin main', 'gh api repos/a/b/pulls -f title=T -f head=h', 'cd x && git push', 'bash -c "gh pr create --fill"', 'git -c a=b remote add up u'];
+    const wrong = [...publish.filter(c => !refuses(c)), ...['git status', 'gh api repos/a/b/pulls', 'git commit -m "no git push here"'].filter(refuses)];
+    const noted = readFileSync(guardLog, 'utf8').trim().split('\n').length;
+    expect(hook.includes('guard.mjs') && !hook.includes('--allow') && !wrong.length && noted === publish.length,
+      `the guard of the crew and the manager misjudged what publishes: ${JSON.stringify({ hook, wrong, noted })}`);
+  } finally {
+    rmSync(guardDir, { recursive: true, force: true });
+  }
+
   const doc = [
     '# Environments', '// selection: one', '## Office', 'Work from {PLACE}.', 'PLACE = the office',
     '# Projects', '// selection: one', '## Sample project', '// tags: code', '// access: browser', '// CODE = SAMPLE',

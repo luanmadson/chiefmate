@@ -14,7 +14,7 @@ import { questionsLine } from './decisions.mjs';
 import { planningLine } from './planning.mjs';
 import { radarLine } from './radar.mjs';
 import { focus, maxParallel, queued } from './queue.mjs';
-import { activeRun, ALWAYS_DISALLOWED, doingNow, liveRuns, prepareLibraries } from './runs.mjs';
+import { activeRun, ALWAYS_DISALLOWED, crewGuard, doingNow, liveRuns, prepareLibraries } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { sessionsLine } from './sessions.mjs';
 import { talkSituation } from './talk.mjs';
@@ -36,8 +36,10 @@ const MANAGER_DIR = path.join(DATA, 'manager');
 const HANDOFF_FILE = path.join(MANAGER_DIR, 'handoff.md');
 const NOTES_FILE = path.join(MANAGER_DIR, 'notes.md');
 const conversationLog = () => path.join(ensureDir(MANAGER_DIR), 'conversation.jsonl');
+const guardLog = () => path.join(ensureDir(MANAGER_DIR), 'guard.jsonl');
 
-// In the conversation the manager works in Chiefmate's own folder: it never commits there, and never pushes.
+// In the conversation the manager works in Chiefmate's own folder: it never commits there, and never pushes (the guard,
+// guard.mjs, also refuses a publication written any other way; each refusal is noted in guard.jsonl).
 const CHAT_DISALLOWED = ['Agent', 'WebSearch', 'WebFetch', 'Bash(git commit:*)', ...ALWAYS_DISALLOWED];
 
 // The manager reads every reference library; the copies are refreshed at most every 10 minutes.
@@ -335,6 +337,7 @@ async function answer(items) {
         effort: manager.chat_effort ?? manager.effort,
         tools: manager.tools ?? [],
         disallowed: CHAT_DISALLOWED,
+        hooks: crewGuard(guardLog()),
         addDirs: libraries.map(l => l.dir),
         // The command line refuses to write to this conversation from inside it.
         env: { CHIEFMATE_MANAGER: '1' },

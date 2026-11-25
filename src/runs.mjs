@@ -6,6 +6,7 @@ import path from 'node:path';
 import { instructionFiles, stepAccess, stepMcp } from './access.mjs';
 import { contextWindow, runClaude } from './claude.mjs';
 import { loadConfig, projectCrew } from './config.mjs';
+import { guardHooks } from './guard.mjs';
 import {
   fullReport, generateBrief, generateOutcome, mergeOutcomes, outcomeLine, outcomeMarkdown, outcomeTemplate, parseOutcome, shortSummary, shortTitle,
   TITLE_MAX,
@@ -47,7 +48,12 @@ export const livePublic = l => ({
 export const doingNow = l => (Date.now() < (l.heldUntil ?? 0) ? t('waiting for you') : l.doing ?? null);
 
 // No agent pushes anything to GitHub or changes it: Chiefmate itself pushes the branch and opens the pull request.
+// These rules catch the commands that start with them; the guard (guard.mjs, see crewGuard) catches the rest, however
+// they are written (git -C dir push, bash -c "git push", a pull request opened through GitHub's API).
 export const ALWAYS_DISALLOWED = ['Bash(git push:*)', 'Bash(gh pr:*)', 'Bash(gh repo:*)', 'Bash(git remote:*)'];
+
+/** The guard of a crew step or of the manager: refuses any publication, noting each refusal in "log" (nothing is ever allowed). */
+export const crewGuard = log => guardHooks({ log, allowed: [] });
 
 /** Chiefmate's command line, for a step: to ask for the owner (src/needs.mjs) and to propose items (src/planning.mjs). */
 function cliCommand() {
@@ -60,7 +66,7 @@ function crewRules(config, project, projectId, reportLang = config.language || '
   const content = languageName(project.language || config.language || 'en');
   return `## Chiefmate rules (for the whole crew)
 - You are part of the Chiefmate crew, working on one step of a run. Work alone, step by step. Avoid subagents: start one only when it is truly necessary, and never several at once.
-- The current folder is a working copy of the project, already on the run's branch. Commit your work with clear messages that follow the project's convention (see \`git log\`); if there is none, write them in ${content}. Never push, switch branches or open pull requests: Chiefmate does that at the end.
+- The current folder is a working copy of the project, already on the run's branch. Commit your work with clear messages that follow the project's convention (see \`git log\`); if there is none, write them in ${content}. Never push, switch branches or open pull requests: Chiefmate does that at the end. A command that would publish, however written, is refused by Chiefmate's guard: don't try another way, and don't stop your work for it.
 - If the project's playbook says to create a branch, push or open a pull request, skip that part.${noTrace(project) ? `
 - Others work on this project too and must not learn of Chiefmate or of AI agents from it: never write "Chiefmate", "Claude" or that an AI or agent did the work in commit messages, file or folder names (temporary ones too, such as no chiefmate_*.py), code, comments or documentation. Commit messages read as the owner's own, in the project's convention. Delete the temporary files and scripts you create before you finish, or keep them outside the project's folder.` : ''}
 - The project's documentation outranks your own preferences. Read what you need before changing anything.
@@ -529,6 +535,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     disallowed,
     addDirs: access.addDirs,
     mcpServers: mcp.servers,
+    hooks: crewGuard(path.join(runDir(run.id), `${name}.guard.jsonl`)),
     // For "needs-you": which run and step is asking, and where Chiefmate answers.
     env: { CHIEFMATE_RUN: run.id, CHIEFMATE_STEP: String(index + 1), CHIEFMATE_PORT: String(Number(process.env.CHIEFMATE_PORT) || config.port || 4747) },
     // With no trace, commits never credit Claude, whatever the installation's setting.
