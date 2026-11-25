@@ -216,7 +216,8 @@ function checkLater(targets, config) {
 /** A pull request's state on GitHub ("open", "merged", "closed"), or null when gh can't tell. */
 async function ghState(url) {
   const r = await exec('gh', ['pr', 'view', url, '--json', 'state', '-q', '.state'], ROOT, { maxMinutes: 1 });
-  const state = r.code === 0 ? r.output.trim().toLowerCase() : '';
+  // stdout and stderr come together: gh may add an upgrade notice after the state.
+  const state = r.code === 0 ? (r.output.trim().split(/\s+/)[0] ?? '').toLowerCase() : '';
   return ['open', 'merged', 'closed'].includes(state) ? state : null;
 }
 
