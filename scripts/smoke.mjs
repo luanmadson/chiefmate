@@ -1632,6 +1632,17 @@ try {
   git(copy, 'add', '.');
   git(copy, 'commit', '-q', '-m', 'Add b');
   expect((await ws.traces(copy, 'feature/x')).length === 0, 'clean work was taken for a trace of Chiefmate');
+  // Someone else's commits from main, merged in during the run, are not the run's traces.
+  git(owner, 'checkout', '-q', '-b', 'main');
+  writeFileSync(path.join(owner, 'chiefmate.md'), 'notes\n');
+  writeFileSync(path.join(owner, 'c.txt'), 'Built with Chiefmate\n');
+  git(owner, 'add', '.');
+  git(owner, '-c', 'user.name=Regis', 'commit', '-q', '-m', 'Add notes', '-m', 'Co-Authored-By: Claude <noreply@anthropic.com>');
+  git(owner, 'checkout', '-q', 'feature/x');
+  git(copy, 'fetch', '-q', 'origin');
+  git(copy, 'merge', '-q', '--no-edit', 'origin/main');
+  const merged = await ws.traces(copy, 'feature/x');
+  expect(merged.length === 0, `commits merged in from main were taken for the run's traces: ${JSON.stringify(merged)}`);
   writeFileSync(path.join(copy, 'chiefmate_tmp.py'), 'x = 1\n');
   writeFileSync(path.join(copy, 'b.txt'), 'b\n# made by Chiefmate\n');
   git(copy, 'add', '.');
