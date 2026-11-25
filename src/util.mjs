@@ -71,6 +71,17 @@ export function slug(text) {
     .slice(0, 40);
 }
 
+/**
+ * The approval level the manager gives a run, a board item or a question: 1 (the manager decides and does it), 2 (the
+ * owner approves) or 3 (never without the owner). "", "none" or "?" clear it (null); anything else is an error.
+ */
+export function parseLevel(value) {
+  const s = String(value ?? '').trim().toLowerCase().replace(/^(level|nivel|nível)\s*/, '');
+  if (!s || s === 'none' || s === '?') return null;
+  if (!['1', '2', '3'].includes(s)) throw new Error(`Unknown level "${value}". Use 1 (the manager decides), 2 (the owner approves) or 3 (only the owner).`);
+  return Number(s);
+}
+
 const LANGUAGE_NAMES = {
   en: 'English',
   'pt-BR': 'Brazilian Portuguese',

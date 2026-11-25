@@ -5,6 +5,9 @@
 // marks the notice as seen (the card fades to the end of the list); every decision reaches the manager as news
 // ("owner_decided"; a merge is "merged" news, src/merge.mjs). A project whose work someone else reviews
 // ("merge_by_owner": false) shows its pull requests as waiting for that review, with no Approve.
+// Each card carries the approval level the manager gave its run, item or question ("approval": 1, the manager
+// decides and does it; 2, the owner approves; 3, never without the owner; null, not given). The app folds the level 1
+// cards apart and counts only the others as needing the owner.
 import path from 'node:path';
 import { markSeen } from './attention.mjs';
 import { loadConfig } from './config.mjs';
@@ -13,7 +16,7 @@ import { discardRun, mergeRun, verdict } from './merge.mjs';
 import { reportEvent } from './news.mjs';
 import { decideItem } from './planning.mjs';
 import { readRun } from './store.mjs';
-import { clip, DATA, ensureDir, now, readJson, writeJson } from './util.mjs';
+import { clip, DATA, ensureDir, now, parseLevel, readJson, writeJson } from './util.mjs';
 
 const QUESTIONS_MAX = 200;
 export const OPTIONS_MAX = 6;
@@ -29,9 +32,10 @@ export const mergedByOwner = (config, project) => config?.projects?.[project]?.m
 
 /**
  * A question for the owner, with the options they answer with: { question, context, options ("A|B|C" or a list),
- * recommend (one of the options), project }. It waits as a card until answered or discarded.
+ * recommend (one of the options), project, level (the approval level, 1 to 3) }. It waits as a card until answered or
+ * discarded.
  */
-export function addQuestion({ question, context, options, recommend, project } = {}, config = loadConfig()) {
+export function addQuestion({ question, context, options, recommend, project, level } = {}, config = loadConfig()) {
   const text = clip(question, 300);
   if (!text) throw new Error('The question is missing.');
   const list = (Array.isArray(options) ? options : String(options ?? '').split('|')).map(o => clip(o, 60)).filter(Boolean);
@@ -40,12 +44,13 @@ export function addQuestion({ question, context, options, recommend, project } =
   if (choices.length < 2 || choices.length > OPTIONS_MAX) throw new Error(`Give 2 to ${OPTIONS_MAX} options, separated by "|".`);
   const recommended = recommend ? choices.find(o => same(o, recommend)) : null;
   if (recommend && !recommended) throw new Error(`The recommendation must be one of the options: ${choices.join(', ')}.`);
+  const approval = parseLevel(level);
   const id = clip(project, 60);
   if (id && !config.projects?.[id]) throw new Error(`${id} is not a project in the settings.`);
   const questions = readQuestions();
   const q = {
     id: Math.max(0, ...questions.map(x => x.id)) + 1, question: text, context: String(context ?? '').trim().slice(0, 2000),
-    options: choices, recommend: recommended ?? null, project: id || null, at: now(), status: 'open', answer: null, answered_at: null,
+    options: choices, recommend: recommended ?? null, project: id || null, level: approval, at: now(), status: 'open', answer: null, answered_at: null,
   };
   saveQuestions([...questions, q]);
   return q;
@@ -139,6 +144,7 @@ function mergeCard(notice, run, item, config) {
     recommend: advice?.text ?? '', recommendShort: advice?.short ?? '',
     detail: [review ? `${t("Manager's verdict")}:\n${review}` : '', run.outcome?.done?.length ? `${t('What was done')}:\n- ${run.outcome.done.join('\n- ')}` : ''].filter(Boolean).join('\n\n'),
     url: run.pullRequest ?? null, run: run.id, item: item?.id ?? null, approve: byOwner && inClone, thirdParty: !byOwner,
+    approval: run.level ?? item?.level ?? null,
   };
 }
 
@@ -152,7 +158,7 @@ function decisionCard(notice, item, config) {
     risk: item.recommend_risk || t('No risk noted.'),
     recommend: [recommend, item.recommend_note].filter(Boolean).join(': '), recommendShort: recommend,
     detail: item.description && item.description !== firstLine(item.description) ? item.description : '',
-    agent: item.agent ?? null, item: item.id, approve: true,
+    agent: item.agent ?? null, item: item.id, approve: true, approval: item.level ?? null,
   };
 }
 
@@ -161,13 +167,13 @@ function questionCard(notice, q, config) {
     id: notice.id, kind: 'question', level: notice.level, seen: !!notice.seen, at: q.at, project: q.project,
     label: q.project ? t('Question from the manager about {project}', { project: projectName(config, q.project) }) : t('Question from the manager'),
     title: q.question, what: q.context, change: '', risk: '', recommend: q.recommend ?? '', recommendShort: q.recommend ?? '', detail: '',
-    question: q.id, options: q.options, approve: false,
+    question: q.id, options: q.options, approve: false, approval: q.level ?? null,
   };
 }
 
 /**
  * The cards, in the notices' order (not seen first, then by level and time): { id (the notice's), kind (merge,
- * decision, question), level, seen, label, title, what, change, risk, recommend, detail, approve, ... }.
+ * decision, question), level, approval, seen, label, title, what, change, risk, recommend, detail, approve, ... }.
  */
 export function decisionCards({ config = loadConfig(), attention = [], items = [], questions = openQuestions() } = {}) {
   const cards = [];
@@ -239,6 +245,6 @@ export async function decide({ card, action, option, reason } = {}, cards = []) 
 export function questionsLine() {
   const open = openQuestions();
   return open.length
-    ? `Your questions waiting for the owner's answer in the app (ask-owner): ${open.slice(0, 6).map(q => `#${q.id} "${clip(q.question, 100)}" (${q.options.join(' | ')})`).join('; ')}.`
+    ? `Your questions waiting for the owner's answer in the app (ask-owner): ${open.slice(0, 6).map(q => `#${q.id} "${clip(q.question, 100)}" (${q.options.join(' | ')}; level ${q.level ?? '?'})`).join('; ')}.`
     : '';
 }
