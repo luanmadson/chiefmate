@@ -658,6 +658,25 @@ button.tab { background: transparent; border-top: 0; border-left: 0; border-righ
 .live-card.active { border-color: var(--accent); border-left-width: 3px; }
 .live-session[hidden] { display: none; }
 .live-session .chat-column { height: 62vh; min-height: 380px; }
+/* The project's agent in charge: who it is, its requests to the manager (each with its state), then the conversation. */
+.action-big.accent { border-color: var(--accent); }
+.action-big.accent .action-title { color: var(--accent); }
+.charge-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin: 4px 0 14px; }
+.charge-head > div { min-width: 0; flex: 1 1 320px; }
+.charge-head .label { display: block; }
+.charge-name { display: block; color: var(--strong); font-size: 15px; margin: 2px 0 4px; }
+.charge-head .hint { margin: 0; max-width: 760px; }
+.charge-requests { border: 1px solid var(--line); background: var(--panel); margin: 6px 0 14px; }
+.charge-request { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 14px; align-items: start; padding: 10px 14px; border-top: 1px solid var(--line); }
+.charge-request:first-child { border-top: 0; }
+.charge-request-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.charge-request-main .primary { color: var(--strong); overflow-wrap: anywhere; }
+.charge-request-state { display: flex; align-items: center; gap: 8px; }
+.charge-earlier { margin-bottom: 10px; }
+.charge-earlier > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+@media (max-width: 600px) {
+  .charge-request { grid-template-columns: minmax(0, 1fr); }
+}
 .live-head { padding: 10px 0 12px; }
 .live-title .primary { color: var(--strong); font-weight: 600; margin-right: 10px; }
 .live-title .secondary { font: 11.5px var(--mono); color: var(--faint); word-break: break-all; }

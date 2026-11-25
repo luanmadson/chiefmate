@@ -96,7 +96,7 @@ function workOf(run, config = loadConfig()) {
  */
 export function createRun({
   kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [], plan = null, prompt = null,
-  title: givenTitle = null, summary: givenSummary = null,
+  title: givenTitle = null, summary: givenSummary = null, request = null,
 }) {
   const config = loadConfig();
   let title, steps, finalReview, project;
@@ -156,6 +156,8 @@ export function createRun({
     ...(plan != null && plan !== '' ? { plan: Number(String(plan).replace(/^#/, '')) } : {}),
     // The prompt written in the app's prompt builder: the steps get it instead of the one put together from the document.
     ...(prompt?.trim() ? { builderPrompt: prompt.trim() } : {}),
+    // The request of the project's agent in charge that the manager (or the owner) authorized (src/charge.mjs).
+    ...(request != null ? { ownerRequest: Number(request) } : {}),
   });
   describeLater(run.id, run);
   return run;

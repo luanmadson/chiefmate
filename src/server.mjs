@@ -6,6 +6,7 @@ import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { attentionArchive, attentionItems, attentionSummary, markSeen } from './attention.mjs';
 import { autopilotStatus, changeAutopilot } from './autopilot.mjs';
+import { answerRequest, chargeProfileId, inCharge, projectRequests } from './charge.mjs';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
@@ -28,7 +29,7 @@ import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.
 import { activeRun, createRun, describeLater, doingNow, liveRuns, needsBrief, outcomeLater } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import {
-  answerPermission, endSession, finishSessionRequest, interruptSession, openSession, planSession, profileFor, removeQueued, resumeSession, sayToSession,
+  answerPermission, endSession, finishSessionRequest, interruptSession, listSessions, openSession, planSession, profileFor, removeQueued, resumeSession, sayToSession,
   sessionRequests, sessionsState, sessionView,
 } from './sessions.mjs';
 import { talkTo } from './talk.mjs';
@@ -305,6 +306,20 @@ function crew(agents, config, runs, going, queue, conversation) {
 // When this Chiefmate started. The app loads itself again when it changes, after an update or a restart.
 const STARTED = now();
 
+/** Per project: { agent, name, lead, profile, session (its conversation: the open one, else the latest), requests }. */
+function chargeState(config, agents) {
+  const sessions = listSessions().filter(s => s.charge && s.mode === 'app');
+  return Object.fromEntries(Object.keys(config.projects ?? {}).map(id => {
+    const who = inCharge(config, id, agents);
+    const own = sessions.filter(s => s.project === id);
+    const session = own.find(s => s.status !== 'ended') ?? own[0] ?? null;
+    return [id, who ? {
+      agent: who.member.id, name: who.member.name ?? who.member.id, base: who.member.base ?? who.member.id, lead: who.lead, profile: chargeProfileId(id),
+      session: session?.id ?? null, requests: projectRequests(id, 8),
+    } : null];
+  }));
+}
+
 function buildState() {
   const config = loadConfig();
   const agents = loadAgents(config);
@@ -337,6 +352,8 @@ function buildState() {
     ai: { claude: { ...claudeInfo }, account: { status: usage.status ?? null, updated: usage.updated ?? null } },
     update: { ...updateInfo, mode: updateMode(config) },
     projects: Object.entries(config.projects ?? {}).map(([id, p]) => ({ id, name: p.name, site: p.site })),
+    // Each project's agent in charge (src/charge.mjs): who it is, its conversation and its requests to the manager.
+    charge: chargeState(config, agents),
     missions: Object.entries(config.missions ?? {}).map(([id, m]) => ({
       id, name: m.name, description: m.description, project: m.project,
       crew: [...(m.steps ?? []).map(s => s.agent), ...(m.review ? [m.review.agent] : [])],
@@ -536,9 +553,19 @@ export function startServer() {
         case '/api/needs-you/done':
           if (body.session) return reply(res, 200, finishSessionRequest(String(body.session), String(body.id ?? '')));
           return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner', body.answer ?? null));
-        case '/api/decide':
+        case '/api/decide': {
           // The owner's click on a decision card: approve (a merge goes through src/merge.mjs), later, discard or answer.
-          return reply(res, 200, await decide({ card: body.card, action: body.action, option: body.option, reason: body.reason }, buildState().decisions));
+          const decided = await decide({ card: body.card, action: body.action, option: body.option, reason: body.reason }, buildState().decisions);
+          // A request of an agent in charge, authorized on its card, has its run queued: the queue looks at once.
+          if (decided.run) nudgeQueue();
+          return reply(res, 200, decided);
+        }
+        case '/api/request': {
+          // The manager's answer to a request of a project's agent in charge (cli.mjs request <id> approve|hold|ask-owner|reject).
+          const answered = await answerRequest(body.id, String(body.action ?? ''), { note: body.note, recommend: body.recommend, ...brief(body) });
+          if (answered.run) nudgeQueue();
+          return reply(res, 200, answered);
+        }
         case '/api/ask-owner':
           // The manager's question for the owner, shown as a card with one button per option.
           return reply(res, 200, { question: addQuestion(body) });

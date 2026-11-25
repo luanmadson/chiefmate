@@ -1851,6 +1851,131 @@ try {
   failures.push(`no trace checks: ${error.message}`);
 }
 
+// The project's agent in charge, in this process with made-up settings and records: who is in charge, a conversation
+// that only reads and sees only its project, a request sent from it (its block taken out of the text), the manager's
+// answers back in the conversation (hold, ask-owner decided on the owner's card, reject), what the manager, the agent
+// and the app see; and an approval that queues a run linked to the request, only with a project of this installation's
+// settings (read only). Nothing starts: the queue is never nudged here, and nothing is told to a manager.
+try {
+  process.env.CHIEFMATE_SMOKE = '1';
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const charge = await import(src('charge.mjs'));
+  const { loadAgents, loadConfig } = await import(src('config.mjs'));
+  const { saveMemory } = await import(src('leads.mjs'));
+  const { openSession, planSession, sessionHistory } = await import(src('sessions.mjs'));
+  const { decide } = await import(src('decisions.mjs'));
+  const { rulePath } = await import(src('access.mjs'));
+  const { NEWS_EVENTS } = await import(src('news.mjs'));
+  const { readRun } = await import(src('store.mjs'));
+  const { WORKSPACES } = await import(src('util.mjs'));
+  const { t } = await import(src('i18n.mjs'));
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-charge-'));
+  const made = {
+    owner: 'Owner', language: 'en', default_model: 'some-model',
+    projects: {
+      gamma: { name: 'Gamma', about: 'A made-up site.', notes: 'Gamma notes.', local_clone: temp, lead: { name: 'Gamma lead' }, crew: { generalist: {} } },
+      alpha: { name: 'Alpha', crew: { builder: { agent: 'generalist', name: 'Builder' } } },
+      beta: { name: 'Beta' },
+    },
+  };
+  const agents = loadAgents(made);
+  expect(charge.inCharge(made, 'gamma', agents)?.lead && charge.inCharge(made, 'alpha', agents)?.member.id === 'builder' && charge.inCharge(made, 'beta', agents)?.member.id === 'generalist',
+    'the wrong agent is in charge of a project (the lead, else the first of its own crew, else the generalist)');
+  const planned = planSession(made, 'project-gamma-charge');
+  expect(planned.profile.charge && planned.folder.dir === path.resolve(temp) && !planned.prompt.blocksGiven, 'the conversation with the agent in charge opens elsewhere, or starts a turn by itself');
+  let windowRefused = false;
+  try {
+    await openSession('project-gamma-charge', { window: true, config: made });
+  } catch {
+    windowRefused = true;
+  }
+  expect(windowRefused, 'the conversation with the agent in charge opened in a window, outside the app');
+
+  // What the agent says: the request's block taken out of the text, its size and risk read in either language.
+  const said = charge.takeRequest('Agreed: I will send it.\n\n~~~manager-request\n{"asked": "Fix the menu", "plan": "The generalist fixes the menu in header.html", "size": "G", "risk": "alto", "urgency": "now"}\n~~~');
+  expect(said.text === 'Agreed: I will send it.' && said.request?.size === 'L' && said.request.risk === 'high' && said.request.urgency === 'now', `a request was not read from the agent's message: ${JSON.stringify(said)}`);
+  expect(charge.takeRequest('~~~manager-request\n{nope}\n~~~').error && charge.takeRequest('Just talking.').request === null, 'a broken request was taken, or plain talk became one');
+
+  // Each turn: its own instructions (not the manager's work), its role, the project, the memory; it only reads, and
+  // other projects (their working copies and their own clones) and Chiefmate's data/ are out of reach.
+  saveMemory('gamma', '# Gamma memory\n- The owner likes short pages.');
+  const system = charge.chargeSystem(made, 'gamma');
+  expect(system.includes('manager-request') && system.includes('short pages') && system.includes('Gamma notes.') && !system.includes('You are **Chiefmate**') && !system.includes('In this run you work only as the team lead'),
+    "the agent in charge does not get its role, the project's notes and memory, or gets the manager's own work");
+  const turn = charge.chargeTurn(made, { project: 'gamma', cwd: temp }, { cloneOf: p => (p === made.projects.alpha ? path.join(temp, 'alpha-clone') : null) });
+  expect(!turn.tools.some(x => ['Bash', 'Edit', 'Write', 'Agent'].includes(x)) && ['Bash', 'Edit', 'Write', 'Agent'].every(x => turn.disallowed.includes(x)), 'the agent in charge may change things or run commands');
+  const denied = dir => turn.disallowed.includes(`Read(${rulePath(dir)}/**)`);
+  expect(denied(path.join(WORKSPACES, 'alpha')) && denied(path.join(temp, 'alpha-clone')) && denied(data), "the agent in charge may read other projects or Chiefmate's data/");
+
+  // A request from the conversation: recorded once, for the manager; the answers go back to the conversation.
+  const sessionId = 'smoke-charge';
+  mkdirSync(path.join(data, 'sessions'), { recursive: true });
+  writeFileSync(path.join(data, 'sessions', `${sessionId}.json`), JSON.stringify({ id: sessionId, profile: 'project-gamma-charge', name: 'Gamma', tool: 'claude', project: 'gamma', mode: 'app', status: 'open', charge: true, cwd: temp, created: new Date().toISOString() }));
+  const r1 = charge.addRequest({ ...said.request, project: 'gamma', session: sessionId }, made);
+  expect(r1.status === 'pending' && r1.member === 'lead' && charge.addRequest({ ...said.request, project: 'gamma', session: sessionId }, made).id === r1.id, 'a request was not recorded, or the same one was recorded twice');
+  expect(NEWS_EVENTS.includes('owner_request') && charge.requestsLine(made).includes(`#${r1.id} (gamma, waiting for you, large, risk high, the owner said "now")`), `the manager does not hear of the request: ${charge.requestsLine(made)}`);
+  let noReason = false;
+  try {
+    await charge.answerRequest(r1.id, 'hold', {}, made);
+  } catch {
+    noReason = true;
+  }
+  const held = (await charge.answerRequest(r1.id, 'hold', { note: 'The 5-hour window is at 80%.' }, made)).request;
+  const answers = () => sessionHistory(sessionId).items.filter(e => e.kind === 'request').map(e => e.text);
+  expect(noReason && held.status === 'waiting' && answers().some(x => x.includes(`#${r1.id}`) && x.includes('80%')), 'a hold without a reason was taken, or the hold did not reach the conversation');
+  expect(charge.chargeSystem(made, 'gamma').includes(`- #${r1.id}`) && charge.chargeSystem(made, 'gamma').includes(': waiting (the manager: The 5-hour window'), "the agent in charge does not see its request's state");
+  const asked = await charge.answerRequest(r1.id, 'ask-owner', { note: 'Large and risky: your call.', recommend: 'hold' }, made);
+  const q = asked.question;
+  expect(asked.request.status === 'owner' && q.options.join('|') === [t('Authorize'), t('Wait'), t('Refuse')].join('|') && q.recommend === t('Wait') && q.request === r1.id && q.project === 'gamma',
+    `ask-owner did not become a card with Authorize, Wait and Refuse: ${JSON.stringify(q)}`);
+  let overrode = false;
+  try {
+    await charge.answerRequest(r1.id, 'approve', {}, made);
+  } catch {
+    overrode = true;
+  }
+  expect(overrode, "the manager answered a request that waits for the owner's card");
+  const card = { id: `question:${q.id}`, kind: 'question', question: q.id, label: 'Question', title: q.question };
+  const decided = await decide({ card: card.id, action: 'answer', option: t('Refuse') }, [card]);
+  const after = charge.readRequests().find(x => x.id === r1.id);
+  expect(decided.done === 'answered' && after.status === 'rejected' && after.by === 'owner' && !decided.run, `the owner's answer on the card did not decide the request: ${JSON.stringify(after)}`);
+  let again = false;
+  try {
+    await charge.answerRequest(r1.id, 'approve', {}, made);
+  } catch {
+    again = true;
+  }
+  expect(again, 'a request already answered was answered again');
+  const r2 = charge.addRequest({ asked: 'Rename the site', plan: 'Rename every page', size: 'L', risk: 'high', project: 'gamma', session: sessionId }, made);
+  expect((await charge.answerRequest(r2.id, 'reject', { note: 'Out of scope.' }, made)).request.status === 'rejected' && answers().length === 4, 'a refusal did not reach the conversation');
+  const listed = charge.projectRequests('gamma');
+  expect(listed[0].id === r2.id && listed.length === 2 && listed.every(x => !x.history), "the project's page does not get its requests, newest first");
+  const cliOut = execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'request', 'list', '--all'], { env: process.env, stdio: 'pipe', windowsHide: true, encoding: 'utf8' });
+  expect(cliOut.includes(`#${r2.id}`) && cliOut.includes('rejected'), `the command line does not list the requests: ${cliOut}`);
+  let stepRefused = false;
+  try {
+    execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'request', String(r2.id), 'approve'], { env: { ...process.env, CHIEFMATE_RUN: 'x' }, stdio: 'pipe', windowsHide: true, encoding: 'utf8' });
+  } catch {
+    stepRefused = true;
+  }
+  expect(stepRefused, 'a step of a run answered a request of an agent in charge');
+
+  // Approved: a run for the project, linked to the request: an "ask" for a team lead, else a task with the review.
+  const config = loadConfig();
+  const real = Object.keys(config.projects ?? {}).find(id => charge.inCharge(config, id));
+  if (real) {
+    const r3 = charge.addRequest({ asked: 'Smoke ask', plan: 'Smoke: change nothing', size: 'S', risk: 'low', project: real }, config);
+    const approved = await charge.answerRequest(r3.id, 'approve', { note: 'Small and safe.', title: 'Smoke request', summary: 'Made up.' }, config);
+    const run = readRun(approved.run?.id);
+    const lead = charge.inCharge(config, real).lead;
+    expect(approved.request.status === 'approved' && approved.request.run === run?.id && run.ownerRequest === r3.id && run.status === 'queued' && run.kind === (lead ? 'ask' : 'task')
+      && (lead || run.review) && run.instruction.includes('Smoke ask') && run.instruction.includes('Small and safe.'), `an approved request did not queue its run: ${JSON.stringify(run)}`);
+  }
+  rmSync(temp, { recursive: true, force: true, maxRetries: 5 });
+} catch (error) {
+  failures.push(`agent in charge checks: ${error.message}`);
+}
+
 try {
   rmSync(data, { recursive: true, force: true, maxRetries: 5 });
   rmSync(files, { recursive: true, force: true, maxRetries: 5 });
