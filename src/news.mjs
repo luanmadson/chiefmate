@@ -1,5 +1,5 @@
 // The manager's news: when something the owner should know happens (a run ends, fails or pauses, a pull request
-// waits for approval or the owner merges a run's work from the app, a step needs the owner, an update is installed or
+// waits for approval or the owner merges a run's work from the app (or the merge fails), a step needs the owner, an update is installed or
 // blocked, a memory or usage alert, a live session ends, the crew proposes items for the planning board, the autopilot
 // finds a project's queue empty or sends its daily report, the watchdog finds Chiefmate stuck, the owner decides a card
 // in the app), Chiefmate tells the manager in a short system message, and
@@ -19,7 +19,7 @@ import { DATA, ensureDir, now, readJson, writeJson } from './util.mjs';
 
 /** The events Chiefmate tells the manager about, by name (as in "manager_updates"). */
 export const NEWS_EVENTS = [
-  'run_finished', 'run_failed', 'run_paused', 'pr_ready', 'merged', 'needs_you',
+  'run_finished', 'run_failed', 'run_paused', 'pr_ready', 'merged', 'merge_failed', 'needs_you',
   'update_installed', 'update_blocked', 'memory_alert', 'usage_alert', 'session_ended', 'plan_proposed',
   'idle', 'autopilot_report', 'watchdog', 'away', 'back', 'owner_decided',
 ];
@@ -71,8 +71,9 @@ function schedule(first) {
  * Records an event for the manager. "text" describes it for the manager, in English, with the run or session it is
  * about. Returns the event, or null when the settings leave it out. The smoke test's server never tells the manager.
  * later: only kept on disk, for the next Chiefmate to start (the watchdog, when Chiefmate doesn't answer).
+ * urgent: handed over at once, without waiting for the minute (an owner's merge that failed).
  */
-export function reportEvent(kind, text, { config, later = false } = {}) {
+export function reportEvent(kind, text, { config, later = false, urgent = false } = {}) {
   if (process.env.CHIEFMATE_SMOKE || !NEWS_EVENTS.includes(kind)) return null;
   try {
     const settings = newsSettings(config ?? loadConfig());
@@ -86,7 +87,8 @@ export function reportEvent(kind, text, { config, later = false } = {}) {
     const list = readNews();
     list.push(event);
     writeJson(newsFile(), list.slice(-MAX_EVENTS));
-    if (!later) schedule(list[0].at);
+    if (urgent && !later) flushNews().catch(error => console.error('News:', error.message));
+    else if (!later) schedule(list[0].at);
     return event;
   } catch (error) {
     console.error('News:', error.message); // the news never gets in the way of what happened
