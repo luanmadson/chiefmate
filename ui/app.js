@@ -1,4 +1,4 @@
-// The Chiefmate app: fetches the state every 2.5 seconds and redraws only what changed.
+// The Chiefmate app: fetches the state every 2.5 seconds (once a minute with the tab hidden) and redraws only what changed.
 import { face } from './faces.js';
 import { language, locale, setLanguage, t, translatePage } from './i18n.js';
 
@@ -1015,7 +1015,7 @@ function openLive(id) {
 
 async function pollLive() {
   const id = liveChat.id;
-  if (!id || liveChat.loading) return;
+  if (!id || liveChat.loading || document.hidden) return;
   liveChat.loading = true;
   try {
     const data = await api(`/api/session/${encodeURIComponent(id)}${liveChat.data ? `?from=${liveChat.next}` : ''}`);
@@ -2984,7 +2984,7 @@ function drawAgentTalk(f) {
 
 async function pollAgent() {
   const id = agentPanel.run;
-  if (!id || agentPanel.loading) return;
+  if (!id || agentPanel.loading || document.hidden) return;
   agentPanel.loading = true;
   let again = false;
   try {
@@ -3080,14 +3080,27 @@ function writing() {
   );
 }
 
+let stateTag = null; // the tag of the last state read: an unchanged state answers 304, with no body
+
+/** The state, or the one already here when it did not change. */
+async function fetchState() {
+  const r = await fetch('/api/state', { cache: 'no-store', headers: stateTag && state ? { 'if-none-match': stateTag } : {} });
+  if (r.status === 304) return state;
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || t('Error {code}', { code: r.status }));
+  stateTag = r.headers.get('etag');
+  return data;
+}
+
 async function refresh() {
   let next;
   try {
-    next = await api('/api/state');
+    next = await fetchState();
   } catch {
     drawOffline();
     return;
   }
+  const fresh = next !== state;
   if (!started) {
     await setLanguage(next.language);
     translatePage();
@@ -3105,7 +3118,7 @@ async function refresh() {
   }
   state = next;
   online = true;
-  if (state.now) skew = new Date(state.now).getTime() - Date.now();
+  if (fresh && state.now) skew = new Date(state.now).getTime() - Date.now();
   $('#version').textContent = `Chiefmate ${state.version}`;
   drawPresence();
   drawFocus();
@@ -3509,4 +3522,18 @@ drawClock();
 setInterval(drawClock, 15_000);
 setInterval(tickClocks, 1000);
 refresh();
-setInterval(refresh, 2500);
+// With the tab hidden (or the phone's screen off), the state is read once a minute, enough for the title and the
+// app's badge; the open conversation and agent panel wait. Back in view, everything is read at once.
+let lastRefresh = Date.now();
+setInterval(() => {
+  if (document.hidden && Date.now() - lastRefresh < 60_000) return;
+  lastRefresh = Date.now();
+  refresh();
+}, 2500);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  lastRefresh = Date.now();
+  refresh();
+  pollLive();
+  pollAgent();
+});

@@ -1,7 +1,9 @@
 // The app (http://localhost:4747) and the API it uses. It only answers this computer.
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { attentionItems, attentionSummary, markSeen } from './attention.mjs';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
@@ -51,9 +53,31 @@ const SAFE_HEADERS = {
   'x-frame-options': 'DENY',
 };
 
-function reply(res, code, data) {
-  res.writeHead(code, { ...SAFE_HEADERS, 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-  res.end(JSON.stringify(data));
+// Answers in JSON, compressed with gzip when the browser takes it and the answer is worth it (the state is ~140 KB).
+function reply(res, code, data, headers = {}) {
+  let body = Buffer.from(JSON.stringify(data));
+  const head = { ...SAFE_HEADERS, 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', vary: 'accept-encoding', ...headers };
+  if (body.length > 1024 && /\bgzip\b/.test(res.req?.headers['accept-encoding'] ?? '')) {
+    body = gzipSync(body);
+    head['content-encoding'] = 'gzip';
+  }
+  res.writeHead(code, head);
+  res.end(body);
+}
+
+// The state with a tag of its content, leaving out "now": the app sends the tag back, and an unchanged state
+// answers 304 with no body. Free memory and Chiefmate's own RAM move on every reading, so the tag counts them in
+// steps (128 MB and 8 MB), about what the app shows.
+function replyState(req, res) {
+  const state = buildState();
+  const { now: _, computer: c, ...rest } = state;
+  const steady = { ...rest, computer: { ...c, memory: { ...c.memory, free: Math.round(c.memory.free / 2 ** 27) }, chiefmate: { ram: Math.round(c.chiefmate.ram / 2 ** 23) } } };
+  const etag = `"${createHash('sha1').update(JSON.stringify(steady)).digest('base64url')}"`;
+  if (req.headers['if-none-match'] === etag) {
+    res.writeHead(304, { ...SAFE_HEADERS, etag, 'cache-control': 'no-store', vary: 'accept-encoding' });
+    return res.end();
+  }
+  reply(res, 200, state, { etag });
 }
 
 function serveFile(res, pathname) {
@@ -375,7 +399,7 @@ export function startServer() {
       const url = new URL(req.url, `http://${req.headers.host}`);
       if (req.method === 'GET') {
         if (url.pathname === '/api/health') return reply(res, 200, { ok: true, version: VERSION });
-        if (url.pathname === '/api/state') return reply(res, 200, buildState());
+        if (url.pathname === '/api/state') return replyState(req, res);
         if (url.pathname === '/api/computer') {
           await processes(5000);
           return reply(res, 200, computer());

@@ -67,6 +67,25 @@ try {
     failures.push('the server did not start');
   } else {
     const state = await (await fetch(`${base}/api/state`)).json();
+    // The app's refresh: compressed, and an unchanged state (apart from "now") answers 304 with no body. (node:http,
+    // as fetch hides the compression.)
+    const { get } = await import('node:http');
+    const read = headers => new Promise((resolve, reject) => {
+      get({ host: '127.0.0.1', port, path: '/api/state', headers: { host: `localhost:${port}`, ...headers } }, r => {
+        let size = 0;
+        r.on('data', d => (size += d.length));
+        r.on('end', () => resolve({ status: r.statusCode, headers: r.headers, size }));
+      }).on('error', reject);
+    });
+    const packed = await read({ 'accept-encoding': 'gzip' });
+    expect(packed.status === 200 && packed.headers['content-encoding'] === 'gzip' && packed.size > 0, '/api/state is not compressed with gzip');
+    let unchanged = false;
+    for (let i = 0; i < 5 && packed.headers.etag && !unchanged; i++) {
+      if (i) await new Promise(r => setTimeout(r, 200));
+      const again = await read({ 'if-none-match': packed.headers.etag });
+      unchanged = again.status === 304 && again.size === 0;
+    }
+    expect(unchanged, '/api/state has no tag, or an unchanged state did not answer 304');
     for (const key of ['now', 'version', 'language', 'ai', 'update', 'projects', 'missions', 'crew', 'teams', 'needs', 'prompts', 'focus', 'running', 'current', 'parallel', 'sessions', 'queue', 'history', 'usage', 'manager', 'computer', 'plan', 'planning', 'alerts', 'attention']) {
       expect(key in state, `/api/state has no "${key}"`);
     }
