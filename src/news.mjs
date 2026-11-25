@@ -1,7 +1,7 @@
 // The manager's news: when something the owner should know happens (a run ends, fails or pauses, a pull request
 // waits for approval, a step needs the owner, an update is installed or blocked, a memory or usage alert, a live
-// session ends), Chiefmate tells the manager in a short system message, and the manager writes the owner a notice in
-// the conversation. Events close together (within WINDOW_MS) go as one message; while the manager answers, they wait
+// session ends, the crew proposes items for the planning board), Chiefmate tells the manager in a short system
+// message, and the manager writes the owner a notice in the conversation (and triages the proposals). Events close together (within WINDOW_MS) go as one message; while the manager answers, they wait
 // in the conversation's queue. The setting "manager_updates" turns this off or picks the events.
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
@@ -10,7 +10,7 @@ import { DATA, ensureDir, now, readJson, writeJson } from './util.mjs';
 /** The events Chiefmate tells the manager about, by name (as in "manager_updates"). */
 export const NEWS_EVENTS = [
   'run_finished', 'run_failed', 'run_paused', 'pr_ready', 'needs_you',
-  'update_installed', 'update_blocked', 'memory_alert', 'usage_alert', 'session_ended',
+  'update_installed', 'update_blocked', 'memory_alert', 'usage_alert', 'session_ended', 'plan_proposed',
 ];
 
 // Events within a minute of the first one go to the manager together.

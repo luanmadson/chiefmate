@@ -38,13 +38,13 @@ export const livePublic = l => ({ run: l.run, title: l.title, project: l.project
 // No agent pushes anything to GitHub or changes it: Chiefmate itself pushes the branch and opens the pull request.
 export const ALWAYS_DISALLOWED = ['Bash(git push:*)', 'Bash(gh pr:*)', 'Bash(gh repo:*)', 'Bash(git remote:*)'];
 
-/** How a step asks for the owner (see src/needs.mjs). */
-function needsYouCommand() {
+/** Chiefmate's command line, for a step: to ask for the owner (src/needs.mjs) and to propose items (src/planning.mjs). */
+function cliCommand() {
   const cli = path.join(ROOT, 'src', 'cli.mjs').replaceAll('\\', '/');
-  return 'node ' + (/\s/.test(cli) ? '"' + cli + '"' : cli) + ' needs-you';
+  return 'node ' + (/\s/.test(cli) ? '"' + cli + '"' : cli);
 }
 
-function crewRules(config, project) {
+function crewRules(config, project, projectId) {
   const owner = languageName(config.language || 'en');
   const content = languageName(project.language || config.language || 'en');
   return `## Chiefmate rules (for the whole crew)
@@ -54,8 +54,9 @@ function crewRules(config, project) {
 - The project's documentation outranks your own preferences. Read what you need before changing anything.
 - Write project content in the language the project already uses.
 - If you get stuck, undo whatever is half-done and explain it in your report.
+- If you find work worth doing outside your part, don't do it: propose it for ${config.owner || 'the owner'}'s planning board, during the step or at its end, with \`${cliCommand()} plan propose ${projectId} "<short title>" --summary "<1-2 sentences: what and why>" --agent <member who should do it> --priority high|medium|low\`. Propose only what has a clear gain, one item per idea, and check \`${cliCommand()} plan list --project ${projectId} --all\` first so you don't repeat an item. The manager triages the proposals and ${config.owner || 'the owner'} decides. Don't propose fixes within your own task or the next run of a mission already approved: those you just do.
 - Never read, list or copy Chiefmate's \`data/\` folder (including \`data/browser-profile\`, the browser profile Chiefmate uses for the owner), other projects' working copies or other projects' personal documentation. You only get the folders this step needs.
-- When you need ${config.owner || 'the owner'} to act (sign in somewhere, confirm something, do what only a person can do), don't stop and don't work around it: run \`${needsYouCommand()} "<what to do, in ${owner}>" [--url <address>] [--wait] [--check "<command that succeeds once it is done>"]\` with the Bash tool's timeout at 600000 ms. Chiefmate shows the request to the owner and opens the address in their browser. With --wait the command returns once the owner clicks Done (or the check succeeds); if it says it is still waiting, run the command it prints. If it gives up waiting, finish what you can and say in your report what is left for the owner. Never type passwords or codes yourself.
+- When you need ${config.owner || 'the owner'} to act (sign in somewhere, confirm something, do what only a person can do), don't stop and don't work around it: run \`${cliCommand()} needs-you "<what to do, in ${owner}>" [--url <address>] [--wait] [--check "<command that succeeds once it is done>"]\` with the Bash tool's timeout at 600000 ms. Chiefmate shows the request to the owner and opens the address in their browser. With --wait the command returns once the owner clicks Done (or the check succeeds); if it says it is still waiting, run the command it prints. If it gives up waiting, finish what you can and say in your report what is left for the owner. Never type passwords or codes yourself.
 - ${config.owner || 'The owner'} may write to you directly from the app while you work: the message arrives as your next turn, with your work kept as it was. Answer it in one short message, then go on. To ask ${config.owner || 'the owner'} something, use needs-you with --wait: they can answer from the app, and the answer comes back as the command's output.
 - Your last message is the step's report, in ${owner}: short markdown with what you did (and the files), the sources you used, what you left out and why, and what the reviewer should check.`;
 }
@@ -281,7 +282,7 @@ export function promptParts({ run, step, project, previous, finalReview, changes
     for (const p of reports) lines.push('', `### ${p.agent}${p.role ? `, ${p.role === 'plan' ? 'planning' : 'first review'}` : ''} (${p.status})`, p.report || p.error || '(no report)');
     add('reports', 'The reports of the steps before', lines);
   }
-  add('rules', 'Chiefmate (src/runs.mjs, crewRules)', ['', crewRules(config, project)]);
+  add('rules', 'Chiefmate (src/runs.mjs, crewRules)', ['', crewRules(config, project, run.project)]);
   return parts;
 }
 

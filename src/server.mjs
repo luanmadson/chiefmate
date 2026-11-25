@@ -456,7 +456,7 @@ export function startServer() {
           return reply(res, 200, { stopped: await stopProject(String(body.project ?? ''), body.pids) });
         }
         case '/api/planning':
-          return reply(res, 200, { item: changePlan(body) });
+          return reply(res, 200, { item: await changePlan(body) });
         case '/api/reset-grants':
           return reply(res, 200, { resets: changeResets(body) });
         case '/api/usage-reader': {

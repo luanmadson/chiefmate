@@ -363,6 +363,24 @@ details summary { cursor: pointer; }
 .plan-waiting li { padding: 6px 0; border-bottom: 1px solid var(--line); }
 .plan-waiting li:last-child { border-bottom: 0; }
 .plan-waiting .primary { color: var(--strong); }
+/* The owner's decisions on the crew's proposals: a short ordered list with large buttons, dragged to reorder */
+.plan-decisions ol { list-style: none; margin: 8px 0 0; padding: 0; }
+.plan-decision { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.plan-decision:last-child { border-bottom: 0; }
+.plan-decision[draggable] { cursor: grab; }
+.plan-decision.dragging { opacity: 0.5; }
+.plan-grip { color: var(--muted); letter-spacing: -2px; user-select: none; }
+.plan-decision-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.plan-recommend { font-size: 12px; color: var(--accent); }
+.plan-recommend.recommend-discard { color: var(--muted); }
+.plan-decide { display: flex; gap: 8px; flex-shrink: 0; }
+.plan-decide .button { min-width: 92px; padding: 9px 16px; }
+.plan-reason { display: block; font-size: 12px; color: var(--muted); margin-top: 6px; }
+.plan-turn { margin: -8px 0 18px; font-size: 12px; }
+.plan-quick .tab { background: transparent; border-top: 0; border-left: 0; border-right: 0; font: inherit; font-size: 12.5px; cursor: pointer; }
+.plan-row.plan-triaged td:first-child { box-shadow: inset 2px 0 0 var(--warn); color: var(--warn); }
+.plan-row.plan-discarded .primary { color: var(--muted); text-decoration: line-through; }
+@media (max-width: 700px) { .plan-decision { flex-wrap: wrap; } .plan-decide { width: 100%; } }
 .plan-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0 16px; margin-bottom: 8px; }
 .plan-filters label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
 .plan-table td:first-child { width: 44px; color: var(--muted); }

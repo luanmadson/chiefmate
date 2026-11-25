@@ -514,7 +514,7 @@ function drawClock() {
 const newsEvent = kind => ({
   run_finished: t('run finished'), run_failed: t('run failed'), run_paused: t('run paused'), pr_ready: t('pull request ready'),
   needs_you: t('needs you'), update_installed: t('update installed'), update_blocked: t('update blocked'),
-  memory_alert: t('memory alert'), usage_alert: t('usage alert'), session_ended: t('live session ended'),
+  memory_alert: t('memory alert'), usage_alert: t('usage alert'), session_ended: t('live session ended'), plan_proposed: t('new proposal'),
 }[kind] ?? kind);
 
 let chatScrolled = false;
@@ -1166,7 +1166,7 @@ const PAGE_PARTS = ['#project-title', '#project-more', '#project-status', '#proj
 const TAB_PARTS = { overview: '#project-overview', crew: '#project-crew', tasks: '#project-tasks', planning: '#project-planning', context: '#project-context', builder: '#project-builder' };
 
 const projectHash = (id, tab = 'overview') => `#project/${encodeURIComponent(id)}${tab === 'overview' ? '' : `/${tab}`}`;
-const projectOpenItems = (id, p) => planItemsNow().filter(i => !i.archived && i.status !== 'done' && (i.project === id || i.project === p?.name));
+const projectOpenItems = (id, p) => planItemsNow().filter(i => openItem(i) && (i.project === id || i.project === p?.name));
 const noCloneAttr = info => (info && !info.clone ? ` disabled title="${esc(t('No clone of yours on this computer: set "local_clone" in its settings.'))}"` : '');
 
 function drawProjectPage() {
@@ -1278,14 +1278,14 @@ function drawProjectMore(id, info) {
 /** What waits for you in this project, at the top: the crew's requests and the board's items waiting for you. */
 function drawProjectNeeds(id, p) {
   const needs = (online ? state.needs ?? [] : []).filter(n => n.project === id);
-  const items = projectOpenItems(id, p).filter(i => i.status === 'waiting_owner');
+  const items = projectOpenItems(id, p).filter(i => ['triaged', 'waiting_owner'].includes(i.status));
   const rows = [
     ...needs.map(n => `<div class="project-need">
       <div><span class="primary">${esc(n.what)}</span><span class="hint">${esc(n.title)}${n.url ? ` · <a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}</span></div>
       <button type="button" class="button small" ${n.session ? `data-needs-session="${esc(n.session)}"` : `data-needs-done="${esc(n.run)}"`} data-request="${esc(n.id)}">${esc(t('Mark as done'))}</button></div>`),
     ...items.map(i => `<div class="project-need">
-      <div><span class="primary">#${i.id} ${esc(i.title)}</span><span class="hint">${esc(t('On the board, waiting for you'))}</span></div>
-      <a class="button secondary small" href="${projectHash(id, 'planning')}">${esc(t('See'))}</a></div>`),
+      <div><span class="primary">#${i.id} ${esc(i.title)}</span><span class="hint">${esc(i.status === 'triaged' ? t('A proposal waiting for your decision') : t('On the board, waiting for you'))}</span></div>
+      <a class="button secondary small" href="${i.status === 'triaged' ? '#planning' : projectHash(id, 'planning')}">${esc(i.status === 'triaged' ? t('Decide') : t('See'))}</a></div>`),
   ];
   const html = rows.length ? `<div class="project-needs" role="alert"><div class="label">${esc(t('Waiting for you ({count})', { count: rows.length }))}</div>${rows.join('')}</div>` : '';
   draw('#project-needs', html, html);
@@ -1377,7 +1377,7 @@ function drawProjectHistory(info) {
 
 /** The project's items on the planning board (open ones, in the board's order). */
 function drawProjectPlanning(id, p) {
-  const items = planItemsNow().filter(i => !i.archived && i.status !== 'done' && (i.project === id || i.project === p.name));
+  const items = planItemsNow().filter(i => openItem(i) && (i.project === id || i.project === p.name));
   const rows = items.map(i => `<tr>
       <td class="num">#${i.id}</td>
       <td><span class="primary">${esc(i.title)}</span>${i.description ? `<span class="secondary plan-description">${esc(i.description)}</span>` : ''}</td>
@@ -2281,6 +2281,10 @@ function drawPlan() {
 const priorityLabel = p => ({ high: t('High'), medium: t('Medium'), low: t('Low') })[p] ?? p;
 function planState(status) {
   switch (status) {
+    case 'proposed': return [t('Proposed'), 'neutral'];
+    case 'triaged': return [t('Waiting for your decision'), 'warn'];
+    case 'approved': return [t('Approved, waiting its turn'), 'info'];
+    case 'discarded': return [t('Discarded'), 'neutral'];
     case 'future': return [t('Future'), 'neutral'];
     case 'todo': return [t('To do'), 'neutral'];
     case 'queued': return [t('Queued'), 'info'];
@@ -2294,7 +2298,17 @@ const planFilter = { project: '', priority: '', status: 'open', sort: 'priority'
 let editingItem = null; // the item being edited in place: the list is not redrawn meanwhile
 const planOptions = (list, selected) => list.map(([value, label]) => `<option value="${esc(value)}"${value === selected ? ' selected' : ''}>${esc(label)}</option>`).join('');
 const planItemsNow = () => state?.planning?.items ?? [];
+const CLOSED_ITEMS = ['done', 'discarded'];
+const openItem = i => !i.archived && !CLOSED_ITEMS.includes(i.status);
+const byRank = (a, b) => (a.rank ?? 1e9) - (b.rank ?? 1e9) || a.id - b.id;
 const waitingItems = () => planItemsNow().filter(i => !i.archived && i.status === 'waiting_owner');
+// The manager's triaged proposals, in the owner's order: what the owner decides with "Do", "Later" or "Discard".
+const decisionItems = () => planItemsNow().filter(i => !i.archived && i.status === 'triaged').sort(byRank);
+const approvedItems = () => planItemsNow().filter(i => !i.archived && i.status === 'approved').sort(byRank);
+const recommendLabel = r => ({ now: t('Do now'), later: t('Later'), discard: t('Discard') })[r] ?? r ?? '';
+const firstLine = text => String(text ?? '').split('\n').find(l => l.trim())?.trim() ?? '';
+let discarding = null; // the decision being discarded: its reason is asked in place
+let dragging = null; // the decision being dragged: the panel is not redrawn meanwhile
 
 /** The projects in the settings, then any other name the items use (from the board the manager kept before). */
 function planProjects() {
@@ -2335,14 +2349,21 @@ function planRow(i) {
   const dates = t('Created {created} · updated {updated}', { created: shortDate(i.created), updated: shortDate(i.updated) });
   const priorities = state.planning.priorities.map(p => [p, priorityLabel(p)]);
   const statuses = state.planning.statuses.map(s => [s, planState(s)[0]]);
+  // Who proposed it, who would do it, the manager's recommendation and, when discarded, why.
+  const about = [
+    i.proposed_by === 'owner' ? t('Proposed by you') : i.proposed_by ? t('Proposed by {who}', { who: agentName(i.proposed_by, i.project) }) : '',
+    i.agent ? t('for {agent}', { agent: agentName(i.agent, i.project) }) : '',
+    i.recommend ? t('manager: {recommendation}', { recommendation: recommendLabel(i.recommend) }) + (i.recommend_note ? ` (${i.recommend_note})` : '') : '',
+    i.status === 'discarded' ? t('discarded: {reason}', { reason: i.discard_reason || t('no reason given') }) : '',
+  ].filter(Boolean).join(' · ');
   return `<tr class="plan-row plan-${esc(i.status)}${i.archived ? ' archived' : ''}" data-item="${i.id}">
     <td class="num">#${i.id}</td>
-    <td><span class="primary">${esc(i.title)}</span>${i.description ? `<span class="secondary plan-description">${esc(i.description)}</span>` : ''}<span class="secondary">${esc(dates)}${i.archived ? ` · ${esc(t('archived {when}', { when: shortDate(i.archived) }))}` : ''}</span></td>
+    <td><span class="primary">${esc(i.title)}</span>${i.description ? `<span class="secondary plan-description">${esc(i.description)}</span>` : ''}${about ? `<span class="secondary">${esc(about)}</span>` : ''}<span class="secondary">${esc(dates)}${i.archived ? ` · ${esc(t('archived {when}', { when: shortDate(i.archived) }))}` : ''}</span></td>
     <td>${projectLink(i.project)}</td>
     <td><select class="inline-select priority-${esc(i.priority)}" data-plan-field="priority" aria-label="${esc(t('Priority'))}">${planOptions(priorities, i.priority)}</select></td>
     <td><select class="inline-select state-${planState(i.status)[1]}" data-plan-field="status" aria-label="${esc(t('Status'))}">${planOptions(statuses, i.status)}</select></td>
     <td>${planLinks(i)}</td>
-    <td class="row-actions"><div class="plan-actions">${i.archived
+    <td class="row-actions"><div class="plan-actions">${i.archived || i.status === 'discarded'
       ? `<button type="button" class="button secondary small" data-plan-restore="${i.id}">${esc(t('Restore'))}</button>`
       : `<button type="button" class="button secondary small" data-plan-edit="${i.id}">${esc(t('Edit'))}</button><button type="button" class="button secondary small" data-plan-archive="${i.id}">${esc(t('Archive'))}</button>`}</div></td>
   </tr>`;
@@ -2352,7 +2373,9 @@ function visibleItems() {
   const f = planFilter;
   const list = planItemsNow().filter(i =>
     (f.status === 'archived' ? !!i.archived : !i.archived)
-    && (f.status === 'open' ? i.status !== 'done' : ['all', 'archived'].includes(f.status) || i.status === f.status)
+    && (f.status === 'open' ? !CLOSED_ITEMS.includes(i.status)
+      : f.status === 'waiting' ? ['triaged', 'waiting_owner'].includes(i.status)
+      : ['all', 'archived'].includes(f.status) || i.status === f.status)
     && (!f.project || i.project === f.project) && (!f.priority || i.priority === f.priority));
   if (f.sort === 'updated') list.sort((a, b) => (b.updated ?? '').localeCompare(a.updated ?? ''));
   else if (f.sort === 'number') list.sort((a, b) => a.id - b.id);
@@ -2363,19 +2386,53 @@ function drawPlanning(force = false) {
   if (!state?.planning) return;
   const items = planItemsNow();
   const waiting = waitingItems();
-  draw('#counter-planning', String(waiting.length), waiting.length ? String(waiting.length) : '');
-  $('#counter-planning').parentElement.title = waiting.length ? t('{count} item(s) waiting for you', { count: waiting.length }) : '';
+  const deciding = decisionItems();
+  const approved = approvedItems();
+  const needs = waiting.length + deciding.length;
+  draw('#counter-planning', String(needs), needs ? String(needs) : '');
+  $('#counter-planning').parentElement.title = needs ? t('{count} item(s) waiting for you', { count: needs }) : '';
 
-  const highlight = waiting.length
-    ? `<div class="panel plan-waiting"><div class="label">${esc(t('Waiting for you ({count})', { count: waiting.length }))}</div><ul>${waiting.map(i =>
+  // First, what needs you: the decisions (in your order, which you can drag), then the work waiting for your action.
+  const decision = i => discarding === i.id
+    ? `<li class="plan-decision" data-item="${i.id}"><div class="plan-decision-text"><span class="primary">#${i.id} ${esc(i.title)}</span>
+        <label class="plan-reason"><span>${esc(t('Why discard it? (optional, one line)'))}</span><input type="text" maxlength="200" data-discard-reason></label></div>
+        <div class="plan-decide"><button type="button" class="button danger" data-plan-decide="discard" data-confirm>${esc(t('Discard'))}</button><button type="button" class="button secondary" data-plan-decide="cancel">${esc(t('Cancel'))}</button></div></li>`
+    : `<li class="plan-decision" data-item="${i.id}" draggable="true" title="${esc(t('Drag to change the order'))}">
+        <span class="plan-grip" aria-hidden="true">⋮⋮</span>
+        ${face(member(i.agent, i.project), 'still', 22)}
+        <div class="plan-decision-text">
+          <span class="primary">#${i.id} ${esc(i.title)}</span>
+          ${i.description ? `<span class="secondary">${esc(firstLine(i.description))}</span>` : ''}
+          <span class="hint">${projectLink(i.project)} · ${esc(t('for {agent}', { agent: agentName(i.agent, i.project) }))} · ${esc(priorityLabel(i.priority))}</span>
+          <span class="plan-recommend recommend-${esc(i.recommend ?? '')}">${esc(t('Manager: {recommendation}', { recommendation: recommendLabel(i.recommend) }))}${i.recommend_note ? ` · ${esc(i.recommend_note)}` : ''}</span>
+        </div>
+        <div class="plan-decide"><button type="button" class="button" data-plan-decide="approve">${esc(t('Do'))}</button><button type="button" class="button secondary" data-plan-decide="later">${esc(t('Later'))}</button><button type="button" class="button danger" data-plan-decide="discard">${esc(t('Discard'))}</button></div>
+      </li>`;
+  const decisions = deciding.length
+    ? `<div class="panel plan-waiting plan-decisions"><div class="label">${esc(t('Decide ({count})', { count: deciding.length }))}</div>
+      <p class="hint">${esc(t('Proposals from the crew, triaged by the manager. "Do" makes a task for the agent shown; one at a time per project, in this order.'))}</p>
+      <ol>${deciding.map(decision).join('')}</ol></div>`
+    : '';
+  const turn = approved.length
+    ? `<div class="plan-turn hint">${esc(t('Approved, waiting their turn:'))} ${approved.map(i => `<span class="num">#${i.id}</span> ${esc(i.title)} (${esc(agentName(i.agent, i.project))})`).join(' · ')}</div>`
+    : '';
+  const action = waiting.length
+    ? `<div class="panel plan-waiting"><div class="label">${esc(t('Waiting for your action ({count})', { count: waiting.length }))}</div><ul>${waiting.map(i =>
       `<li><span class="num">#${i.id}</span> <span class="hint">${projectLink(i.project)}</span> <span class="primary">${esc(i.title)}</span>${i.pr ? ` · ${prLink(i.pr)}` : ''}</li>`).join('')}</ul></div>`
     : '';
-  draw('#planning-waiting', highlight, highlight);
+  const highlight = decisions + turn + action;
+  if (!$('#planning-waiting').contains(document.activeElement) && !dragging) draw('#planning-waiting', highlight, highlight);
+
+  // Quick filters: the proposals, what waits for you and what was discarded, each with its count.
+  const count = status => items.filter(i => !i.archived && (status === 'waiting' ? ['triaged', 'waiting_owner'].includes(i.status) : i.status === status)).length;
+  const quick = [['open', t('Open items')], ['proposed', t('Proposed items'), count('proposed')], ['waiting', t('Needs you'), count('waiting')], ['discarded', t('Discarded items'), count('discarded')], ['all', t('All')]]
+    .map(([key, label, n]) => `<button type="button" class="tab${planFilter.status === key ? ' active' : ''}" data-plan-quick="${key}">${esc(label)}${n ? `<span class="counter">${n}</span>` : ''}</button>`).join('');
+  draw('#planning-quick', quick, quick);
 
   const projects = planProjects();
   const filters = `<label><span>${esc(t('Project'))}</span><select data-plan-filter="project">${planOptions([['', t('All projects')], ...projects], planFilter.project)}</select></label>
     <label><span>${esc(t('Priority'))}</span><select data-plan-filter="priority">${planOptions([['', t('All priorities')], ...state.planning.priorities.map(p => [p, priorityLabel(p)])], planFilter.priority)}</select></label>
-    <label><span>${esc(t('Status'))}</span><select data-plan-filter="status">${planOptions([['open', t('Open (not completed)')], ['all', t('All')], ...state.planning.statuses.map(s => [s, planState(s)[0]]), ['archived', t('Archived')]], planFilter.status)}</select></label>
+    <label><span>${esc(t('Status'))}</span><select data-plan-filter="status">${planOptions([['open', t('Open (not completed)')], ['waiting', t('Needs you')], ['all', t('All')], ...state.planning.statuses.map(s => [s, planState(s)[0]]), ['archived', t('Archived')]], planFilter.status)}</select></label>
     <label><span>${esc(t('Order'))}</span><select data-plan-filter="sort">${planOptions([['priority', t('By priority')], ['updated', t('Recently updated')], ['number', t('By number')]], planFilter.sort)}</select></label>`;
   if (!$('#planning-filters').contains(document.activeElement)) draw('#planning-filters', filters, filters);
 
@@ -2406,6 +2463,62 @@ $('#planning-filters').addEventListener('change', event => {
   planFilter[key] = event.target.value;
   event.target.blur();
   drawPlanning(true);
+});
+
+$('#planning-quick').addEventListener('click', event => {
+  const button = event.target.closest('[data-plan-quick]');
+  if (!button) return;
+  planFilter.status = button.dataset.planQuick;
+  delete signatures['#planning-filters'];
+  drawPlanning(true);
+});
+
+// The decisions: "Do", "Later" and "Discard" (which asks for a reason in place), and the order, by dragging.
+$('#planning-waiting').addEventListener('click', async event => {
+  const button = event.target.closest('[data-plan-decide]');
+  const row = button?.closest('[data-item]');
+  if (!row) return;
+  const id = Number(row.dataset.item);
+  const decision = button.dataset.planDecide;
+  if (decision === 'cancel' || (decision === 'discard' && !('confirm' in button.dataset))) {
+    discarding = decision === 'cancel' ? null : id;
+    delete signatures['#planning-waiting'];
+    drawPlanning(true);
+    $('#planning-waiting [data-discard-reason]')?.focus();
+    return;
+  }
+  const reason = row.querySelector('[data-discard-reason]')?.value ?? '';
+  for (const b of row.querySelectorAll('button')) b.disabled = true;
+  discarding = null;
+  const done = { approve: t('Approved: it becomes a task for its agent, in its turn.'), later: t('Left for later. It is under "Future".'), discard: t('Discarded. It is under "Discarded", where you can restore it.') }[decision];
+  if (document.activeElement) document.activeElement.blur();
+  await changeItem({ action: decision, id, reason }, done);
+});
+$('#planning-waiting').addEventListener('keydown', event => {
+  if (event.key === 'Enter' && event.target.matches('[data-discard-reason]')) event.target.closest('[data-item]').querySelector('[data-confirm]').click();
+});
+$('#planning-waiting').addEventListener('dragstart', event => {
+  const row = event.target.closest('.plan-decision[draggable]');
+  if (!row) return;
+  dragging = row;
+  row.classList.add('dragging');
+  event.dataTransfer.effectAllowed = 'move';
+});
+$('#planning-waiting').addEventListener('dragover', event => {
+  const over = event.target.closest('.plan-decision');
+  if (!dragging || !over || over === dragging) return;
+  event.preventDefault();
+  const { top, height } = over.getBoundingClientRect();
+  over.parentElement.insertBefore(dragging, event.clientY > top + height / 2 ? over.nextSibling : over);
+});
+$('#planning-waiting').addEventListener('dragend', async () => {
+  if (!dragging) return;
+  const list = dragging.parentElement;
+  dragging.classList.remove('dragging');
+  dragging = null;
+  const ids = [...list.querySelectorAll('[data-item]')].map(r => Number(r.dataset.item));
+  if (ids.join() !== decisionItems().map(i => i.id).join()) await changeItem({ action: 'reorder', ids }, t('Order saved.'));
+  else drawPlanning(true);
 });
 
 async function changeItem(body, done) {

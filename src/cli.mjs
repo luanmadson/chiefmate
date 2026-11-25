@@ -80,11 +80,24 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs plan [list] [--project <id>] [--status <s>] [--priority <p>] [--all]
                                                 the planning board: open items by priority (--all: done and archived too)
   node src/cli.mjs plan add <project> "<title>" [--priority high|medium|low] [--status <s>] [--description "<text>"]
-                                                adds an item; statuses: future, todo, queued, in_progress, waiting_owner, done
-  node src/cli.mjs plan set <n> [--title ...] [--description ...] [--project ...] [--priority ...] [--status ...]
+                                                adds an item; statuses: proposed, triaged, approved, future, todo, queued,
+                                                in_progress, waiting_owner, done, discarded
+  node src/cli.mjs plan set <n> [--title ...] [--description ...] [--project ...] [--priority ...] [--status ...] [--agent ...]
                             [--run <id>] [--pr <url>] [--archive | --restore]
                                                 changes item n (--run "" or --pr "" removes the link)
   node src/cli.mjs plan done <n>                marks item n as done
+  node src/cli.mjs plan propose <project> "<short title>" --summary "<1-2 sentences>" [--agent <member>] [--priority ...]
+                                                for the crew: proposes an item (status "proposed", the author recorded);
+                                                the manager hears of it and triages it, the owner decides
+  node src/cli.mjs plan triage <n> --recommend now|later|discard [--agent <member>] [--priority ...] [--note "..."]
+                            [--order <position>]
+                                                for the manager: the item then waits for the owner's decision
+  node src/cli.mjs plan approve|later|discard <n> [--reason "..."] [--duplicate-of <m>]
+                                                the decision: "approve" makes it a task for its agent (one approved task
+                                                per project at a time, the others wait in order), "later" leaves it for
+                                                the future, "discard" sets it aside with a reason (plan restore <n> brings
+                                                it back)
+  node src/cli.mjs plan order <n> <n> ...       puts these items first in the owner's order, in this order
   node src/cli.mjs chat [n]                     the conversation with the manager: the last n messages (10), what it is
                                                 doing now and the messages waiting in the queue
   node src/cli.mjs chat say "<message>"         writes to the manager; while it answers, the message waits in the queue
@@ -234,21 +247,77 @@ async function chatCommand() {
   }
 }
 
-/** "plan": the planning board, read and changed in data/plan.json (with or without Chiefmate running). */
+/**
+ * "plan": the planning board, read and changed in data/plan.json (with or without Chiefmate running). Proposals,
+ * triage and decisions go through the running Chiefmate when there is one, so the manager hears of new proposals and
+ * an approved item's task is queued at once.
+ */
 async function planCommand() {
   const planning = await import('./planning.mjs');
-  const keys = ['title', 'description', 'project', 'priority', 'status', 'run', 'pr']; // the options that take a value
+  // The options that take a value.
+  const keys = ['title', 'description', 'project', 'priority', 'status', 'agent', 'run', 'pr', 'summary', 'recommend', 'note', 'order', 'reason', 'by', 'duplicate-of'];
   const [action = 'list', ...args] = rest.filter((x, i) => !x.startsWith('--') && !keys.includes(rest[i - 1]?.slice(2)));
-  const fields = () => Object.fromEntries(keys.filter(k => option(`--${k}`) !== undefined).map(k => [k, option(`--${k}`)]));
-  const line = i => `#${String(i.id).padEnd(3)} ${i.priority.padEnd(6)} ${i.status.padEnd(13)} ${i.project}: ${i.title}${i.run ? `  [run ${i.run}${i.run_status ? `, ${i.run_status}` : ''}]` : ''}${i.pr ? `  ${i.pr}` : ''}${i.archived ? '  (archived)' : ''}`;
-  const show = (verb, i) => console.log(`${verb} ${line(i)}${i.description ? `\n      ${i.description.replace(/\n/g, '\n      ')}` : ''}`);
+  const fields = () => Object.fromEntries(['title', 'description', 'project', 'priority', 'status', 'agent', 'run', 'pr'].filter(k => option(`--${k}`) !== undefined).map(k => [k, option(`--${k}`)]));
+  const line = i => `#${String(i.id).padEnd(3)} ${i.priority.padEnd(6)} ${i.status.padEnd(13)} ${i.project}: ${i.title}${i.agent ? `  (${i.agent})` : ''}${i.recommend ? `  [recommended: ${i.recommend}]` : ''}${i.run ? `  [run ${i.run}${i.run_status ? `, ${i.run_status}` : ''}]` : ''}${i.pr ? `  ${i.pr}` : ''}${i.archived ? '  (archived)' : ''}`;
+  const notes = i => [
+    i.description,
+    i.proposed_by ? `Proposed by ${i.proposed_by}${i.proposed_run ? ` (run ${i.proposed_run})` : ''}.` : '',
+    i.recommend_note ? `Manager: ${i.recommend_note}` : '',
+    i.status === 'discarded' && i.discard_reason ? `Discarded: ${i.discard_reason}` : '',
+  ].filter(Boolean).join('\n');
+  const show = (verb, i) => console.log(`${verb} ${line(i)}${notes(i) ? `\n      ${notes(i).replace(/\n/g, '\n      ')}` : ''}`);
+  const which = () => {
+    if (!args[0]) throw new Error(`Which item? node src/cli.mjs plan ${action} <n>`);
+    return Number(args[0].replace(/^#/, ''));
+  };
+  // Through the running Chiefmate, else here.
+  const change = async body => (await apiOr('/api/planning', body, async () => ({ item: await planning.changePlan(body) }))).item;
+  // The manager triages and the owner decides: a step of a run only proposes.
+  const decided = ['proposed', 'triaged', 'approved', 'discarded'];
+  if (process.env.CHIEFMATE_RUN && (['triage', 'approve', 'later', 'discard', 'restore', 'order'].includes(action)
+    || (['add', 'set'].includes(action) && option('--status') && decided.includes(planning.parseStatus(option('--status')))))) {
+    throw new Error('A step of a run only proposes items: node src/cli.mjs plan propose <project> "<title>" --summary "..." --agent <member>.');
+  }
+  const by = process.env.CHIEFMATE_MANAGER ? 'manager' : option('--by');
   switch (action) {
+    case 'propose': {
+      const [project, ...title] = args;
+      const item = await change({
+        action: 'propose', project, title: title.join(' '), summary: option('--summary') ?? option('--description'), agent: option('--agent'),
+        priority: option('--priority'), run: process.env.CHIEFMATE_RUN, step: process.env.CHIEFMATE_STEP, by,
+      });
+      show('Proposed', item);
+      console.log('The manager triages it; the owner decides.');
+      return;
+    }
+    case 'triage':
+      show('Triaged', await change({ action: 'triage', id: which(), priority: option('--priority'), agent: option('--agent'), recommend: option('--recommend'), note: option('--note'), order: option('--order') }));
+      return;
+    case 'approve':
+    case 'later':
+      show(action === 'approve' ? 'Approved' : 'Later', await change({ action, id: which(), by }));
+      return;
+    case 'discard': {
+      const duplicate = option('--duplicate-of');
+      const reason = [duplicate ? `Duplicate of #${duplicate.replace(/^#/, '')}` : '', option('--reason') ?? ''].filter(Boolean).join(': ');
+      show('Discarded', await change({ action: 'discard', id: which(), reason, by }));
+      return;
+    }
+    case 'restore':
+      show('Restored', await change({ action: 'restore', id: which() }));
+      return;
+    case 'order': {
+      const ids = args.map(x => Number(x.replace(/^#/, '')));
+      if (!ids.length) throw new Error('Which items, in which order? node src/cli.mjs plan order <n> <n> ...');
+      for (const i of await change({ action: 'reorder', ids })) show('Order', i);
+      return;
+    }
     case 'list': {
       const status = option('--status') && planning.parseStatus(option('--status'));
       const priority = option('--priority') && planning.parsePriority(option('--priority'));
       const project = option('--project');
       const items = planning.planItems().filter(i =>
-        (has('--all') || status || (!i.archived && i.status !== 'done')) && (!i.archived || has('--all'))
+        (has('--all') || status || (!i.archived && !planning.CLOSED.includes(i.status))) && (!i.archived || has('--all'))
         && (!status || i.status === status) && (!priority || i.priority === priority) && (!project || i.project === project));
       for (const i of items) console.log(line(i));
       if (!items.length) console.log('No items on the planning board for this filter. Add one: node src/cli.mjs plan add <project> "<title>"');
@@ -256,22 +325,22 @@ async function planCommand() {
     }
     case 'add': {
       const [project, ...title] = args;
-      show('Added', planning.addItem({ ...fields(), project, title: title.join(' ') }));
+      show('Added', await change({ action: 'add', ...fields(), project, title: title.join(' ') }));
       return;
     }
     case 'set': {
       if (!args[0]) throw new Error('Which item? node src/cli.mjs plan set <n> --status <s>');
-      let item = planning.updateItem(args[0], fields());
+      let item = await change({ action: 'set', id: args[0], ...fields() });
       if (has('--archive') || has('--restore')) item = planning.archiveItem(args[0], has('--archive'));
       show('Changed', item);
       return;
     }
     case 'done':
       if (!args[0]) throw new Error('Which item? node src/cli.mjs plan done <n>');
-      show('Done', planning.updateItem(args[0], { status: 'done' }));
+      show('Done', await change({ action: 'set', id: args[0], status: 'done' }));
       return;
     default:
-      throw new Error('Use: plan [list] | add <project> "<title>" | set <n> [--status ...] | done <n>');
+      throw new Error('Use: plan [list] | add <project> "<title>" | set <n> [--status ...] | done <n> | propose <project> "<title>" | triage <n> | approve|later|discard|restore <n> | order <n> <n> ...');
   }
 }
 
