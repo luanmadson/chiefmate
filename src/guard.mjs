@@ -176,7 +176,9 @@ function inWeb(program, args) {
 /** The settings that make Claude Code run this file before each command, refusing what is not in "allowed". */
 export function guardHooks({ log, allowed = [] }) {
   const q = s => `"${String(s).replace(/\\/g, '/')}"`;
-  const command = [q(process.execPath), q(fileURLToPath(import.meta.url)), '--log', q(log), ...allowed.flatMap(r => ['--allow', q(r)])].join(' ');
+  // Only the guard's own rules: any other text would go into a shell command line.
+  const rules = [PUSH, REMOTE, PR, REPO, API].filter(r => allowed.includes(r));
+  const command = [q(process.execPath), q(fileURLToPath(import.meta.url)), '--log', q(log), ...rules.flatMap(r => ['--allow', q(r)])].join(' ');
   return { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command, timeout: 30 }] }] };
 }
 
