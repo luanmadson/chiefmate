@@ -1088,6 +1088,8 @@
   "Merged": "Merge feito",
   "by the manager, with your authorization": "pelo Gerente, com sua autorização",
   "by you": "por você",
+  "on GitHub": "no GitHub",
+  "in your clone": "no seu clone",
   "The pull request {address} is merged on GitHub.": "O merge do pull request {address} é feito no GitHub.",
   "The branch {branch} is merged into {base} in {path}. Nothing is sent to GitHub.": "O branch {branch} é juntado a {base} em {path}. Nada vai para o GitHub.",
   "{count} check(s) failed.": "{count} verificação(ões) falharam.",

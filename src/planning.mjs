@@ -210,7 +210,7 @@ function statusForRun(run) {
 function follow(item, run) {
   let changed = false;
   if (run.pullRequest && item.pr !== run.pullRequest) [item.pr, changed] = [run.pullRequest, true];
-  // Merged with the owner's authorization (src/merge.mjs): nothing waits for the owner any more.
+  // Merged through Chiefmate (src/merge.mjs) or outside it (src/attention.mjs): nothing waits for the owner any more.
   if (run.merged && item.status === 'waiting_owner') [item.status, changed] = ['done', true];
   if (item.run_status !== run.status) {
     item.run_status = run.status;

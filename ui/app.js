@@ -1556,7 +1556,7 @@ async function refreshDetail(force = false) {
     <div class="actions left">
       ${r.pullRequest ? `<a class="button" href="${esc(r.pullRequest)}" target="_blank" rel="noopener">${esc(t('Open pull request'))}</a>` : ''}
       ${r.status === 'done' && (r.pullRequest || r.delivered) && !r.merged ? `<button type="button" class="button secondary" data-merge="${esc(r.id)}">${esc(t('Merge'))}</button>` : ''}
-      ${r.merged ? `<span class="hint">${stateHtml([t('Merged'), 'ok'])} <span class="num">${shortDate(r.merged.at)}</span> · ${esc(r.merged.by === 'manager' ? t('by the manager, with your authorization') : t('by you'))}</span>` : ''}
+      ${r.merged ? `<span class="hint">${stateHtml([t('Merged'), 'ok'])} <span class="num">${shortDate(r.merged.at)}</span> · ${esc(r.merged.by === 'manager' ? t('by the manager, with your authorization') : r.merged.by === 'outside' ? (r.merged.how === 'pr' ? t('on GitHub') : t('in your clone')) : t('by you'))}</span>` : ''}
       ${canResume ? `<button type="button" class="button secondary" data-resume="${esc(r.id)}">${esc(t('Resume'))}</button>` : ''}
       ${r.status === 'paused' ? `<button type="button" class="button secondary" data-resume="${esc(r.id)}" data-ignore>${esc(t('Resume past the limit'))}</button>` : ''}
       ${canCancel ? `<button type="button" class="button danger" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button>` : ''}

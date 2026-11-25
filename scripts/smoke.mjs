@@ -1281,6 +1281,18 @@ try {
   const back = attentionItems(more);
   expect(back.some(i => i.id === 'memory:low') && !why('memory:low') && !back.some(i => i.id === 'done:a-local'), 'a cause back did not return to the list, or an expired info notice came back');
   expect(attentionArchive().every(i => i.archived && i.title), 'an archived notice lost what it said');
+  // Merged outside Chiefmate (a pull request on GitHub, a branch in the owner's clone): the run is merged, its item done.
+  const { readRun, saveRun } = await import(src('store.mjs'));
+  const { addItem, planItem } = await import(src('planning.mjs'));
+  const onGitHub = addItem({ project: 'p', title: 'Merged on GitHub' });
+  const inClone = addItem({ project: 'p', title: 'Merged in the clone' });
+  saveRun({ id: 'o-pr', project: 'p', title: 'Merged on GitHub', status: 'done', created: at, ended: at, pullRequest: 'https://github.com/o/r/pull/1', plan: onGitHub.id });
+  saveRun({ id: 'o-local', project: 'p', title: 'Merged in the clone', status: 'done', created: at, ended: at, branch: 'cm/merged', delivered: 'C:/clone', plan: inClone.id });
+  expect(planItem(onGitHub.id).status === 'waiting_owner' && planItem(inClone.id).status === 'waiting_owner', 'a board item with work to merge is not waiting for the owner');
+  attentionItems({ config: {}, runs: [readRun('o-pr'), readRun('o-local')], items: [planItem(onGitHub.id), planItem(inClone.id)] });
+  expect(readRun('o-pr').merged?.by === 'outside' && readRun('o-pr').merged.how === 'pr' && readRun('o-local').merged?.how === 'local',
+    `work merged outside Chiefmate did not mark its run as merged: ${JSON.stringify([readRun('o-pr').merged, readRun('o-local').merged])}`);
+  expect(planItem(onGitHub.id).status === 'done' && planItem(inClone.id).status === 'done', 'a board item whose work was merged outside Chiefmate still waits for the owner');
   const urgent = toastXml('Needs you', 'Sign in', 'chiefmate:operations', { urgent: true });
   expect(urgent.includes('scenario="reminder"') && urgent.includes('activationType="system"') && !toastXml('Done', 'x').includes('scenario'), 'an urgent Windows notification does not stay until seen');
 } catch (error) {
