@@ -275,6 +275,10 @@ export function newsMessage(owner, events, alongside = false, away = awayInfo())
   const idle = events.some(e => e.kind === 'idle')
     ? `\n\nFor the idle events (the autopilot, which ${owner} turned on): for each project named, put on the queue the first item listed that still makes sense now (check the latest runs and what it depends on) with node src/cli.mjs plan approve <n> --autopilot. At most one per project; Chiefmate refuses it outside the autopilot's limits. Then tell ${owner} in one line what you queued and why, or why nothing.`
     : '';
+  // An owner's merge that failed: a conflict is the crew's to solve, at once; anything else is the owner's to do.
+  const mergeFailed = events.some(e => e.kind === 'merge_failed')
+    ? `\n\nFor the merge_failed events: ${owner}'s Approve (or Merge) didn't go through. When the cause is a conflict, put the fix on the queue now, without asking, unless a task for that run is already queued or running: node src/cli.mjs task <project> generalist "<instruction>" --review --title "<at most 60 characters>" --summary "<one or two sentences>", with --plan <n> when the event names a board item. The instruction names the run, its branch and the base branch, and asks the crew to bring that branch into the run's own (git fetch origin <branch>, or git fetch <clone folder> <branch> for a local delivery, then git merge FETCH_HEAD), solve the conflicts keeping what both sides meant, and run the checks; the new work replaces the old, whose card settles by itself once the new one is merged. When it is not a conflict (a clone with changes or on another branch, GitHub refusing for another reason), queue nothing. Either way, tell ${owner} in one line what failed and what you did or what they must do.`
+    : '';
   const report = events.some(e => e.kind === 'autopilot_report')
     ? `\n\nFor the autopilot_report event: the daily report of what the autopilot did alone. Tell ${owner} in a few lines, with each item's short title, where it is now and what waits for them (a pull request to approve, a branch to review).`
     : '';
@@ -288,7 +292,7 @@ export function newsMessage(owner, events, alongside = false, away = awayInfo())
     : leaving || away
       ? `\n\n${owner} is away (away mode${away ? `, since ${formatDateTime(away.since)}` : ''}): they stepped out or are asleep, and will read this later. The work goes on alone. Do your own part (the triage, the autopilot) without asking ${owner} anything that can wait, and keep what is not urgent for the summary when they are back. ${leaving ? 'For the away event: reply in one or two lines with what goes on alone meanwhile (the runs, the queue, the autopilot), nothing else.' : 'Reply in a line or two.'}`
       : '';
-  return `${head}\n${lines.join('\n')}\n\n${ask}${triage}${idle}${report}${watchdog}${absence}`;
+  return `${head}\n${lines.join('\n')}\n\n${ask}${triage}${idle}${mergeFailed}${report}${watchdog}${absence}`;
 }
 
 /** The text the manager receives: your message, or the queue in order with the time of each one, and Chiefmate's news. */

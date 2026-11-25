@@ -62,23 +62,50 @@ async function mergeLocal({ dir, branch, base }) {
   const r = await git(dir, 'merge', '--no-ff', '--no-edit', branch);
   if (r.code !== 0) {
     await git(dir, 'merge', '--abort');
-    throw new Error(t("The branch {branch} doesn't merge cleanly into {base}: nothing was changed. {output}", { branch, base, output: clip(r.output, 400) }));
+    throw Object.assign(new Error(t("The branch {branch} doesn't merge cleanly into {base}: nothing was changed. {output}", { branch, base, output: clip(r.output, 400) })), { conflict: true, detail: clip(r.output, 400) });
   }
+}
+
+// gh's words for a pull request that conflicts with its base branch.
+const CONFLICT = /not mergeable|cannot be cleanly created|merge conflict|conflicting/i;
+
+/**
+ * Tells the manager at once that the owner's merge failed (merge_failed), so it queues the fix of a conflict and tells
+ * the owner in one line. The news carries gh's or git's own output when there is one (the error's message is in the
+ * owner's language).
+ */
+function reportFailure(run, where, error, config) {
+  const project = config.projects?.[run.project];
+  const base = where?.base ?? project?.main_branch ?? 'main';
+  const what = where?.kind === 'pr' ? `pull request ${where.url} (branch ${run.branch ?? '?'})`
+    : `branch ${run.branch ?? '?'} into ${base} in ${where?.dir ?? run.delivered ?? '?'} (a local delivery, nothing on GitHub)`;
+  const why = error.conflict ? `a conflict with ${base}. ${error.detail ?? ''}` : clip(error.detail ?? error.message, 500);
+  const item = run.plan ? ` Board item #${run.plan}.` : '';
+  return reportEvent('merge_failed', `The owner's Approve of run ${run.id} "${run.title}" (project ${run.project}) failed: ${what}. Cause: ${error.conflict ? '' : 'not a conflict: '}${why.trim()}${item}`, { config, urgent: true });
 }
 
 /**
  * Merges a finished run's work. "by" says whose authorization it was: "owner" (the app) or "manager" (after the
- * owner's explicit yes). A merged pull request of Chiefmate itself is installed at once (checkNow).
+ * owner's explicit yes). A merged pull request of Chiefmate itself is installed at once (checkNow). When the owner's
+ * merge fails, the manager hears of it at once and the error says so.
  */
 export async function mergeRun(id, { by = 'owner' } = {}, config = loadConfig()) {
   const run = readRun(String(id ?? ''));
   const where = await target(run, config);
-  if (where.kind === 'pr') {
-    const dir = existsSync(projectDir(run.project)) ? projectDir(run.project) : ROOT;
-    const r = await exec('gh', ['pr', 'merge', where.url, '--merge'], dir);
-    if (r.code !== 0) throw new Error(t("GitHub didn't merge the pull request: {output}", { output: clip(r.output, 500) }));
-  } else {
-    await mergeLocal(where);
+  try {
+    if (where.kind === 'pr') {
+      const dir = existsSync(projectDir(run.project)) ? projectDir(run.project) : ROOT;
+      const r = await exec('gh', ['pr', 'merge', where.url, '--merge'], dir);
+      if (r.code !== 0) {
+        throw Object.assign(new Error(t("GitHub didn't merge the pull request: {output}", { output: clip(r.output, 500) })), { conflict: CONFLICT.test(r.output), detail: clip(r.output, 500) });
+      }
+    } else {
+      await mergeLocal(where);
+    }
+  } catch (error) {
+    // The manager knows when its own merge fails: only the owner's is news to it.
+    if (by !== 'manager' && reportFailure(run, where, error, config)) error.message += ` ${t('The manager was told and takes care of it.')}`;
+    throw error;
   }
   run.merged = { at: now(), by: by === 'manager' ? 'manager' : 'owner', how: where.kind };
   saveRun(run);

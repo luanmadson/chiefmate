@@ -494,6 +494,38 @@ try {
   const summary = readPending().find(m => m.from === 'chiefmate');
   expect(!news.awayInfo() && summary?.events.map(e => e.kind).join() === 'run_failed,back' && composeMessage('Owner', [summary]).includes('summary of the time away'), `back from away mode, the held events did not go with "back": ${JSON.stringify(summary)}`);
   removePending(summary.id);
+  // An owner's merge that fails on a conflict (a local branch, in a made-up clone): the manager is told at once, without
+  // waiting for the minute, with git's output and the board item; the error says so. The manager's own failure is not news.
+  const { mergeRun } = await import(pathToFileURL(path.join(root, 'src', 'merge.mjs')).href);
+  const { saveRun: keepRun } = await import(pathToFileURL(path.join(root, 'src', 'store.mjs')).href);
+  const clone = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-merge-'));
+  try {
+    const g = (...a) => execFileSync('git', ['-C', clone, '-c', 'user.name=smoke', '-c', 'user.email=smoke@example.com', ...a], { stdio: 'pipe' });
+    g('init', '-q', '-b', 'main');
+    writeFileSync(path.join(clone, 'a.txt'), 'one\n');
+    g('add', '-A');
+    g('commit', '-qm', 'one');
+    g('checkout', '-qb', 'cm/conflict');
+    writeFileSync(path.join(clone, 'a.txt'), 'branch\n');
+    g('commit', '-qam', 'branch');
+    g('checkout', '-q', 'main');
+    writeFileSync(path.join(clone, 'a.txt'), 'main\n');
+    g('commit', '-qam', 'main');
+    const mergeConfig = { owner: 'Owner', projects: { mp: { local_clone: clone, main_branch: 'main' } } };
+    keepRun({ id: 'smoke-merge-fail', project: 'mp', title: 'Conflicting work', status: 'done', branch: 'cm/conflict', delivered: clone, plan: 7 });
+    const failed = await mergeRun('smoke-merge-fail', { by: 'owner' }, mergeConfig).then(() => null, error => error);
+    await settle();
+    const told = readPending().find(m => m.from === 'chiefmate');
+    const event = told?.events.find(e => e.kind === 'merge_failed');
+    expect(failed?.conflict && failed.message.includes('The manager was told') && event?.text.includes('a conflict with main') && event.text.includes('#7') && event.text.includes('cm/conflict')
+      && composeMessage('Owner', [told]).includes('For the merge_failed events'), `a failed merge of the owner's did not reach the manager at once: ${failed?.message} ${JSON.stringify(told)}`);
+    if (told) removePending(told.id);
+    const own = await mergeRun('smoke-merge-fail', { by: 'manager' }, mergeConfig).then(() => null, error => error);
+    await settle();
+    expect(own && !own.message.includes('The manager was told') && !readPending().some(m => m.from === 'chiefmate'), "the manager's own failed merge was told to it as news");
+  } finally {
+    rmSync(clone, { recursive: true, force: true });
+  }
   const { watchEnded } = await import(pathToFileURL(path.join(root, 'src', 'sessions.mjs')).href);
   watchEnded([{ id: 's1', status: 'open' }, { id: 's2', status: 'open' }]);
   const ended = watchEnded([{ id: 's1', status: 'ended', name: 'X', tool: 'claude' }, { id: 's2', status: 'ended', endedBy: 'owner' }]);
