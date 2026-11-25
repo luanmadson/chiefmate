@@ -29,7 +29,7 @@ const ago = (iso, span) => iso && Date.now() - Date.parse(iso) <= span;
 
 /**
  * The notices now, most urgent first: { id, level, kind, title, text, view, project, run, at, seen, seenable }.
- * "view" is the app's place that deals with it; a request of a step carries what "Mark as done" needs.
+ * "view" is the app's place that deals with it; a request of a step carries what its buttons need ("I did it", or a question's options).
  */
 export function attentionItems({ config, runs = [], needs = [], usage = {}, machine, items = [], update = {}, questions = [] }) {
   const list = [];
@@ -43,9 +43,9 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
   // Urgent: a step or a live session waits for the owner (a session's permission asked included).
   for (const n of needs) {
     add({
-      id: `needs:${n.run ?? n.session}:${n.id}`, level: 'urgent', kind: 'needs', title: n.kind === 'permission' ? t('Asks your permission') : t('Needs you'),
+      id: `needs:${n.run ?? n.session}:${n.id}`, level: 'urgent', kind: 'needs', title: n.kind === 'permission' ? t('Asks your permission') : n.options ? t('Asks you') : t('Needs you'),
       text: t('{task}: {what}', { task: n.title, what: n.explain?.summary ?? n.what }), view: 'operations', project: n.project ?? null, run: n.run ?? null, at: n.at, seenable: false,
-      request: { id: n.id, kind: n.kind ?? null, run: n.run ?? null, session: n.session ?? null, url: n.url ?? null, openError: n.openError ?? null, agent: n.agent ?? null, explain: n.explain ?? null },
+      request: { id: n.id, kind: n.kind ?? null, run: n.run ?? null, session: n.session ?? null, url: n.url ?? null, openError: n.openError ?? null, agent: n.agent ?? null, explain: n.explain ?? null, options: n.options ?? null, recommend: n.recommend ?? null, why: n.why ?? null },
     });
   }
   // Urgent: a run failed (until a newer run of the same work starts, or 3 days go by).

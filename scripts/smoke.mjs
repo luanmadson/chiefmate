@@ -626,7 +626,7 @@ try {
   const src = file => pathToFileURL(path.join(root, 'src', file)).href;
   const { live } = await import(src('runs.mjs'));
   const { pendingTalk, talkSection, talkSituation, talkTo, ownerTurn } = await import(src('talk.mjs'));
-  const { pollRequest } = await import(src('needs.mjs'));
+  const { askOwner, finishRequest, pollRequest } = await import(src('needs.mjs'));
   const { runClaude } = await import(src('claude.mjs'));
   const run = { id: 'smoke-talk', title: 'Generalist: smoke', project: 'none', status: 'running', created: new Date().toISOString(), steps: [{ agent: 'generalist', status: 'running' }], requests: [] };
   let interrupted = 0;
@@ -642,6 +642,26 @@ try {
   const section = talkSection(run, 1, id => id, { owner: 'Owner', language: 'en' });
   expect(section.includes('Owner') && section.includes('Use the other file') && section.includes('The second one'), `the step's report does not get the direct talk: ${section}`);
   expect(talkSituation([run], 'Owner').includes('Owner guided step 1 (generalist): "Use the other file"'), "the manager's situation does not get the direct talk");
+  // A question from the step: one button per option, the recommended one among them; it always waits, and the
+  // option clicked is the answer the waiting command hands over.
+  const asked = await askOwner({ run: run.id, step: 1, what: 'Resend or SES?', options: 'Resend|SES', recommend: 'resend', why: 'Simpler to set up.' });
+  expect(asked.wait && asked.options.join() === 'Resend,SES' && asked.recommend === 'Resend' && asked.why === 'Simpler to set up.', `a question was not recorded with its options and recommendation: ${JSON.stringify(asked)}`);
+  let outside = false;
+  try {
+    finishRequest(run.id, asked.id, 'owner', 'Mailgun');
+  } catch {
+    outside = true;
+  }
+  finishRequest(run.id, asked.id, 'owner', 'ses');
+  const chosen = pollRequest(run.id, asked.id);
+  expect(outside && chosen.status === 'done' && chosen.answer === 'SES', `the option clicked did not answer the question, or an answer outside the options was taken: ${JSON.stringify(chosen)}`);
+  let single = false;
+  try {
+    await askOwner({ run: run.id, step: 1, what: 'Only one?', options: 'Yes' });
+  } catch {
+    single = true;
+  }
+  expect(single, 'a question with a single option was accepted');
   live.get(run.id).talking = false;
   let refused = false;
   try {

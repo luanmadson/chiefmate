@@ -447,7 +447,6 @@
   "Crews by project": "Equipes por projeto",
   "Close": "Fechar",
   "Waiting for your action": "Aguardando você",
-  "Mark as done": "Feito",
   "The queue already has {count} messages. Wait for the manager, or remove some.": "A fila já tem {count} mensagens. Espere o gerente ou remova algumas.",
   "interrupted by you": "interrompida por você",
   "You interrupted the answer. The conversation goes on in the same session, and the manager is told in your next message.": "Você interrompeu a resposta. A conversa continua na mesma sessão, e o gerente fica sabendo na sua próxima mensagem.",
@@ -1364,5 +1363,14 @@
   "Do not approve": "Não aprovar",
   "Nothing waits for your decision. New pull requests, proposals and questions from the manager show up here.": "Nada espera sua decisão. Pull requests novos, propostas e perguntas do gerente aparecem aqui.",
   "What waits for your yes or no. Each card says what it is and what the manager recommends; the rest is under Details.": "O que espera seu sim ou não. Cada cartão diz o que é e o que o gerente recomenda; o resto fica em Detalhes.",
-  "New": "Nova"
+  "New": "Nova",
+  "I did it": "Já fiz",
+  "Recommended by the agent": "Recomendado pelo agente",
+  "{option} (recommended)": "{option} (recomendado)",
+  "Answer": "Responder",
+  "Your answer: {answer}": "Sua resposta: {answer}",
+  "Choose an option, or write your answer below.": "Escolha uma opção ou escreva sua resposta abaixo.",
+  "Answer sent: {answer}. The crew goes on.": "Resposta enviada: {answer}. A equipe segue.",
+  "Asks you": "Pergunta para você",
+  "Answer with one of the options.": "Responda com uma das opções."
 }

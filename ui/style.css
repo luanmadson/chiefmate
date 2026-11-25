@@ -103,6 +103,12 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .attn-title { font-weight: 600; }
 .attn-text .hint { display: block; font-size: 12px; }
 .attn-actions { display: flex; gap: 8px; flex: none; }
+/* A step's question: one button per option (the recommended one in brass), the recommendation and its reason above */
+.request-options { display: inline-flex; flex-wrap: wrap; gap: 8px; }
+.attn-actions .request-options { max-width: 380px; justify-content: flex-end; }
+.request-why { display: block; margin-top: 2px; font-size: 13px; color: var(--accent); }
+.talk-options { margin-top: 6px; }
+.talk-options .request-why { margin: 0 0 6px; }
 .attn-band { background: var(--panel); border-bottom: 1px solid var(--line); }
 .attn-band .attn { padding-left: 28px; padding-right: 28px; }
 .attn-band > .attn:first-child { padding-top: 9px; padding-bottom: 9px; }
