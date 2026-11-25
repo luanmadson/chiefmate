@@ -104,7 +104,9 @@ export async function mergeRun(id, { by = 'owner' } = {}, config = loadConfig())
     }
   } catch (error) {
     // The manager knows when its own merge fails: only the owner's is news to it.
-    if (by !== 'manager' && reportFailure(run, where, error, config)) error.message += ` ${t('The manager was told and takes care of it.')}`;
+    if (by !== 'manager' && reportFailure(run, where, error, config)) {
+      error.message += ` ${error.conflict ? t('The manager was told and queues the fix.') : t('The manager was told and will say what to do.')}`;
+    }
     throw error;
   }
   run.merged = { at: now(), by: by === 'manager' ? 'manager' : 'owner', how: where.kind };
