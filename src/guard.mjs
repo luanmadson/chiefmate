@@ -303,13 +303,17 @@ async function hook(argv) {
   if (target?.branch && takeGrant(grants, target)) return;
   if (log) appendFileSync(log, `${JSON.stringify({ tool_name: 'Bash', tool_use_id: call.tool_use_id, tool_input: { command }, cwd })}\n`);
   const rules = [...new Set(refused.map(f => f.rule))].join(', ');
+  // The manager asks for a new repository through Chiefmate's command line, never through gh (src/decisions.mjs, repoCreate).
+  const creating = refused.some(f => f.rule === REPO && /^gh repo create\b/.test(f.part));
   const reason = !grants
     ? `Refused by Chiefmate: this publishes (${rules}) and needs the owner's permission in the app. Say what you wanted to run and why, and stop.`
-    : target?.refused === 'main' || target?.refused === 'forced'
-      ? 'Refused by Chiefmate, always: the manager never pushes to the main branch (main, master or the default one) nor forces a push (--force, --force-with-lease, +refspec, --mirror, --delete). Tell the owner what you wanted to send and why.'
-      : target
-        ? `Refused by Chiefmate: this push needs the owner's permission. If it is a plain push of one branch, the owner now gets a card to allow it once (this repository and branch, for ${GRANT_MINUTES} minutes); you are told when they do, and may run the same command again. Only "git -C <folder> push <remote> <branch>" can be allowed, alone and with no other option. Say what you want to send and why, and stop.`
-        : `Refused by Chiefmate: this publishes (${rules}), and the manager never does. Say what you wanted to run and why.`;
+    : creating
+      ? `Refused by Chiefmate: the manager never runs "gh repo create". To create a private repository in the owner's account from a local folder, run node src/cli.mjs repo-create <name> --private --from <folder> [--description "<text>"]: the owner gets a card to allow it once, and you run the same command again when they do. Never a public repository.`
+      : target?.refused === 'main' || target?.refused === 'forced'
+        ? 'Refused by Chiefmate, always: the manager never pushes to the main branch (main, master or the default one) nor forces a push (--force, --force-with-lease, +refspec, --mirror, --delete). Tell the owner what you wanted to send and why.'
+        : target
+          ? `Refused by Chiefmate: this push needs the owner's permission. If it is a plain push of one branch, the owner now gets a card to allow it once (this repository and branch, for ${GRANT_MINUTES} minutes); you are told when they do, and may run the same command again. Only "git -C <folder> push <remote> <branch>" can be allowed, alone and with no other option. Say what you want to send and why, and stop.`
+          : `Refused by Chiefmate: this publishes (${rules}), and the manager never does. Say what you wanted to run and why.`;
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } }));
 }
 

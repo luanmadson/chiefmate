@@ -16,7 +16,7 @@ const option = name => {
 };
 const has = name => rest.includes(name);
 // The words of a command that are not options nor their values ("--title <text>").
-const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--level', '--note', '--recommend', '--project', '--tool'];
+const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--level', '--note', '--recommend', '--project', '--tool', '--from', '--description'];
 const words = () => rest.filter((x, i) => !x.startsWith('--') && !VALUED.includes(rest[i - 1]));
 /** The title and summary given with --title and --summary: nothing is generated for them. */
 const brief = () => ({ title: option('--title'), summary: option('--summary'), level: option('--level'), tool: option('--tool') });
@@ -179,6 +179,12 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs push <folder> <branch>       for the manager: the push the owner allowed on its card (that branch,
                                                 from that folder, once, within 30 minutes; never the main branch, never
                                                 forced). Without the owner's grant it refuses and sends nothing
+  node src/cli.mjs repo-create <name> --private --from <folder> [--description "<text>"]
+                                                for the manager: a private repository in the owner's GitHub account for a
+                                                local folder. Without the owner's grant, a card for them to allow it; with
+                                                it (once, within 30 minutes), creates it (always private), adds it to the
+                                                folder as "origin" and sends the folder's branch. Never public, never a
+                                                name that already exists
   node src/cli.mjs close-pr <id> --replaced-by <id> [--yes]
                                                 a run's pull request replaced by a newer run's (same board item, or the
                                                 newer instruction names the old run): shows both; with --yes, closes it
@@ -944,6 +950,23 @@ async function main() {
       const r = spawnSync('git', ['-C', target.dir, 'push', target.remote, `${target.src}:refs/heads/${target.branch}`], { stdio: 'inherit', windowsHide: true });
       if (r.status !== 0) throw new Error(`The push failed (git exit ${r.status ?? r.error?.message}). The grant was used: try the push again to ask the owner once more.`);
       console.log(`Pushed ${target.branch} to ${facts.repo}.`);
+      return;
+    }
+    case 'repo-create': {
+      // A private repository for a local folder, created only once the owner allows it on its card (src/decisions.mjs).
+      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error('The crew never creates repositories: ask the owner with needs-you.');
+      const [name] = words();
+      if (!name || !option('--from')) throw new Error('Which name and folder? node src/cli.mjs repo-create <name> --private --from <folder> [--description "<text>"]');
+      const visibility = has('--public') || has('--internal') ? 'public' : has('--private') ? 'private' : '';
+      const { repoCreate } = await import('./decisions.mjs');
+      const r = repoCreate({ name, from: option('--from'), description: option('--description') ?? '', visibility });
+      if (r.created) {
+        console.log(`Created the private repository ${r.created.repo} (${r.created.url}); ${r.created.dir} has it as "origin" and its branch ${r.created.branch} was sent.`);
+        console.log(`Later pushes follow the usual rules. For a project of Chiefmate in this folder, its "repository" setting can now be "${r.created.repo}".`);
+      } else {
+        console.log(`${r.again ? 'Still waiting' : 'Waiting'} for the owner's card in the app: the private repository ${r.request.repo}, with ${r.request.dir} (branch ${r.request.branch}) sent to it.`);
+        console.log('Nothing was created. When the owner allows it ("repo_allowed" news), run the same command again, once, within 30 minutes.');
+      }
       return;
     }
     case 'update-check': {
