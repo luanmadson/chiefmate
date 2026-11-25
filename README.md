@@ -19,7 +19,7 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
   |---|---|
   | **Manager** | Talk to Chiefmate. Ask how things are going, request a job, adjust the crew. It answers with the real situation: what is running, the queue, usage and your account's plan usage. You can write at any time, even while it answers (see "Talking while the manager answers" below), and you see live what it is doing. Beside the conversation, how full its context is and the context of the agent at work (see "The conversation's context" below). |
   | **Operations** | What the crew is doing right now. Each run going on (up to three at once by default, one per project) has its own block, with a discreet brass animation: the agent at work and their portrait, the step out of how many, the time counting live (for the run and for the step) and the agent's last action, updated as it happens; then the steps, the context of the agent at work and the logbook (every action of the agent, with the time). Click the agent at work, or "Watch and talk", to open its panel (see "Talking to an agent at work" below). Below, the queue, numbered in the order it will run, with the next run marked and when each one is expected to start, and the live sessions: those open (alive or not, memory, for how long, a button to end them) and a button to open each profile. |
-  | **Planning** | Your board of what is to be done in each project, by priority (see "Planning" below). The items waiting for you stand out at the top, and their number shows beside the section. |
+  | **Planning** | Your board of what is to be done in each project, by priority (see "Planning" below). The items waiting for you stand out at the top as important notices, and a mark beside the section counts them (see "What needs you" below). |
   | **Missions** | Complete jobs with their own schedule. "Run now" starts one at any time. |
   | **Crew** | Who is on board, what each one is doing and the model behind them, and the crews by project, each with its team lead above it when it has one. Give any of them a one-off task. Click a member at work to open its panel. A member waiting its turn says what it waits for: "Waiting for Generalist: <task>" (the agent at work on its run) or "Waiting for <project>: <task>" (the run ahead of it in the queue). |
   | **Projects** | Which of your projects are running on this computer (development servers, node, python, IDEs, started by you or by the crew) and the memory each one uses, with a button to stop them. |
@@ -30,9 +30,10 @@ Everything the crew produces reaches you as a **pull request**. Nothing goes liv
 - **Crew portraits** that show at a glance who is standing by, working, thinking or waiting for a limit to reset. The title bar tells you whether Chiefmate is online and waiting for you, and which project is in focus: the one being worked on the longest (the mission or task, the agent at work and for how long, and the other projects being worked on at the same time) or, when nothing is running, the next one in the queue. A click on a project in focus that is being worked on opens the panel of its agent at work; a click on its name opens its page.
 - **Running, seen from afar.** While a run goes on, a brass square pulses beside Operations in the sections and beside the project in focus, the window's title starts with ● (the agent, the step, how many are waiting: `● Writer 2/3 · 1 in the queue · Chiefmate`; with several runs at once, how many: `● 2 running · Chiefmate`) and the icon gets a brass square. With runs only waiting in the queue, the title starts with ○ and the square in the icon is hollow. The animations stop when Windows is set to show fewer animations (reduced motion); the app reads the state every 2.5 seconds, as it always has.
 - **Scheduled missions**, for example every Monday at 9:00. They wake the computer from sleep.
-- **Windows notifications**: the evening before a mission, when a run starts, when it pauses for a limit and when it is ready for your review.
+- **Windows notifications**: the evening before a mission, when a run starts, when it pauses for a limit and when it is ready for your review. The urgent ones (a step needs you, a run or a mission failed, the account above 90%, low memory, a free reset expiring within a day) stay on screen until you open or dismiss them.
 - **News from the manager**: when a run ends, fails or pauses, a pull request waits for you, a step needs you, an update is installed or blocked, an alert goes off or a live session ends, the manager writes you a short notice in the conversation on its own (see "News from the manager").
-- **Alerts that only warn**, as a band at the top of the app and a Windows notification, once each: when the account's 5-hour window or the plan's week passes 70% and 90%, when this computer has less than 15% of its memory free (naming the projects using the most), and about the plan's free resets.
+- **Alerts that only warn**, as notices in the app (see "What needs you" below) and a Windows notification, once each: when the account's 5-hour window or the plan's week passes 70% and 90%, when this computer has less than 15% of its memory free (naming the projects using the most), and about the plan's free resets.
+- **What needs you, by level.** Every notice has one of three levels, drawn the same way everywhere (see "What needs you" below).
 - **One-off tasks** for any agent, at any time.
 - **A queue that runs one run per project at a time**, with runs of different projects going on side by side (three at most by default), so agents never set off other agents.
 - **Live sessions** with Claude Code or Codex, opened from the app or the command line, each in its own window and folder, started with the blocks of the prompt builder you choose (see "Live sessions" below).
@@ -120,11 +121,26 @@ Some work needs a person: signing in to a site, confirming something, a step onl
 node <chiefmate>/src/cli.mjs needs-you "<what to do>" [--url <address>] [--wait] [--check "<command>"]
 ```
 
-Chiefmate records the request in the run and shows it at once: a band at the top of the app ("Needs you: <task> — <what to do>") with a **Done** button, a mark on the window's icon and title, the app's taskbar badge and a Windows notification. With `--url`, the address opens for you:
+Chiefmate records the request in the run and shows it at once as an urgent notice (see "What needs you" below): the band at the top of the app ("Needs you: <task> — <what to do>") with a **Mark as done** button, a red mark on the window's icon and title, the app's taskbar badge and a Windows notification that stays until you see it. With `--url`, the address opens for you:
 - with `browser_cdp` set (the address of your own browser started with remote debugging, such as `http://127.0.0.1:9333`), in a new tab of that browser, where you are already signed in. Mind the risk: while remote debugging is on, any program on this computer, the crew's shell commands included, can drive that browser and its signed-in sessions. Prefer a separate browser profile for it (recent Chrome versions only allow remote debugging with their own `--user-data-dir`);
 - without it, in a visible browser with Chiefmate's own profile in `data/browser-profile`, which the crew can never read (through Playwright when `playwright-core` is installed, else by starting Edge or Chrome on that profile).
 
 With `--wait`, the agent waits until you click Done, until its `--check` command succeeds, or until you answer it in the agent's panel (see below). While it waits, the step's time limit stands still. The wait has a ceiling (`needs_you.max_wait_minutes`, 120 by default): past it, the agent goes on with what it can and the request stays open in the app. The run is never canceled for it, and shows "Waiting for you" meanwhile.
+
+### What needs you
+
+What needs you shows up as a notice with one of three levels, the same component everywhere in the app:
+
+| Level | Looks like | For example |
+|---|---|---|
+| **Urgent** | Bright red, with a soft pulse | A step asks for you ("needs you"), a run failed, the account above 90%, less than 15% of memory free, a free reset expiring within a day |
+| **Important** | Lit brass | A pull request waiting for your approval, an item of the board waiting for your decision, an update that could not be installed, the account above 70%, a free reset expiring within 3 days |
+| **Info** | Discreet grey | A task finished (in the last day), an update installed |
+
+- **Where you see them.** The band at the top shows the most urgent notice and how many others there are ("+2 more" opens them all). Operations, the project's page and Planning list their own notices at the top, and a run waiting for you gets a red edge. Each section in the menu has a square in the color of its most urgent notice, with how many there are. The window's title starts with `!!` (urgent) or `!` (important) and the notice's name, and its icon gets a square of that color.
+- **They go away when you act**: the request marked as done, the item of the board decided, the run redone, the memory back. A failed run asks for attention for 3 days, a pull request for a week (Chiefmate doesn't read whether you merged it: mark it as seen), a finished task for a day.
+- **Mark as seen** fades a notice (an info one goes away): it stays in the list, out of the counts, the title and the icon. A step's request has no "seen": only **Mark as done** clears it.
+- **Calm by design.** The colors keep their contrast on the dark panels, the level is also written ("Urgent", "Important"), and the pulse stops when Windows is set to show fewer animations.
 
 ### Talking to an agent at work
 

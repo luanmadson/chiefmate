@@ -85,8 +85,8 @@ export const savePending = list => writeJson(PENDING_FILE, list);
 
 export const readNotifications = () => readJson(NOTIFICATIONS_FILE, []);
 
-export function recordNotification(title, text) {
+export function recordNotification(title, text, level = null) {
   const list = readNotifications();
-  list.push({ title, text, at: now() });
+  list.push({ title, text, at: now(), ...(level ? { level } : {}) });
   writeJson(NOTIFICATIONS_FILE, list.slice(-100));
 }

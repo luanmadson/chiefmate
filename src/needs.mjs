@@ -76,7 +76,7 @@ export async function askOwner({ run: runId, step, what, url, wait = false, chec
   // The request is also part of the direct conversation: the owner can answer it from the agent's panel.
   agentSays(run, { step: n, agent: request.agent, text: request.what, kind: 'request', request: request.id });
   saveRun(run);
-  notify(t('Needs you: {title}', { title: run.title }), request.what, 'chiefmate:operations');
+  notify(t('Needs you: {title}', { title: run.title }), request.what, 'chiefmate:operations', { urgent: true });
   reportEvent('needs_you', `${request.agent ?? 'A step'} in run ${run.id} "${run.title}" (project ${run.project}) needs the owner: ${request.what}${request.url ? ` (address: ${request.url}, opened in the owner's browser)` : ''}${request.wait ? '. The step waits until the owner clicks Done in the app.' : '. The step goes on meanwhile.'}`);
   if (request.url) {
     try {

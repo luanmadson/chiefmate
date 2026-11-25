@@ -442,9 +442,11 @@ function drawFavicon(mode) {
     g.drawImage(baseIcon, 0, 0, 32, 32);
     g.fillStyle = '#0b0d10';
     g.fillRect(17, 17, 15, 15);
-    g.fillStyle = g.strokeStyle = '#c9a45d';
+    // The colors of the attention levels (style.css): urgent red, important lit brass, info grey.
+    g.fillStyle = g.strokeStyle = mode === 'urgent' ? '#ff5c52' : mode === 'important' ? '#e8bd5f' : mode === 'info' ? '#8a93a0' : '#c9a45d';
     if (mode === 'running') g.fillRect(19, 19, 11, 11);
-    else if (mode === 'needs') {
+    else if (mode === 'info') g.fillRect(21, 21, 7, 7);
+    else if (mode === 'urgent' || mode === 'important') {
       g.fillRect(17, 17, 15, 15);
       g.fillStyle = '#0b0d10';
       g.fillRect(23, 19, 3, 7);
@@ -471,29 +473,99 @@ function drawTitle() {
   if (runs.length > 1) title = `● ${[t('{count} running', { count: runs.length }), waiting, 'Chiefmate'].filter(Boolean).join(' · ')}`;
   else if (a) title = `● ${[`${a.agent ? agentName(a.agent, a.project) : t('preparing')} ${a.step ?? 1}/${a.steps.length}`, waiting, 'Chiefmate'].filter(Boolean).join(' · ')}`;
   else if (count) title = `○ ${waiting} · Chiefmate`;
-  const needs = online ? state?.needs?.length ?? 0 : 0;
-  if (needs) title = `! ${t('Needs you ({count})', { count: needs })} · ${title.replace(/^[●○] /, '')}`;
+  // The most urgent notice first: "!!" when urgent, "!" when important (the info ones stay out of the title).
+  const fresh = unseen(attnItems());
+  const level = topLevel(fresh);
+  const first = fresh.find(i => i.level === level);
+  if (level === 'urgent' || level === 'important') {
+    const more = fresh.filter(i => i.level !== 'info').length - 1;
+    title = `${level === 'urgent' ? '!!' : '!'} ${first.title}${more > 0 ? ` (+${more})` : ''} · ${title.replace(/^[●○] /, '')}`;
+  }
   if (document.title !== title) document.title = title;
-  drawFavicon(needs ? 'needs' : a ? 'running' : count ? 'queued' : '');
-  // The badge on the app's icon in the taskbar, where the browser supports it.
+  drawFavicon(level === 'urgent' || level === 'important' ? level : a ? 'running' : count ? 'queued' : level ?? '');
+  // The badge on the app's icon in the taskbar, where the browser supports it: the urgent and important notices.
+  const needs = fresh.filter(i => i.level !== 'info').length;
   if (needs !== drawTitle.badge && 'setAppBadge' in navigator) {
     (needs ? navigator.setAppBadge(needs) : navigator.clearAppBadge()).catch(() => {});
     drawTitle.badge = needs;
   }
 }
 
-/** The band of alerts at the top: low memory, the account's usage, free resets. They warn; nothing is paused. */
+// ---------- Attention: what needs you, in three levels ----------
+// One component for the whole app (the mark and the notice, styled by "data-level"): urgent (bright red, a soft
+// pulse), important (lit brass) and info (discreet). The server decides the level (src/attention.mjs).
+
+const LEVELS = ['urgent', 'important', 'info'];
+const levelName = level => ({ urgent: t('Urgent'), important: t('Important'), info: t('For your information') })[level] ?? '';
+const attnItems = () => (online ? state?.attention?.items ?? [] : []);
+const unseen = list => list.filter(i => !i.seen);
+const topLevel = list => LEVELS.find(l => list.some(i => i.level === l && !i.seen)) ?? null;
+const ofProject = (id, name) => i => i.project === id || (name && i.project === name);
+
+/** The mark: a square in the level's color, with a count when there is more than one. */
+function attnMark(list, label = '') {
+  const level = topLevel(list);
+  if (!level) return '';
+  const n = unseen(list).length;
+  const text = [levelName(level), label, n > 1 ? t('{count} notices', { count: n }) : ''].filter(Boolean).join(' · ');
+  return `<span class="attn-mark" data-level="${level}" role="img" aria-label="${esc(text)}" title="${esc(text)}">${n > 1 ? n : ''}</span>`;
+}
+
+/** A notice: its level, what happened, where and when, and what to do (act, open, or mark as seen). */
+function attnNotice(i) {
+  const r = i.request;
+  const where = [r?.agent ? agentName(r.agent, i.project) : '', i.project ? projectName(i.project) : '', i.at ? relative(i.at) : ''].filter(Boolean).join(' · ');
+  const links = [
+    r?.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : '',
+    r?.openError ? esc(r.openError) : '',
+    i.url ? `<a href="${esc(i.url)}" target="_blank" rel="noopener">${esc(t('Open the pull request'))}</a>` : '',
+  ].filter(Boolean);
+  const open = i.view === 'log' && i.run ? `href="#log" data-select="${esc(i.run)}"` : `href="#${esc(i.view)}"`;
+  const actions = r
+    ? `<button type="button" class="button small" ${r.session ? `data-needs-session="${esc(r.session)}"` : `data-needs-done="${esc(r.run)}"`} data-request="${esc(r.id)}">${esc(t('Mark as done'))}</button>`
+    : `${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
+  return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
+      <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
+      <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}${where || links.length ? `<span class="hint">${[esc(where), ...links].filter(Boolean).join(' · ')}</span>` : ''}</div>
+      <div class="attn-actions">${actions}</div>
+    </div>`;
+}
+
+/** A list of notices under a label ("Waiting for you"), for a section or a project; empty when there are none. */
+function attnList(list, label) {
+  if (!list.length) return '';
+  const head = `<div class="attn-head">${attnMark(list)}<span class="label">${esc(t('{label} ({count})', { label, count: unseen(list).length }))}</span></div>`;
+  return `<div class="attn-list"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>${head}${list.map(attnNotice).join('')}</div>`;
+}
+
+let attnOpen = false; // the band shows every notice, not only the most urgent
+/** The band at the top: the most urgent notice and how many others, opening into all of them. Nothing is paused. */
 function drawAlerts() {
-  const list = online ? state.alerts ?? [] : [];
-  const needs = (online ? state.needs ?? [] : []).map(n => `
-    <div class="needs" role="alert">
-      <div class="needs-text"><span class="needs-label">${esc(t('Needs you'))}</span>${esc(t('{task}: {what}', { task: n.title, what: n.what }))}
-        <span class="hint">${esc([n.agent ? agentName(n.agent, n.project) : '', projectName(n.project), relative(n.at)].filter(Boolean).join(' · '))}${n.url ? ` · <a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${n.openError ? ` · ${esc(n.openError)}` : ''}</span>
-      </div>
-      <button type="button" class="button" ${n.session ? `data-needs-session="${esc(n.session)}"` : `data-needs-done="${esc(n.run)}"`} data-request="${esc(n.id)}">${esc(t('Mark as done'))}</button>
-    </div>`).join('');
-  const html = needs + list.map(a => `<a class="alert" href="#${esc(a.view ?? 'manager')}">${stateHtml([a.text, a.level === 'critical' ? 'error' : 'warn'])}</a>`).join('');
+  const list = attnItems();
+  const fresh = unseen(list);
+  if (!fresh.length && !attnOpen) return draw('#alerts', '', '');
+  const others = fresh.length - 1;
+  const toggle = list.length > 1 || attnOpen
+    ? `<button type="button" class="button secondary small" data-attn-more aria-expanded="${attnOpen}">${esc(attnOpen ? t('Show less') : others > 0 ? t('+{count} more', { count: others }) : t('See all'))}</button>`
+    : '';
+  const all = fresh.some(i => i.seenable) ? `<button type="button" class="button secondary small" data-attn-seen="${esc(fresh.filter(i => i.seenable).map(i => i.id).join(' '))}">${esc(t('Mark all as seen'))}</button>` : '';
+  const shown = attnOpen ? list : fresh.slice(0, 1);
+  const html = `<div class="attn-band" data-level="${topLevel(list) ?? 'info'}"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>
+      ${shown.map(attnNotice).join('') || `<div class="attn" data-level="info"><div class="attn-text">${esc(t('Nothing needs you now.'))}</div></div>`}
+      ${toggle || (attnOpen && all) ? `<div class="attn-more">${toggle}${attnOpen ? all : ''}</div>` : ''}
+    </div>`;
   draw('#alerts', html, html);
+}
+
+/** A mark beside each section in the menu: the color of its most urgent notice and how many there are. */
+function drawNavAttention() {
+  const list = attnItems();
+  for (const a of document.querySelectorAll('.nav a[data-view]')) {
+    let slot = a.querySelector('.nav-attn');
+    if (!slot) a.append((slot = Object.assign(document.createElement('span'), { className: 'nav-attn' })));
+    const html = attnMark(list.filter(i => i.view === a.dataset.view), a.firstElementChild?.textContent ?? '');
+    if (slot.innerHTML !== html) slot.innerHTML = html;
+  }
 }
 
 function drawStatusbar() {
@@ -771,6 +843,9 @@ function runBlock(a) {
 
 function drawRun(a) {
   const k = opKey(a.id);
+  // A run waiting for you stands out with the urgent level.
+  const block = $(`#${k}-live`)?.closest('.run-block');
+  if (block && block.dataset.level !== (a.needsYou ? 'urgent' : '')) block.dataset.level = a.needsYou ? 'urgent' : '';
   const statuses = a.steps.map(s => s.status);
   const working = a.agent ? member(a.agent, a.project) : null;
   if (draw(`#${k}-live`, JSON.stringify([online, a.title, a.summary, a.step, a.agent, a.stepStarted, statuses, working?.status]), liveCard(a, k))) delete signatures[`#${k}-last`];
@@ -820,10 +895,13 @@ function drawOperations() {
     ? `<div class="hint run-count">${esc(t('{count} of at most {max} runs at once, one per project.', { count: runs.length, max: parallel }))}</div>`
     : '';
   // With several runs, each logbook is shorter, so every run fits in view one after another.
-  const skeleton = `${head}${runs.length ? `<div class="runs${runs.length > 1 ? ' several' : ''}">${runs.map(runBlock).join('')}</div>` : '<div class="panel" id="op-idle"></div>'}<div id="op-queue"></div><div id="op-sessions"></div>`;
+  const skeleton = `<div id="op-attention"></div>${head}${runs.length ? `<div class="runs${runs.length > 1 ? ' several' : ''}">${runs.map(runBlock).join('')}</div>` : '<div class="panel" id="op-idle"></div>'}<div id="op-queue"></div><div id="op-sessions"></div>`;
   if (draw('#operations', JSON.stringify([runs.map(a => a.id), parallel]), skeleton)) {
     for (const key of Object.keys(signatures)) if (key.startsWith('#op-')) delete signatures[key];
   }
+  // What needs you in the crew's work (requests, failed runs, pull requests, finished tasks), above the runs.
+  const notices = attnList(attnItems().filter(i => ['operations', 'log'].includes(i.view)), t('Waiting for you'));
+  draw('#op-attention', notices, notices);
   drawQueue();
   drawSessions();
   if (!runs.length) {
@@ -1297,19 +1375,9 @@ function drawProjectMore(id, info) {
   draw('#project-more', html, html);
 }
 
-/** What waits for you in this project, at the top: the crew's requests and the board's items waiting for you. */
+/** What waits for you in this project, at the top: its notices (requests, failures, pull requests, the board's items). */
 function drawProjectNeeds(id, p) {
-  const needs = (online ? state.needs ?? [] : []).filter(n => n.project === id);
-  const items = projectOpenItems(id, p).filter(i => i.status === 'waiting_owner');
-  const rows = [
-    ...needs.map(n => `<div class="project-need">
-      <div><span class="primary">${esc(n.what)}</span><span class="hint">${esc(n.title)}${n.url ? ` · <a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}</span></div>
-      <button type="button" class="button small" ${n.session ? `data-needs-session="${esc(n.session)}"` : `data-needs-done="${esc(n.run)}"`} data-request="${esc(n.id)}">${esc(t('Mark as done'))}</button></div>`),
-    ...items.map(i => `<div class="project-need">
-      <div><span class="primary">#${i.id} ${esc(i.title)}</span><span class="hint">${esc(t('On the board, waiting for you'))}</span></div>
-      <a class="button secondary small" href="${projectHash(id, 'planning')}">${esc(t('See'))}</a></div>`),
-  ];
-  const html = rows.length ? `<div class="project-needs" role="alert"><div class="label">${esc(t('Waiting for you ({count})', { count: rows.length }))}</div>${rows.join('')}</div>` : '';
+  const html = attnList(attnItems().filter(ofProject(id, p.name)), t('Waiting for you'));
   draw('#project-needs', html, html);
 }
 
@@ -2385,13 +2453,10 @@ function drawPlanning(force = false) {
   if (!state?.planning) return;
   const items = planItemsNow();
   const waiting = waitingItems();
-  draw('#counter-planning', String(waiting.length), waiting.length ? String(waiting.length) : '');
+  // The menu shows how many wait for you with the attention mark (drawNavAttention).
   $('#counter-planning').parentElement.title = waiting.length ? t('{count} item(s) waiting for you', { count: waiting.length }) : '';
 
-  const highlight = waiting.length
-    ? `<div class="panel plan-waiting"><div class="label">${esc(t('Waiting for you ({count})', { count: waiting.length }))}</div><ul>${waiting.map(i =>
-      `<li><span class="num">#${i.id}</span> <span class="hint">${projectLink(i.project)}</span> <span class="primary">${esc(i.title)}</span>${i.pr ? ` · ${prLink(i.pr)}` : ''}</li>`).join('')}</ul></div>`
-    : '';
+  const highlight = attnList(attnItems().filter(i => i.view === 'planning'), t('Waiting for you'));
   draw('#planning-waiting', highlight, highlight);
 
   const projects = planProjects();
@@ -2644,6 +2709,7 @@ function drawOffline() {
   drawPresence();
   drawFocus();
   drawAlerts();
+  drawNavAttention();
   drawStatusbar();
   drawTitle();
   if (state) {
@@ -2696,6 +2762,7 @@ async function refresh() {
   drawPresence();
   drawFocus();
   drawAlerts();
+  drawNavAttention();
   drawCounters();
   drawTitle();
   drawStatusbar();
@@ -2902,7 +2969,7 @@ document.addEventListener('click', event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-needs-done],[data-needs-session],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live]');
   if (!target) return;
   // A project's name inside a row that opens on a click (Projects) goes to its page, and nothing else.
   if (event.target.closest('a.project-link') && !target.matches('a')) return;
@@ -2995,6 +3062,12 @@ document.addEventListener('click', async event => {
     } else if (target.dataset.needsSession) {
       await api('/api/needs-you/done', { session: target.dataset.needsSession, id: target.dataset.request });
       toast(t('Marked as done. The session opens now.'));
+    } else if (target.dataset.attnSeen) {
+      await api('/api/attention/seen', { ids: target.dataset.attnSeen.split(' ') });
+      await refresh();
+    } else if (target.hasAttribute('data-attn-more')) {
+      attnOpen = !attnOpen;
+      drawAlerts();
     } else if (target.dataset.sessionOpen) {
       target.disabled = true;
       const session = await api('/api/session', { profile: target.dataset.sessionOpen });

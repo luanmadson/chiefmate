@@ -889,7 +889,7 @@ export async function execute(run) {
   } catch (error) {
     Object.assign(run, { status: 'failed', ended: now(), result: error.message });
     saveRun(run);
-    notify(t('Chiefmate hit an error'), t('{title}: {error}', { title: run.title, error: clip(error.message, 180) }));
+    notify(t('Chiefmate hit an error'), t('{title}: {error}', { title: run.title, error: clip(error.message, 180) }), 'chiefmate:log', { urgent: true });
     reportEvent('run_failed', `${aboutRun(run)} failed: ${clip(error.message, 400)}`);
   } finally {
     live.delete(run.id);

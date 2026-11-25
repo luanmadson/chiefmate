@@ -2,6 +2,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { attentionItems, attentionSummary, markSeen } from './attention.mjs';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
@@ -244,6 +245,9 @@ function buildState() {
   for (const r of [...queue, ...runs.slice(0, 30)]) if (needsBrief(r)) describeLater(r.id, r);
   const usage = readUsage();
   const machine = computer(config, queue);
+  const needs = [...openRequests(runs), ...sessionRequests()].sort((a, b) => b.at.localeCompare(a.at));
+  const items = planItems();
+  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo });
   const lastOf = id => runs.find(r => r.mission === id && !['queued', 'waiting'].includes(r.status));
   return {
     now: now(),
@@ -262,7 +266,7 @@ function buildState() {
     })),
     crew: (general = crew(agents, config, runs, going.map(x => x.run), queue, conversation)),
     teams: teams(config, agents, general, runs, going.map(x => x.run), queue, conversation),
-    needs: [...openRequests(runs), ...sessionRequests()].sort((a, b) => b.at.localeCompare(a.at)),
+    needs,
     prompts: { ...builderStatus(config), syncing: isSyncing(), cdp: !!config.browser_cdp },
     focus: focus(config),
     // Every run going on (one per project, up to "max_parallel"); "current" is the oldest, for older readers of the API.
@@ -280,8 +284,10 @@ function buildState() {
       reader: { ...readerSettings(config), signedIn: signedIn(), reading: isReading(), status: readerStatus() },
     },
     alerts: alerts(config, usage, machine),
+    // What needs the owner, in three levels (src/attention.mjs): the band at the top, the sections, the title and the icon.
+    attention: { items: attention, ...attentionSummary(attention) },
     // The owner's planning board (data/plan.json): every item, archived ones included, in the board's order.
-    planning: { items: planItems(), priorities: PRIORITIES, statuses: STATUSES },
+    planning: { items, priorities: PRIORITIES, statuses: STATUSES },
     manager: {
       messages: conversation.slice(-80), responding: chat.responding, interrupting: chat.interrupting, since: chat.since, partial: chat.partial,
       actions: chat.actions.slice(-12), lastAction: chat.actions.at(-1) ?? null, pending: readPending(), context: managerContext(),
@@ -385,6 +391,9 @@ export function startServer() {
         case '/api/needs-you/done':
           if (body.session) return reply(res, 200, finishSessionRequest(String(body.session), String(body.id ?? '')));
           return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner'));
+        case '/api/attention/seen':
+          // Marks notices as seen: they fade (an info notice goes away).
+          return reply(res, 200, { seen: markSeen(Array.isArray(body.ids) ? body.ids : [body.id]) });
         case '/api/run/talk':
           return reply(res, 200, talkTo(body.run, body.text));
         case '/api/session': {
