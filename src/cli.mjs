@@ -455,7 +455,10 @@ function updateLine(u) {
     job.paused?.length ? ` ${job.paused.length} run(s) paused for it resume after the restart.` : '',
     job.sessions?.length ? ` ${job.sessions.length} live session(s) paused for it carry on after the restart.` : '',
   ].join('');
-  if (job.stage === 'pausing') return `Installing: pausing the runs and the live sessions' turns going on at a safe point.${paused}`;
+  if (job.stage === 'pausing') {
+    const waiting = (job.waitingFor ?? []).map(w => `${w.title ?? w.run}${w.doing ? ` (${w.doing})` : ''}`);
+    return `Installing: pausing the runs and the live sessions' turns going on at a safe point${waiting.length ? `; waiting for: ${waiting.join('; ')}` : ''}.${paused}`;
+  }
   if (job.stage === 'manager') return `Installing: waiting for the manager's answer to end${job.interruptManager ? ' (it is being interrupted)' : ''}.${paused}`;
   return `Installing the new version: Chiefmate checks it and restarts by itself.${paused}`;
 }
@@ -481,7 +484,7 @@ async function main() {
         const { startQueue } = await import('./queue.mjs');
         const { startSchedule } = await import('./schedule.mjs');
         const { startUpdates } = await import('./update.mjs');
-        const { live, pauseAll } = await import('./runs.mjs');
+        const { doingNow, live, pauseAll } = await import('./runs.mjs');
         const { nudgeQueue } = await import('./queue.mjs');
         const { pauseSessionTurns, resumeSessions, sessionTurnsGoingOn, startSessions } = await import('./sessions.mjs');
         const { chat, deliverPending, interruptManager, managerBusy } = await import('./manager.mjs');
@@ -497,6 +500,7 @@ async function main() {
         startUpdates({
           isBusy: () => live.size > 0 || managerBusy() || sessionTurnsGoingOn(),
           crewBusy: () => live.size > 0,
+          crewWaiting: () => [...live.values()].map(l => ({ run: l.run, title: l.title, project: l.project, doing: doingNow(l) })),
           pauseRuns: pauseAll,
           sessionsBusy: sessionTurnsGoingOn,
           pauseSessions: pauseSessionTurns,

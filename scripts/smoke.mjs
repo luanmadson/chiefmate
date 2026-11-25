@@ -506,9 +506,11 @@ try {
   // A step at work is interrupted at a safe point, once; a run between steps is only marked.
   let interrupts = 0;
   live.set('smoke-pause-a', { run: 'smoke-pause-a', project: 'a', actions: [], process: { interrupt: () => interrupts++ } });
-  live.set('smoke-pause-b', { run: 'smoke-pause-b', project: 'b', actions: [], process: null });
+  // A run preparing its working copy (a download, say) has it stopped at once.
+  live.set('smoke-pause-b', { run: 'smoke-pause-b', project: 'b', actions: [], process: null, preparing: new AbortController() });
   const asked = pauseAll();
   expect(asked.join() === 'smoke-pause-a,smoke-pause-b' && interrupts === 1 && live.get('smoke-pause-b').pauseRequest && !pauseLive('smoke-pause-a') && interrupts === 1, `the runs going on were not asked to pause once each: ${asked}`);
+  expect(live.get('smoke-pause-b').preparing.signal.aborted, 'a pause for an update did not stop the preparation of a working copy');
   const turn = updatedTurn([{ text: 'Also fix the title', at: new Date().toISOString() }], { owner: 'Owner', language: 'en' });
   expect(turn.startsWith('Chiefmate was updated') && turn.includes('Continue from where you left off') && turn.includes('Also fix the title'), `a step resumed after the update is not told so, or loses the owner's message: ${turn}`);
 
@@ -524,10 +526,16 @@ try {
   const calls = { interrupt: 0, resume: 0, apply: 0 };
   let busy = 2;
   let answering = true;
+  let waitingShown = '';
   const hooks = {
     pollMs: 10,
     pauseRuns: () => (busy > 1 ? ['smoke-pause-a'] : []),
-    crewBusy: () => busy-- > 0,
+    // What the app shows while pausing: the runs the update waits for, with what they are doing.
+    crewWaiting: () => [{ run: 'smoke-pause-a', title: 'Run A', project: 'a', doing: 'preparing the working copy' }],
+    crewBusy: () => {
+      waitingShown ||= (update.updateInfo.installing?.waitingFor ?? []).map(w => `${w.title}: ${w.doing}`).join();
+      return busy-- > 0;
+    },
     managerAnswering: () => answering,
     interruptManager: () => {
       calls.interrupt++;
@@ -549,6 +557,7 @@ try {
   const installed = await update.install(job, hooks);
   expect(!installed && calls.apply === 1 && calls.interrupt === 1 && calls.resume === 1 && job.paused.join() === 'smoke-pause-a', `the update did not pause the crew, interrupt the manager when asked and resume after a failed install: ${JSON.stringify({ installed, calls, job })}`);
   expect(update.updateInfo.installing === null && !update.updating(), 'a failed update kept holding the queue and the manager');
+  expect(waitingShown === 'Run A: preparing the working copy' && job.waitingFor.length === 0, `the update did not say which runs it waits for while pausing, or kept them after: ${waitingShown}`);
 
   // Without "interrupt", the update waits for the answer to end.
   answering = true;
@@ -562,6 +571,77 @@ try {
   live.delete('smoke-pause-b');
 } catch (error) {
   failures.push(`update checks: ${error.message}`);
+}
+
+// A command stopped by its time limit or by a pause ends with every process it started (on Windows, git's download
+// helper outlived git and held its output open); a working copy is made borrowing your own clone's objects, and a
+// preparation stopped, or a lock left by a git cut off, leaves nothing in the way of the next one.
+{
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const { prepareWorkspace, run } = await import(src('workspace.mjs'));
+  const { WORKSPACES } = await import(src('util.mjs'));
+  const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const alive = pid => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const tree = "const c = require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'inherit' }); console.log('grandchild ' + c.pid); setTimeout(() => {}, 60000);";
+  for (const how of ['timeout', 'aborted']) {
+    let grandchild = 0;
+    try {
+      const controller = new AbortController();
+      if (how === 'aborted') setTimeout(() => controller.abort(), 1500);
+      const started = Date.now();
+      const r = await run(process.execPath, ['-e', tree], root, { maxMinutes: how === 'timeout' ? 0.025 : 5, signal: controller.signal });
+      grandchild = Number(r.output.match(/grandchild (\d+)/)?.[1]) || 0;
+      expect(r.stopped === how && r.code !== 0, `a command was not reported as stopped (${how}): ${JSON.stringify(r)}`);
+      await pause(500);
+      // The whole tree is ended on Windows only (taskkill /T); elsewhere the command itself.
+      if (process.platform === 'win32') expect(grandchild && !alive(grandchild) && Date.now() - started < 8000, `a command stopped (${how}) left a process it started running`);
+    } catch (error) {
+      failures.push(`stopping a command (${how}): ${error.message}`);
+    } finally {
+      if (grandchild && alive(grandchild)) process.kill(grandchild);
+    }
+  }
+
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-clone-'));
+  const hadWorkspaces = existsSync(WORKSPACES);
+  const id = `smoke-${process.pid}`;
+  const copy = path.join(WORKSPACES, id);
+  try {
+    const origin = path.join(temp, 'origin');
+    const mine = path.join(temp, 'mine');
+    const g = (dir, ...a) => execFileSync('git', ['-C', dir, '-c', 'user.name=smoke', '-c', 'user.email=smoke@example.com', ...a], { stdio: 'pipe' });
+    mkdirSync(origin);
+    g(origin, 'init', '-q', '-b', 'main');
+    writeFileSync(path.join(origin, 'a.txt'), 'one\n');
+    g(origin, 'add', '-A');
+    g(origin, 'commit', '-qm', 'one');
+    execFileSync('git', ['clone', '-q', origin, mine], { stdio: 'pipe' });
+    const project = { repository: origin, local_clone: mine };
+    const stopped = new AbortController();
+    stopped.abort();
+    const refused = await prepareWorkspace(id, project, 'main', () => {}, { signal: stopped.signal }).then(() => null, error => error);
+    expect(refused?.name === 'AbortError' && !existsSync(copy) && !existsSync(`${copy}.partial`), `a preparation stopped by a pause did not stop, or left a copy behind: ${refused?.message}`);
+    const dir = await prepareWorkspace(id, project, 'main');
+    const alternates = readFileSync(path.join(dir, '.git', 'objects', 'info', 'alternates'), 'utf8').trim().replaceAll('\\', '/').toLowerCase();
+    expect(alternates.endsWith(`${path.basename(temp)}/mine/.git/objects`.toLowerCase()) && existsSync(path.join(dir, 'a.txt')), `the first copy of a project did not borrow the objects of your own clone: ${alternates}`);
+    writeFileSync(path.join(dir, '.git', 'index.lock'), '');
+    await prepareWorkspace(id, project, 'main');
+    expect(!existsSync(path.join(dir, '.git', 'index.lock')), 'a lock left by a git cut off was not cleared');
+  } catch (error) {
+    failures.push(`preparing a working copy: ${error.message}`);
+  } finally {
+    rmSync(copy, { recursive: true, force: true });
+    rmSync(`${copy}.partial`, { recursive: true, force: true });
+    if (!hadWorkspaces) rmSync(WORKSPACES, { recursive: true, force: true });
+    rmSync(temp, { recursive: true, force: true });
+  }
 }
 
 // Without the server: the crews by project, what a step may see, the command line and the prompt builder,

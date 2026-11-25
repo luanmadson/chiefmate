@@ -671,6 +671,8 @@
   "Update approved: it installs on the next check, pausing the work going on": "Atualização aprovada: instala na próxima verificação, pausando o trabalho em andamento",
   "{count} run(s) paused for it resume after the restart.": "{count} execução(ões) pausada(s) para ela retoma(m) depois do reinício.",
   "Updating: pausing the work going on at a safe point…": "Atualizando: pausando o trabalho em andamento num ponto seguro…",
+  "Updating: waiting for {runs} to pause at a safe point…": "Atualizando: esperando {runs} pausar num ponto seguro…",
+  "Preparation stopped for the update: it starts over when the run resumes": "Preparação interrompida pela atualização: recomeça quando a execução retomar",
   "Updating: interrupting the manager's answer…": "Atualizando: interrompendo a resposta do gerente…",
   "Updating: waiting for the manager's answer to end…": "Atualizando: esperando o gerente terminar a resposta…",
   "Updating: checking the new version; Chiefmate restarts by itself…": "Atualizando: verificando a versão nova; o Chiefmate reinicia sozinho…",
