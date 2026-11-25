@@ -1,15 +1,16 @@
 // The tools a crew member's steps may run on: Claude Code (src/claude.mjs, the default), the Codex CLI and the Grok
 // CLI, each headless, in the run's working copy, with the same rules: the agent's and the project's instructions, the
-// time limit, the step's log, the refusal of anything that publishes and the final report. The manager, the team leads
-// and the final review always run on Claude Code.
+// time limit, the step's log, the refusal of anything that publishes and the final report. The tool is the member's
+// ("tool" in its settings) or the one chosen for a task (--tool). The manager, the team leads, the final review and the
+// projects marked "sensitive" always run on Claude Code.
 import { execFile, spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, createWriteStream, existsSync, writeFileSync } from 'node:fs';
+import { appendFileSync, createWriteStream, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { describeAction, describeDoing, environment, executable as claudeExecutable } from './claude.mjs';
 import { t } from './i18n.mjs';
-import { clip, ROOT } from './util.mjs';
+import { clip, DATA, ensureDir, now, ROOT } from './util.mjs';
 
 export const TOOLS = ['claude', 'codex', 'grok'];
 export const TOOL_NAMES = { claude: 'Claude Code', codex: 'Codex', grok: 'Grok' };
@@ -59,8 +60,119 @@ export function agentTool(config, agent, date = new Date()) {
   return { tool: asked, asked, until, reason: null };
 }
 
+/** A tool given for a task (--tool): claude, codex or grok; empty: none (null). Anything else is refused. */
+export function parseTool(value) {
+  const tool = String(value ?? '').trim().toLowerCase();
+  if (!tool) return null;
+  if (!TOOLS.includes(tool)) throw new Error(t('Unknown tool "{tool}". Use: {list}.', { tool, list: TOOLS.join(', ') }));
+  return tool;
+}
+
+/**
+ * The tool a step runs on: { tool, asked, until, reason, task }. The final review always on Claude Code; a project
+ * marked "sensitive" always on Claude Code (reason "sensitive"); else the tool chosen for the task (task: true), if
+ * any, else the member's own (agentTool).
+ */
+export function chooseTool(config, agent, { finalReview = false, asked = null, project = null, date = new Date() } = {}) {
+  if (finalReview) return { tool: 'claude', asked: 'claude', until: null, reason: null, task: false };
+  const task = !!asked;
+  const choice = agentTool(config, task ? { ...agent, tool: asked } : agent, date);
+  if (project?.sensitive === true && choice.tool !== 'claude') return { tool: 'claude', asked: choice.asked, until: null, reason: 'sensitive', task };
+  return { ...choice, task };
+}
+
 /** The model for a tool: the member's own, unless it names a Claude model and the tool is another (its default then). */
 export const toolModel = (tool, model) => (tool !== 'claude' && /^(claude|opus|sonnet|haiku|fable)\b/i.test(String(model ?? '')) ? null : model || null);
+
+/**
+ * The tools other than Claude Code a run's crew steps ran on, or were chosen to run on while still to come (--tool, a
+ * mission step's "tool"), for the app. The manager and the team lead are always on Claude Code.
+ */
+export function runTools(run) {
+  const found = new Set();
+  const crew = (run.steps ?? []).filter(s => s.agent !== 'manager' && s.agent !== 'lead');
+  for (const s of crew) {
+    const tool = s.tool ?? (s.status === 'pending' ? s.toolAsked ?? run.tool : null);
+    if (tool && tool !== 'claude') found.add(tool);
+  }
+  // A request not planned yet: its tasks will take the run's tool.
+  if (run.kind === 'ask' && !run.lead?.plan && run.tool && run.tool !== 'claude') found.add(run.tool);
+  return [...found];
+}
+
+// ---------- How each tool does: data/manager/tools-quality.jsonl ----------
+
+export const QUALITY_FILE = () => path.join(DATA, 'manager', 'tools-quality.jsonl');
+
+/** The one line the final review wrote on what it had to fix ("Corrections: ..."), or null. */
+export function correctionLine(report) {
+  const m = String(report ?? '').match(/^[\s>*_-]*Corrections?\**:\**\s*(.+)$/im);
+  return m ? clip(m[1].replace(/[*_`]+/g, '').trim(), 200) : null;
+}
+
+/**
+ * The records of a run that ended, one per step that ran on Codex or Grok: the tool, the kind of task, how long it
+ * took, whether the checks passed (null: none ran) and whether the final review had to correct something (null: no
+ * review), with one line on what. reviewCommits: the subjects of the commits the final review made.
+ */
+export function qualityRecords(run, reviewCommits = []) {
+  const ran = (run.steps ?? []).filter(s => s.tool && s.tool !== 'claude' && ['done', 'failed'].includes(s.status));
+  if (!ran.length) return [];
+  const checks = run.checks?.length ? run.checks.every(c => c.ok) : null;
+  const review = run.review && ['done', 'failed'].includes(run.review.status) ? run.review : null;
+  const said = review ? correctionLine(review.report) : null;
+  const saidNone = !said || /^(none|nothing|no|nenhum|nenhuma|nada|n[aã]o)\b/i.test(said);
+  const corrected = review ? reviewCommits.length > 0 || !saidNone : null;
+  const note = !review ? '' : said && !saidNone ? said : reviewCommits.length ? clip(reviewCommits.join('; '), 200) : '';
+  return ran.map(s => ({
+    at: now(), run: run.id, project: run.project, tool: s.tool, agent: s.agent, kind: run.kind, mission: run.mission ?? null,
+    task: clip(run.title, 100), chosen: (s.toolAsked ?? run.tool) ? 'task' : 'member', status: s.status, durationMs: s.durationMs ?? null,
+    checks, run_status: run.status, corrected, note,
+  }));
+}
+
+/** Appends the records (src/runs.mjs calls it once per run, when it ends). */
+export function recordQuality(records) {
+  if (!records.length) return;
+  const file = QUALITY_FILE();
+  ensureDir(path.dirname(file));
+  appendFileSync(file, records.map(r => `${JSON.stringify(r)}\n`).join(''));
+}
+
+export function readQuality() {
+  try {
+    return readFileSync(QUALITY_FILE(), 'utf8').split('\n').filter(Boolean).map(line => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    }).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The records summed up by tool, and by tool and kind of task: how many, how many approved with no correction (the
+ * step done, no check failed, the run done and the review fixed nothing), and the mean time of a step.
+ */
+export function qualitySummary(records = readQuality()) {
+  const clean = r => r.status === 'done' && r.checks !== false && r.run_status === 'done' && r.corrected !== true;
+  const sum = list => {
+    const timed = list.filter(r => Number(r.durationMs) > 0);
+    return {
+      count: list.length, clean: list.filter(clean).length, corrected: list.filter(r => r.corrected === true).length,
+      failed: list.filter(r => r.status === 'failed' || r.run_status === 'failed').length,
+      meanMs: timed.length ? Math.round(timed.reduce((n, r) => n + r.durationMs, 0) / timed.length) : null,
+    };
+  };
+  return TOOLS.filter(x => x !== 'claude').map(tool => {
+    const mine = records.filter(r => r.tool === tool);
+    const kinds = [...new Set(mine.map(r => r.mission ? `mission ${r.mission}` : r.kind))];
+    return { tool, ...sum(mine), kinds: kinds.map(kind => ({ kind, ...sum(mine.filter(r => (r.mission ? `mission ${r.mission}` : r.kind) === kind)) })), last: mine.at(-1)?.at ?? null };
+  });
+}
 
 // ---------- Finding and starting the programs ----------
 

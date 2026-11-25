@@ -215,6 +215,12 @@ export async function newCommits(dir, base) {
   return list ? list.split('\n') : [];
 }
 
+/** The subjects of the commits made since a commit, oldest first. */
+export async function commitSubjects(dir, from) {
+  const list = await git(dir, 'log', '--reverse', '--format=%s', `${from}..HEAD`);
+  return list ? list.split('\n') : [];
+}
+
 export const changedFiles = (dir, base) => git(dir, 'diff', '--stat', `origin/${base}...HEAD`);
 
 export async function runChecks(dir, commands = []) {

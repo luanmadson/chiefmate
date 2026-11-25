@@ -21,10 +21,10 @@ import { notify } from './notify.mjs';
 import { builderSettings, projectInstructions, writtenInstructions } from './prompts.mjs';
 import { readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
-import { agentTool, GROK_DENY, LOGIN_COMMAND, runTool, signedIn, TOOL_NAMES, toolModel } from './tools.mjs';
+import { chooseTool, GROK_DENY, LOGIN_COMMAND, parseTool, qualityRecords, recordQuality, runTool, signedIn, TOOL_NAMES, toolModel } from './tools.mjs';
 import { clip, languageName, now, parseLevel, ROOT, slug, stamp } from './util.mjs';
 import {
-  advanceClone, baseBranch, changedFiles, checkoutBranch, commitPending, createBranch, deliverToClone, discardSince, freeBranch, headCommit, newCommits, noTrace,
+  advanceClone, baseBranch, changedFiles, checkoutBranch, commitPending, commitSubjects, createBranch, deliverToClone, discardSince, freeBranch, headCommit, newCommits, noTrace,
   openPullRequest, prepareLibrary, prepareWorkspace, projectDir, runBranch, runChecks, traces,
 } from './workspace.mjs';
 
@@ -101,9 +101,11 @@ function workOf(run, config = loadConfig()) {
  */
 export function createRun({
   kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [], plan = null, prompt = null,
-  title: givenTitle = null, summary: givenSummary = null, level = null, request = null,
+  title: givenTitle = null, summary: givenSummary = null, level = null, request = null, tool: givenTool = null,
 }) {
   const config = loadConfig();
+  // The tool chosen for the run's crew steps (--tool); none: each member's own (src/tools.mjs).
+  const tool = parseTool(givenTool);
   let title, steps, finalReview, project;
   if (kind === 'mission') {
     const mission = config.missions?.[missionId];
@@ -114,7 +116,8 @@ export function createRun({
     for (const s of [...mission.steps, ...(mission.review ? [mission.review] : [])]) {
       if (!agents[s.agent] || s.agent === LEAD) throw new Error(t('{agent} is not in the crew of {project}.', { agent: s.agent, project }));
     }
-    steps = mission.steps.map(s => ({ agent: s.agent, part: s.part, status: 'pending' }));
+    // A mission's step may name its own tool ("tool" in the step); --tool covers the steps without one.
+    steps = mission.steps.map(s => ({ agent: s.agent, part: s.part, status: 'pending', ...(parseTool(s.tool) ? { toolAsked: parseTool(s.tool) } : {}) }));
     finalReview = mission.review ? { agent: mission.review.agent, part: mission.review.part, status: 'pending' } : null;
   } else if (kind === 'ask') {
     // A request for a project's team lead: it plans the tasks, the crew does them, the lead and then the manager review.
@@ -157,6 +160,7 @@ export function createRun({
     id, kind, mission: missionId ?? null, project, title, summary, briefBy, instruction: instruction ?? null, origin,
     status: 'queued', created: now(), notBefore, branch: runBranch(config.projects[project], id, title), steps, review: finalReview,
     modules: (Array.isArray(modules) ? modules : String(modules ?? '').split(',')).map(m => String(m).trim()).filter(Boolean),
+    ...(tool ? { tool } : {}),
     // The planning board's item this run was queued for: the item follows the run (src/planning.mjs).
     ...(plan != null && plan !== '' ? { plan: Number(String(plan).replace(/^#/, '')) } : {}),
     // The prompt written in the app's prompt builder: the steps get it instead of the one put together from the document.
@@ -333,7 +337,7 @@ function logAction(l, event) {
  * A step's prompt in parts, in order, each with a key and where it comes from (the project's Context tab shows them,
  * src/context.mjs): their lines, joined, are the prompt as it is sent.
  */
-export function promptParts({ run, step, project, previous, finalReview, changes, traces, config, libraries, base, access, built, agents }) {
+export function promptParts({ run, step, project, previous, finalReview, changes, traces, config, libraries, base, access, built, agents, tool = null }) {
   const prLanguage = project.language || config.language || 'en';
   const local = project.deliver === 'local';
   const parts = [];
@@ -378,6 +382,13 @@ export function promptParts({ run, step, project, previous, finalReview, changes
       `2. Check it against the reports and the project's rules${run.lead?.opinion ? ", weighing the team lead's opinion below (its first review)" : ''}. Fix whatever is wrong or incomplete, committing as ${noTrace(project) ? "the owner would, with a short message in the project's convention that names neither Chiefmate nor a review by an AI" : '"Chiefmate: manager review"'}. When the owner guided a step directly (a "direct talk" section at the end of its report), check that the work follows what they said.`,
       `3. Run the checks: ${(project.checks ?? []).map(c => `\`${c}\``).join(', ') || 'the ones the project and its documentation describe, as far as this machine allows'}.`,
       `4. Your last message presents the work for approval${local ? ', as the note that goes with the branch' : ', as the pull request text'}, in markdown and in ${languageName(prLanguage)}, starting with the final summary the rules below describe. End it with a section titled "${t("Manager's verdict", {}, prLanguage)}": what you fixed, the risks and your recommendation (approve, approve with caveats, or do not approve).`,
+    );
+    // The tools' quality record (src/tools.mjs) keeps this line: did the work done on Codex or Grok need fixing?
+    const onTools = [...new Set(run.steps.filter(s => s.tool && s.tool !== 'claude' && ['done', 'failed'].includes(s.status)).map(s => TOOL_NAMES[s.tool] ?? s.tool))];
+    if (onTools.length) {
+      lines.push(`5. Part of this work ran on ${onTools.join(' and ')}, not on Claude Code. In your verdict, write one line that starts with "Corrections:" saying, in a few words, what you had to fix in that work, or "Corrections: none".`);
+    }
+    lines.push(
       '',
       '## Changed files',
       '```',
@@ -404,14 +415,20 @@ export function promptParts({ run, step, project, previous, finalReview, changes
     add('reports', 'The reports of the steps before', lines);
   }
   add('rules', 'Chiefmate (src/runs.mjs, crewRules)', ['', crewRules(config, project, run.project, finalReview ? prLanguage : config.language || 'en')]);
-  add('tool', 'Chiefmate (src/runs.mjs, toolLines)', toolLines(stepTool(config, agents?.[step.agent], finalReview).tool));
+  add('tool', 'Chiefmate (src/runs.mjs, toolLines)', toolLines(tool ?? stepTool(config, agents?.[step.agent], finalReview, { asked: askedTool(run, step), project }).tool));
   return parts;
 }
 
 const stepPrompt = args => promptParts(args).flatMap(p => p.lines).join('\n');
 
-/** The tool a step runs on (src/tools.mjs): the member's, except the final review, which is always Claude Code's. */
-export const stepTool = (config, agent, finalReview = false) => (finalReview ? { tool: 'claude', asked: 'claude', until: null, reason: null } : agentTool(config, agent ?? {}));
+/**
+ * The tool a step runs on (src/tools.mjs, chooseTool): the one chosen for its task, else the member's; the final review
+ * and a project marked "sensitive" always on Claude Code. options: { asked (askedTool), project }.
+ */
+export const stepTool = (config, agent, finalReview = false, options = {}) => chooseTool(config, agent ?? {}, { ...options, finalReview });
+
+/** The tool chosen for a step's task (--tool): the step's own (a mission's step), else the run's; null: none. */
+export const askedTool = (run, step) => step?.toolAsked ?? run?.tool ?? null;
 
 /** What a step on Codex or Grok must know of its tool, at the end of its prompt. */
 function toolLines(tool) {
@@ -575,8 +592,12 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   const previous = run.steps.filter(s => s !== step && s.status !== 'pending' && s.status !== 'skipped');
   const changes = finalReview ? await changedFiles(dir, base).catch(() => '') : '';
   const found = finalReview && noTrace(project) ? await traces(dir, base).catch(() => []) : [];
-  const choice = stepTool(config, agent, finalReview);
-  const { tool } = choice;
+  const choice = stepTool(config, agent, finalReview, { asked: askedTool(run, step), project });
+  // A tool chosen for the task but not signed in here: the step runs on Claude Code (the member's own tool asks for the sign-in).
+  // A step paused for an update resumes on the tool it ran on.
+  const resumedOn = step.paused ? step.tool ?? null : null;
+  const unsigned = !resumedOn && choice.task && choice.tool !== 'claude' && !(await signedIn(choice.tool));
+  const tool = resumedOn ?? (unsigned ? 'claude' : choice.tool);
   const model = tool === 'claude' ? agent.model ?? config.default_model : toolModel(tool, agent.model);
   const access = stepAccess({ config, projectId: run.project, project, libraries, manager: step.agent === 'manager' });
   const mcp = stepMcp(config, project, agent);
@@ -587,7 +608,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     logAction(l, { type: 'action', text: t("Couldn't read the prompt builder: {error}", { error: error.message }) });
   }
   for (const a of built?.adaptations ?? []) logAction(l, { type: 'action', text: t('Prompt builder: a line of "{block}" was adapted to the crew\'s rules', { block: a.block }) });
-  const prompt = stepPrompt({ run, step, project, previous, finalReview, changes, traces: found, config, libraries, base, access, built, agents });
+  const prompt = stepPrompt({ run, step, project, previous, finalReview, changes, traces: found, config, libraries, base, access, built, agents, tool });
   const { tools, disallowed } = tool === 'claude' ? stepTools(agent, mcp, access) : { tools: [], disallowed: tool === 'grok' ? GROK_DENY : [] };
   const name = `${String(index + 1).padStart(2, '0')}-${step.agent}`;
   const contextFile = path.join(runDir(run.id), `${name}.context.md`);
@@ -607,6 +628,12 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   saveRun(run);
   if (['expired', 'off', 'unknown'].includes(choice.reason)) {
     logAction(l, { type: 'action', text: t('{tool} is not available to the crew now: this step runs on Claude Code', { tool: TOOL_NAMES[choice.asked] ?? choice.asked }) });
+  }
+  if (choice.reason === 'sensitive') {
+    logAction(l, { type: 'action', text: t('{tool} was chosen, but this project is marked sensitive: this step runs on Claude Code', { tool: TOOL_NAMES[choice.asked] ?? choice.asked }) });
+  }
+  if (unsigned) {
+    logAction(l, { type: 'action', text: t('{tool} is not signed in on this computer: this step runs on Claude Code', { tool: TOOL_NAMES[choice.tool] }) });
   }
   if (tool !== 'claude' && !(await signInFirst(l, run, index, tool))) {
     Object.assign(step, { status: 'failed', ended: now(), error: l.cancelRequest ?? t('{tool} is not signed in on this computer.', { tool: TOOL_NAMES[tool] }) });
@@ -940,7 +967,10 @@ export async function execute(run) {
       const { step, finalReview } = order[index];
       const limit = checkLimits(config, run);
       if (limit) return wait(limit.waitUntil, limit.note);
+      // What the final review commits tells whether it had to correct the crew's work (the tools' quality, src/tools.mjs).
+      const reviewFrom = finalReview ? await headCommit(dir).catch(() => null) : null;
       const { waitUntil, paused } = await runStep({ l, run, step, index, dir, project, config, agents, libraries, base, finalReview });
+      if (reviewFrom && step.status === 'done') step.commits = await commitSubjects(dir, reviewFrom).catch(() => []);
       if (paused && !l.cancelRequest) return pauseForUpdate();
       if (waitUntil) return wait(waitUntil, t('Your account reached its limit in the middle of a step'));
       if (step.agent === LEAD) afterLead(run, step, agents, log);
@@ -1038,6 +1068,19 @@ export async function execute(run) {
     reportEvent('run_failed', `${aboutRun(run)} failed: ${clip(error.message, 400)}`);
   } finally {
     live.delete(run.id);
+    // A run that ended with steps on Codex or Grok: how each did, for the manager's choice of tools (node src/cli.mjs tools).
+    if (['done', 'failed'].includes(run.status) && !run.qualityRecorded) {
+      try {
+        const records = qualityRecords(run, run.review?.commits ?? []);
+        if (records.length) {
+          recordQuality(records);
+          run.qualityRecorded = true;
+          saveRun(run);
+        }
+      } catch (error) {
+        console.error('Tools quality:', error.message);
+      }
+    }
     // A run that failed or was canceled gets its final summary too, in the background.
     if (['failed', 'canceled'].includes(run.status)) outcomeLater(run.id);
   }
