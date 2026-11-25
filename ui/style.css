@@ -231,7 +231,7 @@ textarea { resize: vertical; min-height: 64px; }
 .decisions[hidden] { display: none; }
 .decisions-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 8px 18px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .decisions-head .label { margin: 0; }
-.decision { padding: 12px 18px 14px; background: var(--attn-bg); border-left: 4px solid var(--attn); border-bottom: 1px solid var(--line); }
+.decision { padding: 10px 18px 12px; background: var(--attn-bg); border-left: 4px solid var(--attn); border-bottom: 1px solid var(--line); }
 .decision[data-seen] { background: transparent; border-left-color: var(--line-strong); }
 .decision[data-seen] .attn-mark { animation: none; opacity: 0.5; }
 .decision-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: var(--muted); }
@@ -251,8 +251,12 @@ textarea { resize: vertical; min-height: 64px; }
 .decision-detail-body { margin: 6px 0; padding: 8px 12px; background: var(--panel); border: 1px solid var(--line); }
 .decision-detail-body p:last-child { margin-bottom: 0; }
 .decision-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-.decision-buttons .button { min-width: 104px; min-height: 38px; padding: 9px 16px; font-size: 13px; }
+.decision-buttons .button { min-width: 96px; min-height: 36px; padding: 8px 15px; font-size: 13px; }
 .decisions-later > summary { padding: 8px 18px; color: var(--muted); font-size: 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+/* The phone's folds (the bar, the one-line cards, the short labels): hidden on wider screens */
+.decisions-bar, .decision-line, .decision-buttons .short { display: none; }
+.decision-chevron { flex: none; width: 7px; height: 7px; margin: 0 4px 3px; border-right: 1px solid var(--muted); border-bottom: 1px solid var(--muted); transform: rotate(45deg); }
+[aria-expanded="true"] > .decision-chevron { margin-bottom: -3px; transform: rotate(-135deg); }
 .chat-queue { max-height: 32vh; overflow-y: auto; border-top: 1px solid var(--line); background: var(--raised); }
 .chat-queue[hidden] { display: none; }
 .chat-queue-head { display: flex; gap: 10px; align-items: baseline; padding: 8px 18px 0; }
@@ -827,9 +831,12 @@ details summary { cursor: pointer; }
   .nav.open > a.nav-extra.active { border-left-color: var(--accent); }
   .nav.open > a.nav-extra > span:first-child { flex: 1; }
 
-  /* The notices: closed, at most three lines of text each, so the band keeps its height; open, it scrolls */
+  /* The notices: closed, two lines of text with no "where and when", so the band keeps its height; open, it scrolls.
+     On the manager's page, the notices with a decision card are left to the cards (drawAlerts in ui/app.js). */
   .attn-band { position: relative; max-height: 40dvh; overflow-y: auto; }
-  .attn-band:not(:has([data-attn-more][aria-expanded="true"])) .attn-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+  .attn-band > .attn:first-child { padding-top: 7px; padding-bottom: 7px; }
+  .attn-band:not(:has([data-attn-more][aria-expanded="true"])) .attn-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+  .attn-band:not(:has([data-attn-more][aria-expanded="true"])) .attn-text .hint { display: none; }
   .attn-band .attn-level { font-size: 10.5px; }
   .attn-band .attn-actions .button, .attn-more .button { min-width: 44px; }
   /* Closed, "+N more" sits beside the notice's buttons instead of a row of its own */
@@ -842,19 +849,63 @@ details summary { cursor: pointer; }
 
   /* While typing, the bottom bar and the notices step aside for the keyboard */
   html.typing .nav, html.typing .alerts, html.typing #view-manager .view-header, html.typing .suggestions { display: none; }
-  html.typing #view-manager .chat-column { height: calc(var(--view-h, 70dvh) - 24px); }
+  html.typing #view-manager .chat-column { height: calc(var(--view-h, 70dvh) - 20px); }
 
-  .view { padding: 12px 12px 16px; }
+  .view { padding: 8px 12px 12px; }
   .view-header h1 { font-size: 18px; }
   pre, code { overflow-wrap: anywhere; }
 
   /* The manager: the conversation takes the screen, the message field fixed at its bottom; the bridge below it */
-  #view-manager .view-header { height: 44px; margin-bottom: 8px; padding-bottom: 0; align-items: center; flex-wrap: nowrap; border-bottom: 0; }
+  #view-manager .view-header { height: 44px; margin-bottom: 6px; padding-bottom: 0; align-items: center; flex-wrap: nowrap; border-bottom: 0; }
   #view-manager .view-header p { display: none; }
   .manager-grid { display: block; height: auto; min-height: 0; }
-  #view-manager .chat-column { height: calc(var(--view-h, 70dvh) - 80px); min-height: 200px; }
+  #view-manager .chat-column { height: calc(var(--view-h, 70dvh) - 70px); min-height: 200px; }
   .chat { max-height: none; overscroll-behavior: contain; overflow-wrap: anywhere; }
-  .decisions { max-height: 45%; }
+  .msg { padding: 10px 12px; }
+  .msg-head { margin-bottom: 4px; }
+
+  /* Decisions: a one-line bar ("3 decisions") folding its list; each card one line (title, where, the recommendation),
+     unfolding to its explanation and short buttons. At most 40% of the conversation's height, scrolling inside. */
+  .decisions { max-height: 40%; overscroll-behavior: contain; }
+  .decisions-head { display: none; }
+  .decisions-bar {
+    position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 0 12px;
+    border: 0; border-left: 3px solid var(--attn); background: var(--panel); color: var(--strong); font: inherit; font-size: 13px; font-weight: 600; text-align: left; cursor: pointer;
+  }
+  .decisions-bar-text { flex: 1; min-width: 0; }
+  .decisions.open .decisions-bar { border-bottom: 1px solid var(--line); }
+  .decisions:not(.open) .decisions-list { display: none; }
+  .decision { padding: 0; border-left-width: 3px; }
+  .decision-line { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 6px 12px 6px 9px; border: 0; background: transparent; color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+  /* Folded: the title takes at most 62% of the line, so where and the recommendation stay in sight; unfolded, all of it */
+  .decision-line-text { flex: 1; min-width: 0; display: flex; gap: 6px; white-space: nowrap; }
+  .decision-line-text > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .decision-line-title { flex: 0 1 auto; max-width: 62%; font-weight: 600; color: var(--strong); }
+  .decision-line-about { flex: 1 1 0; color: var(--muted); }
+  .decision[data-open] .decision-line-text { display: block; white-space: normal; }
+  .decision[data-open] .decision-line-title { max-width: none; }
+  .decisions-bar:focus-visible, .decision-line:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+  .decision:not([data-open]) > :not(.decision-line), .decision > .decision-head, .decision > .decision-title { display: none; }
+  .decision[data-open] { padding-bottom: 10px; }
+  .decision > :not(.decision-line) { margin-left: 9px; margin-right: 12px; }
+  .decision-what { margin-top: 0; font-size: 13px; }
+  .decision-facts, .decision-third, .decision-detail { margin-top: 6px; }
+  .decision-facts div { display: block; }
+  .decision-facts dt { display: inline; }
+  .decision-facts dt::after { content: ": "; }
+  .decision-facts dd { display: inline; }
+  .decisions:has(.decision[data-open]) { max-height: 45%; }
+  /* Unfolded, the buttons come right under the line, the explanation below them */
+  .decision[data-open] { display: flex; flex-direction: column; }
+  .decision[data-open] > * { order: 2; }
+  .decision[data-open] > .decision-line { order: 0; }
+  .decision[data-open] > .decision-buttons { order: 1; margin: 0 12px 4px 9px; }
+  .decision-buttons { gap: 6px; margin-top: 8px; }
+  .decision-buttons .button { flex: none; min-width: 0; min-height: 44px; padding: 0 12px; }
+  .decision-buttons .long { display: none; }
+  .decision-buttons .short { display: inline; }
+  .decisions-later > summary { padding: 13px 12px; }
+  html.typing .decisions { display: none; }
   .side { margin-top: 16px; overflow: visible; }
   /* The field with its buttons to the right, as in a messaging app; the suggestions in one row below, scrolling sideways */
   .compose { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 8px; }
@@ -867,7 +918,7 @@ details summary { cursor: pointer; }
   .compose-footer > :first-child:empty { display: none; }
   .suggestion { flex: none; }
   /* A live session: its conversation fills the screen once its header scrolls away */
-  .live-session .chat-column { height: calc(var(--view-h, 70dvh) - 28px); min-height: 200px; }
+  .live-session .chat-column { height: calc(var(--view-h, 70dvh) - 20px); min-height: 200px; }
 
   /* Tables become cards: the main cell on top, the others below it, the buttons to the right */
   .table:not(.inner) { display: block; overflow: visible; }
