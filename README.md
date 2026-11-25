@@ -373,7 +373,8 @@ The libraries are read from a copy that Chiefmate refreshes from GitHub before u
 **Local delivery.** For a project whose work must not go to GitHub on its own, such as a repository you share with a team, set `"deliver": "local"`. The crew works the same way, but the result is a branch handed to your own clone (`local_clone`), never pushed. You review it there and decide what to send. Related settings:
 - `"main_branch": "current"` starts every run from the branch checked out in your clone, so the crew starts where you are working;
 - `repository` may be your clone's folder itself, which makes copying instant and includes commits you haven't pushed;
-- `clone_filter` (such as `"blob:none"`) makes a partial copy of a very large repository.
+- `clone_filter` (such as `"blob:none"`) makes a partial copy of a very large repository;
+- with `local_clone` set, the first copy borrows the objects your clone already has (`git clone --reference-if-able`), so only what it lacks is downloaded. The copy then depends on that clone: don't delete or move it.
 
 **Projects on this computer.** The Projects section finds a project's processes by its folders: `local_clone`, `repository` when it is a folder, `Documents/GitHub/<repository name>` in your user folder when it exists, the working copy in `workspaces/` and any extra folders in the project's `local_dirs`. The development environment started from the project's page counts too, with everything it started.
 
@@ -488,7 +489,7 @@ Chiefmate can be one of its own projects. Its crew then works on Chiefmate the s
 
 **The work going on doesn't hold the update back.** With `auto_update_mode` at `"pause"` (the default), and whenever you click **Update now** (in the Manager section, under "Crew on board", while an approved update waits) or run `node src/cli.mjs update-now --yes`:
 1. no new run starts and the manager starts no new answer: your messages wait in the queue;
-2. each run going on pauses at a safe point: its agent finishes the action under way (at most two minutes), and its step is kept to resume the same Claude Code session (`--resume`), told that Chiefmate was updated and should carry on where it stopped. A run preparing its working copy, running its checks or opening its pull request pauses at its next step, or ends first;
+2. each run going on pauses at a safe point: its agent finishes the action under way (at most two minutes), and its step is kept to resume the same Claude Code session (`--resume`), told that Chiefmate was updated and should carry on where it stopped. A run preparing its working copy (a first download, say) stops at once and prepares it again when it resumes; a run running its checks or opening its pull request pauses at its next step, or ends first. Meanwhile, "Crew on board" says which runs the update waits for and what each is doing;
 3. the update waits for the manager to finish its answer. To not wait, click **Interrupt the manager's answer** in the same place (or add `--interrupt-manager`): the conversation goes on in the same session;
 4. the turns of the live sessions in the app pause the same way (a Codex turn is awaited) and carry on by themselves after the restart; their windows and the sessions waiting for your message are left as they are;
 5. Chiefmate installs, checks the new version and restarts. The paused runs go first in the queue and resume by themselves, and the messages in the queue go to the manager. If the checks fail, Chiefmate goes back to the version it had and resumes everything the same way (that version is not tried again on its own: a newer one, or **Update now**, is).

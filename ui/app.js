@@ -733,7 +733,10 @@ function drawBridge() {
   const job = online ? update.installing : null;
   if (job) {
     const paused = job.paused?.length ? ` ${t('{count} run(s) paused for it resume after the restart.', { count: job.paused.length })}` : '';
-    if (job.stage === 'pausing') updateLine = t('Updating: pausing the work going on at a safe point…') + paused;
+    // Pausing: the runs it still waits for, each with what it is doing (a download, a step's action).
+    const waiting = (job.waitingFor ?? []).map(w => (w.doing ? `${w.title ?? w.run} (${w.doing})` : w.title ?? w.run));
+    if (job.stage === 'pausing' && waiting.length) updateLine = t('Updating: waiting for {runs} to pause at a safe point…', { runs: waiting.join('; ') }) + paused;
+    else if (job.stage === 'pausing') updateLine = t('Updating: pausing the work going on at a safe point…') + paused;
     else if (job.stage === 'manager') updateLine = (job.interruptManager ? t("Updating: interrupting the manager's answer…") : t("Updating: waiting for the manager's answer to end…")) + paused;
     else updateLine = t('Updating: checking the new version; Chiefmate restarts by itself…') + paused;
   }
