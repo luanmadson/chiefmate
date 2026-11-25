@@ -462,6 +462,11 @@ details summary { cursor: pointer; }
 /* What waits for the owner in this project: brass, above the tabs */
 .project-needs { margin-bottom: 16px; padding: 10px 16px; background: var(--accent-bg); border: 1px solid var(--accent); border-left-width: 4px; }
 .project-needs .label { color: var(--accent); margin-bottom: 6px; }
+.project-need { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 6px 0; border-top: 1px solid rgba(201, 164, 93, 0.25); }
+.project-need:first-of-type { border-top: 0; }
+.project-need .primary { display: block; color: var(--strong); }
+.project-need .hint { display: block; font-size: 12px; }
+.project-need .button { flex: none; }
 
 /* A live session's conversation in the app (a project's Live tab, or its own view) */
 .live-list, .live-earlier { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin-bottom: 12px; }
@@ -489,11 +494,6 @@ details summary { cursor: pointer; }
 .msg.first[open] summary { margin-bottom: 6px; }
 .msg.system.ask { color: var(--accent); }
 .live-ask { padding: 9px 18px; border-bottom: 1px solid var(--accent); }
-.project-need { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 6px 0; border-top: 1px solid rgba(201, 164, 93, 0.25); }
-.project-need:first-of-type { border-top: 0; }
-.project-need .primary { display: block; color: var(--strong); }
-.project-need .hint { display: block; font-size: 12px; }
-.project-need .button { flex: none; }
 .tab .counter { margin-left: 6px; }
 .project-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-bottom: 20px; }
 .summary-card { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 12px 16px; background: var(--panel); border: 1px solid var(--line); color: var(--text); }

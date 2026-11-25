@@ -568,7 +568,9 @@ function permissionOf(denial, dir) {
   const input = denial?.tool_input ?? {};
   if (tool === 'Bash') {
     const command = String(input.command ?? '');
-    const rule = ASK_FIRST.find(r => command.trim().startsWith(r.slice(5, -3))) ?? `Bash(${command.trim().split(/\s+/).slice(0, 2).join(' ')}:*)`;
+    // Any part of a compound command ("cd x && git push") may be the one refused.
+    const parts = command.split(/&&|\|\||[;|\n]/).map(p => p.trim());
+    const rule = ASK_FIRST.find(r => parts.some(p => p.startsWith(r.slice(5, -3)))) ?? `Bash(${command.trim().split(/\s+/).slice(0, 2).join(' ')}:*)`;
     return { tool, rule, what: t('Ran: {command}', { command: clip(command, 200) }) };
   }
   return { tool, rule: tool, what: describeAction(tool, input, dir) };

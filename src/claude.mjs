@@ -190,7 +190,8 @@ export function runClaude(options) {
       return;
     }
     if (event.type === 'system' && event.subtype === 'init') {
-      if (event.model) [mainModel, context.window] = [event.model, contextWindow(event.model)];      const { tools: loaded, mcp_servers, skills, plugins, agents, memory_paths, additional_directories } = event;
+      if (event.model) [mainModel, context.window] = [event.model, contextWindow(event.model)];
+      const { tools: loaded, mcp_servers, skills, plugins, agents, memory_paths, additional_directories } = event;
       onEvent({ type: 'start', model: event.model, session: event.session_id, init: { tools: loaded, mcp_servers, skills, plugins, agents, memory_paths, additional_directories } });
     } else if (event.type === 'system' && event.subtype === 'compact_boundary') {
       context.compactions++;

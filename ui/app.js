@@ -471,7 +471,6 @@ function drawTitle() {
   }
 }
 
-/** The band of alerts at the top: low memory, the account's usage, free resets. They warn; nothing is paused. */
 /** A request's buttons: Done (a step's, Codex to sign in), or Allow and See (a session's permission). */
 function needsButtons(n, size) {
   if (n.kind === 'permission') {
@@ -480,6 +479,7 @@ function needsButtons(n, size) {
   return `<button type="button" class="button${size}" ${n.session ? `data-needs-session="${esc(n.session)}"` : `data-needs-done="${esc(n.run)}"`} data-request="${esc(n.id)}">${esc(t('Mark as done'))}</button>`;
 }
 
+/** The band of alerts at the top: low memory, the account's usage, free resets. They warn; nothing is paused. */
 function drawAlerts() {
   const list = online ? state.alerts ?? [] : [];
   const needs = (online ? state.needs ?? [] : []).map(n => `
