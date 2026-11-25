@@ -261,14 +261,50 @@ export async function freeBranch(clone, name) {
  * forward; the run's branch is then removed. Returns null when done, or why it was not.
  */
 export async function advanceClone(clone, branch, base) {
-  const current = (await run('git', ['branch', '--show-current'], clone)).output.trim();
+  const why = await fastForward(clone, branch, base);
+  if (!why) await run('git', ['branch', '-d', branch], clone);
+  return why;
+}
+
+/**
+ * Moves your clone's base branch forward to "ref", never switching branches nor touching your changes: only when the
+ * clone has the base checked out, no changes to tracked files, and the move is a fast forward (git itself refuses to
+ * overwrite an untracked file). Returns null when done, or why it was not.
+ */
+export async function fastForward(clone, ref, base) {
+  const current = (await run('git', ['branch', '--show-current'], clone, { maxMinutes: 1 })).output.trim();
   if (current !== base) return t('your clone has {current} checked out, not {base}', { current: current || '-', base });
-  const status = await run('git', ['status', '--porcelain', '--untracked-files=no'], clone);
+  const status = await run('git', ['status', '--porcelain', '--untracked-files=no'], clone, { maxMinutes: 1 });
   if (status.code !== 0 || status.output.trim()) return t('your clone has changes not committed');
-  const r = await run('git', ['merge', '--ff-only', '-q', branch], clone);
+  const r = await run('git', ['merge', '--ff-only', '-q', ref], clone, { maxMinutes: 2 });
   if (r.code !== 0) return t('{base} moved on in your clone: not a fast forward', { base });
-  await run('git', ['branch', '-d', branch], clone);
   return null;
+}
+
+/** Whether two repository addresses are the same: case, a final ".git" and slashes aside (local folders too). */
+export function sameRepository(a, b) {
+  const norm = s => String(s ?? '').trim().replace(/\\/g, '/').replace(/\/+$/, '').replace(/\.git$/i, '').toLowerCase();
+  return !!norm(a) && norm(a) === norm(b);
+}
+
+/** The reference libraries that are a copy of the project's own repository (their ids). */
+export const projectLibraries = (config, id) => Object.entries(config?.library ?? {})
+  .filter(([, source]) => sameRepository(source?.repository, config?.projects?.[id]?.repository)).map(([lib]) => lib);
+
+/**
+ * How far a copy is behind its origin's branch, asking the origin itself (git ls-remote; nothing is downloaded):
+ * { branch, behind } with behind 0 (up to date), a count, or -1 (behind, the commits not in the copy), or null when it
+ * can't be told. "branch": the one given, else the one checked out.
+ */
+export async function behindOrigin(dir, branch = null) {
+  const name = branch || (await run('git', ['branch', '--show-current'], dir, { maxMinutes: 0.5 })).output.trim();
+  if (!name) return null;
+  const remote = await run('git', ['ls-remote', 'origin', `refs/heads/${name}`], dir, { maxMinutes: 0.5 });
+  const sha = remote.code === 0 ? remote.output.trim().split(/\s/)[0] : '';
+  if (!/^[0-9a-f]{40}$/.test(sha)) return null;
+  if ((await run('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], dir, { maxMinutes: 0.5 })).code === 0) return { branch: name, behind: 0 };
+  const count = await run('git', ['rev-list', '--count', `HEAD..${sha}`], dir, { maxMinutes: 0.5 });
+  return { branch: name, behind: count.code === 0 ? Number(count.output.trim()) || -1 : -1 };
 }
 
 const TRACE = /chiefmate/i;

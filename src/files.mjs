@@ -8,6 +8,7 @@ import { t } from './i18n.mjs';
 import { projectClone } from './sessions.mjs';
 import { decodeText, parseCsv, readXlsx } from './sheets.mjs';
 import { DATA, ROOT, WORKSPACES } from './util.mjs';
+import { behindOrigin, projectLibraries } from './workspace.mjs';
 
 export const MAX_FILE = 50 * 1024 ** 2; // the largest file read or sent
 export const MAX_TEXT = 2 * 1024 ** 2; // the largest text shown
@@ -304,9 +305,72 @@ async function runSource(run, file, config) {
 // ---------- References, facts and content ----------
 
 /**
+ * The copies of a project a relative path is looked for in: your clone, the reference libraries that copy its
+ * repository and the crew's working copy, in that order ({ dir, kind, label, project, branch }; branch: the one its
+ * origin is compared with). With no project, every root, and each library on its own.
+ */
+export function projectPlaces(config, project, roots, { workspaces = WORKSPACES } = {}) {
+  const main = id => {
+    const b = config?.projects?.[id]?.main_branch;
+    return b && b !== 'current' ? b : null;
+  };
+  const libraries = ids => ids.map(id => ({ dir: path.join(workspaces, '.library', id), kind: 'library', label: config?.library?.[id]?.name ?? id, project: project ?? null, branch: config?.library?.[id]?.main_branch ?? 'main' }))
+    .filter(p => statOf(p.dir)?.isDirectory());
+  if (project) {
+    const own = roots.filter(r => r.project === project).map(r => ({ dir: r.real, kind: r.kind, label: r.label, project, branch: main(project) }));
+    const rank = { clone: 0, library: 1, workspace: 2 };
+    return [...own, ...libraries(projectLibraries(config, project))].sort((a, b) => (rank[a.kind] ?? 3) - (rank[b.kind] ?? 3));
+  }
+  const library = roots.find(r => r.kind === 'library');
+  const ids = library ? readdirSync(library.real, { withFileTypes: true }).filter(d => d.isDirectory() && !blockedName(d.name)).map(d => d.name) : [];
+  return [...roots.filter(r => r.kind !== 'library').map(r => ({ dir: r.real, kind: r.kind, label: r.label, project: r.project, branch: r.project ? main(r.project) : null })), ...libraries(ids)];
+}
+
+/**
+ * The newest of the copies of "rel" in these places: { real, from, copies } (from: the place it came from; copies: how
+ * many places have it), or null when none has it. The newest is the one last written (a copy updated after a merge, or
+ * your own change); a tie keeps the places' order.
+ */
+export function newestCopy(rel, places, roots, blocked) {
+  const found = [];
+  for (const place of places) {
+    try {
+      const { real } = checkPath(path.join(place.dir, rel), roots, { blocked });
+      found.push({ real, place, mtime: statOf(real)?.mtimeMs ?? 0 });
+    } catch (error) {
+      if (error.code !== 404) throw error;
+    }
+  }
+  if (!found.length) return null;
+  const best = found.reduce((a, b) => (b.mtime > a.mtime ? b : a));
+  return { real: best.real, from: { kind: best.place.kind, label: best.place.label, dir: best.place.dir }, copies: found.length };
+}
+
+/** A copy's name for the owner: your clone, the crew's working copy, the library X, or the folder's label. */
+const placeName = p => ({ clone: t('your clone'), workspace: t("the crew's working copy"), library: t('the library {name}', { name: p.label }) })[p.kind] ?? p.label;
+
+/**
+ * "File not found", saying where it was looked for and which of those copies is behind its origin's branch (asked of
+ * the origin, so a merge on GitHub that a copy doesn't have yet shows).
+ */
+async function notFound(rel, places) {
+  const looked = places.map(p => `${placeName(p)} (${p.dir})`);
+  const behind = [];
+  // Only the projects' copies and the libraries are git copies of something: asked all at once.
+  const checks = await Promise.all(places.map(p => (p.kind === 'extra' ? null : behindOrigin(p.dir, p.branch).catch(() => null))));
+  for (const [i, p] of places.entries()) {
+    const b = checks[i];
+    if (b?.behind) behind.push(b.behind > 0 ? t('{place} is {count} commit(s) behind origin/{branch}', { place: placeName(p), count: b.behind, branch: b.branch }) : t('{place} is behind origin/{branch}', { place: placeName(p), branch: b.branch }));
+  }
+  const text = [t('File not found: {path}.', { path: rel }), looked.length ? t('Looked in: {places}.', { places: looked.join('; ') }) : '', behind.length ? `${behind.join('; ')}.` : ''].filter(Boolean).join(' ');
+  return Object.assign(new Refused(text, 404), { looked: places.map(p => ({ kind: p.kind, label: p.label, dir: p.dir })) });
+}
+
+/**
  * Where a reference leads: { path } on the disk, or { run, file } in a run's branch. A path may be absolute or relative,
- * with a ":line" at the end; a relative one is looked for in the run's files, then in the project's folders (or every
- * root, with no project), the first that exists.
+ * with a ":line" at the end. A relative one is looked for in the run's files, then in the project's copies (or every
+ * root, with no project): the newest copy wins, and "from" says which. An absolute one that no longer exists is looked
+ * for, by the same relative path, in the other copies of its project.
  */
 async function resolveRef(params, config, roots, blocked, readRun) {
   const run = params.run ? readRun(String(params.run)) : null;
@@ -314,26 +378,34 @@ async function resolveRef(params, config, roots, blocked, readRun) {
   if (run && params.file) return { source: await runSource(run, params.file, config) };
   const asked = String(params.path ?? '').trim().replace(/^["'`]+|["'`]+$/g, '').replace(/:\d+(?:[-:]\d+)?$/, '');
   if (!asked) throw new Refused(t('File not found.'), 404);
-  if (/^[a-z]:[\\/]/i.test(asked) || /^[\\/]/.test(asked)) return { real: checkPath(asked, roots, { blocked }).real };
+  const project = params.project || run?.project;
+  if (/^[a-z]:[\\/]/i.test(asked) || /^[\\/]/.test(asked)) {
+    try {
+      return { real: checkPath(asked, roots, { blocked }).real };
+    } catch (error) {
+      if (error.code !== 404) throw error;
+      // Gone from this copy (or not there yet): the same path in the other copies of its project.
+      const home = projectPlaces(config, null, roots).filter(p => within(asked, p.dir)).sort((a, b) => b.dir.length - a.dir.length)[0];
+      if (!home) throw error;
+      const rel = path.relative(home.dir, path.resolve(asked));
+      const owner = project || home.project
+        || (home.kind === 'library' ? Object.keys(config?.projects ?? {}).find(id => projectLibraries(config, id).includes(path.basename(home.dir))) : null);
+      const siblings = owner ? projectPlaces(config, owner, roots) : [home];
+      const copy = newestCopy(rel, siblings, roots, blocked);
+      if (copy) return copy;
+      throw await notFound(rel.split(path.sep).join('/'), siblings);
+    }
+  }
   const rel = asked.replace(/\\/g, '/').replace(/^\.\//, '');
   if (rel.split('/').some(p => p === '..')) throw outside();
   if (run) {
     const list = await runFiles(run, config);
     if (list.files.some(f => f.file === rel && f.status !== 'D')) return { source: await runSource(run, rel, config) };
   }
-  const project = params.project || run?.project;
-  const places = project ? roots.filter(r => r.project === project) : roots;
-  // A library's files: workspaces/.library/<library>/<path>.
-  const tries = places.flatMap(r => (r.kind === 'library' ? readdirSync(r.real, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => path.join(r.real, d.name, rel)) : [path.join(r.real, rel)]));
-  for (const candidate of tries) {
-    try {
-      const { real } = checkPath(candidate, roots, { blocked });
-      return { real };
-    } catch (error) {
-      if (error.code !== 404) throw error;
-    }
-  }
-  throw new Refused(t('File not found.'), 404);
+  const places = projectPlaces(config, project, roots);
+  const copy = newestCopy(rel, places, roots, blocked);
+  if (copy) return copy;
+  throw await notFound(rel, places);
 }
 
 /**
@@ -345,7 +417,8 @@ export async function viewFile(what, params, { config, readRun, dest = '' }) {
   const blocked = blockedPlaces();
   const found = await resolveRef(params, config, roots, blocked, readRun);
   if (what === 'info') {
-    if (found.real) return diskInfo(found.real, roots, blocked);
+    // "from": the copy a relative path was found in (the newest of "copies").
+    if (found.real) return { ...diskInfo(found.real, roots, blocked), ...(found.from ? { from: { ...found.from, name: placeName(found.from) }, copies: found.copies } : {}) };
     const s = found.source;
     return { ref: { run: s.run, file: s.file }, name: s.name, size: s.size, mtime: null, kind: s.kind, folder: null };
   }
