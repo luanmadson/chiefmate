@@ -26,7 +26,11 @@ import { notify } from './notify.mjs';
 import { assembleBlocks, builderSettings, parseBlocks } from './prompts.mjs';
 import { codexEnvironment, signedIn, spawnable, toolCommand, where } from './tools.mjs';
 import { updating } from './update.mjs';
+import { stopping } from './power.mjs';
 import { clip, DATA, ensureDir, languageName, now, readJson, ROOT, slug, stamp, WORKSPACES, writeJson } from './util.mjs';
+
+// No new answer or turn starts while an update is installed or Chiefmate stops for the owner (src/power.mjs).
+const held = () => updating() || stopping();
 
 export { toolCommand, where };
 
@@ -439,7 +443,7 @@ export function sayToSession(id, text, { by = 'owner' } = {}) {
   let session = appSession(id);
   if (session.status === 'ended') session = resumeSession(id);
   const item = { id: randomUUID().slice(0, 8), text: message, at: now(), ...(by === 'manager' ? { by } : {}) };
-  const queued = live.has(id) || session.status !== 'open' || !!session.paused || updating() || (session.queue ?? []).length > 0;
+  const queued = live.has(id) || session.status !== 'open' || !!session.paused || held() || (session.queue ?? []).length > 0;
   saveSession({ ...session, queue: [...(session.queue ?? []), item] });
   deliverSession(id);
   return { ...item, queued, position: queued ? (readSession(id)?.queue ?? []).length : 0 };
@@ -520,7 +524,7 @@ const appSystem = owner => [
  * update carries on by itself. None starts while an update of Chiefmate is being installed. Returns whether one started.
  */
 export function deliverSession(id) {
-  if (live.has(id) || updating()) return false;
+  if (live.has(id) || held()) return false;
   const session = readSession(id);
   if (!session || session.mode !== 'app' || session.status !== 'open' || (!(session.queue ?? []).length && !session.paused)) return false;
   const items = session.queue ?? [];
@@ -607,12 +611,12 @@ function chargeSays(id, session, text, config) {
  * way finish), to carry on by itself after the restart in the same session. A turn of Codex can't stop that way: the
  * update waits for it to end. Returns the ids of the sessions asked.
  */
-export function pauseSessionTurns() {
+export function pauseSessionTurns(why = 'update') {
   const asked = [];
   for (const [id, turn] of live) {
     if (turn.pausing || turn.ending || turn.interrupted || !turn.interrupt()) continue;
     turn.pausing = true;
-    note(id, t('Pausing at a safe point for an update of Chiefmate: the agent carries on by itself after the restart.'));
+    note(id, why === 'stop' ? t('Pausing at a safe point: Chiefmate is shutting down, and the agent carries on by itself at the next start.') : t('Pausing at a safe point for an update of Chiefmate: the agent carries on by itself after the restart.'));
     asked.push(id);
   }
   return asked;

@@ -22,11 +22,12 @@ export const NEWS_EVENTS = [
   'run_finished', 'run_failed', 'run_paused', 'pr_ready', 'merged', 'merge_failed', 'needs_you',
   'update_installed', 'update_blocked', 'memory_alert', 'usage_alert', 'session_ended', 'plan_proposed',
   'idle', 'autopilot_report', 'watchdog', 'away', 'back', 'owner_decided', 'push_allowed', 'repo_allowed', 'owner_request',
+  'power',
 ];
 
-// The owner's own switch, and a push the owner allowed (for a short time): always told to the manager, whatever
-// "manager_updates" says.
-const OWNER_EVENTS = ['away', 'back', 'push_allowed', 'repo_allowed'];
+// The owner's own switches (away mode, the power modes of src/power.mjs), and a push the owner allowed (for a short
+// time): always told to the manager, whatever "manager_updates" says.
+const OWNER_EVENTS = ['away', 'back', 'push_allowed', 'repo_allowed', 'power'];
 
 /**
  * While the owner is away, these events wait for the summary when they are back. The rest still go at once: the

@@ -3,6 +3,7 @@
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { activeRun, cancelLive, doingNow, execute, live, liveRuns } from './runs.mjs';
+import { held } from './power.mjs';
 import { listRuns, readRun, saveRun, stepsOf } from './store.mjs';
 import { updating } from './update.mjs';
 import { now } from './util.mjs';
@@ -83,8 +84,9 @@ export function focus(config = loadConfig()) {
 }
 
 function tick() {
-  // While an update of Chiefmate is being installed, nothing starts: the queue goes on after it.
-  if (updating()) return;
+  // While an update of Chiefmate is being installed, on standby or while Chiefmate stops, nothing starts: the queue
+  // goes on after it.
+  if (updating() || held()) return;
   const free = maxParallel() - live.size - starting.size;
   if (free <= 0) return;
   for (const next of pickNext(queued().filter(r => !live.has(r.id) && !starting.has(r.id)), busyProjects(), free)) {

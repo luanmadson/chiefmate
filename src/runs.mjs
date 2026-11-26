@@ -102,7 +102,7 @@ function workOf(run, config = loadConfig()) {
  */
 export function createRun({
   kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [], plan = null, prompt = null,
-  title: givenTitle = null, summary: givenSummary = null, level = null, request = null, tool: givenTool = null,
+  title: givenTitle = null, summary: givenSummary = null, level = null, request = null, tool: givenTool = null, due = null,
 }) {
   const config = loadConfig();
   // The tool chosen for the run's crew steps (--tool); none: each member's own (src/tools.mjs).
@@ -170,6 +170,8 @@ export function createRun({
     level: parseLevel(level),
     // The request of the project's agent in charge that the manager (or the owner) authorized (src/charge.mjs).
     ...(request != null ? { ownerRequest: Number(request) } : {}),
+    // A mission missed while Chiefmate was off or on standby: when it was due (src/schedule.mjs). The app marks it late.
+    ...(due ? { due } : {}),
   });
   describeLater(run.id, run);
   return run;
@@ -246,23 +248,37 @@ export function cancelLive(id, reason) {
  * when it resumes; one running its checks or opening its pull request pauses only at its next step, or ends first.
  * Returns false when it is not going on, or was already asked.
  */
-export function pauseLive(id) {
+export function pauseLive(id, why = 'update') {
   const l = live.get(id);
   if (!l || l.cancelRequest || l.pauseRequest) return false;
-  l.pauseRequest = true;
+  l.pauseRequest = why;
   l.process?.interrupt?.();
   l.preparing?.abort();
-  logAction(l, { type: 'action', text: t('Pausing at a safe point for an update of Chiefmate') });
+  const text = why === 'standby' ? t('Pausing at a safe point: Chiefmate is going on standby')
+    : why === 'stop' ? t('Pausing at a safe point: Chiefmate is shutting down')
+      : t('Pausing at a safe point for an update of Chiefmate');
+  logAction(l, { type: 'action', text });
   return true;
 }
 
-/** Asks every run going on to pause for an update of Chiefmate (see pauseLive). Returns the ids it asked. */
-export const pauseAll = () => [...live.keys()].filter(pauseLive);
+/**
+ * Asks every run going on to pause (see pauseLive). why: "update" (the default), "standby" or "stop" (the power modes,
+ * src/power.mjs). Returns the ids it asked.
+ */
+export const pauseAll = (why = 'update') => [...live.keys()].filter(id => pauseLive(id, why));
+
+/** The note of a run paused for an update or a power mode, until it resumes. */
+function pausedNote(why) {
+  if (why === 'standby') return t('Paused at a safe point for standby. It resumes by itself when Chiefmate is turned back on.');
+  if (why === 'stop') return t('Paused at a safe point because Chiefmate was shut down. It resumes by itself at the next start.');
+  return t('Paused for an update of Chiefmate. It resumes by itself as soon as the update is over.');
+}
 
 /** The next turn of a step resumed after an update of Chiefmate, with the owner's messages sent meanwhile. */
-export function updatedTurn(messages, config = loadConfig()) {
+export function updatedTurn(messages, config = loadConfig(), why = 'update') {
   const lines = [
-    'Chiefmate was updated while you were working: your work was paused at a safe point so the new version could be installed, and this session now resumes.',
+    why === 'update' ? 'Chiefmate was updated while you were working: your work was paused at a safe point so the new version could be installed, and this session now resumes.'
+      : `Chiefmate was ${why === 'standby' ? 'put on standby' : 'shut down'} by its owner while you were working: your work was paused at a safe point, and this session now resumes.`,
     'Continue from where you left off. The branch, the files and this session are as you left them. A command that was still running when you were paused may have been cut off: check its result before you go on.',
     "When you finish, your last message is still the step's full report.",
   ];
@@ -686,8 +702,8 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     const messages = pendingTalk(run, index + 1);
     for (const m of messages) Object.assign(m, { status: 'delivered', delivered: now(), via: 'resume' });
     if (messages.length) l.reply = messages.at(-1).id;
-    turn = updatedTurn(messages, config);
-    logAction(l, { type: 'action', text: t('Chiefmate was updated: the agent goes on in the same session') });
+    turn = updatedTurn(messages, config, paused.why ?? 'update');
+    logAction(l, { type: 'action', text: (paused.why ?? 'update') === 'update' ? t('Chiefmate was updated: the agent goes on in the same session') : t('Back from the pause: the agent goes on in the same session') });
   }
   let r;
   let pausedNow = false;
@@ -751,8 +767,8 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   }
   l.reply = null;
   if (pausedNow) {
-    Object.assign(step, { status: 'pending', paused: { session: r.session ?? l.session ?? session.id, spentMs, total, at: now() } });
-    logAction(l, { type: 'action', text: t('Paused for the update: the step resumes in the same session afterwards') });
+    Object.assign(step, { status: 'pending', paused: { session: r.session ?? l.session ?? session.id, spentMs, total, at: now(), why: l.pauseRequest } });
+    logAction(l, { type: 'action', text: l.pauseRequest === 'update' ? t('Paused for the update: the step resumes in the same session afterwards') : t('Paused: the step resumes in the same session afterwards') });
     saveRun(run);
     return { paused: true };
   }
@@ -900,7 +916,7 @@ export async function execute(run) {
 
   // Paused for an update of Chiefmate: back to the front of the queue, to resume as soon as the update is over.
   const pauseForUpdate = () => {
-    Object.assign(run, { status: 'queued', resumeFirst: true, note: t('Paused for an update of Chiefmate. It resumes by itself as soon as the update is over.') });
+    Object.assign(run, { status: 'queued', resumeFirst: true, note: pausedNote(l.pauseRequest) });
     saveRun(run);
   };
 
