@@ -185,6 +185,8 @@ function effortPick(a, { project = null, chat = false } = {}) {
   const options = [`<option value="default"${level ? '' : ' selected'}>${esc(t('default'))}</option>`, ...EFFORTS.map(e => `<option value="${e}"${e === level ? ' selected' : ''}>${esc(e)}</option>`)];
   return `<span class="effort-pick">${effortBadge(level, title)}<select class="effort-select" data-effort-member="${esc(a.id)}"${project ? ` data-effort-project="${esc(project)}"` : ''}${chat ? ' data-effort-chat="1"' : ''} aria-label="${esc(chat ? t('Change the effort of the conversation') : t('Change the effort of {agent}', { agent: t(a.name ?? a.id) }))}" title="${esc(t('Counts from the next step'))}">${options.join('')}</select></span>`;
 }
+/** An effort picker of this place has the focus: it is not drawn again under the owner's hand (its list would close). */
+const pickingEffort = selector => !!document.activeElement?.matches?.('.effort-select') && !!$(selector)?.contains(document.activeElement);
 /** A recorded effort change in one line: when, who, the member, from and to. */
 function effortChangeHtml(e) {
   const who = e.by === 'manager' ? t('Manager') : t('You');
@@ -1876,8 +1878,8 @@ function drawCrew() {
   });
   const changes = state.effortHistory ?? [];
   const html = `<div class="crew-grid">${cards.join('')}</div>
-    <details class="effort-history"><summary>${esc(t('Effort changes ({count})', { count: changes.length }))}</summary>${changes.map(effortChangeHtml).join('') || `<div class="hint">${esc(t('No effort change recorded.'))}</div>`}<p class="hint">${esc(t('A change counts from the next step and shows in the report of the runs going on. Guide: docs/effort.md.'))}</p></details>`;
-  draw('#crew', html, html);
+    <details class="effort-history" data-keep-open="effort-history"><summary>${esc(t('Effort changes ({count})', { count: changes.length }))}</summary>${changes.map(effortChangeHtml).join('') || `<div class="hint">${esc(t('No effort change recorded.'))}</div>`}<p class="hint">${esc(t('A change counts from the next step and shows in the report of the runs going on. Guide: docs/effort.md.'))}</p></details>`;
+  if (!pickingEffort('#crew')) draw('#crew', html, html);
   drawTeams();
   drawPromptBuilder();
   if (!$('#task-project').options.length) {
@@ -1920,7 +1922,7 @@ function drawTeams() {
       <div class="team-top"><h3>${projectLink(team.project, team.name)}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>
       ${teamBody(team)}
     </div>`).join('')}</div>`;
-  draw('#teams', html, html);
+  if (!pickingEffort('#teams')) draw('#teams', html, html);
 }
 
 function drawPromptBuilder() {
@@ -1988,7 +1990,7 @@ async function refreshDetail(force = false) {
   const canCancel = ['running', 'queued', 'waiting', 'paused'].includes(r.status);
   const reports = steps.map((s, i) => {
     const chosen = s.status === 'pending' && !s.review && !['manager', 'lead'].includes(s.agent) ? s.toolAsked ?? r.tool : null;
-    const facts = [s.tool && s.tool !== 'claude' ? TOOL_LABELS[s.tool] ?? s.tool : chosen && chosen !== 'claude' ? t('to run on {tool}', { tool: TOOL_LABELS[chosen] ?? chosen }) : '', s.model ? shortModel(s.model) : '', s.status !== 'pending' && s.started ? effortName(s.effort) : '', s.durationMs ? t('{minutes} min', { minutes: Math.round(s.durationMs / 60000) }) : '', s.turns ? t('{count} turns', { count: s.turns }) : '', s.subagents ? t('{count} subagent(s)', { count: s.subagents }) : ''].filter(Boolean);
+    const facts = [s.tool && s.tool !== 'claude' ? TOOL_LABELS[s.tool] ?? s.tool : chosen && chosen !== 'claude' ? t('to run on {tool}', { tool: TOOL_LABELS[chosen] ?? chosen }) : '', s.model ? shortModel(s.model) : '', s.status !== 'pending' && 'effort' in s ? effortName(s.effort) : '', s.durationMs ? t('{minutes} min', { minutes: Math.round(s.durationMs / 60000) }) : '', s.turns ? t('{count} turns', { count: s.turns }) : '', s.subagents ? t('{count} subagent(s)', { count: s.subagents }) : ''].filter(Boolean);
     let body = s.report || s.error;
     if (!body) body = s.status === 'pending' ? t('Not started yet.') : s.status === 'running' ? t('Working…') : t('No report.');
     return `
@@ -2478,7 +2480,7 @@ function drawProjectTeam(id) {
   const html = team
     ? `<div class="team"><div class="team-top"><h3>${esc(t('Crew'))}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>${teamBody(team)}</div>`
     : '';
-  draw('#project-team', html, html);
+  if (!pickingEffort('#project-team')) draw('#project-team', html, html);
 }
 
 /** The project's runs going on (a click opens the agent's panel) and its runs in the queue. */
@@ -4026,6 +4028,7 @@ document.addEventListener('change', async event => {
   const select = event.target.closest('select[data-effort-member]');
   if (!select || !select.value) return;
   const { effortMember: member, effortProject: project, effortChat: chat } = select.dataset;
+  select.blur(); // the places are drawn again with the new level
   try {
     const e = await api('/api/effort', { member, level: select.value, project: project || null, chat: !!chat });
     toast(e.changed

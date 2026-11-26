@@ -19,7 +19,7 @@ import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
 import { askedTool, stepTool } from '../src/runs.mjs';
 import {
   agentTool, availableTools, chooseTool, codexEnvironment, codexEvents, codexGuard, codexStepArgs, correctionLine, GROK_DENY, grokEvents, grokStepArgs, parseTool,
-  qualityRecords, qualitySummary, runTools, toolAvailable, toolModel,
+  qualityRecords, qualitySummary, runTools, toolAvailable, toolEffort, toolModel,
 } from '../src/tools.mjs';
 import { parseLevel } from '../src/util.mjs';
 import { behindOrigin, fastForward, projectLibraries, sameRepository } from '../src/workspace.mjs';
@@ -809,4 +809,7 @@ test('effort: each level from its place, the project only, the history and the r
   assert.equal(runEffortChanges({ project: 'demo', started: '2000-01-01T00:00:00Z' }, file).length, 3);
   assert.equal(runEffortChanges({ project: 'demo', started: '2000-01-01T00:00:00Z', ended: '2000-01-02T00:00:00Z' }, file).length, 0);
   assert.match(effortChangeLine(one), /manager: generalist in demo, low → max$/);
+
+  // A step records the level its tool was given: Codex has no max and runs at its own default.
+  assert.deepEqual([toolEffort('claude', 'max'), toolEffort('claude', undefined), toolEffort('codex', 'max'), toolEffort('codex', 'xhigh'), toolEffort('grok', 'max')], ['max', null, null, 'xhigh', 'max']);
 });

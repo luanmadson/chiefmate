@@ -978,7 +978,7 @@ async function main() {
       const changes = runEffortChanges(run).map(e => `- ${effortChangeLine(e)}`);
       if (changes.length) console.log(`Effort changed during the run:\n${changes.join('\n')}\n`);
       for (const step of stepsOf(run)) {
-        console.log(`## ${step.agent} (${step.status}, ${formatDuration(step.durationMs)}, ${step.model ?? ''}${step.started ? `, effort ${step.effort ?? 'default'}` : ''})\n${fullReport(step) || step.error || '(no report)'}\n`);
+        console.log(`## ${step.agent} (${step.status}, ${formatDuration(step.durationMs)}, ${step.model ?? ''}${step.started && 'effort' in step ? `, effort ${step.effort ?? 'default'}` : ''})\n${fullReport(step) || step.error || '(no report)'}\n`);
       }
       return;
     }

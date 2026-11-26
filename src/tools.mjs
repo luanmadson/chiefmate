@@ -287,6 +287,11 @@ const GROK_NO_COMPAT = Object.fromEntries(['CLAUDE', 'CURSOR'].flatMap(v => ['HO
 
 const CODEX_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh'];
 const GROK_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+/** The effort a step's tool is given: the member's level, or null when that tool doesn't take it (its own default). */
+export function toolEffort(tool, effort) {
+  const known = { codex: CODEX_EFFORTS, grok: GROK_EFFORTS }[tool];
+  return (known ? known.includes(effort) : !!effort) ? effort : null;
+}
 
 /**
  * Codex's arguments for a step: "codex exec" the first time, "codex exec resume <thread>" to go on, the events as JSON

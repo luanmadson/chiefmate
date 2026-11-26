@@ -1183,7 +1183,7 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   .action-big { padding: 8px 12px; min-height: 44px; justify-content: center; }
 
   /* Fields in the app's own look (Safari draws a gray bubble otherwise); tabs scroll without a bar */
-  select, select.inline-select { appearance: none; -webkit-appearance: none; padding-right: 30px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238a93a0'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; text-overflow: ellipsis; }
+  select, select.inline-select, select.effort-select { appearance: none; -webkit-appearance: none; padding-right: 30px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238a93a0'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; text-overflow: ellipsis; }
   select.inline-select { min-width: 0; font-size: 14px; }
   .tabs { scrollbar-width: none; }
   .tabs::-webkit-scrollbar { display: none; }
