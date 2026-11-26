@@ -155,6 +155,20 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .attn-head .label { margin: 0; }
 .attn-archived { margin-left: auto; padding: 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
 .attn-archived:hover, .attn-archived:focus-visible { color: var(--accent); text-decoration: underline; }
+/* The notices folded into one line (attnFold in ui/app.js): the mark, the count per level, then the list by level */
+.attn-fold > summary { list-style: none; cursor: pointer; border-bottom: 0; flex-wrap: wrap; row-gap: 2px; }
+.attn-fold > summary::-webkit-details-marker { display: none; }
+.attn-fold[open] > summary { border-bottom: 1px solid var(--line); }
+.attn-fold > summary:hover .attn-toggle, .attn-fold > summary:focus-visible .attn-toggle { color: var(--accent); text-decoration: underline; }
+.attn-counts { color: var(--muted); font-size: 12px; min-width: 0; }
+.attn-counts [data-level] { color: var(--attn); }
+.attn-toggle { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.attn-toggle::after { content: " ▾"; }
+.attn-fold[open] .attn-toggle::after { content: " ▴"; }
+.attn-fold:not([open]) .when-open, .attn-fold[open] .when-closed { display: none; }
+.attn-group { padding: 8px 16px 2px; border-bottom: 1px solid var(--line); background: var(--raised); }
+.attn-group .label { margin: 0; }
+@media (max-width: 600px) { .attn-fold .attn-counts { order: 1; flex-basis: 100%; } } /* the counts on a line of their own, under the label and the toggle */
 .attn-more .attn-archived { margin-right: auto; margin-left: 0; }
 .attn-archived-only { display: flex; justify-content: flex-end; margin: -6px 0 12px; }
 .archive-dialog { width: min(820px, calc(100vw - 32px)); }
@@ -743,6 +757,17 @@ button.tab { background: transparent; border-top: 0; border-left: 0; border-righ
 .open-matters .charge-earlier { margin-bottom: 0; }
 @media (max-width: 600px) {
   .charge-request { grid-template-columns: minmax(0, 1fr); }
+}
+/* With its conversation open, the conversation comes first, and who is in charge and its requests stand beside it
+   (under it on narrower screens) */
+#project-charge:not([hidden]):has(> #live-body:not([hidden])) { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); grid-template-areas: "chat side"; gap: 0 20px; align-items: start; }
+#project-charge > #live-body { grid-area: chat; }
+#project-charge > #project-charge-top { grid-area: side; }
+#project-charge:has(> #live-body:not([hidden])) .charge-request { grid-template-columns: minmax(0, 1fr); }
+#project-charge:has(> #live-body:not([hidden])) .charge-head { margin-top: 10px; }
+@media (max-width: 1100px) {
+  #project-charge:not([hidden]):has(> #live-body:not([hidden])) { grid-template-columns: minmax(0, 1fr); grid-template-areas: "chat" "side"; }
+  #project-charge:has(> #live-body:not([hidden])) .charge-head { margin-top: 16px; }
 }
 .live-head { padding: 10px 0 12px; }
 .live-title .primary { color: var(--strong); font-weight: 600; margin-right: 10px; }
