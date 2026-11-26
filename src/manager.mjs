@@ -202,6 +202,10 @@ export function situation(libraries = []) {
 
 const MAX_PENDING = 50;
 
+// An id as Chiefmate makes them (letters, digits, "_", "." and "-"): it can't point outside data/ nor put words in the
+// sender's label.
+const plainId = id => String(id ?? '').replace(/[^\w.-]/g, '').replace(/\.{2,}/g, '.').slice(0, 80);
+
 /**
  * Who an agent's message comes from, worked out here from what its command line says: { session } (a live session,
  * from CHIEFMATE_SESSION or --from) or { run, step } (a step of a run). Returns { kind, id, step, name, agent, project,
@@ -211,16 +215,16 @@ export function agentSender(from = {}) {
   const config = loadConfig();
   const memberName = id => (id ? loadAgents(config)[id]?.name ?? id : null);
   if (from.session) {
-    const id = String(from.session);
+    const id = plainId(from.session);
     const s = readSession(id);
     if (!s) return { kind: 'session', id, name: null, agent: null, project: null, tool: null };
     const agent = s.memberName ?? memberName(s.member) ?? (s.tool === 'codex' ? 'Codex' : 'Claude Code');
     return { kind: 'session', id, name: s.name ?? null, agent, project: s.project ?? null, tool: s.tool === 'codex' ? 'Codex' : 'Claude Code' };
   }
   if (from.run) {
-    const id = String(from.run);
+    const id = plainId(from.run);
     const step = Number(from.step) || null;
-    const run = readRun(id);
+    const run = id ? readRun(id) : null;
     const agent = (step && run ? stepsOf(run)[step - 1]?.agent : null) || liveRuns().find(l => l.run === id)?.agent || null;
     return { kind: 'step', id, step, name: run?.title ?? null, agent: memberName(agent), project: run?.project ?? null, tool: null };
   }

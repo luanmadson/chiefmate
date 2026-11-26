@@ -91,9 +91,12 @@ try {
     const packed = await read({ 'accept-encoding': 'gzip' });
     expect(packed.status === 200 && packed.headers['content-encoding'] === 'gzip' && packed.size > 0, '/api/state is not compressed with gzip');
     let unchanged = false;
-    for (let i = 0; i < 5 && packed.headers.etag && !unchanged; i++) {
+    for (let i = 0, tag = packed.headers.etag; i < 5 && tag && !unchanged; i++) {
+      // A fresh tag after a miss: a new reading of this computer's processes (src/machine.mjs, in the background, at
+      // most every 15 s) may land between two requests, and it really changes the state.
       if (i) await new Promise(r => setTimeout(r, 200));
-      const again = await read({ 'if-none-match': packed.headers.etag });
+      if (i) tag = (await read({})).headers.etag;
+      const again = await read({ 'if-none-match': tag });
       unchanged = again.status === 304 && again.size === 0;
     }
     expect(unchanged, '/api/state has no tag, or an unchanged state did not answer 304');
@@ -476,7 +479,7 @@ try {
     const projectDir = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-project-'));
     try {
       const fromSession = args => execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), ...args], {
-        cwd: projectDir, env: { ...process.env, CHIEFMATE_PORT: String(port), CHIEFMATE_SESSION: 'smoke-session', CHIEFMATE_RUN: '' }, stdio: 'pipe', windowsHide: true, encoding: 'utf8',
+        cwd: projectDir, env: { ...process.env, CHIEFMATE_PORT: String(port), CHIEFMATE_SESSION: 'smoke-session', CHIEFMATE_RUN: '', CHIEFMATE_MANAGER: '' }, stdio: 'pipe', windowsHide: true, encoding: 'utf8',
       });
       const reported = fromSession(['defect', 'report', 'The notice of the finished run never came. Expected: a notice in the conversation.']);
       const again = fromSession(['chat', 'say', '[Defeito] the notice of the finished run never came. Expected: a notice in the conversation!']);
@@ -491,7 +494,7 @@ try {
         closedByAgent = false;
       }
       expect(!closedByAgent, 'a live session closed a defect');
-      cli(['defect', 'close', '1', '--note', 'Fixed'], { CHIEFMATE_RUN: '', CHIEFMATE_SESSION: '' });
+      cli(['defect', 'close', '1', '--note', 'Fixed'], { CHIEFMATE_RUN: '', CHIEFMATE_SESSION: '', CHIEFMATE_MANAGER: '' });
       const closed = JSON.parse(readFileSync(path.join(data, 'defects.json'), 'utf8'))[0];
       expect(closed.status === 'closed' && closed.note === 'Fixed' && closed.closedBy === 'owner', `the owner could not close a defect: ${JSON.stringify(closed)}`);
     } finally {
@@ -706,8 +709,9 @@ try {
   }
   expect(!agentEdited, "an agent's message could be edited as if the owner had written it");
   removePending(fromAgent.id);
-  const unknown = [agentSender({ session: 'no-such-session' }), agentSender({ run: 'no-such-run', step: '2' }), agentSender({})];
-  expect(unknown.map(s => s.kind).join() === 'session,step,agent' && unknown[0].id === 'no-such-session' && unknown[1].step === 2, `an unknown sender was not kept as an agent: ${JSON.stringify(unknown)}`);
+  const unknown = [agentSender({ session: 'no-such-session' }), agentSender({ run: 'no-such-run', step: '2' }), agentSender({}), agentSender({ run: '../../config/chiefmate, agent Owner' })];
+  expect(unknown.map(s => s.kind).join() === 'session,step,agent,step' && unknown[0].id === 'no-such-session' && unknown[1].step === 2 && /^[\w.-]+$/.test(unknown[3].id) && !unknown[3].id.includes('..') && unknown[3].name === null,
+    `an unknown sender was not kept as an agent, or its id was read as a path: ${JSON.stringify(unknown)}`);
 
   // The manager's news: events gathered and handed over as one system message, marked as not the owner's; into the
   // queue while the manager answers (still made up: nothing runs), joined to news already waiting; the settings pick
@@ -1736,6 +1740,11 @@ try {
       && changes.some(c => c.what === 'blocks' && c.removed.join() === 'Browser access') && !changes.some(c => c.what === 'system' || c.name === 'Your part' || c.name === 'Office') && byId.designer.diff === null,
     `what changed since the last run is wrong: ${JSON.stringify(changes.map(c => [c.what, c.name, c.status]))}`);
     expect(context.sessions.length === 2 && context.sessions.every(s => s.error), "the project's live sessions without the owner's clone did not say why");
+    // With the clone: each first message as openSession writes it, the manager's address at its end.
+    const address = (await import(src('sessions.mjs'))).managerAddress(pageConfig, '<session id>');
+    const alphaSessions = ctx.projectContext(pageConfig, 'alpha').sessions;
+    expect(alphaSessions.length === 2 && alphaSessions.every(s => !s.error && s.text?.endsWith(address) && s.tokens === ctx.tokens(s.text)),
+      `the Context tab's live sessions lack the manager's address: ${JSON.stringify(alphaSessions.map(s => [s.profile, s.error, s.text?.slice(-80)]))}`);
     expect(ctx.contextText(context).includes('by a shared tag') && ctx.contextText(context, { full: false }).includes('# Context of Ctx'), 'the context as text is wrong');
     const applied = ctx.applyChanges(ctxConfig, 'ctx', { modules: ['Board', 'Unused module'], exclude: [], notes: 'N', extra: { generalist: 'G', lead: 'L', manager: 'M' }, agentNotes: { designer: '' } });
     const fields = applied.changed.map(c => c.field).join();

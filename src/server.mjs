@@ -691,7 +691,7 @@ export function startServer() {
           if (!String(body.prompt ?? '').trim()) return reply(res, 400, { error: t('The prompt is empty.') });
           if (body.dryRun) {
             const { folder, prompt } = planSession(config, profile, { prompt: String(body.prompt) });
-            return reply(res, 200, { dryRun: true, profile, tool, cwd: folder.dir, prompt: prompt.text });
+            return reply(res, 200, { dryRun: true, profile, tool, cwd: folder.dir, prompt: withManager(prompt.text, config, '<session id>') });
           }
           return reply(res, 200, await openSession(profile, { origin: 'app', prompt: String(body.prompt), window: !!body.window }));
         }
