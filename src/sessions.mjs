@@ -599,7 +599,8 @@ export function deliverSession(id) {
   const claudeTurn = (resume, retried = false) => {
     if (charge?.error) throw new Error(charge.error);
     const run = runClaude({
-      dir: session.cwd, prompt, system: charge?.system ?? [appSystem(config.owner || 'the owner'), ...(session.work ? [workSystem(config, session)] : [])].join('\n'), model: charge?.model ?? session.model ?? config.default_model,
+      dir: session.cwd, prompt: charge ? `${charge.requests}\n\n## This turn\n\n${prompt}` : prompt,
+      system: charge?.system ?? [appSystem(config.owner || 'the owner'), ...(session.work ? [workSystem(config, session)] : [])].join('\n'), model: charge?.model ?? session.model ?? config.default_model,
       tools: charge ? charge.tools : [...APP_TOOLS, ...mcp.tools, ...(session.allowed ?? []).filter(r => !ASK_FIRST.includes(r))],
       disallowed: charge ? [...charge.disallowed, ...ASK_FIRST] : ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r)), mcpServers: charge ? {} : browserServers(config, mcp.servers, sessionBrowser(session)),
       addDirs: charge?.addDirs ?? [], hooks: guardHooks({ log: guardLog(id), allowed: charge ? [] : session.allowed ?? [], who: 'session', noMain: !!session.work }),

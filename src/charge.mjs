@@ -5,9 +5,8 @@
 // but changes nothing: it reads only (no shell, no editing). When there is something to do, it ends its message with a
 // ~~~manager-request block; Chiefmate records the request (data/manager/owner-requests.json), shows it on the
 // project's page and tells the manager ("owner_request" news). The manager answers with "cli.mjs request <id>
-// approve|hold|ask-owner|reject": approve queues the work for the project (an "ask" for a team lead, else a task with
-// the manager's review), hold leaves it waiting with the reason, ask-owner turns it into a card in Decisions, reject
-// refuses it. Each answer goes back to the conversation, and the agent reads its requests' state in every turn.
+// approve|hold|ask-owner|forward|in-progress|reject" (answerRequest). Each answer goes back to the conversation, and
+// the agent reads its requests' state in every turn's input.
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { denyRules, stepAccess } from './access.mjs';
@@ -55,10 +54,10 @@ export function chargeProfile(config, projectId) {
 const REQUESTS_MAX = 300;
 export const SIZES = ['S', 'M', 'L'];
 export const RISKS = ['low', 'medium', 'high'];
-/** pending (with the manager), approved, waiting (on hold), owner (a card in Decisions), rejected. */
-export const REQUEST_STATUSES = ['pending', 'approved', 'waiting', 'owner', 'rejected'];
-const ACTIONS = { approve: 'approved', hold: 'waiting', 'ask-owner': 'owner', reject: 'rejected' };
-const FINAL = ['approved', 'rejected'];
+const ACTIONS = { approve: 'approved', hold: 'waiting', 'ask-owner': 'owner', forward: 'forwarded', 'in-progress': 'in-progress', reject: 'rejected' };
+export const REQUEST_STATUSES = ['pending', ...Object.values(ACTIONS)];
+const FINAL = ['approved', 'forwarded', 'in-progress', 'rejected'];
+const ANSWERS = Object.keys(ACTIONS).join('|');
 
 const requestsFile = () => path.join(ensureDir(path.join(DATA, 'manager')), 'owner-requests.json');
 export const readRequests = () => readJson(requestsFile(), []);
@@ -121,15 +120,16 @@ export function addRequest({ project, session = null, asked, plan, size, risk, u
   };
   saveRequests([...list, r]);
   const owner = config.owner || 'the owner';
-  reportEvent('owner_request', `${r.memberName ?? 'The agent in charge'}, in charge of ${config.projects[project].name ?? project}, sends you request #${r.id} from its conversation with ${owner}. ${owner} asked: "${clip(r.asked, 300)}". It intends to: ${clip(r.plan, 500)}. Size ${sizeWords[r.size]}, risk ${r.risk}${r.urgency ? `; ${owner} said it can be done now` : ''}. Answer it with node src/cli.mjs request ${r.id} approve|hold|ask-owner|reject --note "<why, one line>" --level 1|2|3.`, { config });
+  reportEvent('owner_request', `${r.memberName ?? 'The agent in charge'}, in charge of ${config.projects[project].name ?? project}, sends you request #${r.id} from its conversation with ${owner}. ${owner} asked: "${clip(r.asked, 300)}". It intends to: ${clip(r.plan, 500)}. Size ${sizeWords[r.size]}, risk ${r.risk}${r.urgency ? `; ${owner} said it can be done now` : ''}. Answer it with node src/cli.mjs request ${r.id} ${ANSWERS} --note "<why, one line>" --level 1|2|3.`, { config });
   return r;
 }
 
-/** A project's requests, newest first, each with its run's title and status when it was approved. */
+/** A project's requests, newest first, with the current state of linked work. */
 export function projectRequests(projectId, limit = 12) {
   return readRequests().filter(r => r.project === projectId).reverse().slice(0, limit).map(r => {
     const run = r.run ? readRun(r.run) : null;
-    return { ...r, history: undefined, runTitle: run?.title ?? null, runStatus: run?.status ?? null, merged: !!run?.merged };
+    const managerNote = r.by === 'manager' ? r.note : r.history?.findLast(h => h.by === 'manager')?.note;
+    return { ...r, history: undefined, managerNote, runTitle: run?.title ?? null, runStatus: run?.status ?? null, merged: !!run?.merged };
   });
 }
 
@@ -137,14 +137,20 @@ export function projectRequests(projectId, limit = 12) {
 const describe = r => `request #${r.id} of ${r.project} ("${clip(r.plan, 120)}")`;
 
 /**
- * The manager's answer (or the owner's, from the card of an "ask-owner"): approve | hold | ask-owner | reject, with a
- * note (required to hold or reject). approve queues the work, linked to the request (the caller nudges the queue); ask-owner adds a question card.
+ * The manager's answer, or the owner's from an "ask-owner" card. Only approve queues work, and the caller nudges
+ * the queue. Forward and in-progress record the destination without queueing work.
  * The level (1 to 3) is the approval level its decision card shows; kept on the request, so the owner's "Authorize" passes it on.
  * The answer goes back to the conversation with the agent in charge. Returns { request, run, question }.
  */
-export async function answerRequest(id, action, { note = '', by = 'manager', recommend = null, title = null, summary = null, level = null } = {}, config = loadConfig()) {
+export async function answerRequest(id, action, { note = '', by = 'manager', recommend = null, title = null, summary = null, level = null, project = null, run: runId = null } = {}, config = loadConfig()) {
+  if (!Object.hasOwn(ACTIONS, action)) throw new Error(t('Answer with approve, hold, ask-owner, forward, in-progress or reject.'));
   const status = ACTIONS[action];
-  if (!status) throw new Error(t('Answer with approve, hold, ask-owner or reject.'));
+  // Resolve imports before reading the requests so concurrent answers cannot use the same snapshot.
+  const [{ noteSession }, runs, decisions] = await Promise.all([
+    import('./sessions.mjs'),
+    action === 'approve' ? import('./runs.mjs') : null,
+    action === 'ask-owner' ? import('./decisions.mjs') : null,
+  ]);
   const list = readRequests();
   const r = list.find(x => x.id === Number(String(id).replace(/^#/, '')));
   if (!r) throw new Error(t('Request {id} not found.', { id }));
@@ -153,27 +159,35 @@ export async function answerRequest(id, action, { note = '', by = 'manager', rec
   if (r.status === 'owner' && by !== 'owner') throw new Error(t('Request {id} waits for the owner in Decisions.', { id: r.id }));
   const why = clip(note, 600);
   const approval = level == null || level === '' ? r.level ?? null : parseLevel(level);
-  if (!why && by === 'manager' && ['hold', 'reject', 'ask-owner'].includes(action)) throw new Error(t('Say why, with --note "<one line>".'));
+  if (!why && by === 'manager' && action !== 'approve') throw new Error(t('Say why, with --note "<one line>".'));
+  if (action === 'forward' && !!project === !!runId) throw new Error(t('Forward to one destination with --project <id> or --run <id>.'));
+  if (action === 'in-progress' && !runId) throw new Error(t('Link the existing run with --run <id>.'));
+  if (project && !['approve', 'forward'].includes(action)) throw new Error(t('Use --project with approve or forward.'));
+  if (runId && !['forward', 'in-progress'].includes(action)) throw new Error(t('Use --run with forward or in-progress.'));
+  if (project && !Object.hasOwn(config.projects ?? {}, project)) throw new Error(t('Unknown project: {id}', { id: project }));
+  const linkedRun = typeof runId === 'string' && /^[\w-]+$/.test(runId) ? readRun(runId) : null;
+  if (runId && !linkedRun) throw new Error(t('Run {id} not found.', { id: runId }));
+  if (action === 'in-progress' && !['queued', 'running', 'waiting', 'paused'].includes(linkedRun.status)) {
+    throw new Error(t('Run {id} is no longer in progress.', { id: runId }));
+  }
   const owner = config.owner || 'the owner';
   let run = null;
   let question = null;
   if (action === 'approve') {
-    const who = inCharge(config, r.project);
-    if (!who) throw new Error(t('{project} has no one in its crew to be in charge.', { project: r.project }));
+    const projectId = project || r.project;
+    const who = inCharge(config, projectId);
+    if (!who) throw new Error(t('{project} has no one in its crew to be in charge.', { project: projectId }));
     const instruction = [
       r.plan,
       `What ${owner} asked the agent in charge of the project (request #${r.id}): ${r.asked}`,
       ...(why ? [`The manager's note: ${why}`] : []),
     ].join('\n\n');
-    const { createRun } = await import('./runs.mjs');
-    run = createRun(who.lead
-      ? { kind: 'ask', projectId: r.project, instruction, origin: 'owner-request', request: r.id, title, summary, level: approval }
-      : { kind: 'task', projectId: r.project, agent: who.member.id, instruction, review: true, origin: 'owner-request', request: r.id, title, summary, level: approval });
+    const work = { projectId, instruction, origin: 'owner-request', request: r.id, title, summary, level: approval };
+    run = runs.createRun(who.lead ? { ...work, kind: 'ask' } : { ...work, kind: 'task', agent: who.member.id, review: true }, config);
     r.run = run.id;
   } else if (action === 'ask-owner') {
-    const { addQuestion } = await import('./decisions.mjs');
     const choice = { approve: t('Authorize'), hold: t('Wait'), reject: t('Refuse') }[word(recommend)] ?? null;
-    question = addQuestion({
+    question = decisions.addQuestion({
       question: clip(t('Authorize: {plan}?', { plan: clip(r.plan, 200) }), 300),
       context: [
         t('{owner} asked the agent in charge: {asked}', { owner, asked: clip(r.asked, 500) }),
@@ -183,13 +197,21 @@ export async function answerRequest(id, action, { note = '', by = 'manager', rec
       options: [t('Authorize'), t('Wait'), t('Refuse')], recommend: choice, project: r.project, level: approval, request: r.id,
     }, config);
     r.question = question.id;
+  } else if (linkedRun) {
+    r.run = linkedRun.id;
+  } else if (action === 'forward') {
+    r.targetProject = project;
   }
   Object.assign(r, { status, note: why, answered_at: now(), by, level: approval });
   r.history = [...(r.history ?? []), { at: now(), action, by, note: why }];
   saveRequests(list);
   if (r.session) {
-    const { noteSession } = await import('./sessions.mjs');
-    noteSession(r.session, answerLine(r, owner), { kind: 'request', request: r.id, status });
+    const target = run ?? linkedRun;
+    noteSession(r.session, answerLine(r, owner), {
+      kind: 'request', request: r.id, status, by,
+      ...(target ? { run: target.id, runTitle: target.title } : {}),
+      ...(r.targetProject ? { targetProject: r.targetProject } : {}),
+    });
   }
   return { request: r, run, question };
 }
@@ -202,6 +224,8 @@ function answerLine(r, owner) {
     approved: t('{who} authorized request #{id}: the work is in the queue for the crew.', { who, id: r.id }),
     waiting: t('{who} put request #{id} on hold.', { who, id: r.id }),
     owner: t('The manager took request #{id} to you: answer it in Decisions.', { id: r.id }),
+    forwarded: t('{who} forwarded request #{id}.', { who, id: r.id }),
+    'in-progress': t('{who} linked request #{id} to work already in progress.', { who, id: r.id }),
     rejected: t('{who} refused request #{id}.', { who, id: r.id }),
   }[r.status] + note;
 }
@@ -221,7 +245,7 @@ export function requestsLine(config = loadConfig()) {
   const open = readRequests().filter(r => ['pending', 'waiting'].includes(r.status));
   if (!open.length) return '';
   const line = r => `#${r.id} (${r.project}, ${r.status === 'pending' ? 'waiting for you' : `on hold: ${clip(r.note, 80)}`}, ${sizeWords[r.size]}, risk ${r.risk}${r.urgency ? ', the owner said "now"' : ''}): ${clip(r.plan, 140)}`;
-  return `Requests from the agents in charge of the projects, sent from their conversations with ${config.owner || 'the owner'} (answer with node src/cli.mjs request <id> approve|hold|ask-owner|reject --note "..." --level 1|2|3; node src/cli.mjs request show <id> for the whole request): ${open.slice(0, 8).map(line).join('; ')}.`;
+  return `Requests from the agents in charge of the projects, sent from their conversations with ${config.owner || 'the owner'} (answer with node src/cli.mjs request <id> ${ANSWERS} --note "..." --level 1|2|3; node src/cli.mjs request show <id> for the whole request): ${open.slice(0, 8).map(line).join('; ')}.`;
 }
 
 // ---------- The project's open matters ----------
@@ -317,6 +341,7 @@ export function chargeTurn(config, session, { cloneOf = () => null, sessions = [
   const deny = others.filter(dir => path.resolve(dir) !== own).flatMap(dir => denyRules(dir));
   return {
     system: chargeSystem(config, projectId, who, { sessions }),
+    requests: chargeRequests(projectId, config.owner || 'the owner'),
     model: who.member.model ?? session.model ?? config.default_model,
     tools: CHARGE_TOOLS,
     disallowed: [...CHARGE_REFUSED, ...access.denied, ...deny],
@@ -324,7 +349,7 @@ export function chargeTurn(config, session, { cloneOf = () => null, sessions = [
   };
 }
 
-/** The instructions of the agent in charge: its own (not the manager's work), its role here, the project, the memory, the open matters, the requests. */
+/** The instructions of the agent in charge: its own (not the manager's work), its role here, the project, the memory and the open matters. */
 export function chargeSystem(config, projectId, who = inCharge(config, projectId), { sessions = [] } = {}) {
   const owner = config.owner || 'the owner';
   const project = config.projects[projectId];
@@ -337,13 +362,13 @@ export function chargeSystem(config, projectId, who = inCharge(config, projectId
 ${owner} talks to you directly from the project's page in the Chiefmate app. You are ${member.name ?? member.id}, ${who.lead ? 'the team lead' : 'the main member of the crew'} of the project ${name}, and the one in charge of it in this conversation. The instructions above describe your usual work in the crew; here you talk, answer questions and plan with ${owner}, in ${languageName(config.language || 'en')}, and you carry out nothing yourself. Ignore what they say about editing, committing, queueing work or Chiefmate's command line.
 - You only read: this project's files (the current folder), its documentation and the web. You have no shell and cannot edit, commit, push or publish anything; never ask for it, and don't try another way.
 - You see only this project. Other projects' files are out of reach: don't look for them.
-- When there is something to do (a change, a fix, research, a text), don't do it: agree on it with ${owner}, then send a request to the manager (Chiefmate), who authorizes it, asks to wait, or takes it to ${owner} as a decision. Say in one line that you are sending it and what happens next. Send it by ending your message with this block (one request per message):
+- When there is something to do (a change, a fix, research, a text), don't do it: agree on it with ${owner}, then send a request to the manager (Chiefmate), who authorizes it, forwards it to where it belongs, links it to work already going on, asks to wait, or takes it to ${owner} as a decision. Say in one line that you are sending it and what happens next. Send it by ending your message with this block (one request per message):
 ~~~manager-request
 {"asked": "what ${owner} asked, in their words", "plan": "what you intend to do: who in the crew, where (files, pages) and how", "size": "S | M | L", "risk": "low | medium | high", "urgency": "now or empty"}
 ~~~
   Size: S for minutes and a few lines, M for about an hour and a few files, L for hours or many files. Risk: what could break, or reach people, if it goes wrong. "urgency": "now" only when ${owner} said it can be done right away.
 - An authorized request becomes work for the crew, which ends in a pull request (or a local branch) that ${owner} approves. Nothing goes live without ${owner}.
-- Your requests and their state are below, current at every message. Don't send the same one twice; when ${owner} asks how one is going, answer from there.
+- Chiefmate gives you the latest state of your requests in each turn. Don't send the same one twice; when ${owner} asks how one is going, answer from the latest list.
 - Be short and plain: the essentials first, no jargon.`;
   const facts = [
     `## The project: ${name}`,
@@ -354,11 +379,18 @@ ${owner} talks to you directly from the project's page in the Chiefmate app. You
   const memoryText = memory
     ? `## The project's memory (kept by the team lead; read here, never changed)\n\n${memory}`
     : "## The project's memory\n\nNone yet.";
-  const requests = readRequests().filter(r => r.project === projectId).slice(-10).reverse();
-  const requestText = `## Your requests to the manager, newest first\n\n${requests.length ? requests.map(r => {
-    const run = r.run ? readRun(r.run) : null;
-    return `- #${r.id}, ${formatDateTime(r.at)}: ${r.status}${r.note ? ` (${r.by === 'owner' ? owner : 'the manager'}: ${r.note})` : ''}${run ? `; its run "${run.title}" is ${run.merged ? 'merged' : run.status}` : ''}. ${clip(r.plan, 200)}`;
-  }).join('\n') : 'None yet.'}`;
   const matters = mattersText(openMatters(config, projectId, { sessions }), owner);
-  return [parts.map(p => p.text).join('').trim(), role, facts, memoryText, matters, requestText].filter(Boolean).join('\n\n');
+  return [parts.map(p => p.text).join('').trim(), role, facts, memoryText, matters].filter(Boolean).join('\n\n');
+}
+
+/** The request state goes in the turn's input so it also reaches a resumed conversation. */
+function chargeRequests(projectId, owner) {
+  const lines = projectRequests(projectId, 10).map(r => {
+    const target = r.run ? `; run "${r.runTitle ?? r.run}" [open run](#log/${encodeURIComponent(r.run)})${r.runStatus ? ` (${r.merged ? 'merged' : r.runStatus})` : ''}`
+      : r.targetProject ? `; project ${r.targetProject} [open project](#project/${encodeURIComponent(r.targetProject)})` : '';
+    const managerNote = r.managerNote ? `; the manager: ${r.managerNote}` : '';
+    const ownerNote = r.by === 'owner' && r.note ? `; ${owner}: ${r.note}` : '';
+    return `- #${r.id}, ${formatDateTime(r.at)}: ${r.status}${managerNote}${ownerNote}${target}. ${clip(r.plan, 200)}`;
+  });
+  return `## Your requests to the manager, newest first\n\n${lines.join('\n') || 'None yet.'}`;
 }
