@@ -249,13 +249,16 @@ export function cancelLive(id, reason) {
  * when it resumes; one running its checks or opening its pull request pauses only at its next step, or ends first.
  * Returns false when it is not going on, or was already asked.
  */
-export function pauseLive(id, why = 'update') {
+export function pauseLive(id, why = 'update', { holdWhile = null } = {}) {
   const l = live.get(id);
   if (!l || l.cancelRequest || l.pauseRequest) return false;
   l.pauseRequest = why;
+  // "owner": paused for the owner's "Work now" session (src/worknow.mjs), held while holdWhile() says so.
+  l.holdWhile = holdWhile;
   l.process?.interrupt?.();
   l.preparing?.abort();
-  const text = why === 'standby' ? t('Pausing at a safe point: Chiefmate is going on standby')
+  const text = why === 'owner' ? t('Pausing at a safe point: you are working on this project now')
+    : why === 'standby' ? t('Pausing at a safe point: Chiefmate is going on standby')
     : why === 'stop' ? t('Pausing at a safe point: Chiefmate is shutting down')
       : t('Pausing at a safe point for an update of Chiefmate');
   logAction(l, { type: 'action', text });
@@ -270,6 +273,7 @@ export const pauseAll = (why = 'update') => [...live.keys()].filter(id => pauseL
 
 /** The note of a run paused for an update or a power mode, until it resumes. */
 function pausedNote(why) {
+  if (why === 'owner') return t('Paused at a safe point while you work on this project. It resumes by itself when your session ends.');
   if (why === 'standby') return t('Paused at a safe point for standby. It resumes by itself when Chiefmate is turned back on.');
   if (why === 'stop') return t('Paused at a safe point because Chiefmate was shut down. It resumes by itself at the next start.');
   return t('Paused for an update of Chiefmate. It resumes by itself as soon as the update is over.');
@@ -279,6 +283,7 @@ function pausedNote(why) {
 export function updatedTurn(messages, config = loadConfig(), why = 'update', gitRecovery = '') {
   const lines = [
     why === 'update' ? 'Chiefmate was updated while you were working: your work was paused at a safe point so the new version could be installed, and this session now resumes.'
+      : why === 'owner' ? `${config.owner || 'The owner'} paused your work at a safe point to work on this project themselves, and this session now resumes. They may have changed the project meanwhile: check what changed on the main branch before you go on.`
       : `Chiefmate was ${why === 'standby' ? 'put on standby' : 'shut down'} by its owner while you were working: your work was paused at a safe point, and this session now resumes.`,
     gitRecovery || 'Continue from where you left off. The branch, the files and this session are as you left them. A command that was still running when you were paused may have been cut off: check its result before you go on.',
     "When you finish, your last message is still the step's full report.",
@@ -928,7 +933,9 @@ export async function execute(run) {
 
   // Paused for an update of Chiefmate: back to the front of the queue, to resume as soon as the update is over.
   const pauseForUpdate = () => {
-    Object.assign(run, { status: 'queued', resumeFirst: true, note: pausedNote(l.pauseRequest) });
+    // Paused for the owner's session: held (not in the queue) while it is open; it goes back to the queue when it ends.
+    const held = l.pauseRequest === 'owner' && l.holdWhile?.() !== false;
+    Object.assign(run, { status: held ? 'paused' : 'queued', resumeFirst: true, note: pausedNote(l.pauseRequest) });
     saveRun(run);
   };
 

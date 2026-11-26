@@ -219,6 +219,10 @@
         <div id="project-charge" class="project-tab" hidden>
           <div id="project-charge-top"></div>
         </div>
+        <!-- The conversation with the manager, brought here from the Conversation (placeChat in app.js) -->
+        <div id="project-manager" class="project-tab" hidden>
+          <p class="hint" data-t="Your conversation with the manager, without leaving the project. What you send from here says which project it is about.">Your conversation with the manager, without leaving the project. What you send from here says which project it is about.</p>
+        </div>
         <div id="project-live" class="project-tab" hidden>
           <div id="project-live-list"></div>
           <div id="live-body" class="live-session" hidden>
@@ -367,6 +371,18 @@
       <div class="actions">
         <button value="no" class="button secondary" data-t="Cancel">Cancel</button>
         <button value="yes" class="button" id="confirm-yes"></button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="work-dialog" class="confirm">
+    <form method="dialog">
+      <div class="label" data-t="The crew is working on this project">The crew is working on this project</div>
+      <p id="work-dialog-text"></p>
+      <ul id="work-dialog-runs" class="work-runs"></ul>
+      <div class="actions">
+        <button value="" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="copy" class="button secondary" data-t="Work in a separate copy">Work in a separate copy</button>
+        <button value="pause" class="button" data-t="Pause the crew's task">Pause the crew's task</button>
       </div>
     </form>
   </dialog>

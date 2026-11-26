@@ -239,6 +239,7 @@ try {
     expect((await post('/api/manager/remove', { id: 'smoke1' })).status === 404, 'removing a message twice did not answer 404');
     // Live sessions: an unknown profile or session is refused, and nothing opens.
     expect((await post('/api/session', { profile: 'no-such-profile' })).status === 400, 'opening a session of an unknown profile was not refused');
+    expect((await post('/api/work-now', { project: 'no-such-project' })).status === 400, '"Work now" on an unknown project was not refused');
     expect((await post('/api/session/end', { id: 'no-such-session' })).status === 400, 'ending a session that does not exist was not refused');
     expect((await post('/api/session/say', { id: 'no-such-session', text: 'Hello' })).status === 400, 'a message to a session that does not exist was not refused');
     expect((await fetch(`${base}/api/session/no-such-session`)).status >= 400, 'the conversation of a session that does not exist was given');
@@ -2647,6 +2648,81 @@ try {
   rmSync(temp, { recursive: true, force: true, maxRetries: 5 });
 } catch (error) {
   failures.push(`agent in charge checks: ${error.message}`);
+}
+
+// "Work now", in this process with made-up settings and records: the profile with the agent in charge's name, opened
+// only through the owner's button (never as a profile, in a window or with a prompt), the first message with the
+// project's context (the documentation's index, notes, memory, the earlier session's summary, the rules), the choice
+// when the crew is on the project (a made-up run going on), the summary kept for the next session, the idle check,
+// the manager's line and news, and the guard that never lets a push reach the main branch. Nothing opens or starts.
+try {
+  process.env.CHIEFMATE_SMOKE = '1';
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const work = await import(src('worknow.mjs'));
+  const { saveMemory } = await import(src('leads.mjs'));
+  const { checkIdleWork, openSession, planSession, planWork } = await import(src('sessions.mjs'));
+  const { live } = await import(src('runs.mjs'));
+  const { NEWS_EVENTS } = await import(src('news.mjs'));
+  const { guardHooks } = await import(src('guard.mjs'));
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-work-'));
+  const library = path.join(temp, 'library');
+  mkdirSync(path.join(library, 'Docs Delta'), { recursive: true });
+  writeFileSync(path.join(library, 'Docs Delta', 'INSTRUCOES_IA.md'), '# Index');
+  writeFileSync(path.join(library, 'Docs Delta', 'details.md'), '# Details');
+  const made = {
+    owner: 'Owner', language: 'en', default_model: 'some-model',
+    library: { notes: { local_clone: library } },
+    projects: { delta: { name: 'Delta', about: 'A made-up app.', notes: 'Delta notes.', local_clone: temp, docs: 'notes/Docs Delta', deliver: 'local', crew: { generalist: { name: 'Fixer' } } } },
+  };
+  expect(work.workProfileId('delta') === 'project-delta-work' && work.workProject('project-delta-work-codex') === 'delta' && work.workProject('project-delta-claude') === null, 'the "Work now" profile ids are wrong');
+  let refused = 0;
+  for (const open of [() => planSession(made, 'project-delta-work'), () => openSession('project-delta-work', { config: made }), () => openSession('project-delta-work', { config: made, window: true, work: { dir: temp } })]) {
+    try {
+      await open();
+    } catch {
+      refused++;
+    }
+  }
+  expect(refused === 3, '"Work now" opened as a plain profile, in a window, or without the owner\'s button');
+  saveMemory('delta', 'Delta memory line.');
+  work.saveWorkNote('delta', { session: 'earlier', tool: 'claude', done: 'Fixed the login.', open: 'The footer.' });
+  const planned = planWork(made, 'project-delta-work', { dir: temp, copy: false, crew: [] });
+  const text = planned.prompt.text;
+  expect(planned.profile.work && planned.profile.memberName === 'Fixer' && planned.profile.name.includes('Fixer') && planned.folder.dir === temp, `the "Work now" profile is not the agent in charge's, in the owner's clone: ${JSON.stringify(planned.profile)}`);
+  expect(text.includes(path.join(library, 'Docs Delta', 'INSTRUCOES_IA.md')) && text.includes('details.md') && text.includes('Delta notes.') && text.includes('Delta memory line.')
+    && text.includes('Fixed the login.') && text.includes('The footer.') && text.includes('main branch') && text.includes('no trace of Chiefmate'),
+  `the first message of "Work now" misses the project's context or its rules: ${text}`);
+  const dry = await work.openWork('delta', { dryRun: true, config: made });
+  expect(dry.dryRun && dry.cwd === temp && !dry.copy && dry.prompt.includes('## Now'), `"Work now" (dry run) does not open in the owner's clone: ${JSON.stringify(dry).slice(0, 300)}`);
+  live.set('smoke-work-run', { run: 'smoke-work-run', project: 'delta', title: 'A crew task', agent: 'generalist', since: new Date().toISOString() });
+  try {
+    const asked = await work.openWork('delta', { dryRun: true, config: made });
+    const copy = await work.openWork('delta', { dryRun: true, choice: 'copy', config: made });
+    expect(asked.conflict?.[0]?.title === 'A crew task' && !asked.dryRun, 'the crew working on the project did not ask the owner to choose');
+    expect(copy.copy && copy.cwd === work.copyFolder('delta') && copy.prompt.includes('separate copy'), `"Work in a separate copy" does not work elsewhere: ${copy.cwd}`);
+  } finally {
+    live.delete('smoke-work-run');
+  }
+  const summary = await work.summarize(made, { id: 's1', project: 'delta', tool: 'claude' }, [{ kind: 'owner', text: 'Fix the menu' }, { kind: 'say', text: 'Fixed it.' }], async () => 'Done: Fixed the menu in header.html.\nOpen: none');
+  expect(summary?.done === 'Fixed the menu in header.html.' && summary.open === '' && work.readWorkNotes('delta', 1)[0].done === summary.done, `the session's summary was not kept: ${JSON.stringify(summary)}`);
+  const sessions = path.join(data, 'sessions');
+  mkdirSync(sessions, { recursive: true });
+  const quiet = new Date(Date.now() - (work.IDLE_MINUTES + 5) * 60_000).toISOString();
+  const record = { id: 'smoke-work', profile: 'project-delta-work', name: 'Delta', tool: 'claude', project: 'delta', mode: 'app', status: 'open', memberName: 'Fixer', turns: 2, lastTurn: { at: quiet, ok: true }, cwd: temp, created: quiet, work: { copy: false, held: [] } };
+  writeFileSync(path.join(sessions, 'smoke-work.json'), JSON.stringify(record));
+  const closed = [];
+  expect(checkIdleWork(Date.now(), async id => closed.push(id)).includes('smoke-work') && closed.includes('smoke-work'), 'a quiet "Work now" session did not get its summary');
+  writeFileSync(path.join(sessions, 'smoke-work.json'), JSON.stringify({ ...record, work: { ...record.work, summarized: new Date().toISOString() } }));
+  expect(!checkIdleWork(Date.now(), async () => {}).includes('smoke-work'), 'a quiet session was summarized twice');
+  expect(work.workLine([record], made).includes('Delta with Fixer') && NEWS_EVENTS.includes('owner_working') && work.openedNews(made, record).includes('Nothing waits for your answer'), "the manager doesn't hear of the owner working now");
+  expect(work.isCommit('Ran: git -C "x y" commit -m "Fix"') && work.isCommit('Rodou: git commit -am x') && !work.isCommit('Ran: git status'), 'a commit is not recognized as a milestone');
+  // The guard of a "Work now" session: with pushing allowed, a branch of the work goes; the main branch never does.
+  const hook = guardHooks({ log: path.join(temp, 'guard.jsonl'), allowed: ['Bash(git push:*)'], who: 'session', noMain: true }).PreToolUse[0].hooks[0].command;
+  const denies = command => /"permissionDecision":"deny"/.test(execFileSync(hook, { shell: true, encoding: 'utf8', cwd: temp, input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', cwd: temp, tool_input: { command } }) }));
+  expect(denies('git push origin main') && denies('git push') && denies('git push --force origin feature') && !denies('git push origin feature/menu'), 'a "Work now" session may push to the main branch, or may not push a branch of the work once allowed');
+  rmSync(temp, { recursive: true, force: true, maxRetries: 5 });
+} catch (error) {
+  failures.push(`work now checks: ${error.message}`);
 }
 
 try {
