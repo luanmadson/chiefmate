@@ -1768,18 +1768,53 @@ async function refreshDetail(force = false) {
 
 // ---------- Usage ----------
 
+const usageResets = w => (w?.resets ? t('Resets {when} ({relative}).', { when: shortDate(w.resets), relative: relative(w.resets) }) : '');
+
+/** A plan's window by its length: the 5-hour window, the week, or its days or hours. */
+function windowLabel(minutes) {
+  if (!minutes) return t('Usage limit');
+  if (minutes === 300) return t('5-hour window');
+  if (minutes === 10080) return t("Plan's week");
+  if (minutes % 1440 === 0) return t('{count}-day window', { count: minutes / 1440 });
+  return t('{count}-hour window', { count: Math.round(minutes / 60) });
+}
+
+/** A panel with the plan of Codex or Grok, as the tool last read it (src/tools.mjs): a window already reset shows no share. */
+function toolPlanPanel(name, reading, hint) {
+  const plan = reading?.plan ? ` · ${reading.plan.charAt(0).toUpperCase()}${reading.plan.slice(1)}` : '';
+  const meters = (reading?.windows ?? []).map(w => (w.resets && Date.parse(w.resets) <= Date.now()
+    ? meter(windowLabel(w.minutes), 0, '—', esc(t('Reset {when}: not measured since.', { when: shortDate(w.resets) })))
+    : meter(windowLabel(w.minutes), w.used, percent(w.used), esc(usageResets(w)))));
+  return `<div class="panel">
+      <div class="label">${esc(name + plan)}</div>
+      ${meters.join('')}
+      <div class="hint">${esc(hint)}</div>
+    </div>`;
+}
+
 function drawUsage() {
-  const { limits: l, account: u } = state.usage;
-  const resets = w => (w?.resets ? t('Resets {when} ({relative}).', { when: shortDate(w.resets), relative: relative(w.resets) }) : '');
+  const { limits: l, account: u, tools = {} } = state.usage;
   const measured = u.updated
     ? t('Measured {when}, from what Claude Code reports on every run.', { when: shortDate(u.updated) })
     : t('Measured on the next agent run, from what Claude Code reports.');
+  const steps = (tools.steps ?? []).map(s => `<tr><td>${esc(s.name)}</td><td class="num">${s.today}</td><td class="num">${s.week}</td></tr>`);
   const html = `<div class="usage-grid">
     <div class="panel">
       <div class="label">${esc(t('Your Claude account'))}</div>
-      ${meter(t('5-hour window'), u.five_hour?.used, percent(u.five_hour?.used), esc(resets(u.five_hour)))}
-      ${meter(t("Plan's week"), u.seven_day?.used, percent(u.seven_day?.used), esc(resets(u.seven_day)))}
+      ${meter(t('5-hour window'), u.five_hour?.used, percent(u.five_hour?.used), esc(usageResets(u.five_hour)))}
+      ${meter(t("Plan's week"), u.seven_day?.used, percent(u.seven_day?.used), esc(usageResets(u.seven_day)))}
       <div class="hint">${esc(measured)}</div>
+    </div>
+    ${toolPlanPanel(tools.codex?.plan ? 'Codex · ChatGPT' : 'Codex', tools.codex, tools.codex?.updated
+      ? t("Read {when}, from what Codex last reported on this computer, in your sessions or the crew's steps.", { when: shortDate(tools.codex.updated) })
+      : t('Not measured yet: Codex reports its plan once it runs on this computer.'))}
+    ${toolPlanPanel('Grok', tools.grok, tools.grok?.updated
+      ? t('Read {when}, from what Grok last wrote in its log: it checks its plan when you open it in a terminal.', { when: shortDate(tools.grok.updated) })
+      : t('Not measured yet: Grok writes its plan in its log once you open it in a terminal.'))}
+    <div class="panel">
+      <div class="label">${esc(t('Steps by tool'))}</div>
+      <table class="table"><thead><tr><th>${esc(t('Tool'))}</th><th class="num">${esc(t('Today'))}</th><th class="num">${esc(t('Last 7 days'))}</th></tr></thead><tbody>${steps.join('')}</tbody></table>
+      <div class="hint">${esc(t("The crew's steps, final reviews included, by the tool they ran on."))}</div>
     </div>
     <div class="panel">
       <div class="label">${esc(t('How Chiefmate looks after your plan'))}</div>

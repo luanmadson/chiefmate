@@ -9,7 +9,7 @@ import { autopilotStatus, changeAutopilot } from './autopilot.mjs';
 import { answerRequest, chargeProfileId, inCharge, projectRequests } from './charge.mjs';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
-import { agentTool, runTools, toolModel } from './tools.mjs';
+import { agentTool, runTools, toolModel, toolsUsage } from './tools.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
 import { addQuestion, decide, decisionCards, openPushes, openQuestions, openRepoRequests } from './decisions.mjs';
 import { listFolder, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
@@ -389,7 +389,8 @@ function buildState() {
     parallel: { max: maxParallel(config) },
     queue: queue.map(summary),
     history: runs.filter(r => !['queued', 'waiting'].includes(r.status) && !goingIds.has(r.id)).slice(0, 30).map(summary),
-    usage: { limits: config.limits ?? {}, account: usage },
+    // Codex's and Grok's plans, and the steps each tool ran (src/tools.mjs).
+    usage: { limits: config.limits ?? {}, account: usage, tools: toolsUsage(runs) },
     computer: machine,
     // The crew's browsers open (src/browsers.mjs): project, task, since when and whether the task still goes on.
     browsers: openBrowsers(config, latestProcesses()),

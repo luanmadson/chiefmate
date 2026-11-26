@@ -13,8 +13,8 @@ import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
 import { askedTool, stepTool } from '../src/runs.mjs';
 import {
-  agentTool, availableTools, chooseTool, codexEnvironment, codexEvents, codexGuard, codexStepArgs, correctionLine, GROK_DENY, grokEvents, grokStepArgs, parseTool,
-  qualityRecords, qualitySummary, runTools, toolAvailable, toolModel,
+  agentTool, availableTools, chooseTool, codexEnvironment, codexEvents, codexGuard, codexPlan, codexStepArgs, correctionLine, GROK_DENY, grokEvents, grokPlan, grokStepArgs,
+  parseTool, qualityRecords, qualitySummary, runTools, stepsByTool, toolAvailable, toolModel,
 } from '../src/tools.mjs';
 import { parseLevel } from '../src/util.mjs';
 import { behindOrigin, fastForward, projectLibraries, sameRepository } from '../src/workspace.mjs';
@@ -480,6 +480,43 @@ test("the tools' quality: one record per step on Codex or Grok, and the summary 
   const grok = summary.find(x => x.tool === 'grok');
   assert.deepEqual([grok.count, grok.clean, grok.failed], [1, 0, 1]);
   assert.ok(!summary.some(x => x.tool === 'claude'));
+});
+
+test("the Usage section: Codex's and Grok's plans from their own files, and the steps of each tool", () => {
+  const codexHome = path.join(temp, 'codex-home');
+  const day = path.join(codexHome, 'sessions', '2026', '11', '25');
+  mkdirSync(day, { recursive: true });
+  const limits = used => ({ primary: { used_percent: used, window_minutes: 300, resets_at: 1795665767 }, secondary: { used_percent: 8, window_minutes: 10080, resets_in_seconds: 60 }, plan_type: 'plus' });
+  const line = (at, used) => JSON.stringify({ timestamp: at, type: 'event_msg', payload: { type: 'token_count', rate_limits: limits(used) } });
+  writeFileSync(path.join(day, 'rollout-2026-11-25T10-00-00-a.jsonl'), `${line('2026-11-25T13:00:00.000Z', 30)}\n`);
+  const nulls = '{"type":"event_msg","payload":{"type":"token_count","rate_limits":null}}';
+  writeFileSync(path.join(day, 'rollout-2026-11-25T09-00-00-b.jsonl'), `${line('2026-11-25T12:00:00.000Z', 5)}\n${line('2026-11-25T14:00:00.000Z', 40)}\n${nulls}\n`);
+  const codex = codexPlan(codexHome);
+  assert.equal(codex.plan, 'plus');
+  assert.equal(codex.updated, '2026-11-25T14:00:00.000Z', 'the newest reading, even in an older session');
+  assert.deepEqual(codex.windows, [
+    { minutes: 300, used: 0.4, resets: new Date(1795665767000).toISOString() },
+    { minutes: 10080, used: 0.08, resets: '2026-11-25T14:01:00.000Z' },
+  ]);
+  assert.equal(codexPlan(path.join(temp, 'no-codex')), null);
+
+  const grokHome = path.join(temp, 'grok-home');
+  mkdirSync(path.join(grokHome, 'logs'), { recursive: true });
+  const log = path.join(grokHome, 'logs', 'unified.jsonl');
+  const billing = { ts: '2026-11-20T19:38:21.002Z', msg: 'billing: fetched credits config', ctx: { config: { creditUsagePercent: 4, currentPeriod: { type: 'USAGE_PERIOD_TYPE_WEEKLY', start: '2026-11-17T21:21:08.974+00:00', end: '2026-11-24T21:21:08.974+00:00' } }, subscriptionTier: 'SuperGrok' } };
+  writeFileSync(log, `${JSON.stringify(billing)}\n{"msg":"other"}\n`);
+  const expected = { plan: 'SuperGrok', updated: '2026-11-20T19:38:21.002Z', windows: [{ minutes: 10080, used: 0.04, resets: '2026-11-24T21:21:08.974Z' }] };
+  assert.deepEqual(grokPlan(grokHome), expected);
+  writeFileSync(log, '{"msg":"only other lines now"}\n');
+  assert.deepEqual(grokPlan(grokHome), expected, 'a reading found once stays until a newer one');
+  assert.equal(grokPlan(path.join(temp, 'no-grok')), null);
+
+  const runs = [
+    { steps: [{ agent: 'generalist', started: '2026-11-25T10:00:00Z' }, { agent: 'writer', tool: 'codex', started: '2026-11-25T11:00:00Z' }, { agent: 'x', status: 'pending' }], review: { agent: 'manager', tool: 'claude', started: '2026-11-25T12:00:00Z' } },
+    { steps: [{ agent: 'writer', tool: 'grok', started: '2026-11-10T10:00:00Z' }] },
+  ];
+  assert.deepEqual(stepsByTool(runs, Date.parse('2026-11-20T00:00:00Z')), { claude: 2, codex: 1, grok: 0 });
+  assert.deepEqual(stepsByTool(runs, 0), { claude: 2, codex: 1, grok: 1 });
 });
 
 test('Codex: its sandbox, no own configuration, never asking, and the guard as its hook', () => {
