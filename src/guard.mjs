@@ -194,6 +194,8 @@ function asPath(word, cwd, home) {
   let w = String(word).replace(/^-{1,2}[\w-]+=/, '');
   w = w.replace(/^(~|\$HOME|\$\{HOME\}|\$env:USERPROFILE|\$env:HOME|%USERPROFILE%)(?=$|[\\/])/i, home);
   if (!w || /^[a-z][a-z0-9+.-]*:\/\//i.test(w)) return null;
+  // Git Bash's drive paths on Windows: /c/Users -> C:/Users.
+  if (process.platform === 'win32') w = w.replace(/^\/([a-z])(?=$|\/)/i, (_, d) => `${d.toUpperCase()}:/`);
   return path.resolve(cwd, w);
 }
 

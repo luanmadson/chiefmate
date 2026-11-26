@@ -720,4 +720,10 @@ test("The lockdown's detection in a shell command: protected folders and deletio
   assert.deepEqual(kinds(`rm -rf '${path.join(root, 'data')}'`), ['wide_delete']);
   assert.deepEqual(kinds(`Remove-Item -Force "${root}"`), []); // not recursive
   assert.deepEqual(kinds('cd x && rm -fr ../../..'), ['wide_delete']);
+  // Git Bash's drive paths on Windows (/c/Users/...).
+  if (process.platform === 'win32') {
+    const bash = p => p.replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`).replace(/\\/g, '/');
+    assert.deepEqual(kinds(`rm -rf ${bash(path.join(home, 'Documents'))}`), ['wide_delete']);
+    assert.deepEqual(kinds(`rm -rf ${bash(path.join(tmp, 'scratch'))}`), []);
+  }
 });
