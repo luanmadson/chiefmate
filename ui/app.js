@@ -252,8 +252,16 @@ function draw(selector, signature, html) {
   signatures[selector] = signature;
   // What the owner opened ([data-keep-open] details) stays open when the content is drawn again.
   const opened = [...$(selector).querySelectorAll('details[data-keep-open][open]')].map(d => d.dataset.keepOpen);
+  // And the answer being written ([data-reply], its text kept in replyDrafts) keeps the focus and the cursor.
+  const field = document.activeElement;
+  const typing = field?.dataset?.reply && $(selector).contains(field) ? { key: field.dataset.reply, start: field.selectionStart, end: field.selectionEnd } : null;
   $(selector).innerHTML = html;
   for (const d of $(selector).querySelectorAll('details[data-keep-open]')) if (opened.includes(d.dataset.keepOpen)) d.open = true;
+  const again = typing && [...$(selector).querySelectorAll('[data-reply]')].find(x => x.dataset.reply === typing.key);
+  if (again) {
+    again.focus({ preventScroll: true });
+    again.setSelectionRange(typing.start, typing.end);
+  }
   return true;
 }
 
@@ -746,6 +754,29 @@ function requestButtons(run, q, size = '') {
   return `<span class="request-options">${q.options.map(option).join('')}</span>`;
 }
 
+// What the owner writes to a question ("Explain / another answer"), by field ("req:<id>", "card:<id>"): it survives
+// the lists being drawn again, and goes with the option clicked or alone with "Send".
+const replyDrafts = new Map();
+const replyText = key => (replyDrafts.get(key) ?? '').trim();
+document.addEventListener('input', event => {
+  const key = event.target.dataset?.reply;
+  if (key) replyDrafts.set(key, event.target.value);
+});
+
+/** The field to write an answer, with its "Send" button ("send": the button's attributes). */
+const replyField = (key, send, size = '') => `<div class="reply">
+    <textarea data-reply="${esc(key)}" rows="1" maxlength="2000" placeholder="${esc(t('Explain / another answer (optional)'))}" aria-label="${esc(t('Explain / another answer (optional)'))}">${esc(replyDrafts.get(key) ?? '')}</textarea>
+    <button type="button" class="button secondary${size}" ${send} data-reply-send>${esc(t('Send'))}</button>
+  </div>`;
+
+/**
+ * A step's question with its field to write: under the question's text (the notices and the run's report). A notice's
+ * request carries no status: only open requests become notices.
+ */
+const requestReply = (run, q, size = '') => (q?.options?.length && (q.status ?? 'open') === 'open'
+  ? replyField(`req:${q.id}`, `data-needs-done="${esc(run)}" data-request="${esc(q.id)}"`, size)
+  : '');
+
 /** A question's recommendation and its reason, in one line ("Recommends: Resend. Simpler to set up."). */
 const requestWhy = q => (q?.options?.length && (q.recommend || q.why)
   ? `<span class="request-why">${esc([q.recommend ? t('Recommends: {what}', { what: q.recommend }) : '', q.why ?? ''].filter(Boolean).join('. '))}</span>`
@@ -816,7 +847,7 @@ function attnNotice(i, brief = false) {
     : `${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
   return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
       <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
-      <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}${brief ? '' : requestWhy(r)}${where || links.length ? `<span class="hint">${[esc(where), ...links].filter(Boolean).join(' · ')}</span>` : ''}${brief ? '' : permissionFacts(r?.explain, r?.id)}</div>
+      <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}${brief ? '' : requestWhy(r)}${brief || !r?.run ? '' : requestReply(r.run, r, ' small')}${where || links.length ? `<span class="hint">${[esc(where), ...links].filter(Boolean).join(' · ')}</span>` : ''}${brief ? '' : permissionFacts(r?.explain, r?.id)}</div>
       <div class="attn-actions">${actions}</div>
     </div>`;
 }
@@ -835,7 +866,7 @@ function attnList(list, label, { archived = false } = {}) {
   const link = archived ? attnArchivedLink() : '';
   if (!list.length) return link ? `<div class="attn-archived-only">${link}</div>` : '';
   const head = `<div class="attn-head">${attnMark(list)}<span class="label">${esc(t('{label} ({count})', { label, count: unseen(list).length }))}</span>${link}</div>`;
-  return `<div class="attn-list"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>${head}${list.map(attnNotice).join('')}</div>`;
+  return `<div class="attn-list"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>${head}${list.map(i => attnNotice(i)).join('')}</div>`;
 }
 
 /** Why a notice went to the archive (src/attention.mjs). */
@@ -988,6 +1019,8 @@ function decisionCardHtml(c) {
     c.thirdParty ? '' : button('discard', label(c.kind === 'push' || c.kind === 'repo' ? t('Refuse') : t('Discard')), ' danger'),
     button('talk', label(t('Talk about this'), t('Talk')), ' secondary'),
   ].join('');
+  // A question also takes an answer in the owner's words: with the option clicked, or alone with "Send".
+  const reply = c.kind === 'question' ? replyField(`card:${c.id}`, `data-decide="answer" data-card="${esc(c.id)}"`) : '';
   const about = [esc(c.label), c.at ? esc(relative(c.at)) : ''].filter(Boolean).join(' · ');
   // The recommendation's verdict only ("Approve with caveats", src/decisions.mjs); its reason is under Details.
   const verdict = c.recommendShort || c.recommend;
@@ -1003,6 +1036,7 @@ function decisionCardHtml(c) {
       ${verdict ? `<div class="decision-verdict">${esc(t('Recommends: {what}', { what: verdict }))}</div>` : ''}
       ${c.thirdParty ? `<p class="decision-third">${esc(t('Someone else reviews and merges the work of this project: nothing for you to approve here.'))}</p>` : ''}
       <div class="decision-buttons">${buttons}</div>
+      ${reply}
       ${detail ? `<details class="decision-detail" data-detail="${esc(c.id)}"><summary>${esc(t('Details'))}</summary>${detail}</details>` : ''}
     </article>`;
 }
@@ -1057,14 +1091,18 @@ $('#decisions').addEventListener('click', async event => {
   if (c.kind === 'push' && action === 'approve' && !(await confirmDialog(t('Allow this push'), `${c.title}. ${c.what} ${c.change}`, t('Allow push')))) return;
   // And creating a repository: the manager may then create it, private, and send the folder once.
   if (c.kind === 'repo' && action === 'approve' && !(await confirmDialog(t('Allow this repository'), `${c.what} ${c.change}`, t('Allow creation')))) return;
+  // What the owner wrote goes with the answer; "Send" needs something written.
+  const note = action === 'answer' ? replyText(`card:${c.id}`) : '';
+  if (button.hasAttribute('data-reply-send') && !note) return toast(t('Write your answer first.'));
   const card = button.closest('.decision');
   for (const b of card.querySelectorAll('button')) b.disabled = true;
   try {
-    const r = await api('/api/decide', { card: c.id, action, option: button.dataset.option });
+    const r = await api('/api/decide', { card: c.id, action, option: button.dataset.option, note });
+    if (r.done === 'answered') replyDrafts.delete(`card:${c.id}`);
     toast({
       merged: [t('Merged.'), r.merge?.copiesNote].filter(Boolean).join(' '), later: c.thirdParty ? t('Hidden: it is in the archive.') : t('Left for later: the card stays at the end, faded.'), discarded: t('Discarded.'),
       already_merged: t('Branch already merged'), branch_deleted: t('Local branch deleted'),
-      approved: t('Approved: it becomes a task for its agent, in its turn.'), allowed: t('Allowed: the manager may send it once now.'), refused: t('Refused: the manager is told.'), answered: t('Answer sent to the manager: {answer}', { answer: r.answer ?? '' }),
+      approved: t('Approved: it becomes a task for its agent, in its turn.'), allowed: t('Allowed: the manager may send it once now.'), refused: t('Refused: the manager is told.'), answered: t('Answer sent to the manager: {answer}', { answer: [r.answer, r.note].filter(Boolean).join(' — ') }),
     }[r.done] ?? '');
   } catch (error) {
     toast(error.message);
@@ -1830,7 +1868,7 @@ async function refreshDetail(force = false) {
     ? `<div class="report"><div class="report-top"><strong>${esc(t('Asked of you'))}</strong></div>${r.requests.map(q => {
       const status = q.status === 'closed' ? [t('No longer needed'), 'neutral']
         : q.status === 'open' ? [t('Waiting for your action'), 'warn'] : [t('Done'), 'ok'];
-      return `<div>${stateHtml(status)} ${esc(q.what)}${q.url ? ` · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${q.status === 'open' ? `${requestWhy(q)} ${requestButtons(r.id, q, ' small')}` : q.answer ? ` · ${esc(t('Your answer: {answer}', { answer: q.answer }))}` : ''}</div>`;
+      return `<div>${stateHtml(status)} ${esc(q.what)}${q.url ? ` · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${q.status === 'open' ? `${requestWhy(q)} ${requestButtons(r.id, q, ' small')}${requestReply(r.id, q, ' small')}` : q.answer || q.note ? ` · ${esc(t('Your answer: {answer}', { answer: [q.answer, q.note].filter(Boolean).join(' — ') }))}` : ''}</div>`;
     }).join('')}</div>`
     : '';
   const checks = r.checks?.length
@@ -4314,8 +4352,14 @@ document.addEventListener('click', async event => {
       await api('/api/reset-grants', { action: 'remove', index: Number(target.dataset.resetRemove) });
     } else if (target.dataset.needsDone) {
       const answer = target.dataset.answer ?? null;
-      await api('/api/needs-you/done', { run: target.dataset.needsDone, id: target.dataset.request, answer });
-      toast(answer ? t('Answer sent: {answer}. The crew goes on.', { answer }) : t('Marked as done. The crew goes on.'));
+      // What the owner wrote to a question goes with the option, or alone with "Send".
+      const key = `req:${target.dataset.request}`;
+      const note = replyText(key);
+      if (target.hasAttribute('data-reply-send') && !note) return toast(t('Write your answer first.'));
+      await api('/api/needs-you/done', { run: target.dataset.needsDone, id: target.dataset.request, answer, note: note || null });
+      replyDrafts.delete(key);
+      const sent = [answer, note].filter(Boolean).join(' — ');
+      toast(sent ? t('Answer sent: {answer}. The crew goes on.', { answer: sent }) : t('Marked as done. The crew goes on.'));
       if (selectedRun === target.dataset.needsDone) await refreshDetail(true);
     } else if (target.dataset.needsSession) {
       const permission = (state.needs ?? []).some(n => n.id === target.dataset.request && n.kind === 'permission');

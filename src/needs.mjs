@@ -3,7 +3,8 @@
 // the request in the run, shows it in the app (a band at the top, the window's icon and title) and in a Windows
 // notification, and opens the address in the owner's browser. With --wait, the command returns when the owner clicks
 // "I did it" (or a check the agent gave succeeds), or answers it from the agent's panel (the command hands the answer
-// over). A question (--options "A|B", --recommend, --why) always waits, with one button per option. While it waits,
+// over). A question (--options "A|B", --recommend, --why) always waits, with one button per option and a field where
+// the owner writes an explanation with the option, or an answer of their own instead. While it waits,
 // the step's time limit stands still. Past the longest wait, the command returns. Any open request closes when the run ends.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -127,16 +128,26 @@ export function pollRequest(runId, id) {
   const max = needsSettings().maxWaitMinutes * 60_000;
   const going = liveOf(run.id);
   if (request.status === 'open' && waited < max && going) going.heldUntil = Date.now() + 20_000;
-  return { status: request.status, by: request.by ?? null, answer: request.answer ?? null, waitedMinutes: Math.floor(waited / 60_000), maxWaitMinutes: max / 60_000, timedOut: waited >= max };
+  return { status: request.status, by: request.by ?? null, answer: request.answer ?? null, note: request.note ?? null, waitedMinutes: Math.floor(waited / 60_000), maxWaitMinutes: max / 60_000, timedOut: waited >= max };
 }
 
-/** "I did it": the owner did it (or the agent's check succeeded); for a question, the option the owner chose. */
-export function finishRequest(runId, id, by = 'owner', answer = null) {
+/**
+ * "I did it": the owner did it (or the agent's check succeeded); for a question, the option the owner chose and/or
+ * what they wrote ("note": an explanation with the option, or an answer of their own instead of one).
+ */
+export function finishRequest(runId, id, by = 'owner', answer = null, note = null) {
   const { run, request } = findRequest(runId, id);
-  const choice = answer == null ? null : request.options?.find(o => same(o, answer));
-  if (answer != null && !choice) throw new Error(t('Answer with one of the options.'));
+  const given = answer == null || String(answer).trim() === '' ? null : answer;
+  const choice = given == null ? null : request.options?.find(o => same(o, given));
+  if (given != null && !choice) throw new Error(t('Answer with one of the options.'));
   if (request.status !== 'open') return request;
-  Object.assign(request, { status: 'done', done: now(), by }, choice ? { answer: choice } : {});
+  const written = request.options && by === 'owner' ? clip(String(note ?? '').trim(), 2000) : '';
+  Object.assign(request, { status: 'done', done: now(), by }, choice ? { answer: choice } : {}, written ? { note: written } : {});
+  // The owner's answer stays in the run's conversation (the agent's panel, the step's report, the manager).
+  if (choice || written) {
+    const text = [choice, written].filter(Boolean).join(' — ');
+    (run.talk ??= []).push({ id: randomUUID().slice(0, 8), at: now(), who: 'owner', step: request.step, agent: request.agent, text, status: 'delivered', delivered: now(), via: 'request', request: request.id });
+  }
   saveRun(run);
   return request;
 }
