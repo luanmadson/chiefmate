@@ -4645,6 +4645,7 @@ document.addEventListener('click', async event => {
       return;
     } else if (target.dataset.workNow) {
       await workNow(pageProject(), target.dataset.workNow, target);
+      return;
     } else if (target.dataset.workRelease) {
       target.disabled = true;
       await api('/api/work-now/release', { id: target.dataset.workRelease });
