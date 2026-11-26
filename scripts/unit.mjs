@@ -17,7 +17,7 @@ import { riskyCommand } from '../src/guard.mjs';
 import { checkSignals, engage, isLocked, readLockdown, recordSignal, refuseWhileLocked, release, RULES, weigh, WINDOW_MINUTES } from '../src/lockdown.mjs';
 import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
-import { askedTool, stepTool } from '../src/runs.mjs';
+import { askedTool, limitWaitCleared, stepTool } from '../src/runs.mjs';
 import {
   agentTool, availableTools, chooseTool, codexEnvironment, codexEvents, codexGuard, codexStepArgs, correctionLine, GROK_DENY, grokEvents, grokStepArgs, parseTool,
   qualityRecords, qualitySummary, runTools, toolAvailable, toolEffort, toolModel,
@@ -507,6 +507,19 @@ test('the step feed shows a recovery action written after an interrupted log lin
   const log = path.join(temp, 'git-recovery.jsonl');
   write(log, '{"type":\n{"type":"chiefmate_action","text":"The unfinished Git merge was aborted before resuming: the commits are kept."}\n');
   assert.deepEqual(readFeed(log, temp).items, [{ type: 'action', text: 'The unfinished Git merge was aborted before resuming: the commits are kept.' }]);
+});
+
+test('a run waiting for a usage limit goes back to the queue once the limit is raised above the usage or taken out', () => {
+  const resets = new Date(Date.now() + 3_600_000).toISOString();
+  const usage = { five_hour: { used: 0.11, resets }, seven_day: { used: 0.2, resets } };
+  const run = { status: 'waiting', notBefore: resets, limitWait: { window: 'five_hour', ceiling: 0.05 } };
+  const cleared = (window, week = 0.9) => limitWaitCleared(run, { pause_at_5h_window: window, pause_at_plan_week: week }, usage);
+  assert.equal(cleared(0.05), false);
+  assert.equal(cleared(0.11), false);
+  assert.equal(cleared(0.7, 0.1), false);
+  assert.equal(cleared(0.7), true);
+  assert.equal(cleared(undefined), true);
+  assert.equal(limitWaitCleared({ status: 'waiting', note: 'Your account reached its limit in the middle of a step' }, {}, usage), false);
 });
 
 // ---------- The crew's tools (src/tools.mjs): which one a member runs on, until when, and how each is started ----------

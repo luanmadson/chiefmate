@@ -2114,7 +2114,7 @@ function drawUsage() {
     </div>
     <div class="panel">
       <div class="label">${esc(t('How Chiefmate looks after your plan'))}</div>
-      <p class="hint">${esc(t("Before every step, Chiefmate checks your account. If the 5-hour window is above {window} or the plan's week above {week}, the run waits for the reset and then carries on by itself.", { window: percent(l.pause_at_5h_window), week: percent(l.pause_at_plan_week) }))}</p>
+      <p class="hint">${esc(t("Before every step, Chiefmate checks the current limits: {window} for the 5-hour window and {week} for the plan's week. A run paused by these limits returns to the queue after the reset or when you raise the limit enough for the current usage.", { window: percent(l.pause_at_5h_window), week: percent(l.pause_at_plan_week) }))}</p>
       <p class="hint">${esc(t('If the account runs out in the middle of a step, that step starts over after the reset. Each step also has a time limit, in case an agent gets stuck.'))}</p>
     </div>
   </div>`;

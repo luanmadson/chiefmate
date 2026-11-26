@@ -291,16 +291,57 @@ export function updatedTurn(messages, config = loadConfig(), why = 'update', git
   return messages.length ? `${lines.join('\n')}\n\n${ownerTurn(messages, config)}` : lines.join('\n');
 }
 
-/** Before every step: your account's usage, in the plan's 5-hour window and week. */
-function checkLimits(config, run) {
+const usageLimits = { five_hour: 'pause_at_5h_window', seven_day: 'pause_at_plan_week' };
+
+/** The usage window at or over its limit with a reset ahead (the 5-hour one first), or undefined. */
+function blockingWindow(limits, usage, at = Date.now()) {
+  return Object.keys(usageLimits).find(window => {
+    const ceiling = limits[usageLimits[window]];
+    const w = usage[window];
+    return w && ceiling && w.used >= ceiling && w.resets && new Date(w.resets).getTime() > at;
+  });
+}
+
+function limitNote(window, percent, lang) {
+  const name = window === 'five_hour' ? t('the 5-hour window', {}, lang) : t("the plan's week", {}, lang);
+  return t('{window} of your account is at {percent}', { window: name, percent }, lang);
+}
+
+/**
+ * Before every step: the account's usage against the latest limits in the settings, so a change in Usage counts at
+ * once. If the settings can't be read now (a file being edited), the limits the run started with.
+ */
+function checkLimits(run, config) {
   if (run.ignoreLimits) return null;
-  const limits = config.limits ?? {};
+  let limits;
+  try {
+    limits = loadConfig().limits ?? {};
+  } catch {
+    limits = config.limits ?? {};
+  }
   const usage = readUsage();
-  const window = (w, ceiling, name) =>
-    w && ceiling && w.used >= ceiling && w.resets && new Date(w.resets).getTime() > Date.now()
-      ? { note: t('{window} of your account is at {percent}', { window: name, percent: formatPercent(w.used) }), waitUntil: w.resets }
-      : null;
-  return window(usage.five_hour, limits.pause_at_5h_window, t('the 5-hour window')) ?? window(usage.seven_day, limits.pause_at_plan_week, t("the plan's week"));
+  const window = blockingWindow(limits, usage);
+  if (!window) return null;
+  const w = usage[window];
+  const note = limitNote(window, formatPercent(w.used));
+  return { note, waitUntil: w.resets, limitWait: { window, ceiling: limits[usageLimits[window]] } };
+}
+
+/**
+ * Whether a run waiting for a configured limit goes back to the queue before the reset: its limit was raised (or taken
+ * out) above the current usage and no window blocks it. A wait for the account running out is never cleared here.
+ */
+export function limitWaitCleared(run, limits, usage) {
+  // Older runs only recorded the reason in the translated note.
+  const percent = run.limitWait ? null : run.note?.match(/-?\d+%/)?.[0];
+  const window = run.limitWait?.window ?? (percent && Object.keys(usageLimits).find(window =>
+    ['en', 'pt-BR'].some(lang => run.note === limitNote(window, percent, lang))));
+  if (!window) return false;
+  // No limit in the settings pauses nothing, as in checkLimits.
+  const ceiling = limits[usageLimits[window]] || Infinity;
+  const used = usage[window]?.used;
+  return ceiling > (run.limitWait?.ceiling ?? 0) && Number.isFinite(used) && used < ceiling
+    && !blockingWindow(limits, usage);
 }
 
 /** If the account ran out in the middle of a step, the step starts over once the limit resets. */
@@ -929,6 +970,7 @@ export async function execute(run) {
   const firstTime = !run.started;
   Object.assign(run, { status: 'running', started: run.started ?? now(), notBefore: null, note: null });
   delete run.resumeFirst;
+  delete run.limitWait;
   saveRun(run);
 
   // Paused for an update of Chiefmate: back to the front of the queue, to resume as soon as the update is over.
@@ -939,8 +981,9 @@ export async function execute(run) {
     saveRun(run);
   };
 
-  const wait = (waitUntil, note) => {
+  const wait = (waitUntil, note, limitWait) => {
     Object.assign(run, { status: waitUntil ? 'waiting' : 'paused', notBefore: waitUntil ?? null, note });
+    if (limitWait) run.limitWait = limitWait;
     saveRun(run);
     notify(
       t('Chiefmate paused the run'),
@@ -954,8 +997,8 @@ export async function execute(run) {
   try {
     if (!project) throw new Error(t('Unknown project: {id}', { id: run.project }));
     // Over the limits already: wait before touching the working copy.
-    const early = checkLimits(config, run);
-    if (early) return wait(early.waitUntil, early.note);
+    const early = checkLimits(run, config);
+    if (early) return wait(early.waitUntil, early.note, early.limitWait);
     if (firstTime) {
       // The title and summary from the quick model take a few seconds: the notice waits for them, briefly.
       const pending = describing.get(run.id);
@@ -1022,8 +1065,8 @@ export async function execute(run) {
       if (index < 0 || l.cancelRequest) break;
       if (l.pauseRequest) return pauseForUpdate();
       const { step, finalReview } = order[index];
-      const limit = checkLimits(config, run);
-      if (limit) return wait(limit.waitUntil, limit.note);
+      const limit = checkLimits(run, config);
+      if (limit) return wait(limit.waitUntil, limit.note, limit.limitWait);
       // What the final review commits tells whether it had to correct the crew's work (the tools' quality, src/tools.mjs).
       const reviewFrom = finalReview ? await headCommit(dir).catch(() => null) : null;
       const { waitUntil, paused } = await runStep({ l, run, step, index, dir, project, config, agents, libraries, base, finalReview });

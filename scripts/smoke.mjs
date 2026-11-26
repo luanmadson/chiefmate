@@ -1,7 +1,7 @@
 // Starts a temporary Chiefmate on a spare port (only the app and the API: no queue, no schedule, no updates)
 // and checks that everything answers. Usage: npm run smoke
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -507,6 +507,96 @@ try {
   failures.push(error.message);
 } finally {
   child.kill();
+}
+
+// Run two steps with a stand-in for Claude that changes the settings and reports 11% usage after the first step.
+{
+  const fixture = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-limits-'));
+  const env = { CHIEFMATE_DATA: process.env.CHIEFMATE_DATA, CHIEFMATE_SMOKE: process.env.CHIEFMATE_SMOKE, CHIEFMATE_CLAUDE: process.env.CHIEFMATE_CLAUDE };
+  try {
+    for (const entry of ['src', 'agents', 'ui/locales', 'package.json']) cpSync(path.join(root, entry), path.join(fixture, entry), { recursive: true });
+    const repo = path.join(fixture, 'repo');
+    mkdirSync(repo);
+    const git = (...args) => execFileSync('git', args, { cwd: repo, windowsHide: true, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'Start');
+    const fake = path.join(fixture, 'fake-claude.mjs');
+    Object.assign(process.env, { CHIEFMATE_DATA: path.join(fixture, 'records'), CHIEFMATE_SMOKE: '1', CHIEFMATE_CLAUDE: fake });
+    const load = name => import(pathToFileURL(path.join(fixture, 'src', `${name}.mjs`)).href);
+    const { CONFIG_FILE, saveConfig } = await load('config');
+    const { execute, live } = await load('runs');
+    const { recordUsage, readRun, saveRun } = await load('store');
+    const { nudgeQueue } = await load('queue');
+    const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+    const usage = utilization => ({ unifiedWindows: {
+      five_hour: { utilization, resetsAt }, seven_day: { utilization: 0.20, resetsAt: resetsAt + 86400 },
+    } });
+    writeFileSync(fake, [
+      "import { readFileSync, writeFileSync } from 'node:fs';",
+      `const file = ${JSON.stringify(CONFIG_FILE)};`,
+      "process.stdin.resume();",
+      "process.stdin.on('end', () => {",
+      "  const config = JSON.parse(readFileSync(file, 'utf8'));",
+      "  config.limits.pause_at_5h_window = config.nextLimit;",
+      "  writeFileSync(file, JSON.stringify(config));",
+      `  console.log(JSON.stringify({ type: 'rate_limit_event', rate_limit_info: ${JSON.stringify(usage(0.11))} }));`,
+      "  console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'Done', num_turns: 1 }));",
+      "});",
+    ].join('\n'));
+
+    const settings = (limit, nextLimit, week = 0.9) => saveConfig({
+      quick_model: false, max_parallel: 1, nextLimit, projects: { demo: { repository: repo, main_branch: 'main' } },
+      limits: { pause_at_5h_window: limit, pause_at_plan_week: week },
+    });
+    const makeRun = id => ({
+      id, kind: 'task', project: 'demo', title: id, created: new Date().toISOString(), status: 'queued',
+      branch: id, steps: Array.from({ length: 2 }, () => ({ agent: 'generalist', status: 'pending', instruction: 'Smoke test.' })),
+    });
+    settings(0.05, 0.70);
+    recordUsage(usage(0.03));
+    const raised = makeRun('raised');
+    await execute(raised);
+    expect(raised.status === 'done' && raised.steps.every(step => step.status === 'done'), `a run ignored the raised limit: ${raised.note ?? raised.result}`);
+
+    settings(0.70, 0.05);
+    recordUsage(usage(0.03));
+    const lowered = makeRun('lowered');
+    await execute(lowered);
+    const reset = new Date(resetsAt * 1000).toISOString();
+    expect(lowered.status === 'waiting' && lowered.notBefore === reset && lowered.steps.map(step => step.status).join() === 'done,pending',
+      `a run crossed the lowered limit: ${lowered.note ?? lowered.result}`);
+
+    // Keep the worker slot busy so the test can inspect the persisted return to the queue.
+    live.set('busy', { project: 'other' });
+    saveRun({ ...makeRun('legacy'), status: 'waiting', notBefore: reset, note: 'a janela de 5 horas da sua conta está em 11%' });
+    saveRun({ ...makeRun('exhausted'), status: 'waiting', notBefore: reset, note: 'Your account reached its limit in the middle of a step' });
+    saveRun({ ...makeRun('scheduled'), notBefore: reset });
+    settings(0.11, 0.70);
+    nudgeQueue();
+    expect(readRun(lowered.id).status === 'waiting', 'usage equal to the raised limit released a waiting run');
+    settings(0.70, 0.70, 0.10);
+    nudgeQueue();
+    expect(readRun(lowered.id).status === 'waiting', 'a run was released while the plan week still blocked it');
+    settings(0.70, 0.70);
+    nudgeQueue();
+    const requeued = readRun(lowered.id);
+    expect(requeued.status === 'queued' && requeued.notBefore === null && requeued.steps.map(step => step.status).join() === 'done,pending',
+      'raising the limit did not queue a waiting run before the reset');
+    expect(readRun('legacy').status === 'queued', 'an older run waiting for a configured limit was not queued');
+    expect(readRun('exhausted').notBefore === reset && readRun('scheduled').notBefore === reset,
+      'raising a configured limit cleared an account reset or a scheduled start');
+    live.delete('busy');
+    await execute(requeued);
+    expect(requeued.status === 'done' && requeued.steps.every(step => step.status === 'done'), 'the requeued run did not finish its remaining step');
+  } catch (error) {
+    failures.push(`run limits: ${error.message}`);
+  } finally {
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(fixture, { recursive: true, force: true, maxRetries: 5 });
+  }
 }
 
 // The watchdog's checks, in this process with made-up states: no AI, nothing stopped, nothing told.
