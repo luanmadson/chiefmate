@@ -573,10 +573,10 @@ export function startServer() {
           return reply(res, 200, pollRequest(body.run, body.id));
         case '/api/needs-you/done':
           if (body.session) return reply(res, 200, finishSessionRequest(String(body.session), String(body.id ?? '')));
-          return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner', body.answer ?? null));
+          return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner', body.answer ?? null, body.note ?? null));
         case '/api/decide': {
           // The owner's click on a decision card: approve (a merge goes through src/merge.mjs), later, discard or answer.
-          const decided = await decide({ card: body.card, action: body.action, option: body.option, reason: body.reason }, buildState().decisions);
+          const decided = await decide({ card: body.card, action: body.action, option: body.option, note: body.note, reason: body.reason }, buildState().decisions);
           // A request of an agent in charge, authorized on its card, has its run queued: the queue looks at once.
           if (decided.run) nudgeQueue();
           return reply(res, 200, decided);
@@ -588,7 +588,7 @@ export function startServer() {
           return reply(res, 200, answered);
         }
         case '/api/ask-owner':
-          // The manager's question for the owner, shown as a card with one button per option.
+          // The manager's question for the owner, shown as a card with one button per option and a field to write.
           return reply(res, 200, { question: addQuestion(body) });
         case '/api/attention/seen':
           // Marks notices as seen: they fade (an info notice goes to the archive).

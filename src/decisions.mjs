@@ -1,5 +1,6 @@
 // The owner's decisions as cards, decided with one click: a pull request or a branch to merge, a proposal the manager
-// triaged, and a question the manager asked (cli.mjs ask-owner). Each card says what it is, what changes if approved,
+// triaged, and a question the manager asked (cli.mjs ask-owner), answered with an option, in the owner's own words, or
+// both. Each card says what it is, what changes if approved,
 // the risk and the manager's recommendation, with the project beside its number ("PR #34 of Chiefmate").
 // Cards are built from the attention notices (src/attention.mjs), so a card leaves when its notice does. "Not now"
 // marks the notice as seen (the card fades to the end of the list); every decision reaches the manager as news
@@ -70,17 +71,31 @@ export function addQuestion({ question, context, options, recommend, project, le
 /** The questions still open, oldest first. */
 export const openQuestions = () => readQuestions().filter(q => q.status === 'open');
 
-/** Closes a question: answered with one of its options, or discarded (answer null). */
-function closeQuestion(id, answer) {
+/**
+ * Closes a question: answered with one of its options, what the owner wrote ("note": an explanation with the option,
+ * or an answer of their own instead), or both; or discarded (no answer, no note).
+ */
+function closeQuestion(id, answer, note = null) {
   const questions = readQuestions();
   const q = questions.find(x => x.id === Number(id));
   if (!q) throw new Error(`Question ${id} not found.`);
   if (q.status !== 'open') throw new Error(`Question ${id} was already ${q.status}.`);
-  const choice = answer == null ? null : q.options.find(o => same(o, answer));
-  if (answer != null && !choice) throw new Error(`Answer with one of: ${q.options.join(', ')}.`);
-  Object.assign(q, { status: choice ? 'answered' : 'dismissed', answer: choice, answered_at: now() });
+  const given = answer == null || String(answer).trim() === '' ? null : answer;
+  const choice = given == null ? null : q.options.find(o => same(o, given));
+  if (given != null && !choice) throw new Error(`Answer with one of: ${q.options.join(', ')}.`);
+  const written = clip(String(note ?? '').trim(), 2000);
+  Object.assign(q, { status: choice || written ? 'answered' : 'dismissed', answer: choice, answered_at: now() }, written ? { note: written } : {});
   saveQuestions(questions);
   return q;
+}
+
+/** The "owner_decided" news of a question closed from its card: the option, what the owner wrote, or the discard. */
+export function questionNews(q) {
+  const asked = `your question #${q.id} "${q.question}"`;
+  if (q.status !== 'answered') return `The owner discarded ${asked} from the app without answering it.`;
+  const mine = q.recommend ? ` (You had recommended "${q.recommend}".)` : '';
+  if (!q.answer) return `The owner answered ${asked} from the app in their own words, choosing none of the options: "${q.note}".${mine}`;
+  return `The owner answered ${asked} from the app: "${q.answer}".${q.note ? ` And wrote: "${q.note}".` : ''}${mine}`;
 }
 
 // ---------- The manager's pushes ----------
@@ -463,9 +478,9 @@ const tell = text => reportEvent('owner_decided', text);
 
 /**
  * The owner decides a card from the app: { card (its id), action: approve | later | discard | answer, option (the
- * answer to a question), reason }. The card is checked against "cards", what is pending now.
+ * answer to a question), note (what the owner wrote to a question: with the option, or instead of one), reason }. The card is checked against "cards", what is pending now.
  */
-export async function decide({ card, action, option, reason } = {}, cards = []) {
+export async function decide({ card, action, option, note, reason } = {}, cards = []) {
   const id = String(card ?? '');
   const c = cards.find(x => x.id === id);
   if (!c) {
@@ -518,16 +533,15 @@ export async function decide({ card, action, option, reason } = {}, cards = []) 
     }
     return { card: c.id, done: r.status };
   } else if (c.kind === 'question' && ['answer', 'discard'].includes(action)) {
-    const q = closeQuestion(c.question, action === 'answer' ? String(option ?? '') : null);
+    if (action === 'answer' && !String(option ?? '').trim() && !String(note ?? '').trim()) throw new Error(t('Choose an option or write your answer.'));
+    const q = action === 'answer' ? closeQuestion(c.question, option ?? null, note) : closeQuestion(c.question, null);
     // A request of an agent in charge follows the answer by itself: authorized, on hold or refused.
     const followed = q.request ? await ownerAnswered(q).then(x => x.request, error => ({ error: error.message })) : null;
     const request = !followed ? '' : followed.error
       ? ` Request #${q.request} could not follow it (${followed.error}).`
       : ` Chiefmate applied it to request #${q.request}: ${followed.status}${followed.run ? `, run ${followed.run} queued` : ''}; don't answer that request again.`;
-    tell((q.answer
-      ? `The owner answered your question #${q.id} "${q.question}" from the app: "${q.answer}".${q.recommend ? ` (You had recommended "${q.recommend}".)` : ''}`
-      : `The owner discarded your question #${q.id} "${q.question}" from the app without answering it.`) + request);
-    return { card: c.id, done: q.answer ? 'answered' : 'discarded', answer: q.answer, run: followed?.run ?? null };
+    tell(questionNews(q) + request);
+    return { card: c.id, done: q.status === 'answered' ? 'answered' : 'discarded', answer: q.answer, note: q.note ?? null, run: followed?.run ?? null };
   }
   throw new Error(t('This decision does not take that action.'));
 }

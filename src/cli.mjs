@@ -161,7 +161,8 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs ask-owner "<question>" [--context "<explanation>"] [--options "Yes|No|Wait"] [--recommend <option>] [--project <id>]
                             [--level 1|2|3]
                                                 the manager's question for the owner: a card in the app with one button
-                                                per option; the answer comes back as "owner_decided" news
+                                                per option and a field to write; the answer (the option, what the owner
+                                                wrote, or both) comes back as "owner_decided" news
   node src/cli.mjs request [list] [--project <id>] [--all]
                                                 the requests the agents in charge of the projects sent from their talk
                                                 with the owner (--all: answered ones too)
@@ -207,7 +208,8 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 until they click "I did it" (or the check command succeeds)
   node src/cli.mjs needs-you "<question>" --options "A|B" [--recommend A] [--why "<one sentence>"]
                                                 for a step of a run: asks the owner to choose, one button per option
-                                                (the recommended one marked), and waits for the answer
+                                                (the recommended one marked) and a field to write, and waits for the
+                                                answer: the option, what the owner wrote, or both
   node src/cli.mjs prompts-sync                 brings the prompt builder's document up to date: the library's copy
                                                 (git), or a copy from Google Docs through your browser
   node src/cli.mjs limits [--window-5h 0.85] [--plan-week 0.9]
@@ -271,7 +273,10 @@ async function needsYou() {
   for (;;) {
     const s = await api('/api/needs-you/poll', { run, id });
     if (s.status === 'done') {
-      if (s.answer) console.log(`The owner answered you from the app:\n${s.answer}\n\nTake the answer into account and go on.`);
+      // The option chosen and/or what the owner wrote (an explanation, or an answer of their own instead of an option).
+      if (s.answer && s.note) console.log(`The owner answered you from the app:\n${s.answer}\n\nAnd wrote:\n${s.note}\n\nTake the answer into account and go on.`);
+      else if (s.note) console.log(`The owner answered you from the app in their own words (none of the options):\n${s.note}\n\nTake the answer into account and go on.`);
+      else if (s.answer) console.log(`The owner answered you from the app:\n${s.answer}\n\nTake the answer into account and go on.`);
       else console.log(s.by === 'check' ? 'Done: the check succeeded.' : 'Done: the owner says they did it. Go on.');
       return;
     }

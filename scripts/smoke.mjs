@@ -745,6 +745,18 @@ try {
   finishRequest(run.id, asked.id, 'owner', 'ses');
   const chosen = pollRequest(run.id, asked.id);
   expect(outside && chosen.status === 'done' && chosen.answer === 'SES', `the option clicked did not answer the question, or an answer outside the options was taken: ${JSON.stringify(chosen)}`);
+  // What the owner writes goes with the option, or answers alone; the waiting command hands it over, and it stays in
+  // the run's conversation.
+  const explained = await askOwner({ run: run.id, step: 1, what: 'Which region?', options: 'US|EU' });
+  finishRequest(run.id, explained.id, 'owner', 'eu', '  Closer to the users.  ');
+  const withNote = pollRequest(run.id, explained.id);
+  const own = await askOwner({ run: run.id, step: 1, what: 'Which plan?', options: 'Free|Pro' });
+  finishRequest(run.id, own.id, 'owner', '', 'Neither: wait for the trial.');
+  const ownWords = pollRequest(run.id, own.id);
+  const said = run.talk.filter(m => m.who === 'owner' && m.via === 'request').map(m => m.text);
+  expect(withNote.answer === 'EU' && withNote.note === 'Closer to the users.' && ownWords.answer === null && ownWords.note === 'Neither: wait for the trial.'
+    && said.includes('EU — Closer to the users.') && said.includes('Neither: wait for the trial.'),
+    `what the owner wrote did not reach the step, or is not in the run's conversation: ${JSON.stringify([withNote, ownWords, said])}`);
   let single = false;
   try {
     await askOwner({ run: run.id, step: 1, what: 'Only one?', options: 'Yes' });
@@ -1596,7 +1608,7 @@ try {
 try {
   process.env.CHIEFMATE_SMOKE = '1';
   const src = file => pathToFileURL(path.join(root, 'src', file)).href;
-  const { addQuestion, decide, decisionCards, openQuestions, verdictRecommendation } = await import(src('decisions.mjs'));
+  const { addQuestion, decide, decisionCards, openQuestions, questionNews, verdictRecommendation } = await import(src('decisions.mjs'));
   const { attentionItems } = await import(src('attention.mjs'));
   const { readRun, saveRun } = await import(src('store.mjs'));
   const { planItems, proposeItem, triageItem } = await import(src('planning.mjs'));
@@ -1685,6 +1697,22 @@ try {
     twice = true;
   }
   expect(twice, 'a question was answered twice');
+  // An answer in the owner's words: with the option, or alone; it reaches the manager in the news.
+  const cardOf = x => ({ id: `question:${x.id}`, kind: 'question', question: x.id, label: 'Question', title: x.question });
+  const q2 = addQuestion({ question: 'Which day?', options: 'Monday|Friday', recommend: 'friday' }, config);
+  const q3 = addQuestion({ question: 'Which color?', options: 'Red|Blue' }, config);
+  let empty = false;
+  try {
+    await decide({ card: `question:${q3.id}`, action: 'answer', option: '', note: '  ' }, [cardOf(q3)]);
+  } catch {
+    empty = true;
+  }
+  const both = await decide({ card: `question:${q2.id}`, action: 'answer', option: 'monday', note: 'Friday is a holiday.' }, [cardOf(q2)]);
+  const words = await decide({ card: `question:${q3.id}`, action: 'answer', note: 'Neither: brass.' }, [cardOf(q3)]);
+  const news = [questionNews({ ...q2, status: 'answered', answer: 'Monday', note: 'Friday is a holiday.' }), questionNews({ ...q3, status: 'answered', answer: null, note: 'Neither: brass.' })];
+  expect(empty && both.done === 'answered' && both.answer === 'Monday' && both.note === 'Friday is a holiday.' && words.done === 'answered' && words.answer === null && words.note === 'Neither: brass.'
+    && !openQuestions().some(x => [q2.id, q3.id].includes(x.id)) && news[0].includes('"Monday". And wrote: "Friday is a holiday."') && news[1].includes('in their own words') && news[1].includes('"Neither: brass."'),
+    `an answer written by the owner was not taken, or does not reach the manager: ${JSON.stringify([both, words, news])}`);
   expect((await decide({ card: local.id, action: 'discard' }, cards)).done === 'discarded' && readRun('d-local').discarded?.by === 'owner', 'a local branch was not discarded from its card');
   await decide({ card: proposal.id, action: 'discard' }, cards);
   const left = cardsFor().map(c => c.id);
