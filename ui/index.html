@@ -319,8 +319,7 @@
           <form id="autopilot-form">
             <div class="label" data-t="The autopilot's limits">The autopilot's limits</div>
             <div class="fields">
-              <label><span data-t="Stop at this share of the 5-hour window (%)">Stop at this share of the 5-hour window (%)</span><input name="window" type="number" min="5" max="100" step="5" required></label>
-              <label><span data-t="Plan's week used by its end (%)">Plan's week used by its end (%)</span><input name="pace" type="number" min="5" max="100" step="5" required></label>
+              <label><span data-t="Stop at this share of the 5-hour window">Stop at this share of the 5-hour window</span><span class="autopilot-range"><input name="window" type="range" min="5" max="100" step="5" required><output name="windowOut"></output></span></label>
               <label><span data-t="Quiet hours: from (empty: none)">Quiet hours: from (empty: none)</span><input name="quietFrom" type="time"></label>
               <label><span data-t="Quiet hours: until">Quiet hours: until</span><input name="quietTo" type="time"></label>
               <label><span data-t="Daily report at (empty: none)">Daily report at (empty: none)</span><input name="report" type="time"></label>

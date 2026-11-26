@@ -3,10 +3,12 @@
 // approves for the owner, marked as the autopilot's. Approved items waiting their turn start at once, with no manager.
 // Only within limits: the 5-hour window, the week's pace (a target share of the plan's week by its end) and optional
 // quiet hours. Once a day, the manager gets what was done alone ("autopilot_report") and tells the owner in a few lines.
+// The week's pace comes as a spending mode: "save" (ends the week at 90%), "normal" (100%) or "all" (no pace: only the
+// 5-hour window and a used-up week stop it); any other share, above 1 too, is kept as a custom pace.
 import { loadConfig, saveConfig } from './config.mjs';
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
 import { newsSettings, reportEvent } from './news.mjs';
-import { current, weekPace } from './plan.mjs';
+import { availableResets, current, weekPace } from './plan.mjs';
 import { byRank, CLOSED, decideItem, planItem, planItems, startApproved } from './planning.mjs';
 import { listRuns, readState, readUsage, saveState } from './store.mjs';
 import { isLocked } from './lockdown.mjs';
@@ -18,11 +20,25 @@ const DAY = 86400_000;
 // A project's queue is empty when none of its runs is in one of these.
 const BUSY = ['queued', 'waiting', 'running', 'paused'];
 const MAX_LOG = 100;
+const MAX_CHANGES = 50;
 
+/** The spending modes and their week's pace ("all": none). */
+export const MODES = { save: 0.9, normal: 1, all: null };
+const NO_PACE = ['all', 'none', 'unlimited'];
+
+const number = value => (typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN);
 const share = (value, fallback) => {
-  const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN;
+  const n = number(value);
   return Number.isFinite(n) ? Math.min(1, Math.max(0.05, n)) : fallback;
 };
+// the week's pace: a share from 0.05, above 1 too (never cut down), or null for none ("all")
+const pace = (value, fallback) => {
+  if (value === null || NO_PACE.includes(String(value).trim().toLowerCase())) return null;
+  const n = number(value);
+  return Number.isFinite(n) ? Math.max(0.05, n) : fallback;
+};
+/** The mode a week's pace stands for: "save", "normal", "all" or "custom". */
+export const paceMode = weekPace => Object.keys(MODES).find(m => MODES[m] === weekPace) ?? 'custom';
 const minutesOf = text => {
   const m = String(text ?? '').trim().match(/^(\d{1,2}):(\d{2})$/);
   return m && Number(m[1]) < 24 && Number(m[2]) < 60 ? Number(m[1]) * 60 + Number(m[2]) : null;
@@ -41,14 +57,17 @@ export function inQuietHours(quiet, date = new Date()) {
 }
 
 /**
- * The settings, with their defaults: { enabled (false), week_pace (0.95: the share of the plan's week to reach by its
- * end), stop_at_5h_window (0.85), quiet_hours ("23:00-07:00", none by default), daily_report ("08:00"; false: none) }.
+ * The settings, with their defaults: { enabled (false), week_pace (1, "normal": the share of the plan's week to reach by
+ * its end; null, "all": no pace), mode, stop_at_5h_window (0.85), quiet_hours ("23:00-07:00", none by default),
+ * daily_report ("08:00"; false: none) }.
  */
 export function autopilotSettings(config = loadConfig()) {
   const a = config.autopilot ?? {};
+  const week = pace(a.week_pace, MODES.normal);
   return {
     enabled: a.enabled === true,
-    week_pace: share(a.week_pace, 0.95),
+    week_pace: week,
+    mode: paceMode(week),
     stop_at_5h_window: share(a.stop_at_5h_window, 0.85),
     quiet_hours: parseQuietHours(a.quiet_hours),
     daily_report: a.daily_report === false ? null : minutesOf(a.daily_report) != null ? String(a.daily_report).trim() : '08:00',
@@ -56,18 +75,23 @@ export function autopilotSettings(config = loadConfig()) {
 }
 
 /**
- * Why the autopilot can't put anything on the queue now, for the app: { reason: "off" | "standby" | "quiet" | "window" | "week",
- * and its values }, or null when it can.
+ * Why the autopilot can't put anything on the queue now, for the app: { reason: "off" | "standby" | "lockdown" |
+ * "updating" | "quiet" | "window" | "week_full" | "week", and its values }, or null when it can.
  */
 export function blockInfo(settings, usage = readUsage(), at = new Date()) {
   if (!settings.enabled) return { reason: 'off' };
   if (held()) return { reason: 'standby' };
+  if (isLocked()) return { reason: 'lockdown' };
+  if (updating()) return { reason: 'updating' };
   if (inQuietHours(settings.quiet_hours, at)) return { reason: 'quiet', quiet: settings.quiet_hours.text };
   const w = usage.five_hour;
   if (current(w) && w.used >= settings.stop_at_5h_window) return { reason: 'window', used: w.used, limit: settings.stop_at_5h_window };
+  // A used-up week stops it in every mode, "all" included.
+  const week = usage.seven_day;
+  if (current(week) && week.used >= 1) return { reason: 'week_full', used: week.used, resets: week.resets ?? null };
   // The week's pace: a straight line from 0 to week_pace at the end of the week; above it, the autopilot waits.
-  const pace = weekPace(usage);
-  if (pace && pace.used > settings.week_pace * pace.elapsed) return { reason: 'week', used: pace.used, elapsed: pace.elapsed, target: settings.week_pace };
+  const p = settings.week_pace == null ? null : weekPace(usage);
+  if (p && p.used > settings.week_pace * p.elapsed) return { reason: 'week', used: p.used, elapsed: p.elapsed, target: settings.week_pace };
   return null;
 }
 
@@ -77,26 +101,40 @@ export function blockReason(settings, usage = readUsage(), at = new Date()) {
   switch (b?.reason) {
     case 'off': return 'the autopilot is off';
     case 'standby': return 'Chiefmate is on standby (or shutting down): nothing new starts';
+    case 'lockdown': return 'Chiefmate is in emergency lockdown';
+    case 'updating': return 'Chiefmate is installing an update';
     case 'quiet': return `quiet hours (${b.quiet})`;
     case 'window': return `the 5-hour window is at ${formatPercent(b.used)} (the autopilot stops at ${formatPercent(b.limit)})`;
+    case 'week_full': return `the plan's week is used up (${formatPercent(b.used)})`;
     case 'week': return `the plan's week is at ${formatPercent(b.used)} with ${formatPercent(b.elapsed)} of it gone, ahead of the pace that ends it at ${formatPercent(b.target)}`;
     default: return null;
   }
 }
 
 /**
- * Changes the settings (the app's panel and "cli.mjs autopilot"): any of { enabled, week_pace, stop_at_5h_window
- * (shares from 0.05 to 1), quiet_hours ("23:00-07:00"; "" or "off": none), daily_report ("08:00"; false or "off": none) }.
- * Saved at once and read again on every check: no restart (with dryRun, only validated). Returns the new "autopilot".
+ * Changes the settings (the app's card and "cli.mjs autopilot"): any of { enabled, mode ("save", "normal", "all"),
+ * week_pace (a share from 0.05, above 1 too, or "all": no pace), stop_at_5h_window (a share from 0.05 to 1), quiet_hours
+ * ("23:00-07:00"; "" or "off": none), daily_report ("08:00"; false or "off": none) }. Saved at once and read again on
+ * every check: no restart (with dryRun, only validated). Each change is kept with who made it ("by") and when, in
+ * "autopilot.changes" of data/state.json. Returns the new "autopilot".
  */
-export function changeAutopilot(body, { config = loadConfig(), dryRun = false } = {}) {
-  const changes = { ...config.autopilot };
+export function changeAutopilot(body, { config = loadConfig(), dryRun = false, by = 'owner', save = saveConfig } = {}) {
+  const before = config.autopilot ?? {};
+  const changes = { ...before };
   if (body.enabled !== undefined) changes.enabled = body.enabled === true;
-  for (const key of ['week_pace', 'stop_at_5h_window']) {
-    if (body[key] === undefined) continue;
-    const n = Number(body[key]);
-    if (body[key] === '' || body[key] === null || !Number.isFinite(n)) throw new Error(t('The limits are shares from 0.05 to 1, such as 0.85.'));
-    changes[key] = Math.min(1, Math.max(0.05, n));
+  if (body.mode !== undefined) {
+    if (!Object.hasOwn(MODES, body.mode)) throw new Error(t('The spending mode is save, normal or all.'));
+    changes.week_pace = MODES[body.mode] ?? 'all';
+  }
+  if (body.week_pace !== undefined) {
+    const value = body.week_pace === '' ? NaN : pace(body.week_pace, NaN);
+    if (Number.isNaN(value)) throw new Error(t("The week's pace is a share such as 0.9, 1 or 1.2, or all (no pace)."));
+    changes.week_pace = value ?? 'all';
+  }
+  if (body.stop_at_5h_window !== undefined) {
+    const n = Number(body.stop_at_5h_window);
+    if (body.stop_at_5h_window === '' || body.stop_at_5h_window === null || !Number.isFinite(n)) throw new Error(t('The limits are shares from 0.05 to 1, such as 0.85.'));
+    changes.stop_at_5h_window = Math.min(1, Math.max(0.05, n));
   }
   if (body.quiet_hours !== undefined) {
     const quiet = String(body.quiet_hours ?? '').trim();
@@ -108,11 +146,46 @@ export function changeAutopilot(body, { config = loadConfig(), dryRun = false } 
     if (report && report !== 'off' && minutesOf(report) == null) throw new Error(t('The daily report as HH:MM, such as 08:00, or off.'));
     changes.daily_report = !report || report === 'off' ? false : report;
   }
-  if (JSON.stringify(changes) !== JSON.stringify(config.autopilot ?? {})) {
+  if (JSON.stringify(changes) !== JSON.stringify(before)) {
     config.autopilot = changes;
-    if (!dryRun) saveConfig(config);
+    if (!dryRun) {
+      save(config);
+      recordChange(before, changes, by);
+    }
   }
   return config.autopilot ?? {};
+}
+
+// Who changed what and when: { at, by, changes: { key: [before, after] } }, the latest last.
+function recordChange(before, after, by) {
+  const changes = Object.fromEntries([...new Set([...Object.keys(before), ...Object.keys(after)])]
+    .filter(k => JSON.stringify(before[k]) !== JSON.stringify(after[k]))
+    .map(k => [k, [before[k] ?? null, after[k] ?? null]]));
+  const state = readState();
+  const a = (state.autopilot ??= { woken: {}, log: [], wakes: [] });
+  a.changes = [...(a.changes ?? []), { at: now(), by: clip(String(by), 120), changes }].slice(-MAX_CHANGES);
+  saveState(state);
+}
+
+/**
+ * What the autopilot does now, for the card's "Now" line: { state: "working" | "ready" | "stopped", running (the runs
+ * going on), and when stopped, reason: a blockInfo reason, "limits" (the queue's own limits pause every run), "nothing"
+ * (no item triaged "now" nor approved) or "news_off" (the "idle" news never wakes the manager), with its values }.
+ */
+export function autopilotNow(settings, { config = loadConfig(), usage = readUsage(), at = new Date(), runs = listRuns(), items = planItems() } = {}) {
+  const running = runs.filter(r => r.status === 'running').length;
+  const blocked = blockInfo(settings, usage, at);
+  if (blocked) return { state: 'stopped', running, ...blocked };
+  const limits = config.limits ?? {};
+  for (const [which, w, ceiling] of [['5h', usage.five_hour, limits.pause_at_5h_window], ['week', usage.seven_day, limits.pause_at_plan_week]]) {
+    if (ceiling && current(w) && w.used >= ceiling) return { state: 'stopped', running, reason: 'limits', which, used: w.used, limit: ceiling };
+  }
+  if (running) return { state: 'working', running };
+  const ready = Object.keys(config.projects ?? {}).some(p => candidates(p, items).length || items.some(i => open(i) && i.project === p && i.status === 'approved'));
+  if (!ready) return { state: 'stopped', running, reason: 'nothing' };
+  const news = newsSettings(config);
+  if (!(news.enabled && news.events.has('idle'))) return { state: 'stopped', running, reason: 'news_off' };
+  return { state: 'ready', running };
 }
 
 /**
@@ -120,7 +193,7 @@ export function changeAutopilot(body, { config = loadConfig(), dryRun = false } 
  * news reaches the manager, and what it did today (since midnight): the items it queued, with where each is now, and
  * the empty queues it woke the manager for.
  */
-export function autopilotStatus(config = loadConfig(), usage = readUsage(), at = new Date()) {
+export function autopilotStatus(config = loadConfig(), usage = readUsage(), at = new Date(), runs = listRuns()) {
   const s = autopilotSettings(config);
   const news = newsSettings(config);
   const a = readState().autopilot ?? {};
@@ -135,14 +208,21 @@ export function autopilotStatus(config = loadConfig(), usage = readUsage(), at =
       return { status: 'removed', pr: null };
     }
   };
+  const reset = availableResets(config)[0];
   return {
     enabled: s.enabled,
+    mode: s.mode,
     week_pace: s.week_pace,
     stop_at_5h_window: s.stop_at_5h_window,
     quiet_hours: s.quiet_hours?.text ?? '',
     daily_report: s.daily_report,
     idle_news: news.enabled && news.events.has('idle'),
     blocked: blockInfo(s, usage, at),
+    now: autopilotNow(s, { config, usage, at, runs }),
+    // a free reset of the plan still unused: the card suggests "spend all"
+    reset: reset ? { expires: reset.expires ?? null, note: reset.note ?? '' } : null,
+    // the latest changes of the settings, newest first
+    changes: (a.changes ?? []).slice(-5).reverse(),
     queued: today(a.log).map(e => ({ at: e.at, item: e.item, project: e.project, title: e.title, agent: e.agent, ...where(e) })),
     wakes: today(a.wakes).map(e => ({ at: e.at, project: e.project, items: e.items ?? [] })),
   };
@@ -265,7 +345,7 @@ export function autopilotLine(config = loadConfig(), usage = readUsage()) {
   const blocked = blockReason(s, usage);
   const day = (readState().autopilot?.log ?? []).filter(e => Date.now() - Date.parse(e.at) < DAY);
   return [
-    `Autopilot: on. When a project's queue empties, you are woken ("idle") to put its next item triaged "now" on the queue (plan approve <n> --autopilot), while the 5-hour window is under ${formatPercent(s.stop_at_5h_window)} and the plan's week within the pace that ends it at ${formatPercent(s.week_pace)}${s.quiet_hours ? `, outside the quiet hours ${s.quiet_hours.text}` : ''}${s.daily_report ? `; daily report at ${s.daily_report}` : ''}.`,
+    `Autopilot: on. When a project's queue empties, you are woken ("idle") to put its next item triaged "now" on the queue (plan approve <n> --autopilot), while the 5-hour window is under ${formatPercent(s.stop_at_5h_window)} and ${s.week_pace == null ? 'the plan\'s week is not used up (mode "all": no week\'s pace)' : `the plan's week within the pace that ends it at ${formatPercent(s.week_pace)} (mode "${s.mode}")`}${s.quiet_hours ? `, outside the quiet hours ${s.quiet_hours.text}` : ''}${s.daily_report ? `; daily report at ${s.daily_report}` : ''}.`,
     news.enabled && news.events.has('idle') ? '' : 'The "idle" news is off in manager_updates, so it never wakes you.',
     blocked ? `Now it waits: ${blocked}.` : 'Now it may act.',
     `In the last day it queued: ${day.map(e => `#${e.item} ${e.project}: ${clip(e.title, 60)}`).join('; ') || 'nothing'}.`,

@@ -230,10 +230,13 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 records a free reset (expires: YYYY-MM-DD)
   node src/cli.mjs reset-grant used <n>         marks free reset number n as used (remove <n> deletes it)
   node src/cli.mjs claude-login                 opens a browser window to sign in to claude.ai, for the optional usage reading
-  node src/cli.mjs autopilot [on|off] [--week-pace 0.95] [--window-5h 0.85] [--quiet 23:00-07:00|off] [--report 08:00|off]
+  node src/cli.mjs autopilot [on|off] [--mode save|normal|all] [--week-pace 1.2|all] [--window-5h 0.85]
+                           [--quiet 23:00-07:00|off] [--report 08:00|off]
                                                 the autopilot: when a project's queue empties, the manager puts its next
-                                                item triaged "now" on the queue, within these limits; with no option, its
-                                                settings, whether it may act now and what it did in the last day
+                                                item triaged "now" on the queue, within these limits (mode: the week's
+                                                pace, ending it at 90%, 100% or with no pace; --week-pace: any share,
+                                                above 1 too); with no option, its settings, whether it may act now and
+                                                what it did in the last day
   node src/cli.mjs usage-reader on|off|now      turns the reading of claude.ai's usage page on or off, or reads it now
   node src/cli.mjs watch [--dry-run] [--json]   the watchdog's check, run every 10 minutes by the Windows task "Watchdog":
                                                 whether Chiefmate answers, a stuck queue, run or update, the live sessions,
@@ -1221,9 +1224,10 @@ The reading is off until you turn it on: node src/cli.mjs usage-reader on`);
       const config = loadConfig();
       const changes = {};
       if (rest[0] === 'on' || rest[0] === 'off') changes.enabled = rest[0] === 'on';
-      for (const [o, key] of [['--week-pace', 'week_pace'], ['--window-5h', 'stop_at_5h_window'], ['--quiet', 'quiet_hours'], ['--report', 'daily_report']]) if (option(o) !== undefined) changes[key] = option(o);
-      // validated and saved as in the app (read again on every check: no restart needed)
-      autopilot.changeAutopilot(changes, { config });
+      for (const [o, key] of [['--mode', 'mode'], ['--week-pace', 'week_pace'], ['--window-5h', 'stop_at_5h_window'], ['--quiet', 'quiet_hours'], ['--report', 'daily_report']]) if (option(o) !== undefined) changes[key] = option(o);
+      // validated, saved and kept with who changed it, as in the app (read again on every check: no restart needed)
+      const by = process.env.CHIEFMATE_MANAGER ? 'manager' : process.env.CHIEFMATE_RUN ? `step:${process.env.CHIEFMATE_RUN}` : 'cli';
+      autopilot.changeAutopilot(changes, { config, by });
       console.log(JSON.stringify(config.autopilot ?? {}, null, 2));
       console.log(autopilot.autopilotLine(config));
       return;
