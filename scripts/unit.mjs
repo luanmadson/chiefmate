@@ -446,8 +446,12 @@ function conflictingRun() {
   git('init', '-q', '-b', 'main');
   commit(file, 'Base\n');
   git('branch', 'run');
+  git('branch', 'side');
   commit(file, 'Main\n');
   commit(path.join(dir, 'extra.md'), 'Extra\n');
+  // A commit a sequence can still have to pick after its conflict.
+  git('checkout', '-q', 'side');
+  commit(path.join(dir, 'side.md'), 'Side\n');
   git('checkout', '-q', 'run');
   commit(file, 'Run\n');
   return { dir, git };
@@ -461,6 +465,8 @@ for (const { operation, args, marker, sequence } of [
   { operation: 'rebase', args: ['--apply', 'main'], marker: 'rebase-apply' },
   { operation: 'cherry-pick', args: ['main', 'main~'], marker: 'CHERRY_PICK_HEAD', sequence: true },
   { operation: 'revert', args: ['--no-edit', 'main', 'main~'], marker: 'REVERT_HEAD', sequence: true },
+  { operation: 'cherry-pick', args: ['main', 'main~', 'side'], marker: 'CHERRY_PICK_HEAD', sequence: true },
+  { operation: 'revert', args: ['--no-edit', 'main', 'main~', 'side'], marker: 'REVERT_HEAD', sequence: true },
 ]) {
   test(`resuming aborts git ${operation} ${args.join(' ')} and keeps the run's commits`, async () => {
     const { dir, git } = conflictingRun();
@@ -499,8 +505,8 @@ test('a failed Git abort leaves the branch and conflict in place and tells the o
 
 test('the step feed shows a recovery action written after an interrupted log line', () => {
   const log = path.join(temp, 'git-recovery.jsonl');
-  write(log, '{"type":\n{"type":"chiefmate_action","text":"Aborted the unfinished Git merge before checkout."}\n');
-  assert.deepEqual(readFeed(log, temp).items, [{ type: 'action', text: 'Aborted the unfinished Git merge before checkout.' }]);
+  write(log, '{"type":\n{"type":"chiefmate_action","text":"The unfinished Git merge was aborted before resuming: the commits are kept."}\n');
+  assert.deepEqual(readFeed(log, temp).items, [{ type: 'action', text: 'The unfinished Git merge was aborted before resuming: the commits are kept.' }]);
 });
 
 // ---------- The crew's tools (src/tools.mjs): which one a member runs on, until when, and how each is started ----------

@@ -631,7 +631,8 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     logAction(l, { type: 'action', text: t("Couldn't read the prompt builder: {error}", { error: error.message }) });
   }
   for (const a of built?.adaptations ?? []) logAction(l, { type: 'action', text: t('Prompt builder: a line of "{block}" was adapted to the crew\'s rules', { block: a.block }) });
-  const gitRecovery = step.gitRecovery ? `Chiefmate aborted the unfinished git ${step.gitRecovery} before checking out the run branch. Check the current working copy and redo the unfinished operation as needed.` : '';
+  const op = step.gitRecovery;
+  const gitRecovery = op ? `Chiefmate found an unfinished git ${op} in the working copy and aborted it before checking out the run branch: the commits are as they were, but what that ${op} had not committed yet is gone. Check the working copy (git status, git log) and redo the ${op} if it is still needed.` : '';
   const prompt = [stepPrompt({ run, step, project, previous, finalReview, changes, traces: found, config, libraries, base, access, built, agents, tool }), gitRecovery].filter(Boolean).join('\n\n');
   const { tools, disallowed } = tool === 'claude' ? stepTools(agent, mcp, access) : { tools: [], disallowed: tool === 'grok' ? GROK_DENY : [] };
   const name = stepFileName(index, step);
@@ -644,6 +645,8 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   // A step paused for an update of Chiefmate resumes its own Claude Code session, with its clock and its counts.
   const paused = step.paused ?? null;
   delete step.paused;
+  // Told once: a later resume finds, and tells, an operation of its own.
+  delete step.gitRecovery;
   Object.assign(step, { status: 'running', started: paused ? step.started ?? now() : now(), error: null, model, tool, effort: toolEffort(tool, agent.effort), promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
   Object.assign(l, {
     step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0, talking: false, reply: null, session: null,
@@ -782,7 +785,6 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   Object.assign(r, total);
 
   const waitUntil = limitHit(r);
-  if (!waitUntil) delete step.gitRecovery;
   // The final summary at the top of the report is kept apart (step.outcome): the app shows it first, the rest folded.
   const reportLang = finalReview ? project.language || config.language || 'en' : config.language || 'en';
   const { outcome, rest } = parseOutcome(r.text || '', [reportLang, config.language]);
@@ -979,7 +981,7 @@ export async function execute(run) {
       const step = steps[index];
       try {
         await checkoutBranch(dir, run.branch, operation => {
-          const text = t('Aborted the unfinished Git {operation} before checkout.', { operation });
+          const text = t('The unfinished Git {operation} was aborted before resuming: the commits are kept.', { operation });
           log(text);
           const logIndex = index < 0 ? steps.length - 1 : index;
           if (steps[logIndex]) {

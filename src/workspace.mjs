@@ -200,11 +200,14 @@ export async function checkoutBranch(dir, branch, onRecovery = () => {}) {
   if (operation) {
     try {
       const sequenceHead = path.join(gitDir, 'sequencer', 'head');
-      // A sequence's --abort would roll back its completed commits too. Clear the conflict at the current HEAD.
+      // A sequence's --abort would roll back its completed commits too. Clear the conflict at the current HEAD, then
+      // drop the picks left in the sequence (--quit), which a reset keeps when the conflict was not the last one.
       const keepCommits = ['cherry-pick', 'revert'].includes(operation) && existsSync(sequenceHead)
         && readFileSync(sequenceHead, 'utf8').trim() !== await headCommit(dir);
-      if (keepCommits) await git(dir, 'reset', '--merge', 'HEAD');
-      else await git(dir, operation, '--abort');
+      if (keepCommits) {
+        await git(dir, 'reset', '--merge', 'HEAD');
+        await git(dir, operation, '--quit');
+      } else await git(dir, operation, '--abort');
     } catch (error) {
       throw new Error(t('Could not abort the Git {operation}. In "{path}", run "git status", finish or abort the operation, then resume the run. {error}', {
         operation, path: dir, error: error.message,
