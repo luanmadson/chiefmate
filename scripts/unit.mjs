@@ -1,16 +1,16 @@
 // Unit tests with no dependency (node:test): the file viewer's checks of paths, its choice among a project's copies and
 // its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation;
-// the emergency lockdown and its detection; each agent's effort.
+// the emergency lockdown and its detection; each agent's effort; the redacted backup of the settings.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE, projectColor, shouldClose, themeManifest, windowName } from '../src/browsers.mjs';
 import { readFeed } from '../src/claude.mjs';
-import { loadAgents, projectCrew } from '../src/config.mjs';
+import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
 import { riskyCommand } from '../src/guard.mjs';
@@ -901,4 +901,54 @@ test('effort: each level from its place, the project only, the history and the r
 
   // A step records the level its tool was given: Codex has no max and runs at its own default.
   assert.deepEqual([toolEffort('claude', 'max'), toolEffort('claude', undefined), toolEffort('codex', 'max'), toolEffort('codex', 'xhigh'), toolEffort('grok', 'max')], ['max', null, null, 'xhigh', 'max']);
+});
+
+test("the settings' backup: a redacted copy in backup_dir, the full one only on this computer", () => {
+  const config = {
+    owner: 'Someone', port: 4747, default_model: 'claude-opus-5-5',
+    backup_dir: path.join(temp, 'backup', 'repo'),
+    projects: {
+      demo: {
+        name: 'Demo', repository: 'https://github.com/someone/demo.git', main_branch: 'main', checks: ['npm test'], sensitive: true,
+        about: 'Family budget kept by Jane Roe', notes: 'Pays R$ 1.234,56 a month; write to jane.roe@example.com',
+        agent_notes: { writer: 'Call Jane at (51) 99876-5432' },
+        crew: { editor: { agent: 'writer', name: 'Editor', extra_instructions: 'Jane Roe owes 300 reais' } },
+        lead: { name: 'Lead', extra_instructions: 'Private' },
+      },
+    },
+    missions: { weekly: { name: 'Weekly', project: 'demo', description: 'Text', steps: [{ agent: 'writer', part: 'Text' }], review: { agent: 'manager', part: 'Text' }, schedule: { days: ['mon'], time: '09:00' } } },
+    crew: { manager: { max_minutes: 60, extra_instructions: 'Private' } },
+    library: { acervo: { name: 'Acervo', repository: 'https://github.com/someone/acervo.git', about: 'Private' } },
+    mcp_servers: { api: { command: 'npx', args: ['tool'], env: { SERVICE_KEY: 'abc123' }, headers: { 'X-Any': 'xyz' } } },
+    remote_access: { enabled: true, logins: ['owner@example.com'], api_token: 'tk-9f8e' },
+    prompt_builder: { doc_id: '1AbCdEfGh', environment: 'Home' },
+    plan_resets: [{ kind: 'full', expires: '2026-12-10T19:00:00-03:00', used: false, note: 'Free reset' }],
+    sessions: { live: { name: 'Live', tool: 'claude', setup: 'Budget of US$ 300; CPF 123.456.789-09' } },
+  };
+  const before = JSON.stringify(config);
+  const red = redactConfig(config);
+  assert.equal(JSON.stringify(config), before, 'the settings given are not changed');
+  const text = JSON.stringify(red);
+  for (const word of ['Jane', 'example.com', '1.234,56', '99876', '300', 'abc123', 'xyz', 'tk-9f8e', '1AbCdEfGh', '123.456.789', 'Private', 'Free reset']) {
+    assert.ok(!text.includes(word), `${word} left in the redacted copy`);
+  }
+  const demo = red.projects.demo;
+  assert.deepEqual([demo.about, demo.notes, demo.agent_notes, demo.crew.editor.extra_instructions], ['[removed from this copy]', '[removed from this copy]', { writer: '[removed from this copy]' }, '[removed from this copy]']);
+  assert.deepEqual([demo.name, demo.repository, demo.main_branch, demo.checks, demo.sensitive, demo.crew.editor.agent], ['Demo', 'https://github.com/someone/demo.git', 'main', ['npm test'], true, 'writer'], 'the structure stays');
+  assert.deepEqual(red.missions.weekly.schedule, { days: ['mon'], time: '09:00' });
+  assert.equal(red.missions.weekly.steps[0].agent, 'writer');
+  assert.deepEqual([red.mcp_servers.api.command, red.mcp_servers.api.env.SERVICE_KEY, red.mcp_servers.api.headers['X-Any']], ['npx', '[secret]', '[secret]']);
+  assert.deepEqual([red.remote_access.logins, red.remote_access.api_token, red.prompt_builder.doc_id], [['[login]'], '[secret]', '[id]']);
+  assert.equal(red.plan_resets[0].expires, '2026-12-10T19:00:00-03:00', 'dates are not amounts or phones');
+  assert.equal(red.sessions.live.setup, 'Budget of [amount]; CPF [document]');
+  assert.deepEqual([red.owner, red.port, red.backup_dir], ['Someone', 4747, config.backup_dir]);
+  assert.match(red.backup_note, /Redacted copy/);
+
+  const fullDir = path.join(temp, 'backup', 'local');
+  backupConfig(config, { fullDir });
+  assert.deepEqual(JSON.parse(readFileSync(path.join(config.backup_dir, 'chiefmate.json'), 'utf8')), red);
+  assert.deepEqual(JSON.parse(readFileSync(path.join(fullDir, 'chiefmate.json'), 'utf8')), config, 'the full copy, on this computer');
+  const other = path.join(temp, 'backup', 'none');
+  backupConfig({ owner: 'x' }, { fullDir: other });
+  assert.ok(!existsSync(other), 'no backup without backup_dir');
 });

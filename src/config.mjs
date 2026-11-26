@@ -1,7 +1,7 @@
 // The settings (config/chiefmate.json, created from config/example.json on the first run) and the crew (agents/*.md).
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { languageName, readJson, ROOT, writeJson } from './util.mjs';
+import { DATA, languageName, readJson, ROOT, writeJson } from './util.mjs';
 
 export const CONFIG_FILE = path.join(ROOT, 'config', 'chiefmate.json');
 const EXAMPLE_FILE = path.join(ROOT, 'config', 'example.json');
@@ -19,21 +19,71 @@ export function saveConfig(config) {
   backupConfig(config);
 }
 
+/** Where the full copy of the settings stays: Chiefmate's own data folder, on this computer only and never in git. */
+export const FULL_BACKUP_DIR = path.join(DATA, 'config-backup');
+
 /**
- * With "backup_dir" in the settings (a folder of your own, such as one in a private repository),
- * keeps an up-to-date copy of the settings there: on every save and whenever Chiefmate starts.
+ * With "backup_dir" in the settings (a folder of your own, such as one in a private repository), keeps an up-to-date
+ * copy of the settings there, on every save and whenever Chiefmate starts: a redacted one (redactConfig), since that
+ * folder is usually pushed somewhere. The full copy goes to FULL_BACKUP_DIR, on this computer only.
  */
-export function backupConfig(config = loadConfig()) {
+export function backupConfig(config = loadConfig(), { fullDir = FULL_BACKUP_DIR } = {}) {
   if (!config.backup_dir) return;
+  writeIfChanged(config.backup_dir, redactConfig(config));
+  writeIfChanged(fullDir, config);
+}
+
+function writeIfChanged(dir, value) {
   try {
-    const target = path.join(config.backup_dir, 'chiefmate.json');
-    const text = `${JSON.stringify(config, null, 2)}\n`;
+    const target = path.join(dir, 'chiefmate.json');
+    const text = `${JSON.stringify(value, null, 2)}\n`;
     if (existsSync(target) && readFileSync(target, 'utf8') === text) return;
-    mkdirSync(config.backup_dir, { recursive: true });
+    mkdirSync(dir, { recursive: true });
     writeFileSync(target, text);
   } catch (error) {
     console.error('Settings backup:', error.message);
   }
+}
+
+// Free text written by the owner (notes, instructions, descriptions): it is where personal data ends up, so the
+// redacted copy drops it whole, wherever it is (projects, their crews and leads, the crew, missions, libraries).
+const FREE_TEXT_KEYS = new Set(['about', 'notes', 'agent_notes', 'extra_instructions', 'description', 'part', 'note']);
+const SECRET_KEY = /token|secret|password|passwd|api_?key|authorization|cookie|credential/i;
+const MARK = { text: '[removed from this copy]', secret: '[secret]', id: '[id]', login: '[login]' };
+// Personal data left in the other strings: e-mails, Brazilian documents, phone numbers and amounts of money.
+const PATTERNS = [
+  [/[\w.+-]+@[\w-]+(\.[\w-]+)+/g, '[email]'],
+  [/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b|\b\d{3}\.\d{3}\.\d{3}-\d{2}\b/g, '[document]'],
+  [/(\+\d{2}\s?)?\(?\b\d{2}\)?\s?9?\d{4}-\d{4}\b/g, '[phone]'],
+  [/(R\$|US\$|U\$|€|£|\$)\s?\d[\d.,]*|\b\d[\d.]*,\d{2}\b|\b\d[\d.,]*\s?(mil\s)?(reais|real|d[oó]lares|euros)\b/gi, '[amount]'],
+];
+const scrub = text => PATTERNS.reduce((t, [re, mark]) => t.replace(re, mark), text);
+
+/**
+ * The settings without personal data, for a copy kept in a repository: the free text becomes a marker, secrets
+ * (in MCP servers' env and headers, or any key named like a token), remote logins and document ids are masked, and
+ * e-mails, documents, phones and amounts left in other strings are replaced. The structure stays, enough to rebuild
+ * the installation with the full local copy at hand.
+ */
+export function redactConfig(config) {
+  const walk = (value, key = '', parent = '') => {
+    if (Array.isArray(value)) return value.map(v => walk(v, key, parent));
+    if (value && typeof value === 'object') {
+      // agent_notes: { "<agent>": "<text>" } keeps its keys.
+      if (FREE_TEXT_KEYS.has(key)) return Object.fromEntries(Object.keys(value).map(k => [k, MARK.text]));
+      return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, walk(v, k, key)]));
+    }
+    if (typeof value !== 'string' || value === '') return value;
+    if (FREE_TEXT_KEYS.has(key)) return MARK.text;
+    if (SECRET_KEY.test(key) || parent === 'env' || parent === 'headers') return MARK.secret;
+    if (key === 'logins') return MARK.login;
+    if (key === 'doc_id') return MARK.id;
+    return scrub(value);
+  };
+  return {
+    backup_note: 'Redacted copy: notes, instructions and personal data are replaced by markers. The full copy stays on the computer, in data/config-backup/chiefmate.json of the installation.',
+    ...walk(config),
+  };
 }
 
 /** Reads an agent's header: "key: value", "key: [a, b]" or a list of "- item" lines. */
