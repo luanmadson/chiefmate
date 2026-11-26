@@ -422,6 +422,9 @@ try {
     // The app itself still loads there, to show the lockdown instead of a lost connection; its data stays refused.
     expect((await ask(remote.port, '/', tailnet)).status === 200, "the app's page did not load through the remote access in the lockdown");
     expect((await ask(remote.port, '/', { host: remote.host })).status === 403, "the app's page loaded without a Tailscale login in the lockdown");
+    for (const disguised of ['/./api/state', '/%2e/api/state', '/ui/../api/state', `http://${remote.host}/api/state`]) {
+      expect((await ask(remote.port, disguised, tailnet)).status === 423, `the state answered through the remote access in the lockdown at ${disguised}`);
+    }
     expect((await ask(remote.port, '/api/manager/interrupt', command, {})).status === 423, 'a command through the remote access was taken in the lockdown');
     expect((await ask(remote.port, '/api/lockdown', command, { action: 'release', confirm: true })).status === 403, 'the lockdown was released through the remote access');
     expect((await post('/api/lockdown', { action: 'release' })).status === 400, "the lockdown was released without the owner's confirmation");

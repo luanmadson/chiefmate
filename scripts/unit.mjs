@@ -930,6 +930,9 @@ test("the development environment's address is read from its output", () => {
   assert.equal(devAddress('\x1b[32m  ➜  Local:   \x1b[1mhttp://localhost:5173/\x1b[0m\n  ➜  Network: use --host'), 'http://localhost:5173/');
   assert.equal(devAddress('ready - started server on 0.0.0.0:3000, url: http://localhost:3000.'), 'http://localhost:3000');
   assert.equal(devAddress('compiling...'), null);
+  // A link in a warning printed first is not the system's address.
+  assert.equal(devAddress('Browserslist: caniuse-lite is outdated. Why: https://github.com/browserslist/update-db#readme\nUvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)'), 'http://0.0.0.0:8000');
+  assert.equal(devAddress('warn - see https://nextjs.org/docs/messages/x'), null);
 });
 
 test('the development environment started from afar runs in the background, and its page shows its address', async () => {

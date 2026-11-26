@@ -2516,6 +2516,7 @@ function devLink(address) {
   if (!['http:', 'https:'].includes(url.protocol)) return '';
   const afar = !onThisComputer() && ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(url.hostname);
   if (afar) url.hostname = location.hostname;
+  else if (url.hostname === '0.0.0.0') url.hostname = 'localhost'; // "every address" doesn't open on Windows
   const hint = afar ? t('Opens from here when the system accepts connections from other devices (such as with --host).') : '';
   return `<span>${esc(t('System'))} <a href="${esc(url.href)}" target="_blank" rel="noopener">${esc(url.host)}</a>${hint ? ` <span class="hint">${esc(hint)}</span>` : ''}</span>`;
 }

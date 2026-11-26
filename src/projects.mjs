@@ -6,7 +6,7 @@
 // no window, its output kept in data/projects/<id>/dev.log, where the app finds the system's address. Every action takes "dryRun", which says what it would do
 // and does nothing (the smoke test uses it).
 import { execFile, spawn, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, openSync, readFileSync, rmSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
@@ -125,10 +125,36 @@ export async function startDev(id, { dryRun = false, background = false, config 
 /** Where a development environment run in the background keeps its output. */
 export const devLog = (id, data = DATA) => path.join(data, 'projects', id, 'dev.log');
 
-/** The first web address in a development environment's output (such as "Local: http://localhost:5173/"), or null. */
+/**
+ * The system's address in a development environment's output (such as "Local: http://localhost:5173/"), or null: the
+ * first web address on this computer or with a port, so a link in a warning (to the docs, say) is not taken for it.
+ */
 export function devAddress(text) {
   const plain = String(text ?? '').replace(/\x1b\[[\d;]*m/g, ''); // without the terminal's colors
-  return plain.match(/https?:\/\/[^\s'"<>)\]]+/)?.[0].replace(/[.,;:]+$/, '') ?? null;
+  for (const [found] of plain.matchAll(/https?:\/\/[^\s'"<>)\]]+/g)) {
+    const address = found.replace(/[.,;:]+$/, '');
+    try {
+      const url = new URL(address);
+      if (url.port || ['localhost', '127.0.0.1', '0.0.0.0'].includes(url.hostname)) return address;
+    } catch {
+      // not an address
+    }
+  }
+  return null;
+}
+
+/** The start of the output of an environment run in the background, or '' (started in a window, or not started). */
+function devOutput(id, data) {
+  let fd;
+  try {
+    fd = openSync(devLog(id, data), 'r');
+    const buffer = Buffer.alloc(64_000);
+    return buffer.toString('utf8', 0, readSync(fd, buffer, 0, buffer.length, 0));
+  } catch {
+    return '';
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 /** Stops the development environment: its window's process and everything under it. */
@@ -147,18 +173,14 @@ export async function stopDev(id, { dryRun = false, config = loadConfig() } = {}
 function devState(id, project, machine, data = DATA) {
   if (!project.dev_start) return null;
   const found = (machine.dev ?? []).find(d => d.project === id);
-  let url = null;
-  try {
-    url = devAddress(readFileSync(devLog(id, data), 'utf8').slice(0, 64_000));
-  } catch {
-    // started in a window, or not started
-  }
+  // Only the start of the output is read: the log grows for as long as the environment runs.
+  const url = () => devAddress(devOutput(id, data));
   if (found) {
     starting.delete(id);
-    return { status: 'running', ram: found.ram, pid: found.pids[0] ?? null, url };
+    return { status: 'running', ram: found.ram, pid: found.pids[0] ?? null, url: url() };
   }
   const since = starting.get(id);
-  if (since && Date.now() - since < 60_000) return { status: 'starting', ram: 0, pid: null, url };
+  if (since && Date.now() - since < 60_000) return { status: 'starting', ram: 0, pid: null, url: url() };
   starting.delete(id);
   return { status: 'stopped', ram: 0, pid: null };
 }

@@ -527,7 +527,8 @@ export function startServer() {
         }
         // In an emergency lockdown, the remote access is off: only engaging it again is taken. The app's own files
         // still load, and the refusal carries the reason, so the device shows the lockdown instead of a lost connection.
-        const appFile = req.method === 'GET' && !String(req.url).startsWith('/api/');
+        // The path is read as the routes below read it, so "/./api/state" and the like are the API, not a file.
+        const appFile = req.method === 'GET' && !new URL(req.url, `https://${remote.host}`).pathname.startsWith('/api/');
         if (isLocked() && !appFile && !(req.method === 'POST' && req.url === '/api/lockdown')) {
           const { since, reason } = lockdownView();
           return reply(res, 423, {
