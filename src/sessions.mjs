@@ -183,6 +183,32 @@ export function sessionPrompt(config, profile, folder) {
   return { text: lines.join('\n'), blocks: built?.blocks ?? [], details: built?.details ?? [], missing: built?.missing ?? [], unresolved: built?.unresolved ?? [], blocksGiven: !!built || !!project };
 }
 
+/** Chiefmate's command line, with the installation's full path: it works from any folder. */
+export function cliCommand() {
+  const cli = path.join(ROOT, 'src', 'cli.mjs').replaceAll('\\', '/');
+  return `node ${/\s/.test(cli) ? `"${cli}"` : cli}`;
+}
+
+/** What the agent's commands get: the session they come from, so a message to the manager is marked as its own. */
+export const sessionEnv = id => ({ CHIEFMATE_SESSION: id });
+
+/**
+ * The manager's fixed address, for the first message of every live session: the command (with the session's id) and
+ * when to use it, and the rule to report any defect of Chiefmate on its own. Nothing of it is written in the project's
+ * folder: the command talks to Chiefmate on this computer, and its records stay in Chiefmate's data folder.
+ */
+export function managerAddress(config, id) {
+  const owner = config.owner || 'the owner';
+  const cli = cliCommand();
+  return [
+    `Chiefmate's manager (the agent that coordinates the crew and answers to ${owner}) is reached only with \`${cli} chat say --from ${id} "<message>"\` (it works from this folder): to report a problem, ask something of the crew or tell it what ${owner} asked. It never appears in Claude Code's session list (the "chiefmate-…" sessions there are short-lived turns, not the manager): don't look for it there. Your message reaches it marked as this session's, not ${owner}'s, and it is never taken as an order from ${owner}.`,
+    `When you notice an error or failure of Chiefmate or of the communication between agents (a notice that never came, outdated information, a Chiefmate command that failed, a missing instruction), report it on your own at once, without waiting for ${owner} to ask: \`${cli} defect report --from ${id} "<what happened>. Expected: <what should have happened>."\` One report per defect, then go on with your work.`,
+  ].join('\n');
+}
+
+/** The first message, with the manager's address at its end. */
+export const withManager = (text, config, id) => `${String(text ?? '').trimEnd()}\n\n${managerAddress(config, id)}`;
+
 /**
  * The tool's arguments, the first message last. Claude Code starts without the user's own configuration, as the
  * crew's steps do (no user settings, hooks, plugins, skills, ~/.claude/CLAUDE.md or MCP servers of their own), with
@@ -313,10 +339,13 @@ export async function openSession(profileId, { origin = 'app', prompt: written =
   const base = `${stamp()}-${slug(profile.id)}`;
   let id = base;
   for (let n = 2; existsSync(recordFile(id)); n++) id = `${base}-${n}`;
-  writeFileSync(promptFile(id), `${prompt.text}\n`);
+  // The agent in charge has no command line: it reaches the manager with its requests (src/charge.mjs).
+  writeFileSync(promptFile(id), `${profile.charge ? prompt.text : withManager(prompt.text, config, id)}\n`);
   const session = {
     id, profile: profile.id, name: profile.name, tool: profile.tool, project: profile.project, library_folder: profile.library_folder,
-    cwd: folder.dir, readOnlyCopy: folder.copy, model: profile.model ?? (profile.tool === 'claude' ? config.default_model ?? null : null), command, blocks: prompt.written ? ['(written in the prompt builder)'] : prompt.blocks, missing: prompt.missing, firstMessage: prompt.blocksGiven,
+    cwd: folder.dir, readOnlyCopy: folder.copy, model: profile.model ?? (profile.tool === 'claude' ? config.default_model ?? null : null), command, blocks: prompt.written ? ['(written in the prompt builder)'] : prompt.blocks, missing: prompt.missing,
+    // In a window, the first message always goes: it carries the manager's address (in the app, it goes with the owner's first message).
+    firstMessage: prompt.blocksGiven || (mode === 'window' && !profile.charge),
     origin, created: now(), status: 'starting', requests: [], mode, ...(profile.charge ? { charge: true, member: profile.member } : {}),
     ...(profile.work ? { member: profile.member, memberName: profile.memberName, memberRole: profile.memberRole, work: { copy: !!work.copy, held: [], crew: (work.crew ?? []).map(c => c.run) } } : {}),
     // The tool's own session: Claude Code's is chosen here (--session-id), Codex gives its thread id on the first turn.
@@ -349,7 +378,7 @@ export async function runSession(id) {
   console.log(`Chiefmate: ${session.name} (${session.tool}) in ${session.cwd}\n`);
   process.on('SIGINT', () => {}); // Ctrl+C belongs to the agent
   const child = spawn(tool.command, [...tool.prefix, ...sessionArgs(session, config, prompt, browserServers(config, sessionMcp(config, session).servers, sessionBrowser(session)))], {
-    cwd: session.cwd, stdio: 'inherit', env: session.tool === 'claude' ? environment() : codexEnvironment(),
+    cwd: session.cwd, stdio: 'inherit', env: session.tool === 'claude' ? environment(sessionEnv(id)) : codexEnvironment(sessionEnv(id)),
   });
   const code = await new Promise(resolve => {
     child.on('error', error => {
@@ -536,6 +565,8 @@ function turnText(config, session, items) {
   const first = items.find(m => m.first);
   const by = m => (m.by === 'manager' ? `, written by Chiefmate's manager at ${owner}'s request` : '');
   if (first) parts.push(first.text);
+  // A session opened with no first message: the manager's address goes with the owner's first one.
+  else if (!session.charge && !session.firstMessage && !(session.turns ?? 0)) parts.push(managerAddress(config, session.id));
   if (mine.length === 1 && !first && !mine[0].by) parts.push(mine[0].text);
   else if (mine.length) parts.push(`${mine.length === 1 ? `A message from ${owner}` : `${mine.length} messages from ${owner}, oldest first`}:\n\n${mine.map(m => `[sent ${formatDateTime(m.at)}${by(m)}]\n${m.text}`).join('\n\n')}`);
   return parts.join('\n\n');
@@ -603,7 +634,7 @@ export function deliverSession(id) {
       tools: charge ? charge.tools : [...APP_TOOLS, ...mcp.tools, ...(session.allowed ?? []).filter(r => !ASK_FIRST.includes(r))],
       disallowed: charge ? [...charge.disallowed, ...ASK_FIRST] : ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r)), mcpServers: charge ? {} : browserServers(config, mcp.servers, sessionBrowser(session)),
       addDirs: charge?.addDirs ?? [], hooks: guardHooks({ log: guardLog(id), allowed: charge ? [] : session.allowed ?? [], who: 'session', noMain: !!session.work }),
-      attribution: config.attribution !== false, maxMinutes: TURN_MINUTES,
+      attribution: config.attribution !== false, maxMinutes: TURN_MINUTES, env: sessionEnv(id),
       session: { id: session.toolSession, resume }, log: rawLog(id), onEvent,
     });
     Object.assign(turn, { pid: run.pid ?? null, cancel: () => run.cancel(t('interrupted by you')), interrupt: () => run.interrupt() });
@@ -923,7 +954,7 @@ export function codexItem(event, dir) {
 function runCodex({ session, prompt, log, onEvent }) {
   const tool = spawnable('codex');
   // Without Windows' app aliases on the PATH, which Codex's sandbox can't start (see codexEnvironment).
-  const child = spawn(tool.command, [...tool.prefix, ...codexArgs(session)], { cwd: session.cwd, env: codexEnvironment(), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  const child = spawn(tool.command, [...tool.prefix, ...codexArgs(session)], { cwd: session.cwd, env: codexEnvironment(sessionEnv(session.id)),stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   const out = createWriteStream(log, { flags: 'a' });
   let thread = null;
   let failure = null;

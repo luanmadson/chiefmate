@@ -145,7 +145,15 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs chat [n]                     the conversation with the manager: the last n messages (10), what it is
                                                 doing now and the messages waiting in the queue
   node src/cli.mjs chat say "<message>"         writes to the manager; while it answers, the message waits in the queue
-                                                and goes with the others, in order, when the answer ends
+                                                and goes with the others, in order, when the answer ends. From a live
+                                                session or a step, it goes as that agent's message (CHIEFMATE_SESSION,
+                                                --from <session id>, or the step's run), never as the owner's
+  node src/cli.mjs defect report "<text>"       an agent reports a defect of Chiefmate or of the communication between
+                                                agents (also chat say --defect): recorded in data/defects.json, repeats
+                                                joined, and the manager hears of it with its news
+  node src/cli.mjs defect list [--all]          the open defects (--all: the closed too)
+  node src/cli.mjs defect close <id> [--note "..."]
+                                                the manager (or the owner) closes a defect once its fix is in
   node src/cli.mjs chat edit <id> "<message>"   changes a message still in the queue (chat remove <id> takes it out)
   node src/cli.mjs chat interrupt               ends the current answer (the conversation goes on); the queue goes next
   node src/cli.mjs session [<profile>] [--window] [--dry-run]
@@ -326,6 +334,50 @@ async function needsYou() {
   }
 }
 
+/**
+ * Who runs the command, when an agent does: a live session (--from <session id>, or CHIEFMATE_SESSION, which
+ * Chiefmate gives its sessions) or a step of a run (CHIEFMATE_RUN and CHIEFMATE_STEP). Null for the owner's terminal.
+ */
+function agentFrom() {
+  const session = option('--from') || process.env.CHIEFMATE_SESSION;
+  if (session) return { session };
+  if (process.env.CHIEFMATE_RUN) return { run: process.env.CHIEFMATE_RUN, step: process.env.CHIEFMATE_STEP };
+  return null;
+}
+
+/** Records a defect of Chiefmate (src/defects.mjs): through the running Chiefmate, or on disk when it is off. */
+async function reportDefectCommand(text, from = agentFrom()) {
+  if (!String(text ?? '').trim()) throw new Error('Which defect? node src/cli.mjs defect report "<what happened. Expected: what should have happened>"');
+  const r = await apiOr('/api/defect', { text, from: from ?? {} }, async () => {
+    const { agentSender } = await import('./manager.mjs');
+    return (await import('./defects.mjs')).reportDefect(text, agentSender(from ?? {}));
+  });
+  console.log(r.repeated
+    ? `Defect #${r.defect.id} was already open: your report was joined to it (${r.defect.count} reports).`
+    : `Defect #${r.defect.id} recorded; the manager hears of it with its next news.`);
+}
+
+/** "defect": the defects of Chiefmate the agents report on their own; the manager (or the owner) closes them. */
+async function defectCommand() {
+  const [action = 'list', id] = words();
+  const { readDefects, senderLabel } = await import('./defects.mjs');
+  if (action === 'report') return reportDefectCommand(words().slice(1).join(' '));
+  if (action === 'list') {
+    const all = readDefects().filter(d => has('--all') || d.status === 'open');
+    if (!all.length) console.log(has('--all') ? 'No defects.' : 'No open defect.');
+    for (const d of all) console.log(`#${String(d.id).padEnd(3)} ${d.status.padEnd(6)} ${d.count}x, last ${formatDateTime(d.last)} by ${senderLabel(d.reporters?.at(-1))}\n     ${d.text.replace(/\s+/g, ' ')}${d.note ? `\n     Closed: ${d.note}` : ''}`);
+    return;
+  }
+  if (action === 'close') {
+    if ((process.env.CHIEFMATE_RUN || process.env.CHIEFMATE_SESSION) && !process.env.CHIEFMATE_MANAGER) throw new Error('Only the manager (or the owner) closes a defect.');
+    const by = process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner';
+    const r = await apiOr('/api/defect/close', { id, note: option('--note'), by }, async () => ({ defect: (await import('./defects.mjs')).closeDefect(id, option('--note'), by) }));
+    console.log(`Defect #${r.defect.id} closed.`);
+    return;
+  }
+  throw new Error('Use: defect report "<text>" | list [--all] | close <id> [--note "<what fixed it>"]');
+}
+
 /** "chat": the conversation with the manager, through the running Chiefmate. */
 async function chatCommand() {
   const [action, ...args] = rest;
@@ -335,8 +387,13 @@ async function chatCommand() {
   }
   switch (action) {
     case 'say': {
-      const m = await api('/api/manager', { message: args.join(' ') });
+      const message = words().slice(1).join(' ');
+      const from = agentFrom();
+      // A defect of Chiefmate goes to its own record (--defect, or "[Defect]" written by an agent): see "defect".
+      if (has('--defect') || (from && /^\s*\[(defect|defeito)\]/i.test(message))) return reportDefectCommand(message, from);
+      const m = await api('/api/manager', { message, ...(from ? { from } : {}) });
       console.log(m.queued ? `Queued (${m.position} waiting, id ${m.id}): it goes when the manager finishes its answer.` : 'Sent. The manager is answering: node src/cli.mjs chat');
+      if (from) console.log("Marked as an agent's message, not the owner's.");
       return;
     }
     case 'edit':
@@ -354,14 +411,23 @@ async function chatCommand() {
       if (action && !/^\d+$/.test(action)) throw new Error('Use: chat [n] | say "<message>" | edit <id> "<message>" | remove <id> | interrupt');
       const g = (await api('/api/state')).manager;
       const who = { you: 'You', manager: 'Manager', system: 'Chiefmate' };
+      const { senderLabel } = await import('./defects.mjs');
       for (const m of g.messages.slice(-(Number(action) || 10))) {
+        if (m.who === 'agent') {
+          console.log(`[${time(m.at)}] Agent, not you (${senderLabel(m.sender)}):\n${m.text}\n`);
+          continue;
+        }
         const extra = [m.news ? `notice: ${m.news.join(', ')}` : '', m.queued ? `delivered ${time(m.delivered)}` : '', m.interrupted ? 'interrupted' : ''].filter(Boolean).join(', ');
         console.log(`[${time(m.at)}] ${who[m.who] ?? m.who}${extra ? ` (${extra})` : ''}:\n${m.text}\n`);
       }
       if (g.responding) {
         console.log(`Now: ${g.context?.renewing ? 'renewing the conversation' : 'answering'} since ${time(g.since)}.${g.lastAction ? ` Last action, ${time(g.lastAction.at)}: ${g.lastAction.text}` : ''}`);
       } else console.log('Now: waiting for you.');
-      for (const m of g.pending) console.log(m.from === 'chiefmate' ? `In the queue [${m.id}], Chiefmate's news for the manager since ${time(m.at)}: ${m.text}` : `In the queue [${m.id}], sent ${time(m.at)}${m.edited ? ', edited' : ''}: ${m.text}`);
+      for (const m of g.pending) {
+        console.log(m.from === 'chiefmate' ? `In the queue [${m.id}], Chiefmate's news for the manager since ${time(m.at)}: ${m.text}`
+          : m.from === 'agent' ? `In the queue [${m.id}], from ${senderLabel(m.sender)}, sent ${time(m.at)}: ${m.text}`
+            : `In the queue [${m.id}], sent ${time(m.at)}${m.edited ? ', edited' : ''}: ${m.text}`);
+      }
     }
   }
 }
@@ -631,7 +697,8 @@ async function sessionCommand() {
     console.log(`Command: ${command} ${args.map(a => (/[\s"{}]/.test(a) ? JSON.stringify(a) : a)).join(' ')}`);
     if (prompt.missing.length) console.log(`Not found in the prompt builder: ${prompt.missing.join(', ')}`);
     if (prompt.unresolved?.length) console.log(`Variables left unfilled (no value in the prompt builder): ${prompt.unresolved.map(v => `{${v}}`).join(', ')}`);
-    console.log(prompt.blocksGiven ? `\nFirst message (${prompt.text.length} characters):\n\n${prompt.text}` : '\nNo first message: the profile has no "prompt_blocks".');
+    const text = profile.charge ? prompt.text : sessions.withManager(prompt.text, config, '<session id>');
+    console.log(prompt.blocksGiven ? `\nFirst message (${text.length} characters):\n\n${text}` : `\nNo first message: the profile has no "prompt_blocks". The manager's address goes with your first message:\n\n${sessions.managerAddress(config, '<session id>')}`);
     return;
   }
   const window = has('--window');
@@ -941,6 +1008,9 @@ async function main() {
     }
     case 'chat':
       await chatCommand();
+      return;
+    case 'defect':
+      await defectCommand();
       return;
     case 'ask-owner': {
       // The manager's (or the owner's) question; a step of a run asks with needs-you instead.

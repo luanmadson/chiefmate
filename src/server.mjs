@@ -20,7 +20,8 @@ import { LEAD, memoryInfo } from './leads.mjs';
 import { engage, isLocked, lockdownView, recordSignal, release } from './lockdown.mjs';
 import { closeBrowser, focusBrowser, openBrowsers } from './browsers.mjs';
 import { computer, latestProcesses, processes, stoppable, stopProject } from './machine.mjs';
-import { chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
+import { agentSender, chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
+import { closeDefect, reportDefect } from './defects.mjs';
 import { closeReplaced, mergeRun, previewClose, previewMerge } from './merge.mjs';
 import { awayInfo, reportEvent, setAway } from './news.mjs';
 import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
@@ -35,7 +36,7 @@ import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.
 import { activeRun, createRun, describeLater, doingNow, liveRuns, needsBrief, outcomeLater, setRunLevel } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import {
-  answerPermission, endSession, finishSessionRequest, interruptSession, listSessions, openSession, planSession, profileFor, removeQueued, resumeSession, sayToSession,
+  answerPermission, endSession, finishSessionRequest, interruptSession, listSessions, openSession, planSession, profileFor, removeQueued, resumeSession, sayToSession, withManager,
   sessionRequests, sessionsState, sessionView,
 } from './sessions.mjs';
 import { talkTo } from './talk.mjs';
@@ -632,8 +633,10 @@ export function startServer() {
         case '/api/session': {
           // With "dryRun": the folder and the first message it would open with, and nothing opens.
           if (body.dryRun) {
-            const { profile, folder, prompt } = planSession(loadConfig(), String(body.profile ?? ''));
-            return reply(res, 200, { dryRun: true, profile: profile.id, tool: profile.tool, cwd: folder.dir, blocks: prompt.blocks, missing: prompt.missing, prompt: prompt.blocksGiven ? prompt.text : null });
+            const config = loadConfig();
+            const { profile, folder, prompt } = planSession(config, String(body.profile ?? ''));
+            const text = profile.charge ? prompt.text : withManager(prompt.text, config, '<session id>');
+            return reply(res, 200, { dryRun: true, profile: profile.id, tool: profile.tool, cwd: folder.dir, blocks: prompt.blocks, missing: prompt.missing, prompt: prompt.blocksGiven ? text : null });
           }
           // "window": in a window of its own (Windows Terminal), instead of the conversation in the app.
           return reply(res, 200, await openSession(String(body.profile ?? ''), { origin: body.origin ?? 'app', window: !!body.window }));
@@ -717,8 +720,14 @@ export function startServer() {
           if (body.preview) return reply(res, 200, previewClose(body.run, body.replacedBy));
           return reply(res, 200, await closeReplaced(body.run, body.replacedBy, { by: body.by === 'manager' ? 'manager' : 'owner' }));
         case '/api/manager':
-          // Accepted at any time: while the manager answers, the message waits in the queue.
-          return reply(res, 202, { ok: true, ...sendToManager(body.message) });
+          // Accepted at any time: while the manager answers, the message waits in the queue. "from": an agent's
+          // (a live session or a step, from the command line), marked as the agent's, never as the owner's.
+          return reply(res, 202, { ok: true, ...sendToManager(body.message, { sender: body.from ? agentSender(body.from) : null }) });
+        case '/api/defect':
+          // A defect of Chiefmate an agent reports on its own (src/defects.mjs): recorded, and news for the manager.
+          return reply(res, 200, reportDefect(body.text, agentSender(body.from ?? {})));
+        case '/api/defect/close':
+          return reply(res, 200, { defect: closeDefect(body.id, body.note, body.by === 'manager' ? 'manager' : 'owner') });
         case '/api/manager/edit':
         case '/api/manager/remove': {
           const id = String(body.id ?? '');

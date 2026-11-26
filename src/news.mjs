@@ -2,7 +2,8 @@
 // waits for approval or the owner merges a run's work from the app (or the merge fails), a step needs the owner, an update is installed or
 // blocked, a memory or usage alert, a live session ends, the crew proposes items for the planning board, the autopilot
 // finds a project's queue empty or sends its daily report, the watchdog finds Chiefmate stuck, the owner decides a card
-// in the app, the agent in charge of a project sends a request from its talk with the owner), Chiefmate tells the manager in a short system message, and
+// in the app, the agent in charge of a project sends a request from its talk with the owner, an agent reports a defect of Chiefmate
+// (src/defects.mjs)), Chiefmate tells the manager in a short system message, and
 // the manager writes the owner a notice in the conversation (and triages the proposals). Events close together (within
 // WINDOW_MS) go as one message; while the manager answers, they wait in the conversation's queue. The setting
 // "manager_updates" turns this off or picks the events.
@@ -22,7 +23,7 @@ export const NEWS_EVENTS = [
   'run_finished', 'run_failed', 'run_paused', 'pr_ready', 'merged', 'merge_failed', 'needs_you',
   'update_installed', 'update_blocked', 'memory_alert', 'usage_alert', 'session_ended', 'plan_proposed',
   'idle', 'autopilot_report', 'watchdog', 'away', 'back', 'owner_decided', 'push_allowed', 'repo_allowed', 'owner_request',
-  'lockdown', 'security_warning', 'power', 'owner_working',
+  'lockdown', 'security_warning', 'power', 'owner_working', 'defect',
 ];
 
 // The owner's own switches (away mode, the power modes of src/power.mjs), a push the owner allowed (for a short time),
@@ -35,7 +36,7 @@ const OWNER_EVENTS = ['away', 'back', 'push_allowed', 'repo_allowed', 'lockdown'
  */
 export const HELD_WHILE_AWAY = [
   'run_finished', 'run_failed', 'run_paused', 'pr_ready', 'merged', 'update_installed', 'update_blocked',
-  'memory_alert', 'usage_alert', 'session_ended', 'autopilot_report',
+  'memory_alert', 'usage_alert', 'session_ended', 'autopilot_report', 'defect',
 ];
 
 // Events within a minute of the first one go to the manager together.
