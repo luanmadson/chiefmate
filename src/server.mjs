@@ -8,7 +8,7 @@ import { attentionArchive, attentionItems, attentionSummary, markSeen } from './
 import { autopilotStatus, changeAutopilot } from './autopilot.mjs';
 import { answerRequest, chargeProfileId, inCharge, projectRequests } from './charge.mjs';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
-import { loadAgents, loadConfig, projectCrew, projectEfforts, projectLead, saveConfig } from './config.mjs';
+import { EFFORTS, loadAgents, loadConfig, projectCrew, projectEfforts, projectLead, saveConfig } from './config.mjs';
 import { effortHistory, effortSource, runEffortChanges, setEffort } from './effort.mjs';
 import { agentTool, runTools, toolModel } from './tools.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
@@ -155,7 +155,7 @@ function teams(config, agents, general, runs, going, queue, conversation) {
       : null;
     // The project's own effort (projects.<id>.effort) over the general crew's.
     const own = projectEfforts(config, id);
-    const effortOf = a => (own[a.id] ? { ...a, effort: own[a.id], effortFrom: 'project' } : a);
+    const effortOf = a => (EFFORTS.includes(own[a.id]) ? { ...a, effort: own[a.id], effortFrom: 'project' } : a);
     if (lead) lead.effortFrom = effortSource(config, id, leader);
     if (!p.crew) return { project: id, name: p.name ?? id, own: false, lead, members: general.filter(a => a.id !== 'manager').map(effortOf) };
     const team = Object.fromEntries(Object.entries(projectCrew(config, id, agents)).filter(([key]) => key !== 'manager' && key !== LEAD));

@@ -518,10 +518,12 @@ function contextReport({ run, step, index, agent, dir, model, prompt, tools, dis
       ...built.adaptations.map(a => `- Adapted in "${a.block}" (Chiefmate's rules prevail): ${a.line}`),
     ].join('\n')
     : "- Not used (no file, or no block for the project): the project's notes went instead.";
+  // The level the tool was given, as in the step's record: none for a level it lacks (Codex has no max).
+  const effort = toolEffort(tool, agent.effort);
   return [
     `# Context received: ${step.agent} (step ${index + 1}), run ${run.id}`,
     '',
-    `- Tool: ${TOOL_NAMES[tool]}. Model: \`${model ?? `${TOOL_NAMES[tool]}'s default`}\`${agent.effort ? `, effort \`${agent.effort}\`` : ''}, time limit ${agent.max_minutes ?? 60} min`,
+    `- Tool: ${TOOL_NAMES[tool]}. Model: \`${model ?? `${TOOL_NAMES[tool]}'s default`}\`${effort ? `, effort \`${effort}\`` : ''}, time limit ${agent.max_minutes ?? 60} min`,
     `- Agent: \`${agent.id}\`${agent.base ? ` (based on \`${agent.base}\`, crew of ${agent.project})` : ''}, instructions from \`${agent.file}\``,
     TOOL_CONTEXT[tool],
     '',
