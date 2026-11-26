@@ -2413,9 +2413,9 @@ try {
   const answers = () => sessionHistory(sessionId).items.filter(e => e.kind === 'request').map(e => e.text);
   expect(noReason && held.status === 'waiting' && answers().some(x => x.includes(`#${r1.id}`) && x.includes('80%')), 'a hold without a reason was taken, or the hold did not reach the conversation');
   expect(charge.chargeSystem(made, 'gamma').includes(`- #${r1.id}`) && charge.chargeSystem(made, 'gamma').includes(': waiting (the manager: The 5-hour window'), "the agent in charge does not see its request's state");
-  const asked = await charge.answerRequest(r1.id, 'ask-owner', { note: 'Large and risky: your call.', recommend: 'hold' }, made);
+  const asked = await charge.answerRequest(r1.id, 'ask-owner', { note: 'Large and risky: your call.', recommend: 'hold', level: 3 }, made);
   const q = asked.question;
-  expect(asked.request.status === 'owner' && q.options.join('|') === [t('Authorize'), t('Wait'), t('Refuse')].join('|') && q.recommend === t('Wait') && q.request === r1.id && q.project === 'gamma',
+  expect(asked.request.status === 'owner' && q.options.join('|') === [t('Authorize'), t('Wait'), t('Refuse')].join('|') && q.recommend === t('Wait') && q.request === r1.id && q.project === 'gamma' && q.level === 3 && asked.request.level === 3,
     `ask-owner did not become a card with Authorize, Wait and Refuse: ${JSON.stringify(q)}`);
   let overrode = false;
   try {
@@ -2454,11 +2454,11 @@ try {
   const real = Object.keys(config.projects ?? {}).find(id => charge.inCharge(config, id));
   if (real) {
     const r3 = charge.addRequest({ asked: 'Smoke ask', plan: 'Smoke: change nothing', size: 'S', risk: 'low', project: real }, config);
-    const approved = await charge.answerRequest(r3.id, 'approve', { note: 'Small and safe.', title: 'Smoke request', summary: 'Made up.' }, config);
+    const approved = await charge.answerRequest(r3.id, 'approve', { note: 'Small and safe.', title: 'Smoke request', summary: 'Made up.', level: '1' }, config);
     const run = readRun(approved.run?.id);
     const lead = charge.inCharge(config, real).lead;
     expect(approved.request.status === 'approved' && approved.request.run === run?.id && run.ownerRequest === r3.id && run.status === 'queued' && run.kind === (lead ? 'ask' : 'task')
-      && (lead || run.review) && run.instruction.includes('Smoke ask') && run.instruction.includes('Small and safe.'), `an approved request did not queue its run: ${JSON.stringify(run)}`);
+      && (lead || run.review) && run.level === 1 && run.instruction.includes('Smoke ask') && run.instruction.includes('Small and safe.'), `an approved request did not queue its run: ${JSON.stringify(run)}`);
   }
   rmSync(temp, { recursive: true, force: true, maxRetries: 5 });
 } catch (error) {
