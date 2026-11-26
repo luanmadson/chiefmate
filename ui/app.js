@@ -1032,15 +1032,18 @@ function attnFold(list, label, key) {
   if (!list.length) return '';
   const named = { urgent: n => t('{count} urgent', { count: n }), important: n => t('{count} important', { count: n }), info: n => t('{count} for your information', { count: n }) };
   const fresh = unseen(list);
-  const counts = [...LEVELS.map(l => [fresh.filter(i => i.level === l).length, named[l]]), [list.length - fresh.length, n => t('{count} seen', { count: n })]]
-    .filter(([n]) => n).map(([n, name]) => name(n)).join(' · ');
+  // Each count in its level's color; the seen ones stay grey.
+  const counts = [...LEVELS.map(l => [fresh.filter(i => i.level === l).length, named[l], l]), [list.length - fresh.length, n => t('{count} seen', { count: n }), '']]
+    .filter(([n]) => n).map(([n, name, level]) => `<span${level ? ` data-level="${level}"` : ''}>${esc(name(n))}</span>`).join(' · ');
   const groups = [...LEVELS.map(l => [levelName(l), list.filter(i => !i.seen && i.level === l)]), [t('Seen'), list.filter(i => i.seen)]]
     .filter(([, items]) => items.length)
     .map(([name, items]) => `<div class="attn-group"><span class="label">${esc(t('{label} ({count})', { label: name, count: items.length }))}</span></div>${items.map(i => attnNotice(i)).join('')}`).join('');
-  return `<details class="attn-list attn-fold" data-keep-open="${esc(key)}"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>
-      <summary class="attn-head">${attnMark(list, '', true)}<span class="label">${esc(label)}</span><span class="attn-counts">${esc(counts)}</span><span class="attn-toggle"><span class="when-closed">${esc(t('See all'))}</span><span class="when-open">${esc(t('Hide'))}</span></span></summary>
+  const fold = `<details class="attn-list attn-fold" data-keep-open="${esc(key)}">
+      <summary class="attn-head">${attnMark(list, '', true)}<span class="label">${esc(label)}</span><span class="attn-counts">${counts}</span><span class="attn-toggle"><span class="when-closed">${esc(t('See all'))}</span><span class="when-open">${esc(t('Hide'))}</span></span></summary>
       ${groups}
     </details>`;
+  // The alert goes around it: a details element takes no other role.
+  return topLevel(list) === 'urgent' ? `<div role="alert">${fold}</div>` : fold;
 }
 
 /** Why a notice went to the archive (src/attention.mjs). */

@@ -161,6 +161,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .attn-fold[open] > summary { border-bottom: 1px solid var(--line); }
 .attn-fold > summary:hover .attn-toggle, .attn-fold > summary:focus-visible .attn-toggle { color: var(--accent); text-decoration: underline; }
 .attn-counts { color: var(--muted); font-size: 12px; min-width: 0; }
+.attn-counts [data-level] { color: var(--attn); }
 .attn-toggle { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .attn-toggle::after { content: " ▾"; }
 .attn-fold[open] .attn-toggle::after { content: " ▴"; }
