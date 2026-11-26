@@ -1074,6 +1074,7 @@
   "Write to the agent. Enter sends; Shift+Enter starts a new line.": "Escreva ao agente. Enter envia; Shift+Enter começa uma nova linha.",
   "This run was already merged.": "O merge desta execução já foi feito.",
   "Only a finished run can be merged.": "Só se faz merge de uma execução concluída.",
+  "This run has already ended.": "Esta execução já terminou.",
   "This run has nothing to merge: no pull request and no branch delivered.": "Esta execução não tem o que juntar: nem pull request, nem branch entregue.",
   "The branch {branch} is not in a clone of yours (local_clone): merge it by hand.": "O branch {branch} não está num clone seu (local_clone): faça o merge à mão.",
   "Check out {base} in {path} first: it has {current} checked out now.": "Antes, passe {path} para {base}: agora está em {current}.",

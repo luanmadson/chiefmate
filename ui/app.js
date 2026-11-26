@@ -1739,7 +1739,11 @@ async function refreshDetail(force = false) {
   });
   // What the crew asked of the owner during the run.
   const requests = (r.requests ?? []).length
-    ? `<div class="report"><div class="report-top"><strong>${esc(t('Asked of you'))}</strong></div>${r.requests.map(q => `<div>${stateHtml(q.status === 'open' ? [t('Waiting for your action'), 'warn'] : [t('Done'), 'ok'])} ${esc(q.what)}${q.url ? ` · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${q.status === 'open' ? `${requestWhy(q)} ${requestButtons(r.id, q, ' small')}` : q.answer ? ` · ${esc(t('Your answer: {answer}', { answer: q.answer }))}` : ''}</div>`).join('')}</div>`
+    ? `<div class="report"><div class="report-top"><strong>${esc(t('Asked of you'))}</strong></div>${r.requests.map(q => {
+      const status = q.status === 'closed' ? [t('No longer needed'), 'neutral']
+        : q.status === 'open' ? [t('Waiting for your action'), 'warn'] : [t('Done'), 'ok'];
+      return `<div>${stateHtml(status)} ${esc(q.what)}${q.url ? ` · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${q.status === 'open' ? `${requestWhy(q)} ${requestButtons(r.id, q, ' small')}` : q.answer ? ` · ${esc(t('Your answer: {answer}', { answer: q.answer }))}` : ''}</div>`;
+    }).join('')}</div>`
     : '';
   const checks = r.checks?.length
     ? `<div class="report"><div class="report-top"><strong>${esc(t('Checks'))}</strong></div>${r.checks.map(c => `<div>${stateHtml(c.ok ? [t('Passed'), 'ok'] : [t('Failed'), 'error'])} <code>${esc(c.command)}</code></div>`).join('')}</div>`

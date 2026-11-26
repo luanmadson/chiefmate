@@ -14,7 +14,19 @@ const NOTIFICATIONS_FILE = path.join(DATA, 'notifications.json');
 
 export const runFile = id => path.join(RUNS, `${id}.json`);
 export const runDir = id => ensureDir(path.join(RUNS, id));
-export const readRun = id => readJson(runFile(id), null);
+export const runEnded = run => ['done', 'failed', 'canceled'].includes(run.status);
+
+function closeRunRequests(run) {
+  if (run && runEnded(run)) {
+    for (const request of run.requests ?? []) {
+      if (request.status === 'open') Object.assign(request, { status: 'closed', closed: run.ended ?? run.updated ?? null });
+    }
+  }
+  return run;
+}
+
+// Older runs can have open requests on disk. Normalize them on read, including before a resume.
+export const readRun = id => closeRunRequests(readJson(runFile(id), null));
 
 // Called after every save of a run (the planning board follows the runs its items are linked to).
 const runListeners = [];
@@ -22,6 +34,7 @@ export const onRunSaved = listener => runListeners.push(listener);
 
 export function saveRun(run) {
   run.updated = now();
+  closeRunRequests(run);
   writeJson(runFile(run.id), run);
   for (const listener of runListeners) {
     try {
@@ -47,7 +60,7 @@ export function settleRunOutside(listed, reason, url) {
 export function listRuns() {
   return readdirSync(RUNS)
     .filter(f => f.endsWith('.json'))
-    .map(f => readJson(path.join(RUNS, f), null))
+    .map(f => readRun(f.slice(0, -5)))
     .filter(Boolean)
     .sort((a, b) => (b.created ?? '').localeCompare(a.created ?? ''));
 }

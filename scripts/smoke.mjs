@@ -26,6 +26,7 @@ mkdirSync(path.join(data, 'runs', 'smoke-feed'), { recursive: true });
 writeFileSync(path.join(data, 'runs', 'smoke-feed.json'), JSON.stringify({
   id: 'smoke-feed', kind: 'task', project: 'none', title: 'Generalist: smoke', status: 'done', created: new Date().toISOString(),
   steps: [{ agent: 'generalist', status: 'done', started: new Date().toISOString() }],
+  requests: [{ id: 'old-request', status: 'open', what: 'Sign in', at: new Date().toISOString() }],
 }));
 const feedLines = [
   { type: 'system', subtype: 'init', session_id: 's' },
@@ -185,6 +186,29 @@ try {
     expect(Array.isArray(state.teams) && state.teams.every(x => x.project && Array.isArray(x.members)), '/api/state has no crews by project');
     expect(Array.isArray(state.needs), "/api/state has no list of the owner's requests");
     expect((await post('/api/needs-you', { what: 'Sign in' })).status === 400, 'a request for the owner without a run was not refused');
+    const oldRun = await (await fetch(`${base}/api/run/smoke-feed`)).json();
+    expect(oldRun.requests?.[0]?.status === 'closed' && state.history.find(r => r.id === oldRun.id)?.needsYou === 0 && !state.needs.some(n => n.run === oldRun.id),
+      'an old request from a finished run is still open');
+    expect((await post('/api/needs-you', { run: oldRun.id, what: 'Sign in again' })).status === 400, 'a finished run could still make a request');
+    const waitingRun = { id: 'smoke-needs', kind: 'task', project: 'none', title: 'Waiting for sign-in', summary: 'Made up.', status: 'paused', created: new Date().toISOString(), steps: [] };
+    const waitingFile = path.join(data, 'runs', `${waitingRun.id}.json`);
+    writeFileSync(waitingFile, JSON.stringify(waitingRun));
+    const request = await (await post('/api/needs-you', { run: waitingRun.id, what: 'Sign in', wait: true })).json();
+    const answered = await (await post('/api/needs-you', { run: waitingRun.id, what: 'Which?', options: 'A|B' })).json();
+    await post('/api/needs-you/done', { run: waitingRun.id, id: answered.id, answer: 'B' });
+    const noticeId = `needs:${waitingRun.id}:${request.id}`;
+    const beforeCancel = await (await fetch(`${base}/api/state`)).json();
+    expect(beforeCancel.attention.items.some(n => n.id === noticeId && n.level === 'urgent'), 'a paused run lost its open request');
+    expect((await (await post('/api/cancel', { id: waitingRun.id })).json()).status === 'canceled', 'the paused run could not be canceled');
+    const afterCancel = await (await fetch(`${base}/api/state`)).json();
+    const archive = await (await fetch(`${base}/api/attention/archived`)).json();
+    expect(!afterCancel.needs.some(n => n.run === waitingRun.id) && !afterCancel.attention.items.some(n => n.id === noticeId) && archive.items.some(n => n.id === noticeId && n.reason === 'resolved'),
+      'a canceled run did not clear and archive its urgent request');
+    const polled = await (await post('/api/needs-you/poll', { run: waitingRun.id, id: request.id })).json();
+    const late = await (await post('/api/needs-you/done', { run: waitingRun.id, id: request.id })).json();
+    const saved = JSON.parse(readFileSync(waitingFile, 'utf8'));
+    expect(polled.status === 'closed' && late.status === 'closed' && saved.requests[0].closed === saved.ended && saved.requests[1].answer === 'B',
+      'an unanswered request did not stay closed on disk, or an existing answer was lost');
     // A merge needs a finished run with a pull request or a branch in the owner's clone.
     expect((await post('/api/merge', { run: 'smoke-feed', preview: true })).status === 400 && (await post('/api/merge', { run: 'no-such-run' })).status === 400, 'a merge of a run with nothing to merge was not refused');
     expect((await fetch(`${base}/api/run/none/context/1`)).status === 404, "a step's context of a run that does not exist did not answer 404");

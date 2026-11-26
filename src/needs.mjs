@@ -4,8 +4,7 @@
 // notification, and opens the address in the owner's browser. With --wait, the command returns when the owner clicks
 // "I did it" (or a check the agent gave succeeds), or answers it from the agent's panel (the command hands the answer
 // over). A question (--options "A|B", --recommend, --why) always waits, with one button per option. While it waits,
-// the step's time limit stands still; past the longest wait, the command returns and the request stays open: the run
-// is never canceled for it.
+// the step's time limit stands still. Past the longest wait, the command returns. Any open request closes when the run ends.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from './config.mjs';
@@ -13,7 +12,7 @@ import { t } from './i18n.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { activeRun, liveOf } from './runs.mjs';
-import { listRuns, readRun, saveRun, stepsOf } from './store.mjs';
+import { listRuns, readRun, runEnded, saveRun, stepsOf } from './store.mjs';
 import { agentSays } from './talk.mjs';
 import { browserPath, PROFILE_DIR } from './usagepage.mjs';
 import { clip, ensureDir, now } from './util.mjs';
@@ -87,8 +86,9 @@ export async function askOwner({ run: runId, step, what, url, wait = false, chec
   const question = questionOf(options, recommend);
   const run = runId ? runFor(String(runId)) : null;
   if (!run) throw new Error(t('Only a step of a run can ask for you: no run was given.'));
+  if (runEnded(run)) throw new Error(t('This run has already ended.'));
   const n = Number(step) || null;
-  const request = {
+  let request = {
     id: randomUUID().slice(0, 8), step: n, agent: (n && stepsOf(run)[n - 1]?.agent) || liveOf(run.id)?.agent || null, what: clip(text, 500),
     // A question always waits: its answer is what the step needs.
     url: url ? String(url) : null, wait: !!wait || !!question, check: check ? clip(check, 300) : null, status: 'open', at: now(),
@@ -101,12 +101,14 @@ export async function askOwner({ run: runId, step, what, url, wait = false, chec
   notify(t('Needs you: {title}', { title: run.title }), request.what, 'chiefmate:operations', { urgent: true });
   reportEvent('needs_you', `${request.agent ?? 'A step'} in run ${run.id} "${run.title}" (project ${run.project}) needs the owner: ${request.what}${request.options ? ` (options: ${request.options.join(' | ')}${request.recommend ? `; recommends ${request.recommend}` : ''})` : ''}${request.url ? ` (address: ${request.url}, opened in the owner's browser)` : ''}${request.wait ? (request.options ? '. The step waits for the owner to choose in the app.' : '. The step waits until the owner clicks "I did it" in the app.') : '. The step goes on meanwhile.'}`);
   if (request.url) {
-    try {
-      request.opened = await openForOwner(request.url);
-    } catch (error) {
-      request.openError = error.message;
+    const browser = await openForOwner(request.url).then(opened => ({ opened }), error => ({ openError: error.message }));
+    // The run can finish while the browser is opening. Save the result on its current record.
+    const current = runFor(run.id);
+    const saved = current?.requests?.find(r => r.id === request.id);
+    if (saved) {
+      request = Object.assign(saved, browser);
+      saveRun(current);
     }
-    saveRun(run);
   }
   return { ...request, run: run.id, maxWaitMinutes: needsSettings().maxWaitMinutes };
 }
@@ -133,7 +135,8 @@ export function finishRequest(runId, id, by = 'owner', answer = null) {
   const { run, request } = findRequest(runId, id);
   const choice = answer == null ? null : request.options?.find(o => same(o, answer));
   if (answer != null && !choice) throw new Error(t('Answer with one of the options.'));
-  if (request.status === 'open') Object.assign(request, { status: 'done', done: now(), by }, choice ? { answer: choice } : {});
+  if (request.status !== 'open') return request;
+  Object.assign(request, { status: 'done', done: now(), by }, choice ? { answer: choice } : {});
   saveRun(run);
   return request;
 }

@@ -246,7 +246,7 @@ async function apiOr(route, body, local) {
 /**
  * "needs-you", run by a step (Chiefmate gives it CHIEFMATE_RUN and CHIEFMATE_STEP). Without --wait it only records
  * the request. With --wait it waits in rounds of at most 9 minutes (the Bash tool stops a command at 10): exit code 0
- * when it is done, 3 when the round ended and it is still waiting (run the command printed), 2 past the longest wait.
+ * when it is done, 3 when the round ended and it is still waiting, 2 when the wait runs out or the run ends.
  */
 async function needsYou() {
   const run = process.env.CHIEFMATE_RUN;
@@ -275,8 +275,13 @@ async function needsYou() {
       else console.log(s.by === 'check' ? 'Done: the check succeeded.' : 'Done: the owner says they did it. Go on.');
       return;
     }
+    if (s.status === 'closed') {
+      console.log('The request closed because the run ended.');
+      process.exitCode = 2;
+      return;
+    }
     if (s.timedOut) {
-      console.log(`No answer within ${s.maxWaitMinutes} min. The request stays open in the app: finish what you can and say in your report what is left for the owner.`);
+      console.log(`No answer within ${s.maxWaitMinutes} min. The request stays open until the run ends. Finish what you can and say in your report what is left for the owner.`);
       process.exitCode = 2;
       return;
     }
@@ -284,8 +289,7 @@ async function needsYou() {
       lastCheck = Date.now();
       if (spawnSync(check, { shell: true, stdio: 'ignore', windowsHide: true, timeout: 60_000 }).status === 0) {
         await api('/api/needs-you/done', { run, id, by: 'check' });
-        console.log('Done: the check succeeded.');
-        return;
+        continue;
       }
     }
     if (Date.now() >= roundEnds) {
