@@ -64,6 +64,7 @@
     "daily_report": "08:00"
   },
   "auto_update_mode": "pause",
+  "work_now_mode": "pause",
   "remote_access": {
     "enabled": false,
     "host": "",

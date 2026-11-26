@@ -1101,7 +1101,7 @@ export function sessionsState(config = loadConfig(), machine = computer(config))
     const app = s.mode === 'app';
     return {
       id: s.id, profile: s.profile, name: s.name, tool: s.tool, project: s.project, folder: s.library_folder, cwd: s.cwd, model: s.model, charge: !!s.charge,
-      ...(s.work ? { work: true, memberName: s.memberName ?? null, copy: !!s.work.copy, held: s.work.held ?? [] } : {}),
+      ...(s.work ? { work: true, memberName: s.memberName ?? null, copy: !!s.work.copy, held: s.work.held ?? [], heldTitles: (s.work.held ?? []).map(run => s.work.titles?.[run] ?? run) } : {}),
       mode: app ? 'app' : 'window', status: s.status, started: s.started ?? s.created, ended: s.ended ?? null,
       alive: app ? live.has(s.id) : !!p, pid: p?.pid ?? (app ? live.get(s.id)?.pid : s.pid) ?? null, ram: p?.ram ?? 0,
       blocks: s.blocks ?? [], missing: s.missing ?? [], request: (s.requests ?? []).find(r => r.status === 'open') ?? null,
