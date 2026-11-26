@@ -1,7 +1,7 @@
 // The crew's browsers (Playwright's MCP server, in a step or a live session): each project has a profile of its own in
 // data/browsers/<project> (its sign-ins stay there, never in the owner's browser), the window is named after the project
 // and the task, and the browser's frame takes the project's color. The app lists the ones open (src/server.mjs) and
-// Chiefmate closes those whose task is over, unless the task left a request open for the owner (a sign-in under way).
+// Chiefmate closes the crew's browsers when their tasks end.
 import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -173,8 +173,7 @@ function ownerState(owner) {
 }
 
 /**
- * Whether Chiefmate closes a browser by itself: its task is known and over, and left no request open for the owner
- * (a step that asks for a sign-in keeps its browser until the request is answered).
+ * Whether Chiefmate closes a browser by itself. An open request can keep it available while its run is paused.
  */
 export const shouldClose = ({ known, running, request }) => known && !running && !request;
 

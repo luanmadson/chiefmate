@@ -1071,7 +1071,7 @@ export async function execute(run) {
     reportEvent('run_failed', `${aboutRun(run)} failed: ${clip(error.message, 400)}`);
   } finally {
     live.delete(run.id);
-    closeAfterRun(); // its browser, unless a request of the run is still open for the owner
+    closeAfterRun();
     // A run that ended with steps on Codex or Grok: how each did, for the manager's choice of tools (node src/cli.mjs tools).
     if (['done', 'failed'].includes(run.status) && !run.qualityRecorded) {
       try {
