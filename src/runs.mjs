@@ -276,11 +276,11 @@ function pausedNote(why) {
 }
 
 /** The next turn of a step resumed after an update of Chiefmate, with the owner's messages sent meanwhile. */
-export function updatedTurn(messages, config = loadConfig(), why = 'update') {
+export function updatedTurn(messages, config = loadConfig(), why = 'update', gitRecovery = '') {
   const lines = [
     why === 'update' ? 'Chiefmate was updated while you were working: your work was paused at a safe point so the new version could be installed, and this session now resumes.'
       : `Chiefmate was ${why === 'standby' ? 'put on standby' : 'shut down'} by its owner while you were working: your work was paused at a safe point, and this session now resumes.`,
-    'Continue from where you left off. The branch, the files and this session are as you left them. A command that was still running when you were paused may have been cut off: check its result before you go on.',
+    gitRecovery || 'Continue from where you left off. The branch, the files and this session are as you left them. A command that was still running when you were paused may have been cut off: check its result before you go on.',
     "When you finish, your last message is still the step's full report.",
   ];
   return messages.length ? `${lines.join('\n')}\n\n${ownerTurn(messages, config)}` : lines.join('\n');
@@ -344,6 +344,8 @@ function libraryLines(project, libraries, access) {
   }
   return lines;
 }
+
+const stepFileName = (index, step) => `${String(index + 1).padStart(2, '0')}-${step.agent}`;
 
 function logAction(l, event) {
   if (event.type !== 'action' && event.type !== 'say') return;
@@ -629,9 +631,11 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     logAction(l, { type: 'action', text: t("Couldn't read the prompt builder: {error}", { error: error.message }) });
   }
   for (const a of built?.adaptations ?? []) logAction(l, { type: 'action', text: t('Prompt builder: a line of "{block}" was adapted to the crew\'s rules', { block: a.block }) });
-  const prompt = stepPrompt({ run, step, project, previous, finalReview, changes, traces: found, config, libraries, base, access, built, agents, tool });
+  const op = step.gitRecovery;
+  const gitRecovery = op ? `Chiefmate found an unfinished git ${op} in the working copy and aborted it before checking out the run branch: the commits are as they were, but what that ${op} had not committed yet is gone. Check the working copy (git status, git log) and redo the ${op} if it is still needed.` : '';
+  const prompt = [stepPrompt({ run, step, project, previous, finalReview, changes, traces: found, config, libraries, base, access, built, agents, tool }), gitRecovery].filter(Boolean).join('\n\n');
   const { tools, disallowed } = tool === 'claude' ? stepTools(agent, mcp, access) : { tools: [], disallowed: tool === 'grok' ? GROK_DENY : [] };
-  const name = `${String(index + 1).padStart(2, '0')}-${step.agent}`;
+  const name = stepFileName(index, step);
   const contextFile = path.join(runDir(run.id), `${name}.context.md`);
 
   // A team lead reads and judges: whatever it changes in the working copy (through the shell) is dropped after its step.
@@ -641,6 +645,8 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   // A step paused for an update of Chiefmate resumes its own Claude Code session, with its clock and its counts.
   const paused = step.paused ?? null;
   delete step.paused;
+  // Told once: a later resume finds, and tells, an operation of its own.
+  delete step.gitRecovery;
   Object.assign(step, { status: 'running', started: paused ? step.started ?? now() : now(), error: null, model, tool, effort: toolEffort(tool, agent.effort), promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
   Object.assign(l, {
     step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0, talking: false, reply: null, session: null,
@@ -706,7 +712,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     const messages = pendingTalk(run, index + 1);
     for (const m of messages) Object.assign(m, { status: 'delivered', delivered: now(), via: 'resume' });
     if (messages.length) l.reply = messages.at(-1).id;
-    turn = updatedTurn(messages, config, paused.why ?? 'update');
+    turn = updatedTurn(messages, config, paused.why ?? 'update', gitRecovery);
     logAction(l, { type: 'action', text: (paused.why ?? 'update') === 'update' ? t('Chiefmate was updated: the agent goes on in the same session') : t('Back from the pause: the agent goes on in the same session') });
   }
   let r;
@@ -970,7 +976,27 @@ export async function execute(run) {
     } else {
       // Resuming: every finished step already left its work in commits on the run's branch.
       dir = projectDir(run.project);
-      await checkoutBranch(dir, run.branch);
+      const steps = stepsOf(run);
+      const index = steps.findIndex(step => step.status === 'pending' || step.status === 'running');
+      const step = steps[index];
+      try {
+        await checkoutBranch(dir, run.branch, operation => {
+          const text = t('The unfinished Git {operation} was aborted before resuming: the commits are kept.', { operation });
+          log(text);
+          const logIndex = index < 0 ? steps.length - 1 : index;
+          if (steps[logIndex]) {
+            const file = path.join(runDir(run.id), `${stepFileName(logIndex, steps[logIndex])}.jsonl`);
+            appendFileSync(file, `\n${JSON.stringify({ type: 'chiefmate_action', text })}\n`);
+          }
+          if (step) {
+            step.gitRecovery = operation;
+            saveRun(run);
+          }
+        });
+      } catch (error) {
+        if (step) Object.assign(step, { status: 'failed', ended: now(), error: error.message });
+        throw error;
+      }
     }
     const base = run.base ?? project.main_branch;
     const libraries = await prepareLibraries(config, libraryIds(project), log);
