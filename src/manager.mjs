@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { staleLine } from './attention.mjs';
 import { runClaude } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectEfforts, projectLead } from './config.mjs';
 import { effortChangeLine, effortHistory } from './effort.mjs';
@@ -130,7 +131,8 @@ export function situation(libraries = []) {
       ? `Queue: ${queue.map(r => `${r.title} [${r.id}]${r.notBefore ? ` (not before ${formatDateTime(r.notBefore)})` : ''}`).join('; ')}.`
       : 'Queue: empty.',
   );
-  const latest = listRuns().filter(r => !['queued', 'waiting'].includes(r.status)).slice(0, 5);
+  const runs = listRuns();
+  const latest = runs.filter(r => !['queued', 'waiting'].includes(r.status)).slice(0, 5);
   lines.push('Latest runs:');
   for (const r of latest) {
     const work = stepsOf(r).reduce((sum, s) => sum + (s.durationMs ?? 0), 0);
@@ -148,6 +150,8 @@ export function situation(libraries = []) {
   lines.push(computerLine(config));
   lines.push(sessionsLine(config));
   lines.push(planningLine(config.owner || 'the owner'));
+  const stale = staleLine(runs, config.owner || 'the owner');
+  if (stale) lines.push(stale);
   lines.push(radarLine(config.owner || 'the owner'));
   const questions = questionsLine();
   if (questions) lines.push(questions);
