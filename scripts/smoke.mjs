@@ -2349,6 +2349,15 @@ try {
   const redoView = { config: localConfig, runs: [redo], items: [planItem(item.id)] };
   expect(decisionCards({ ...redoView, attention: attentionItems(redoView), questions: [], pushes: [] }).some(c => c.run === redo.id), 'a new local delivery inherited the previous card archive');
 
+  // A new project with no remote: its own folder is its repository and your clone. Its wip/ deliveries are cards with
+  // Approve and their level, like a pull request's; level 1 only folds the card apart in the app.
+  const fresh = { projects: { 'new-local': { name: 'New local', repository: clone, local_clone: clone, main_branch: 'main', deliver: 'local' } } };
+  const freshRuns = [1, 2].map(level => localRun(`new-local-${level}`, { project: 'new-local', branch: 'wip/pending', level }));
+  const freshView = { config: fresh, runs: freshRuns, items: [] };
+  const freshCards = decisionCards({ ...freshView, attention: attentionItems(freshView), questions: [], pushes: [] });
+  expect(freshRuns.every(r => freshCards.some(c => c.run === r.id && c.kind === 'merge' && c.approve && c.approval === r.level && !c.url && /wip\/pending/.test(c.label))),
+    `a local delivery of a new project has no card to approve: ${JSON.stringify(freshCards.map(c => [c.run, c.approve, c.approval, c.label]))}`);
+
   const approveIntegrated = localRun('approve-integrated', { branch: integrated.branch });
   const approveRemoved = localRun('approve-deleted');
   expect((await mergeRun(approveIntegrated.id, {}, localConfig)).merged?.by === 'outside', 'approval tried to merge an already integrated branch');

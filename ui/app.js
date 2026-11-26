@@ -4714,7 +4714,9 @@ function drawProjectFiles(id) {
     const rel = data.path.slice(data.root.path.length).split(/[\\/]/).filter(Boolean);
     const sep = data.root.path.includes('\\') ? '\\' : '/';
     const at = i => data.root.path.replace(/[\\/]$/, '') + rel.slice(0, i).map(x => sep + x).join('');
-    crumbs = `<div class="file-crumbs hint">${[`<button type="button" class="link-button" data-folder="${esc(data.root.path)}">${esc(rootLabel(data.root))}</button>`,
+    // Another project's folder (its working copy, reached through Chiefmate's own clone): named, so it isn't taken for this one's.
+    const top = data.root.project && data.root.project !== id ? `${rootLabel(data.root)} · ${data.root.label}` : rootLabel(data.root);
+    crumbs = `<div class="file-crumbs hint">${[`<button type="button" class="link-button" data-folder="${esc(data.root.path)}">${esc(top)}</button>`,
       ...rel.map((name, i) => `<button type="button" class="link-button" data-folder="${esc(at(i + 1))}">${esc(name)}</button>`)].join(' / ')}</div>`;
   }
   const html = `<div class="panel">
