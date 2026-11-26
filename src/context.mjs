@@ -15,7 +15,7 @@ import { LEAD, leadReviewStep, memoryFile } from './leads.mjs';
 import { projectOf } from './projects.mjs';
 import { builderSettings, builderStatus, projectInstructions, readBuilder } from './prompts.mjs';
 import { libraryIds, promptParts, stepTool, stepTools } from './runs.mjs';
-import { planSession, sessionProfiles } from './sessions.mjs';
+import { managerAddress, planSession, sessionProfiles, withManager } from './sessions.mjs';
 import { listRuns, stepsOf } from './store.mjs';
 import { toolModel } from './tools.mjs';
 import { ensureDir, now, RUNS, WORKSPACES } from './util.mjs';
@@ -147,8 +147,12 @@ function sessionsContext(config, id) {
     try {
       const { folder, prompt } = planSession(config, profile.id);
       const repository = profile.tool === 'claude' ? repositoryFiles(folder.dir) : { dir: folder.dir, exists: true, files: [] };
+      // As openSession writes it: the manager's address at its end, or alone when the profile names no blocks (it then
+      // goes with the owner's first message); the agent in charge gets none.
+      const text = profile.charge ? (prompt.blocksGiven ? prompt.text : null)
+        : prompt.blocksGiven ? withManager(prompt.text, config, '<session id>') : managerAddress(config, '<session id>');
       return {
-        ...base, cwd: folder.dir, text: prompt.blocksGiven ? prompt.text : null, tokens: prompt.blocksGiven ? tokens(prompt.text) : 0,
+        ...base, cwd: folder.dir, text, tokens: text == null ? 0 : tokens(text),
         blocks: (prompt.details ?? []).map(d => ({ ...d, tokens: tokens(d.text) })), missing: prompt.missing, unresolved: prompt.unresolved, repository,
       };
     } catch (error) {

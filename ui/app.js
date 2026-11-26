@@ -1319,8 +1319,16 @@ const newsEvent = kind => ({
   memory_alert: t('memory alert'), usage_alert: t('usage alert'), session_ended: t('live session ended'), plan_proposed: t('new proposal'),
   idle: t('empty queue'), autopilot_report: t('autopilot report'), watchdog: t('watchdog'), lockdown: t('emergency lockdown'), security_warning: t('security warning'),
   away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'), power: t('power mode'),
-  owner_working: t('you working now'),
+  owner_working: t('you working now'), defect: t('defect reported'), agent_message: t('message from an agent'),
 }[kind] ?? kind);
+
+// Who wrote an agent's message to the manager (a live session or a step of a run, from the command line).
+const senderName = s => {
+  const agent = s?.agent ?? t('An agent');
+  if (s?.kind === 'session') return t('{agent} · session {name}', { agent, name: s.name ?? s.id });
+  if (s?.kind === 'step') return t('{agent} · step {step} of {run}', { agent, step: s.step ?? '?', run: s.name ?? s.id });
+  return agent;
+};
 
 let chatScrolled = false;
 function drawChat() {
@@ -1332,6 +1340,12 @@ function drawChat() {
   for (const m of g.messages) {
     if (m.who === 'system') {
       html += `<div class="msg system">${esc(m.text)}</div>`;
+      continue;
+    }
+    // An agent's message (chat say from a session or a step): never shown as yours.
+    if (m.who === 'agent') {
+      const about = [clockTime(m.at), m.sender?.project ?? '', m.sender?.tool ?? ''].filter(Boolean).join(' · ');
+      html += `<div class="msg agent"><div class="msg-head"><span class="msg-author">${esc(senderName(m.sender))}</span><span class="msg-meta">${esc(about)}</span><span class="tag">${esc(t('agent, not you'))}</span></div><div class="msg-body">${md(m.text)}</div></div>`;
       continue;
     }
     const you = m.who === 'you';
@@ -1393,6 +1407,13 @@ function drawChatQueue() {
       <div class="msg-head"><span class="tag news">${esc(t('news for the manager'))}</span><span class="msg-meta">${esc(clockTime(m.at))}</span>
         <span class="queued-actions"><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
       <div class="msg-body">${(m.events ?? []).map(e => `<div class="news-event"><time>${esc(clockTime(e.at))}</time> ${esc(newsEvent(e.kind))}</div>`).join('')}</div>
+    </div>`
+    : m.from === 'agent'
+    // An agent's message: not yours, so it can't be edited (only removed).
+    ? `<div class="queued-msg agent" data-pending="${esc(m.id)}">
+      <div class="msg-head"><span class="tag">${esc(t('from an agent'))}</span><span class="msg-meta">${esc([clockTime(m.at), senderName(m.sender)].join(' · '))}</span>
+        <span class="queued-actions"><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
+      <div class="msg-body">${md(m.text)}</div>
     </div>`
     : `<div class="queued-msg" data-pending="${esc(m.id)}">
       <div class="msg-head"><span class="tag">${esc(t('queued'))}</span><span class="msg-meta">${esc([clockTime(m.at), m.edited ? t('edited') : ''].filter(Boolean).join(' · '))}</span>

@@ -1276,3 +1276,6 @@ html.chat-focus #view-manager .chat-column { width: min(100%, 1000px); margin: 0
   /* In the column of buttons beside the field: "Listening…" under the microphone, within the column's width */
   .compose .button.mic { flex-direction: column; gap: 2px; font-size: 11.5px; line-height: 1.2; }
 }
+/* An agent's message to the manager (a live session or a step): a plain rule on the left, never styled as yours. */
+.msg.agent { border-left: 2px solid var(--muted); }
+.msg.agent .msg-author { color: var(--strong); }
