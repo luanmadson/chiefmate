@@ -196,6 +196,15 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 installs the approved update now: shows what pauses; with --yes, pauses
                                                 the runs going on at a safe point, waits for the manager's answer (or
                                                 interrupts it), installs, restarts and resumes the paused work
+  node src/cli.mjs power [status]               the power mode: on, standby or stopping
+  node src/cli.mjs power standby|on|stop|shutdown|cancel [--yes]
+                                                standby: nothing new starts (the queue, the missions, the autopilot), the
+                                                runs going on pause at a safe point, the live sessions go on; on: back
+                                                from standby. stop: pauses everything at a safe point, closes the crew's
+                                                browsers and processes and ends Chiefmate (the watchdog leaves it off;
+                                                the next start resumes the work). shutdown: the same, then Windows shuts
+                                                down after a 60-second countdown. cancel: stops a stop or shutdown going
+                                                on. Without --yes, only shows what would happen
   node src/cli.mjs history [n]                  the latest runs
   node src/cli.mjs report <id>                  the report of each step of a run
   node src/cli.mjs context <id> [step]          what each step received: prompt, model, tools, folders, MCP servers
@@ -626,6 +635,46 @@ async function sessionCommand() {
   if (s.missing?.length) console.log(`Not found in the prompt builder: ${s.missing.join(', ')}`);
 }
 
+/** The power mode, in one line. */
+function powerLine(p) {
+  if (p.mode === 'standby') return `Standby since ${formatDateTime(p.since)}: nothing new starts. Back on with: node src/cli.mjs power on --yes`;
+  if (p.mode !== 'stopping') return 'On.';
+  const what = p.target === 'shutdown' ? 'Shutting the computer down' : 'Stopping Chiefmate';
+  const waiting = (p.waitingFor ?? []).map(w => `${w.title ?? w.run}${w.doing ? ` (${w.doing})` : ''}`);
+  const stage = p.stage === 'pausing' ? `pausing the work going on at a safe point${waiting.length ? `; waiting for: ${waiting.join('; ')}` : ''}`
+    : p.stage === 'manager' ? "ending the manager's answer"
+      : p.stage === 'countdown' ? `the computer shuts down at ${formatDateTime(p.countdownUntil)}`
+        : 'closing';
+  return `${what}: ${stage}.${p.stage !== 'closing' ? ' To cancel: node src/cli.mjs power cancel' : ''}`;
+}
+
+/** "power": the power modes (src/power.mjs). Only the owner's: refused inside a step and the manager's answer. */
+async function powerCommand() {
+  const action = rest.find(x => !x.startsWith('--')) ?? 'status';
+  if (action === 'status') return console.log(powerLine((await api('/api/state')).power ?? { mode: 'on' }));
+  if (!['standby', 'on', 'stop', 'shutdown', 'cancel'].includes(action)) throw new Error('Use: node src/cli.mjs power [status|standby|on|stop|shutdown|cancel] [--yes]');
+  if (process.env.CHIEFMATE_RUN || process.env.CHIEFMATE_MANAGER) throw new Error("The power modes are the owner's only: ask them with needs-you.");
+  if (action === 'cancel') return console.log(powerLine(await api('/api/power', { action })));
+  if (!has('--yes')) {
+    const p = await api('/api/power', { action: 'preview' });
+    const said = {
+      standby: 'Standby: nothing new starts (the queue, the missions, the autopilot); the runs going on pause at a safe point; the live sessions go on.',
+      on: 'Back on: the queue goes on, the paused runs first, and each mission missed meanwhile runs once.',
+      stop: "Stop Chiefmate: everything pauses at a safe point, the crew's browsers and processes close and Chiefmate ends. The watchdog leaves it off; the next start resumes the work.",
+      shutdown: 'Shut the computer down: as stop, then Windows shuts down after a 60-second countdown (cancel with: node src/cli.mjs power cancel).',
+    };
+    console.log(said[action]);
+    if (p.runs.length) console.log(['Runs that pause at a safe point:', ...p.runs.map(r => `  ${r.title} [${r.run}] (${r.project})`)].join('\n'));
+    if (['stop', 'shutdown'].includes(action)) {
+      if (p.sessions.length) console.log(['Live sessions open (their turns pause; a window ends with the computer):', ...p.sessions.map(x => `  ${x.name} [${x.id}]`)].join('\n'));
+      if (p.unsaved.length) console.log(['Changes not committed:', ...p.unsaved.map(u => `  ${u.folder}: ${u.files} file(s)`)].join('\n'));
+    }
+    console.log('Nothing was done. Add --yes to go ahead.');
+    return;
+  }
+  console.log(powerLine(await api('/api/power', { action })));
+}
+
 /** What an update going on is doing, in one line. */
 function updateLine(u) {
   const job = u.installing;
@@ -696,20 +745,16 @@ async function main() {
         const { chat, deliverPending, interruptManager, managerBusy } = await import('./manager.mjs');
         const { startWatch } = await import('./plan.mjs');
         const { startAutopilot } = await import('./autopilot.mjs');
-        startQueue();
-        startSchedule();
-        startWatch();
-        startAutopilot();
-        startSessions();
+        const { powerOffCommand, startPower } = await import('./power.mjs');
+        const { updating } = await import('./update.mjs');
         // In "pause" mode (and on "update now") the update pauses the runs and the live sessions' turns going on and
         // waits for the manager's answer; in "wait" mode, it waits for all of them to end. The sessions' windows stay open.
-        startUpdates({
-          isBusy: () => live.size > 0 || managerBusy() || sessionTurnsGoingOn(),
+        // The power modes (src/power.mjs) pause the same way.
+        const pausing = {
           crewBusy: () => live.size > 0,
           crewWaiting: () => [...live.values()].map(l => ({ run: l.run, title: l.title, project: l.project, doing: doingNow(l) })),
-          pauseRuns: pauseAll,
           sessionsBusy: sessionTurnsGoingOn,
-          pauseSessions: pauseSessionTurns,
+          pauseSessions: why => pauseSessionTurns(why),
           managerAnswering: () => chat.responding,
           interruptManager,
           resume: () => {
@@ -717,6 +762,33 @@ async function main() {
             deliverPending();
             resumeSessions();
           },
+        };
+        startPower({
+          ...pausing,
+          pauseRuns: why => pauseAll(why),
+          updating,
+          closeBrowsers: async () => (await import('./browsers.mjs')).closeAllBrowsers(),
+          stopCrew: async () => {
+            if (process.platform !== 'win32') return;
+            const { crewUnder, processList, stopPids } = await import('./watch.mjs');
+            await stopPids(crewUnder(process.pid, await processList()).map(p => p.pid));
+          },
+          powerOff: () => powerOffCommand(),
+          // A connection slow to close must not keep Chiefmate alive.
+          finish: async () => {
+            await Promise.race([close(), sleep(10_000)]);
+            process.exit(0);
+          },
+        });
+        startQueue();
+        startSchedule();
+        startWatch();
+        startAutopilot();
+        startSessions();
+        startUpdates({
+          ...pausing,
+          isBusy: () => live.size > 0 || managerBusy() || sessionTurnsGoingOn(),
+          pauseRuns: () => pauseAll('update'),
           beforeRestart: close,
         });
         // The emergency lockdown (src/lockdown.mjs): what it stops, what a release resumes, and who is told.
@@ -769,6 +841,7 @@ async function main() {
       const account = s.usage.account;
       const percent = v => `${Math.round((v ?? 0) * 100)}%`;
       const going = s.running ?? (s.current ? [s.current] : []);
+      if (s.power && s.power.mode !== 'on') console.log(`Power: ${powerLine(s.power)}`);
       if (!going.length) console.log('Running: nothing');
       for (const r of going) console.log(`Running: ${r.title} [${r.id}] (${r.project}), step ${r.step ?? '-'}: ${r.agent ?? 'preparing'}`);
       for (const x of s.sessions?.open ?? []) console.log(`Session: ${x.name} [${x.id}] (${x.tool}${x.project ? `, ${x.project}` : ''}), ${x.alive ? 'open' : x.status} since ${formatDateTime(x.started)}`);
@@ -1038,6 +1111,10 @@ async function main() {
         console.log(`${r.again ? 'Still waiting' : 'Waiting'} for the owner's card in the app: the private repository ${r.request.repo}, with ${r.request.dir} (branch ${r.request.branch}) sent to it.`);
         console.log('Nothing was created. When the owner allows it ("repo_allowed" news), run the same command again, once, within 30 minutes.');
       }
+      return;
+    }
+    case 'power': {
+      await powerCommand();
       return;
     }
     case 'update-check': {

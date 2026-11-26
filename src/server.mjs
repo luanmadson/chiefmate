@@ -22,6 +22,7 @@ import { chat, editPending, interruptManager, managerContext, newConversation, r
 import { closeReplaced, mergeRun, previewClose, previewMerge } from './merge.mjs';
 import { awayInfo, reportEvent, setAway } from './news.mjs';
 import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
+import { cancelStop, powerInfo, powerPreview, setStandby, stopSystem } from './power.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { changePlan, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
 import { changeRadar, RADAR_STATUSES, radarIdeas } from './radar.mjs';
@@ -129,7 +130,7 @@ function readBody(req) {
 
 const summary = run => ({
   id: run.id, title: run.title, summary: run.summary ?? null, outcome: run.outcome ?? null, kind: run.kind, mission: run.mission, project: run.project, origin: run.origin, status: run.status,
-  created: run.created, started: run.started, ended: run.ended, notBefore: run.notBefore, note: run.note, result: run.result,
+  created: run.created, started: run.started, ended: run.ended, notBefore: run.notBefore, due: run.due ?? null, note: run.note, result: run.result,
   pullRequest: run.pullRequest, needsYou: (run.requests ?? []).filter(r => r.status === 'open').length,
   steps: stepsOf(run).map(s => ({ agent: s.agent, status: s.status, review: s === run.review, role: s.role ?? null, task: s.task ?? null, tool: s.tool ?? null })),
   // Codex or Grok, when the run's crew steps ran (or were chosen to run) on them: the cards, the queue and the log show it.
@@ -379,6 +380,8 @@ function buildState() {
       crew: [...(m.steps ?? []).map(s => s.agent), ...(m.review ? [m.review.agent] : [])],
       schedule: describeSchedule(m.schedule), next: nextRun(m.schedule)?.toISOString() ?? null,
       last: lastOf(id) ? summary(lastOf(id)) : null,
+      // A run of it missed while Chiefmate was off or on standby, queued or going on now: the app marks it late.
+      late: (r => (r ? { run: r.id, due: r.due, status: r.status } : null))(runs.find(r => r.mission === id && r.due && ['queued', 'waiting', 'running'].includes(r.status))),
     })),
     crew: (general = crew(agents, config, runs, going.map(x => x.run), queue, conversation)),
     teams: teams(config, agents, general, runs, going.map(x => x.run), queue, conversation),
@@ -420,6 +423,8 @@ function buildState() {
     lockdown: security,
     // The away mode (src/news.mjs): { since, held } while the owner is away, else null.
     away: awayInfo(),
+    // The power mode (src/power.mjs): on, standby or stopping, shown at the top of the app.
+    power: powerInfo(),
     notifications: readNotifications().slice(-8).reverse(),
   };
 }
@@ -717,6 +722,22 @@ export function startServer() {
         case '/api/away':
           // The owner stepped out or is back: the manager is told at once (src/news.mjs).
           return reply(res, 200, { away: setAway(!!body.on) });
+        case '/api/power': {
+          // The power modes (src/power.mjs). From another device, only standby: a Chiefmate stopped there could not be
+          // started again from it.
+          const action = String(body.action ?? '');
+          if (remote && ['stop', 'shutdown'].includes(action)) return reply(res, 403, { error: t('Shutting down is done on the computer itself: from another device, Chiefmate could not be started again.') });
+          if (action === 'preview') {
+            const runs = liveRuns().map(l => ({ run: l.run, title: l.title, project: l.project }));
+            const sessions = sessionsState().open.map(x => ({ id: x.id, name: x.name, cwd: x.cwd, mode: x.mode, tool: x.tool }));
+            return reply(res, 200, await powerPreview({ runs, sessions }));
+          }
+          if (action === 'standby') return reply(res, 200, setStandby(true));
+          if (action === 'on') return reply(res, 200, setStandby(false));
+          if (action === 'cancel') return reply(res, 200, cancelStop());
+          if (['stop', 'shutdown'].includes(action)) return reply(res, 200, stopSystem(action));
+          return reply(res, 400, { error: t('Unknown power mode.') });
+        }
         case '/api/manager/interrupt':
           return reply(res, 200, { interrupted: interruptManager() });
         case '/api/new-conversation':

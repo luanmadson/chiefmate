@@ -13,6 +13,7 @@ import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
+import { readState } from './store.mjs';
 import { clip, DATA, ensureDir, languageName, now, readJson, ROOT, stamp, writeJson } from './util.mjs';
 
 const MINUTE = 60_000;
@@ -126,18 +127,23 @@ export function orphansIn(list, at = Date.now(), minAge = ORPHAN_MS) {
  * checks; lastCheck: when the last check ran. Returns [{ id, level: "stuck" (the rescuer may act) or "warn" (the owner
  * and the manager hear of it), text (in English, for the rescuer and the manager), say (for the owner) }].
  */
-export function findProblems({ health, state, memory, orphans = [], seen = {}, lastCheck = null, at = Date.now() }) {
+export function findProblems({ health, state, memory, orphans = [], seen = {}, lastCheck = null, at = Date.now(), off = false }) {
   const problems = [];
   const add = (id, level, text, say) => problems.push({ id, level, text, say });
   const lasting = id => age(seen[id], at) >= PERSIST_MS;
-  if (!health) {
+  // Stopped by the owner (the power modes, src/power.mjs): off on purpose, and left off.
+  if (!health && off) {
+    // nothing to do: it starts again when the owner opens it
+  } else if (!health) {
     add('server_down', 'stuck', "Chiefmate doesn't answer on its port (no answer to /api/health for about a minute): it is stopped or hung.", t("Chiefmate doesn't answer: it is stopped or hung."));
   } else if (state) {
     const running = state.running ?? [];
     const installing = state.update?.installing ?? null;
     // A run ready to start, with room for it, its project free and no update going on, that doesn't start.
     const ready = (state.queue ?? []).filter(r => r.status === 'queued' && (!r.notBefore || Date.parse(r.notBefore) <= at) && !running.some(x => x.project === r.project));
-    if (ready.length && !installing && running.length < (state.parallel?.max ?? 3)) {
+    // On standby (or stopping), nothing starts on purpose.
+    const held = !!state.power && state.power.mode !== 'on';
+    if (ready.length && !installing && !held && running.length < (state.parallel?.max ?? 3)) {
       const text = `The queue is stuck: ${ready.map(r => `"${r.title}" [${r.id}] (${r.project})`).join(', ')} ready to start, with room for it, and nothing starts.`;
       if (lasting('queue_stuck')) add('queue_stuck', 'stuck', text, t('The queue is stuck: {count} run(s) ready and nothing starts.', { count: ready.length }));
       else add('queue_stuck', 'pending', text, '');
@@ -188,7 +194,8 @@ export async function look(config = loadConfig(), watch = readWatch(), { quick =
     // the process list is a help, not a must
   }
   const memory = { free: os.freemem(), total: os.totalmem() };
-  const problems = findProblems({ health, state, memory, orphans, seen: watch.seen ?? {}, lastCheck: watch.last?.at ?? null });
+  const off = !health && readState().power?.mode === 'off';
+  const problems = findProblems({ health, state, memory, orphans, seen: watch.seen ?? {}, lastCheck: watch.last?.at ?? null, off });
   return { health, state, orphans, problems };
 }
 
@@ -325,7 +332,7 @@ async function listener(config) {
 }
 
 /** Everything under a process, through the parent ids. */
-function subtree(pid, list) {
+export function subtree(pid, list) {
   const out = new Set([pid]);
   for (let grew = true; grew;) {
     grew = false;
@@ -339,7 +346,14 @@ function subtree(pid, list) {
   return out;
 }
 
-const stopPids = pids => (pids.length ? powershell(`Stop-Process -Id ${pids.map(Number).join(',')} -Force -ErrorAction SilentlyContinue`) : null);
+export const stopPids = pids => (pids.length ? powershell(`Stop-Process -Id ${pids.map(Number).join(',')} -Force -ErrorAction SilentlyContinue`) : null);
+
+/** The crew's processes (crewKind) under a process, Chiefmate's server: never a live session's or a development environment's window. */
+export function crewUnder(pid, list) {
+  const windows = list.filter(p => /cli\.mjs["']?\s+(session-run|dev-run)\b/i.test(p.cmd)).flatMap(p => [p.pid, ...subtree(p.pid, list)]);
+  const under = subtree(pid, list);
+  return list.filter(p => under.has(p.pid) && crewKind(p) && !windows.includes(p.pid));
+}
 
 /**
  * Restarts Chiefmate: stops the process on its port (only if it is Chiefmate's server) and the crew's processes under
@@ -352,13 +366,7 @@ export async function rescueRestart({ dryRun = false, config = loadConfig() } = 
   if (state?.update?.installing) throw new Error('An update is being installed: Chiefmate restarts by itself when it ends.');
   const server = await listener(config);
   if (server && !/cli\.mjs["']?\s+server\b/i.test(server.cmd)) throw new Error(`The port ${port(config)} belongs to another program (${clip(server.cmd, 120)}): nothing was stopped.`);
-  let crew = [];
-  if (server) {
-    const list = await processList();
-    const windows = list.filter(p => /cli\.mjs["']?\s+(session-run|dev-run)\b/i.test(p.cmd)).flatMap(p => [p.pid, ...subtree(p.pid, list)]);
-    const under = subtree(server.pid, list);
-    crew = list.filter(p => under.has(p.pid) && crewKind(p) && !windows.includes(p.pid));
-  }
+  const crew = server ? crewUnder(server.pid, await processList()) : [];
   const plan = { stop: server?.pid ?? null, crew: crew.map(p => `${p.name} ${p.pid}`), start: 'scripts/start-hidden.vbs' };
   if (dryRun) return { dryRun: true, ...plan };
   if (server) {

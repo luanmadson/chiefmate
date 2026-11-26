@@ -197,6 +197,8 @@ function stopwatch(from) {
 const ticking = from => (from ? `<span class="num" data-since="${esc(from)}">${stopwatch(from)}</span>` : '—');
 function tickClocks() {
   for (const el of document.querySelectorAll('[data-since]')) el.textContent = stopwatch(el.dataset.since);
+  // Countdowns (the computer shutting down): the seconds left, on the server's clock.
+  for (const el of document.querySelectorAll('[data-until]')) el.textContent = String(Math.max(0, Math.ceil((Date.parse(el.dataset.until) - Date.now() - skew) / 1000)));
 }
 
 function runState(status) {
@@ -360,6 +362,9 @@ function queueOrder() {
 }
 
 const liveDot = () => '<span class="live-dot" aria-hidden="true"></span>';
+
+/** A mission run missed while Chiefmate was off or on standby (src/schedule.mjs): "late, runs now", with when it was due. */
+const lateTag = r => (r?.due ? `<span class="tag late" title="${esc(t('Due at {when}', { when: shortDate(r.due) }))}">${esc(t('Late, runs now'))}</span>` : '');
 
 /** The runs going on now, oldest first (runs of different projects go on at the same time). */
 const going = () => (online && state ? state.running ?? (state.current ? [state.current] : []) : []);
@@ -631,6 +636,108 @@ $('#away').addEventListener('click', async () => {
   } finally {
     button.disabled = false;
   }
+});
+
+// ---------- Power modes (src/power.mjs): standby, stop Chiefmate, shut the computer down ----------
+
+// The power symbol in line art.
+const POWER_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8v6M4.6 4.2a5 5 0 1 0 6.8 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="square"/></svg>';
+
+// The last mode seen: once Chiefmate has stopped, the top says "Off" instead of only "no connection".
+let lastPower = null;
+
+/** The mode at the top, always visible: [label, kind, the one-click action's html]. */
+function powerLook() {
+  const p = online ? state.power ?? { mode: 'on' } : null;
+  if (p) lastPower = p;
+  if (!p) return lastPower?.mode === 'stopping' ? [t('Off'), 'neutral', ''] : null;
+  if (p.mode === 'standby') return [t('On standby'), 'warn', `<button type="button" class="button small" data-power="on">${esc(t('Resume'))}</button>`];
+  if (p.mode === 'stopping') {
+    const cancel = p.stage === 'closing' ? '' : `<button type="button" class="button danger small" data-power="cancel">${esc(t('Cancel'))}</button>`;
+    const label = p.stage === 'countdown'
+      ? `${t('Shutting down')} · <span class="num" data-until="${esc(p.countdownUntil)}"></span> s`
+      : esc(p.target === 'shutdown' ? t('Shutting down…') : t('Stopping…'));
+    return [label, 'error', cancel, true];
+  }
+  return [t('On'), 'ok', ''];
+}
+
+function drawPower() {
+  const look = powerLook();
+  const box = $('#power');
+  box.hidden = !look;
+  if (!look) return;
+  const [label, kind, action, html] = look;
+  const help = t('Power: standby, stop Chiefmate or shut the computer down');
+  const chip = `<button type="button" class="power-chip" data-power-open title="${esc(help)}" aria-label="${esc(help)}">${POWER_ICON}<span class="state state-${kind}">${html ? label : esc(label)}</span></button>`;
+  if (draw('#power', JSON.stringify([label, kind, action]), chip + action)) tickClocks();
+}
+
+/** What each mode does, in one line, and its confirmation. */
+const POWER_MODES = () => ({
+  standby: { title: t('Standby'), line: t('Nothing new starts; what is running pauses at a safe point; live sessions go on.'), yes: t('Go on standby') },
+  on: { title: t('Back on'), line: t('The queue goes on, the paused runs first; each mission missed meanwhile runs once.'), yes: t('Turn back on') },
+  stop: { title: t('Stop Chiefmate'), line: t("Pauses everything at a safe point, closes the crew's browsers and ends Chiefmate; the next start resumes the work."), yes: t('Stop Chiefmate') },
+  shutdown: { title: t('Shut the computer down'), line: t('As stopping Chiefmate, then Windows shuts down after a 60-second countdown you can cancel.'), yes: t('Shut down') },
+});
+
+function openPowerDialog() {
+  const p = state?.power ?? { mode: 'on' };
+  const modes = POWER_MODES();
+  const ids = p.mode === 'standby' ? ['on', 'stop', 'shutdown'] : ['standby', 'stop', 'shutdown'];
+  const now = p.mode === 'standby' ? t('On standby since {time}: nothing new starts.', { time: clockTime(p.since) })
+    : p.mode === 'stopping' ? t('Chiefmate is stopping: cancel it at the top.') : t('On: the queue, the missions and the autopilot work as usual.');
+  $('#power-now').textContent = now;
+  $('#power-modes').innerHTML = ids.map(id => `<button type="button" class="power-mode${id === 'shutdown' ? ' danger' : ''}" data-power="${id}"${p.mode === 'stopping' ? ' disabled' : ''}>
+      <strong>${esc(modes[id].title)}</strong><span>${esc(modes[id].line)}</span></button>`).join('');
+  $('#power-dialog').showModal();
+}
+
+/** The confirmation of a mode, with what the owner should know first (runs, live sessions, changes not saved). */
+async function confirmPower(action) {
+  const mode = POWER_MODES()[action];
+  const notSent = $('#message').value.trim() !== '' || $('#agent-form').text.value.trim() !== '';
+  let preview = { runs: [], sessions: [], unsaved: [] };
+  try {
+    preview = await api('/api/power', { action: 'preview' });
+  } catch (error) {
+    toast(error.message);
+    return false;
+  }
+  const lines = [mode.line];
+  if (preview.runs.length) lines.push(t('Pause at a safe point: {runs}.', { runs: preview.runs.map(r => r.title).join('; ') }));
+  if (['stop', 'shutdown'].includes(action)) {
+    if (preview.sessions.length) {
+      lines.push(action === 'shutdown'
+        ? t('Live sessions open: {names}. Their turns pause; a session in its own window ends with the computer.', { names: preview.sessions.map(s => s.name).join('; ') })
+        : t('Live sessions open: {names}. Their turns pause and carry on at the next start.', { names: preview.sessions.map(s => s.name).join('; ') }));
+    }
+    if (preview.unsaved.length) lines.push(t('Changes not committed: {folders}.', { folders: preview.unsaved.map(u => t('{folder} ({count} file(s))', { folder: u.folder, count: u.files })).join('; ') }));
+    if (notSent) lines.push(t('There is text not sent in the app: it will be lost.'));
+  }
+  return confirmDialog(mode.title, lines.join('\n\n'), mode.yes);
+}
+
+async function setPower(action) {
+  if (!['on', 'cancel'].includes(action) && !(await confirmPower(action))) return;
+  try {
+    const p = await api('/api/power', { action });
+    if (action === 'standby') toast(t('On standby: nothing new starts until you resume.'));
+    else if (action === 'on') toast(t('Back on: the queue goes on.'));
+    else if (action === 'cancel') toast(p.mode === 'on' ? t('Canceled: the paused work goes on.') : t('Canceled: still on standby.'));
+    else toast(action === 'shutdown' ? t('Shutting down: the work pauses at a safe point, then the countdown starts.') : t('Stopping: the work pauses at a safe point, then Chiefmate ends.'));
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+document.addEventListener('click', event => {
+  if (event.target.closest('[data-power-open]')) return openPowerDialog();
+  const button = event.target.closest('[data-power]');
+  if (!button || button.disabled) return;
+  if (button.closest('#power-dialog')) $('#power-dialog').close();
+  setPower(button.dataset.power);
 });
 
 /** The project in focus: the run going on now, else the next one in the queue. */
@@ -1119,7 +1226,7 @@ const newsEvent = kind => ({
   merge_failed: t('merge failed'), needs_you: t('needs you'), update_installed: t('update installed'), update_blocked: t('update blocked'),
   memory_alert: t('memory alert'), usage_alert: t('usage alert'), session_ended: t('live session ended'), plan_proposed: t('new proposal'),
   idle: t('empty queue'), autopilot_report: t('autopilot report'), watchdog: t('watchdog'), lockdown: t('emergency lockdown'), security_warning: t('security warning'),
-  away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'),
+  away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'), power: t('power mode'),
 }[kind] ?? kind);
 
 let chatScrolled = false;
@@ -1290,7 +1397,7 @@ function drawQueue() {
   };
   const rows = list.map((r, i) => `<tr class="${i === 0 ? 'next' : ''}">
       <td class="num">${i + 1}</td>
-      <td>${i === 0 ? `<span class="tag">${esc(t('Next'))}</span>` : ''}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span></td>
+      <td>${i === 0 ? `<span class="tag">${esc(t('Next'))}</span>` : ''}${lateTag(r)}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span></td>
       <td>${stateHtml(runState(r.status))}</td>
       <td class="num">${r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? `${shortDate(r.notBefore)} (${esc(relative(r.notBefore))})` : esc(expected(r))}</td>
       <td class="row-actions"><button type="button" class="button danger small" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button></td>
@@ -1299,7 +1406,7 @@ function drawQueue() {
     ? `<div class="label" style="margin-top:24px">${esc(t('Queue'))}</div>
     <table class="table queue"><thead><tr><th>#</th><th>${esc(t('Run'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Expected start'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
     : '';
-  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools]), Math.floor(Date.now() / 60000)]), html);
+  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools, r.due]), Math.floor(Date.now() / 60000)]), html);
 }
 
 /** A run going on: who is at work, the step out of how many, the time counting and the last action, all live. */
@@ -1312,7 +1419,7 @@ function liveCard(a, key) {
   return `<div class="panel live${online ? '' : ' stalled'}"${a.agent ? opensPanel(a.id) : ''}>
       ${face(working, look, 56, `${who}: ${t('Running')}`)}
       <div class="live-main">
-        <div class="live-label">${online ? liveDot() : ''}<span class="label">${esc(t('Running now'))}</span></div>
+        <div class="live-label">${online ? liveDot() : ''}<span class="label">${esc(t('Running now'))}</span>${lateTag(a)}</div>
         <div class="live-title" title="${esc(a.title)}">${esc(a.title)}</div>
         ${a.summary ? `<div class="live-summary" title="${esc(a.summary)}">${esc(a.summary)}</div>` : ''}
         <div class="hint">${esc([projectName(a.project), kindLabel(a.kind), ...runToolsLabel(a), t('started at {time}', { time: clockTime(a.started) })].join(' · '))}</div>
@@ -1701,7 +1808,7 @@ function drawMissions() {
   const html = state.missions.map(m => `
     <div class="panel mission">
       <div class="mission-top">
-        <div><h2>${esc(m.name)}</h2><div class="hint">${esc(m.description ?? '')}</div></div>
+        <div><h2>${m.late ? lateTag(m.late) : ''}${esc(m.name)}</h2><div class="hint">${esc(m.description ?? '')}</div></div>
         <button type="button" class="button" data-run="${esc(m.id)}">${esc(t('Run now'))}</button>
       </div>
       <dl class="facts">
@@ -1931,6 +2038,7 @@ function drawUsage() {
 /** Why the autopilot waits now (src/autopilot.mjs, blockInfo). */
 function autopilotWait(b) {
   switch (b?.reason) {
+    case 'standby': return t('Waiting: Chiefmate is on standby.');
     case 'quiet': return t('Waiting: quiet hours ({hours}).', { hours: b.quiet });
     case 'window': return t('Waiting: the 5-hour window is at {used}, and the autopilot stops at {limit}.', { used: percent(b.used), limit: percent(b.limit) });
     case 'week': return t("Waiting: the plan's week is at {used} with {elapsed} of it gone, ahead of the pace that ends it at {target}.", { used: percent(b.used), elapsed: percent(b.elapsed), target: percent(b.target) });
@@ -3895,6 +4003,7 @@ function drawOffline() {
   online = false;
   drawPresence();
   drawLockdownButton();
+  drawPower();
   drawAway();
   drawFocus();
   drawAlerts();
@@ -3970,6 +4079,7 @@ async function refresh() {
   $('#version').textContent = `Chiefmate ${state.version}`;
   drawPresence();
   drawLockdownButton();
+  drawPower();
   drawAway();
   drawFocus();
   drawMics();

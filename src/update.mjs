@@ -12,6 +12,7 @@ import { t } from './i18n.mjs';
 import { reportEvent } from './news.mjs';
 import { isLocked, refuseWhileLocked } from './lockdown.mjs';
 import { notify } from './notify.mjs';
+import { stopping } from './power.mjs';
 import { readState, saveState } from './store.mjs';
 import { now, ROOT } from './util.mjs';
 import { run } from './workspace.mjs';
@@ -77,8 +78,8 @@ async function installable({ branch, behind }) {
 
 /** Looks for an approved update and, when there is one, installs it as "auto_update_mode" says. */
 async function check() {
-  // No update comes in during an emergency lockdown.
-  if (!hooks || updateInfo.installing || isLocked()) return;
+  // No update comes in during an emergency lockdown, nor while Chiefmate stops for the owner (it goes in at the next start).
+  if (!hooks || updateInfo.installing || isLocked() || stopping()) return;
   const found = await look();
   updateInfo.mode = updateMode();
   if (!found?.behind || found.target === failedTarget || !(await installable(found))) return;
@@ -221,6 +222,7 @@ export async function updateNow({ interruptManager = false } = {}) {
   }
   await checking;
   if (updateInfo.installing) return updateNow({ interruptManager });
+  if (stopping()) throw new Error(t('Chiefmate is shutting down: the update goes in at the next start.'));
   const found = await look();
   if (!found?.behind) throw new Error(t('No approved update is waiting: Chiefmate is up to date.'));
   if (!(await installable(found))) {

@@ -73,6 +73,25 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .lockdown-evidence { margin: 4px 0 10px; padding-left: 18px; max-height: 32vh; overflow-y: auto; font-size: 12px; line-height: 1.5; }
 .lockdown-evidence code { word-break: break-all; }
 .lockdown-check { display: flex; gap: 8px; align-items: flex-start; margin: 10px 0 4px; }
+/* The power mode at the top (drawPower in ui/app.js): on, standby or stopping, in its color, with the one-click action. */
+.power { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.power[hidden] { display: none; }
+.power-chip { appearance: none; display: inline-flex; align-items: center; gap: 7px; background: transparent; border: 1px solid var(--line-strong); border-radius: 0; color: var(--muted); font: inherit; padding: 3px 9px; cursor: pointer; white-space: nowrap; }
+.power-chip:hover { border-color: var(--muted); background: var(--hover); }
+.power-chip:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.power-chip svg { width: 13px; height: 13px; flex: none; }
+.power-chip:has(.state-warn) { border-color: var(--warn); }
+.power-chip:has(.state-error) { border-color: var(--error); }
+.power-dialog { width: min(520px, calc(100vw - 32px)); }
+.power-modes { display: grid; gap: 10px; margin: 12px 0 14px; }
+.power-mode { appearance: none; display: grid; gap: 4px; text-align: left; background: var(--raised); border: 1px solid var(--line-strong); border-left: 2px solid var(--accent); border-radius: 0; color: var(--text); font: inherit; padding: 14px 16px; cursor: pointer; }
+.power-mode strong { color: var(--strong); font-size: 15px; font-weight: 600; }
+.power-mode span { color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.power-mode:hover { background: var(--hover); border-color: var(--muted); border-left-color: var(--accent); }
+.power-mode.danger { border-left-color: var(--error); }
+.power-mode:disabled { opacity: 0.45; cursor: default; }
+.power-mode:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.tag.late { color: var(--warn); border-color: var(--warn); }
 .presence { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
 .presence .state { overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
 .focus { flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: 10px; margin: 0 20px; padding-left: 16px; border-left: 1px solid var(--line); font-size: 12px; white-space: nowrap; overflow: hidden; }

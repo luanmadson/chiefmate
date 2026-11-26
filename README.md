@@ -120,6 +120,8 @@ queue ─► fresh working copy ─► the crew, one after another ─► manage
 5. **The checks.** Chiefmate runs the project's checks, pushes the branch and opens the pull request. Agents cannot push anything to GitHub.
 6. **Your approval.** You review and merge: on GitHub, with **Approve** on its card in Decisions (see "Waiting for your decision"), with **Merge** in the run's page of the app, or by telling the manager "yes" for that run in the conversation. Nothing is merged without your authorization. From there, your project's own deployment does the rest.
 
+**Missed times run once.** A mission whose time comes while the computer or Chiefmate is off, or on standby (see "Standby and shutting down"), runs at the next chance: once, however many of its times went by, and at once. The app marks it **Late, runs now**, with when it was due, on the mission, in the queue and on the run going on, and a Windows notification says so. Runs waiting for the account's limit or a start time start once that time has passed, and the autopilot's daily report goes once, at its next chance.
+
 A one-off task follows the same path, with a single agent and, if you tick the box, the manager's review. A request to a project's team lead (`ask`) does too: the lead's planning first, then the tasks it planned, its first review and the manager's final review.
 
 ### Titles and summaries
@@ -559,7 +561,7 @@ Every message field (the conversation with the manager, the live sessions, the a
 
 The manager doesn't only answer: when something you should know about happens, it tells you in the conversation on its own.
 
-- **The events**, by the names `manager_updates` uses: a run finished (`run_finished`), failed (`run_failed`) or paused (`run_paused`); a pull request ready and waiting for your approval (`pr_ready`); a run's work you merged from the app (`merged`), or a merge of yours that failed (`merge_failed`, told at once: the manager queues the fix of a conflict and tells you in one line); a step or a live session that needs you (`needs_you`); an update installed (`update_installed`) or blocked (`update_blocked`); a memory alert (`memory_alert`) or an alert about the account's usage or the plan's free resets (`usage_alert`); a live session that ended on its own (`session_ended`; not one you ended from Chiefmate); a new proposal on the planning board (`plan_proposed`), which the manager triages before telling you what waits for your decision; what the watchdog found and did (`watchdog`); with the autopilot on, a project's queue that emptied with items triaged "do now" (`idle`), which the manager may put on the queue, and the autopilot's daily report (`autopilot_report`); you stepping out or coming back (`away`, `back`; see "Away mode"); your click on a decision card (`owner_decided`: an answer, an approval, "not now" or a discard; see "Waiting for your decision"); a request a project's agent in charge sent from its talk with you (`owner_request`; see "Talking to the agent in charge"), which the manager answers; the emergency lockdown engaged or released (`lockdown`) and a security warning (`security_warning`; see "Emergency lockdown"), which always reach the manager.
+- **The events**, by the names `manager_updates` uses: a run finished (`run_finished`), failed (`run_failed`) or paused (`run_paused`); a pull request ready and waiting for your approval (`pr_ready`); a run's work you merged from the app (`merged`), or a merge of yours that failed (`merge_failed`, told at once: the manager queues the fix of a conflict and tells you in one line); a step or a live session that needs you (`needs_you`); an update installed (`update_installed`) or blocked (`update_blocked`); a memory alert (`memory_alert`) or an alert about the account's usage or the plan's free resets (`usage_alert`); a live session that ended on its own (`session_ended`; not one you ended from Chiefmate); a new proposal on the planning board (`plan_proposed`), which the manager triages before telling you what waits for your decision; what the watchdog found and did (`watchdog`); with the autopilot on, a project's queue that emptied with items triaged "do now" (`idle`), which the manager may put on the queue, and the autopilot's daily report (`autopilot_report`); you stepping out or coming back (`away`, `back`; see "Away mode"); standby, back on, a stop or shutdown and the start after it (`power`; see "Standby and shutting down"); your click on a decision card (`owner_decided`: an answer, an approval, "not now" or a discard; see "Waiting for your decision"); a request a project's agent in charge sent from its talk with you (`owner_request`; see "Talking to the agent in charge"), which the manager answers; the emergency lockdown engaged or released (`lockdown`) and a security warning (`security_warning`; see "Emergency lockdown"), which always reach the manager.
 - **How it goes.** Chiefmate wakes the manager with a short system message that describes the events and is marked as not coming from you; the manager reads the situation, as with any message, and writes a short, clear notice: what happened and, when something needs you, what to do. It doesn't queue or change anything because of a notice alone.
 - **Grouped.** Events within a minute of the first one go together, as one message. If the manager is answering, they wait in the queue under the conversation ("news for the manager", which you can remove but not edit) and go with your queued messages; then the manager answers you and mentions them in the same reply. The news survives a restart, such as the one after an update; news older than an hour when Chiefmate starts is dropped.
 - **In the conversation**, a notice has a look of its own: a brass rule on the left, a "notice" tag and the events it is about.
@@ -574,6 +576,16 @@ The **Away mode** button, at the top of every screen next to the manager's face,
 - **Back.** Click the button again: the manager gets everything kept meanwhile (`back`) and writes you one summary, the most important first, with what waits for you and the questions it kept. The app opens the conversation.
 
 `away` and `back` always reach the manager, whatever `manager_updates` says.
+
+### Standby and shutting down
+
+The mark at the top of every screen, next to the away button, always says how Chiefmate is: **On** (green), **On standby** (amber) or **Shutting down** (red). Click it for the three modes, each a large button with what it does in one line, confirmed before it goes:
+
+- **Standby.** Nothing new starts: the queue, the missions and the autopilot wait. A run going on pauses at a safe point (its step keeps its session); the live sessions and the manager go on. **Resume**, next to the mark, turns it back on with one click: the paused runs go first, and each mission missed meanwhile runs once. Standby lasts across a restart.
+- **Stop Chiefmate.** Everything pauses at a safe point, as for an update: the runs, the live sessions' turns and the manager's answer (interrupted). Then the mode is saved, the crew's browsers and processes close (never a live session's or a development environment's window) and Chiefmate ends. The watchdog leaves it off. The next start, from the shortcut or at sign-in, resumes the paused work and catches up on the missions missed.
+- **Shut the computer down.** The same, then a 60-second countdown at the top, with **Cancel**, and Windows shuts down. It doesn't force other programs: one with unsaved work can still hold the shutdown and ask you.
+
+Before stopping or shutting down, the confirmation lists what would be affected: the runs that pause, the live sessions open (a session in its own window ends with the computer), the folders of those sessions with changes not committed, and text not sent in the app. Until Chiefmate starts closing, **Cancel** at the top stops it and the paused work goes on. From another device (the remote access), only standby: a Chiefmate stopped there could not be started again from it. The manager hears of each change (the `power` news, always told). On the command line: `node src/cli.mjs power standby|on|stop|shutdown|cancel`, which only shows what would happen until you add `--yes`.
 
 ### The conversation's context
 
@@ -600,6 +612,8 @@ From then on, the server (never an agent) opens only the usage page, with no win
 ## The watchdog
 
 Chiefmate can stop, hang or get stuck, and then it can't tell you so itself. The watchdog checks it from outside: a Windows task (`\Chiefmate\Watchdog`, created by the installer) runs `node src/cli.mjs watch` every 10 minutes while you are signed in, in a process of its own, apart from Chiefmate and its updates.
+
+A Chiefmate you stopped from the app (see "Standby and shutting down") is off on purpose: the watchdog leaves it off, and a queue held by standby is not stuck.
 
 1. **The check uses no AI.** It looks at whether Chiefmate answers (for about a minute, so a restart after an update isn't taken for a problem), a queue that doesn't start a run ready to go for two checks in a row, a run with no new action for an hour (unless it waits for you), an update installing for over 75 minutes or approved and not installed for over two hours, a live session that doesn't start or whose last turn failed, the computer's free memory and Chiefmate's own, and orphan processes: git, Claude Code (headless) or Codex left alive for over half an hour after what started them ended.
 2. **The rescuer, only when it is stuck.** When Chiefmate doesn't answer, the queue, a run or an update is stuck, or there are orphans, the watchdog calls the rescuer: Claude Code, without your configuration, that may read Chiefmate's files and logs and run a closed list of safe actions, and nothing else (it can't change a file):
@@ -761,6 +775,12 @@ node src/cli.mjs close-pr <id> --replaced-by <id> [--yes]
 node src/cli.mjs update-check                 looks for an approved update now (after a merge), instead of within 10 minutes
 node src/cli.mjs update-now [--yes]           installs the approved update now, pausing the work going on and resuming it
                                               after the restart (--interrupt-manager: doesn't wait for the manager's answer)
+node src/cli.mjs power [status]               the power mode: on, standby or stopping
+node src/cli.mjs power standby|on|stop|shutdown|cancel [--yes]
+                                              standby (nothing new starts), back on, stop Chiefmate or shut the
+                                              computer down (see "Standby and shutting down"); without --yes, only
+                                              shows what would happen. Yours only: refused inside a step and the
+                                              manager's answer
 node src/cli.mjs history                      the latest runs
 node src/cli.mjs report <id>                  the reports of a run
 node src/cli.mjs context <id> [step]          what each step received: prompt, model, tools, folders, MCP servers
