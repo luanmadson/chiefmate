@@ -502,6 +502,25 @@ try {
       decisionRefused = /only adds and updates/.test(String(error.stderr));
     }
     expect(decisionRefused, "a step of a run made the owner's decision on a radar idea");
+
+    // The CLI sends the destination options to the running API. Hold the queue while testing the approval.
+    const charge = await import('../src/charge.mjs');
+    const { readRun, readState, saveState } = await import('../src/store.mjs');
+    const target = state.projects.find(p => state.charge?.[p.id])?.id;
+    if (target) {
+      const previous = readState();
+      try {
+        const held = await post('/api/power', { action: 'standby' });
+        if (!held.ok) throw Error('Could not hold the smoke queue');
+        const answer = args => cli(['request', ...args], { CHIEFMATE_RUN: '' });
+        const source = { manager_updates: false, projects: { 'smoke-source': { name: 'Smoke source' } } };        const request = plan => charge.addRequest({ project: 'smoke-source', asked: plan, plan }, source);        const approve = request('Approve in another project');        answer([String(approve.id), 'approve', '--project', target, '--title', 'Smoke approval', '--summary', 'Made up.']);
+        const saved = charge.readRequests().find(r => r.id === approve.id);        expect(saved?.project === 'smoke-source' && saved.status === 'approved' && readRun(saved.run)?.project === target,          'request approve --project did not queue in the destination project');        const forward = request('Forward to the project');        const progress = request('Already queued');        const forwarded = answer([String(forward.id), 'forward', '--project', target, '--note', 'Belongs to this project.']);
+        const linked = answer([String(progress.id), 'in-progress', '--run', saved.run, '--note', 'Covered by the queued run.']);
+        expect(forwarded.includes(`forwarded → project ${target}`) && linked.includes(`in-progress → run ${saved.run}`), 'the CLI did not send or show the request destinations');
+      } finally {
+        saveState(previous);
+      }
+    }
   }
 } catch (error) {
   failures.push(error.message);
@@ -2299,6 +2318,36 @@ try {
     expect(said.some(e => e.kind === 'say' && e.text === 'Codex: Hi codex') && said.some(e => e.kind === 'action' && e.failed && e.text.includes('npm test')) && said.some(e => e.kind === 'action' && e.text.includes('a.txt')), "Codex's text and actions did not reach the history");
     expect(sessions.sessionView(c.id).session.turns === 2, "a Codex session's view is wrong");
     await sessions.endSession(c.id);
+
+    // Read the actual stdin of a resumed turn after a manager answer and a subsequent run status change.
+    const charge = await import('../src/charge.mjs');
+    const { loadConfig } = await import('../src/config.mjs');
+    const { saveRun } = await import('../src/store.mjs');
+    const config = loadConfig();
+    const project = Object.keys(config.projects).find(id => charge.inCharge(config, id));
+    if (project) {
+      const id = 'smoke-charge-live';
+      writeFileSync(path.join(data, 'sessions', `${id}.json`), JSON.stringify({
+        id, project, charge: true, status: 'open', mode: 'app', tool: 'claude', cwd: liveDir, toolSession: '11111111-1111-4111-8111-111111111111',
+      }));
+      sessions.sayToSession(id, 'First charge turn');
+      await idle(id);
+      const firstPrompt = called().at(-1)?.prompt;
+      const request = charge.addRequest({ project, session: id, asked: 'Change the menu', plan: 'Fix the menu' }, config);
+      const { run } = await charge.answerRequest(request.id, 'approve', { note: 'Please keep the layout.', title: 'Smoke menu', summary: 'Made up.' }, config);
+      saveRun({ ...run, status: 'running' });
+      sessions.sayToSession(id, 'Where is my request?');
+      await idle(id);
+      const resumed = called().at(-1);
+      expect(firstPrompt?.includes('Your requests to the manager') && !firstPrompt.includes(`- #${request.id},`)
+        && resumed?.args.includes('--resume') && resumed.prompt.includes('Where is my request?') && resumed.prompt.includes(`- #${request.id},`)
+        && resumed.prompt.includes('approved; the manager: Please keep the layout.') && resumed.prompt.includes(`(#log/${run.id}) (running)`),
+      'the resumed charge turn did not receive the latest request, the manager note and the linked run state in its input');
+      expect(sessions.sessionHistory(id).items.some(e => e.kind === 'request' && e.request === request.id && e.status === 'approved' && e.run === run.id),
+        'the original conversation did not receive the approval and its run link');
+      saveRun({ ...run, status: 'done', ended: new Date().toISOString() });
+      await sessions.endSession(id);
+    }
   } finally {
     process.env.CHIEFMATE_CLAUDE = path.join(data, 'no-claude.exe');
     delete process.env.CHIEFMATE_CODEX;
@@ -2548,20 +2597,19 @@ try {
 
 // The project's agent in charge, in this process with made-up settings and records: who is in charge, a conversation
 // that only reads and sees only its project, a request sent from it (its block taken out of the text), the manager's
-// answers back in the conversation (hold, ask-owner decided on the owner's card, reject), what the manager, the agent
-// and the app see; and an approval that queues a run linked to the request, only with a project of this installation's
-// settings (read only). Nothing starts: the queue is never nudged here, and nothing is told to a manager.
+// answers back in the conversation, what the manager, the agent and the app see, and the linked runs and projects.
+// Nothing starts: the queue is never nudged here, and nothing is told to a manager.
 try {
   process.env.CHIEFMATE_SMOKE = '1';
   const src = file => pathToFileURL(path.join(root, 'src', file)).href;
   const charge = await import(src('charge.mjs'));
-  const { loadAgents, loadConfig } = await import(src('config.mjs'));
+  const { loadAgents } = await import(src('config.mjs'));
   const { saveMemory } = await import(src('leads.mjs'));
   const { openSession, planSession, sessionHistory } = await import(src('sessions.mjs'));
   const { decide } = await import(src('decisions.mjs'));
   const { rulePath } = await import(src('access.mjs'));
   const { NEWS_EVENTS } = await import(src('news.mjs'));
-  const { readRun } = await import(src('store.mjs'));
+  const { readRun, listRuns } = await import(src('store.mjs'));
   const { WORKSPACES } = await import(src('util.mjs'));
   const { t } = await import(src('i18n.mjs'));
   const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-charge-'));
@@ -2660,7 +2708,8 @@ try {
   const held = (await charge.answerRequest(r1.id, 'hold', { note: 'The 5-hour window is at 80%.' }, made)).request;
   const answers = () => sessionHistory(sessionId).items.filter(e => e.kind === 'request').map(e => e.text);
   expect(noReason && held.status === 'waiting' && answers().some(x => x.includes(`#${r1.id}`) && x.includes('80%')), 'a hold without a reason was taken, or the hold did not reach the conversation');
-  expect(charge.chargeSystem(made, 'gamma').includes(`- #${r1.id}`) && charge.chargeSystem(made, 'gamma').includes(': waiting (the manager: The 5-hour window'), "the agent in charge does not see its request's state");
+  const requestContext = (project = 'gamma') => charge.chargeTurn(made, { project, cwd: temp }).requests;
+  expect(requestContext().includes(`- #${r1.id}`) && requestContext().includes(': waiting; the manager: The 5-hour window'), "the agent in charge does not see its request's state");
   const asked = await charge.answerRequest(r1.id, 'ask-owner', { note: 'Large and risky: your call.', recommend: 'hold', level: 3 }, made);
   const q = asked.question;
   expect(asked.request.status === 'owner' && q.options.join('|') === [t('Authorize'), t('Wait'), t('Refuse')].join('|') && q.recommend === t('Wait') && q.request === r1.id && q.project === 'gamma' && q.level === 3 && asked.request.level === 3,
@@ -2676,6 +2725,7 @@ try {
   const decided = await decide({ card: card.id, action: 'answer', option: t('Refuse') }, [card]);
   const after = charge.readRequests().find(x => x.id === r1.id);
   expect(decided.done === 'answered' && after.status === 'rejected' && after.by === 'owner' && !decided.run, `the owner's answer on the card did not decide the request: ${JSON.stringify(after)}`);
+  expect(requestContext().includes('rejected; the manager: Large and risky: your call.'), 'the owner decision hid the manager note from the agent');
   let again = false;
   try {
     await charge.answerRequest(r1.id, 'approve', {}, made);
@@ -2697,17 +2747,42 @@ try {
   }
   expect(stepRefused, 'a step of a run answered a request of an agent in charge');
 
-  // Approved: a run for the project, linked to the request: an "ask" for a team lead, else a task with the review.
-  const config = loadConfig();
-  const real = Object.keys(config.projects ?? {}).find(id => charge.inCharge(config, id));
-  if (real) {
-    const r3 = charge.addRequest({ asked: 'Smoke ask', plan: 'Smoke: change nothing', size: 'S', risk: 'low', project: real }, config);
-    const approved = await charge.answerRequest(r3.id, 'approve', { note: 'Small and safe.', title: 'Smoke request', summary: 'Made up.', level: '1' }, config);
-    const run = readRun(approved.run?.id);
-    const lead = charge.inCharge(config, real).lead;
-    expect(approved.request.status === 'approved' && approved.request.run === run?.id && run.ownerRequest === r3.id && run.status === 'queued' && run.kind === (lead ? 'ask' : 'task')
-      && (lead || run.review) && run.level === 1 && run.instruction.includes('Smoke ask') && run.instruction.includes('Small and safe.'), `an approved request did not queue its run: ${JSON.stringify(run)}`);
+  // Both approval paths select the destination's crew and keep the request in the original conversation.
+  const request = plan => charge.addRequest({ asked: plan, plan, project: 'gamma', session: sessionId }, made);
+  const approval = { note: 'Small and safe.', title: 'Smoke request', summary: 'Made up.', level: '1' };
+  const own = request('Use our team lead');
+  const askRun = readRun((await charge.answerRequest(own.id, 'approve', approval, made)).run.id);
+  expect(askRun.project === 'gamma' && askRun.kind === 'ask' && askRun.ownerRequest === own.id, 'default approval did not go to the source team lead');
+  const cross = request('Use the other crew');
+  const approve = () => charge.answerRequest(cross.id, 'approve', { ...approval, project: 'alpha' }, made);
+  const approvals = await Promise.allSettled([approve(), approve()]);
+  const run = approvals.find(a => a.status === 'fulfilled')?.value.run;
+  expect(approvals.filter(a => a.status === 'fulfilled').length === 1 && listRuns().filter(r => r.ownerRequest === cross.id).length === 1,
+    'simultaneous approvals created duplicate runs');
+  expect(run?.project === 'alpha' && run.kind === 'task' && run.steps[0].agent === 'builder' && run.review && run.level === 1
+    && run.instruction.includes(cross.asked) && run.instruction.includes(approval.note), 'cross-project approval did not use the destination crew and review');
+
+  const forwarded = request('Direct to a project');
+  const redirected = request('Direct to a specific run');
+  const ongoing = request('Covered by an active run');
+  const total = listRuns().length;
+  for (const options of [{}, { project: 'missing' }, { run: '../smoke-feed' }, { project: 'alpha', run: run.id }]) {
+    const [result] = await Promise.allSettled([charge.answerRequest(forwarded.id, 'forward', { ...approval, ...options }, made)]);
+    expect(result.status === 'rejected' && charge.readRequests().find(r => r.id === forwarded.id)?.status === 'pending', 'an invalid destination closed a request');
   }
+  const [finishedRun] = await Promise.allSettled([charge.answerRequest(ongoing.id, 'in-progress', { note: 'Already covered.', run: 'smoke-feed' }, made)]);
+  expect(finishedRun.status === 'rejected', 'a finished run was accepted as still in progress');
+  await charge.answerRequest(forwarded.id, 'forward', { note: 'Belongs to Alpha.', project: 'alpha' }, made);
+  await charge.answerRequest(redirected.id, 'forward', { note: 'See this delivery.', run: 'smoke-feed' }, made);
+  await charge.answerRequest(ongoing.id, 'in-progress', { note: 'Already covered.', run: run.id }, made);
+  const events = sessionHistory(sessionId).items;
+  expect(listRuns().length === total && events.some(e => e.request === forwarded.id && e.status === 'forwarded' && e.targetProject === 'alpha')
+    && events.some(e => e.request === redirected.id && e.status === 'forwarded' && e.run === 'smoke-feed')
+    && events.some(e => e.request === ongoing.id && e.status === 'in-progress' && e.run === run.id),
+  'the new outcomes did not return their destinations to the conversation, or queued extra work');
+  expect(requestContext().includes('forwarded; the manager: Belongs to Alpha.; project alpha [open project](#project/alpha)')
+    && requestContext().includes(`in-progress; the manager: Already covered.; run "Smoke request" [open run](#log/${run.id}) (queued)`)
+    && requestContext('alpha').endsWith('None yet.'), 'the request context did not show the new outcomes and links, or leaked across projects');
   rmSync(temp, { recursive: true, force: true, maxRetries: 5 });
 } catch (error) {
   failures.push(`agent in charge checks: ${error.message}`);

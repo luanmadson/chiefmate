@@ -63,6 +63,7 @@ function inline(s) {
   const keep = html => `\u0000${kept.push(html) - 1}\u0000`;
   const text = String(s ?? '').replace(/\u0000/g, '')
     .replace(/`([^`]+)`/g, (m, c) => keep(ABS_PATH.test(c) || REL_PATH.test(c) || NAME_PATH.test(c) ? fileLink(c, `<code>${esc(c)}</code>`) : `<code>${esc(c)}</code>`))
+    .replace(/\[([^\]\n\u0000]+)\]\((#(?:log|project)\/(?:[\w.-]|%[\da-f]{2})+)\)/gi, (_, label, href) => keep(`<a href="${esc(href)}">${esc(label)}</a>`))
     .replace(ABS_IN_TEXT, (m, before, p) => {
       const tail = p.match(/[.,;:!?)\]]+$/)?.[0] ?? '';
       const file = p.slice(0, p.length - tail.length);
@@ -417,7 +418,8 @@ const builderTarget = () => (builderHash() ? builderProjectOf() : pageProject() 
 // A live session's conversation: "#project/<id>/live/<session>" for a project's, "#session/<id>" for the others.
 const pageSession = () => (location.hash.startsWith('#session/') ? decodeURIComponent(location.hash.slice('#session/'.length)) : null);
 const pageLiveSession = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length).split('/')[2] ?? '') : '');
-const currentView = () => (pageProject() ? 'project' : pageSession() ? 'session' : builderHash() ? 'builder' : VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
+const pageRun = () => /^#log\/([\w-]+)$/.exec(location.hash)?.[1] ?? null;
+const currentView = () => (pageProject() ? 'project' : pageSession() ? 'session' : pageRun() ? 'log' : builderHash() ? 'builder' : VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
 const touchScreen = () => matchMedia('(pointer: coarse)').matches;
 const phoneQuery = matchMedia('(max-width: 600px)'); // the phone layout of ui/style.css
 /** In a message field, Enter sends and Shift+Enter starts a new line; on a touch screen, Enter starts a new line and the Send button sends. */
@@ -475,6 +477,14 @@ function drawFocusBar() {
 
 function showView() {
   const view = currentView();
+  const run = pageRun();
+  if (run && selectedRun !== run) {
+    selectedRun = run;
+    if (state) {
+      drawLog();
+      refreshDetail();
+    }
+  }
   if (view !== 'manager' && focusMode()) setFocusMode(false);
   if (!(view === 'project' && pageTab() === 'manager')) placeChat();
   if (view !== 'session' && !(view === 'project' && ['live', 'charge'].includes(pageTab()))) stopLive();
@@ -1761,7 +1771,7 @@ function liveFeedHtml(x) {
     } else if (e.kind === 'say') {
       html += `<div class="msg manager"><div class="msg-head"><span class="msg-author">${esc(agent)}</span><span class="msg-meta">${esc(clockTime(e.at))}</span></div><div class="msg-body">${md(e.text)}</div></div>`;
     } else if (e.kind === 'request') {
-      html += `<div class="msg system ask">${esc(e.text)}</div>`;
+      html += e.status && e.status !== 'pending' ? requestAnswerHtml(e, x.project) : `<div class="msg system ask">${esc(e.text)}</div>`;
     } else if (e.kind === 'permission') {
       const said = { open: t('The agent asked your permission: {what}', { what: e.text }), done: t('You allowed: {what}', { what: e.text }), refused: t('You refused: {what}', { what: e.text }) }[e.status] ?? e.text;
       html += `<div class="msg system ask">${esc(said)}</div>`;
@@ -2501,22 +2511,40 @@ function drawProjectActions(id, info) {
 function requestState(r) {
   if (r.status === 'approved') return r.merged ? [t('Done'), 'ok'] : [t('Authorized'), 'ok'];
   return {
-    pending: [t('With the manager'), 'info'], waiting: [t('Waiting'), 'warn'], owner: [t('With you'), 'accent'], rejected: [t('Refused'), 'neutral'],
+    pending: [t('With the manager'), 'info'], waiting: [t('Waiting'), 'warn'], owner: [t('With you'), 'accent'], rejected: [t('Refused'), 'error'],
+    forwarded: [t('Forwarded'), 'info'], 'in-progress': [t('Already in progress'), 'ok'],
   }[r.status] ?? [r.status, 'neutral'];
+}
+
+function requestTarget(r) {
+  if (r.run) return `<a href="#log/${encodeURIComponent(r.run)}">${esc(t('Run: {title}', { title: r.runTitle ?? r.run }))}</a>`;
+  if (r.targetProject) return `<a href="${esc(projectHash(r.targetProject))}">${esc(t('Project: {name}', { name: projectName(r.targetProject) }))}</a>`;
+  return '';
+}
+
+function requestAnswerHtml(entry, project) {
+  const outcome = requestState(entry);
+  const saved = state.charge?.[project]?.requests.find(r => r.id === entry.request && r.status === entry.status);
+  const target = requestTarget(entry.run || entry.targetProject ? entry : saved ?? entry);
+  const who = entry.by === 'owner' ? t('You') : entry.by === 'manager' ? t('Manager') : '';
+  return `<div class="msg request-answer state-${outcome[1]}">
+    <div class="msg-head">${who ? `<span class="msg-author">${esc(who)}</span>` : ''}${stateHtml(outcome)}<time class="msg-meta">${esc(clockTime(entry.at))}</time></div>
+    <div class="msg-body">${esc(entry.text)}${target ? `<div>${target}</div>` : ''}</div>
+  </div>`;
 }
 
 /** The requests still open (with the manager, waiting, or with you): the tab's counter. */
 const chargeOpen = id => (state.charge?.[id]?.requests ?? []).filter(r => ['pending', 'waiting', 'owner'].includes(r.status));
 
-function requestRow(id, r) {
+function requestRow(r) {
   const size = { S: t('Size S'), M: t('Size M'), L: t('Size L') }[r.size] ?? r.size;
   const risk = { low: t('Low risk'), medium: t('Medium risk'), high: t('High risk') }[r.risk] ?? r.risk;
   const who = r.by === 'owner' ? t('You') : t('Manager');
-  const run = r.run ? `<a href="${esc(projectHash(id, 'tasks'))}">${esc(t('Run: {title}', { title: r.runTitle ?? r.run }))}</a>${r.runStatus ? ` · ${esc(runState(r.runStatus)[0])}` : ''}` : '';
+  const target = requestTarget(r);
   return `<div class="charge-request">
       <div class="charge-request-main"><span class="primary">${esc(r.plan)}</span>
         <span class="hint">${esc([`#${r.id}`, size, risk, r.urgency ? t('you said: can be done now') : '', relative(r.at)].filter(Boolean).join(' · '))}</span>
-        ${r.note ? `<span class="hint">${esc(`${who}: ${r.note}`)}</span>` : ''}${run ? `<span class="hint">${run}</span>` : ''}</div>
+        ${r.note ? `<span class="hint">${esc(`${who}: ${r.note}`)}</span>` : ''}${target ? `<span class="hint">${target}${r.runStatus ? ` · ${esc(runState(r.runStatus)[0])}` : ''}</span>` : ''}</div>
       <div class="charge-request-state">${stateHtml(requestState(r))}${r.status === 'owner' ? ` <a class="button small" href="#decisions">${esc(t('Decide'))}</a>` : ''}</div>
     </div>`;
 }
@@ -2532,8 +2560,8 @@ function drawProjectCharge(id) {
       ${c.session ? '' : `<button type="button" class="button" data-charge-open="${esc(id)}">${esc(t('Start the conversation'))}</button>`}
     </div>
     ${open.length || closed.length ? `<div class="label">${esc(t('Requests to the manager'))}</div>` : ''}
-    ${open.length ? `<div class="charge-requests">${open.map(r => requestRow(id, r)).join('')}</div>` : ''}
-    ${closed.length ? `<details class="charge-earlier"${open.length ? '' : ' open'}><summary>${esc(t('Answered ({count})', { count: closed.length }))}</summary><div class="charge-requests">${closed.map(r => requestRow(id, r)).join('')}</div></details>` : ''}`;
+    ${open.length ? `<div class="charge-requests">${open.map(requestRow).join('')}</div>` : ''}
+    ${closed.length ? `<details class="charge-earlier"${open.length ? '' : ' open'}><summary>${esc(t('Answered ({count})', { count: closed.length }))}</summary><div class="charge-requests">${closed.map(requestRow).join('')}</div></details>` : ''}`;
   draw('#project-charge-top', JSON.stringify([id, c, language()]), html);
   if (!c?.session) {
     stopLive();
@@ -4722,6 +4750,7 @@ document.addEventListener('click', async event => {
       $('#task-form').instruction.focus();
     } else if (target.dataset.select) {
       selectedRun = target.dataset.select;
+      if (pageRun()) history.replaceState(null, '', `#log/${encodeURIComponent(selectedRun)}`);
       drawLog();
       await refreshDetail(true);
     } else if (target.dataset.cancel) {

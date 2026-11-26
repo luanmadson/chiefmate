@@ -16,7 +16,7 @@ const option = name => {
 };
 const has = name => rest.includes(name);
 // The words of a command that are not options nor their values ("--title <text>").
-const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--level', '--note', '--recommend', '--project', '--tool', '--from', '--description'];
+const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--level', '--note', '--recommend', '--project', '--run', '--tool', '--from', '--description'];
 const words = () => rest.filter((x, i) => !x.startsWith('--') && !VALUED.includes(rest[i - 1]));
 /** The title and summary given with --title and --summary: nothing is generated for them. */
 const brief = () => ({ title: option('--title'), summary: option('--summary'), level: option('--level'), tool: option('--tool') });
@@ -174,12 +174,12 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 the requests the agents in charge of the projects sent from their talk
                                                 with the owner (--all: answered ones too)
   node src/cli.mjs request show <id>            one request: what the owner asked, the plan, size, risk, urgency, answers
-  node src/cli.mjs request <id> approve|hold|ask-owner|reject [--note "<why>"] [--recommend approve|hold|reject]
-                     [--title "..."] [--summary "..."]
-                                                the manager's answer: approve queues the work for the project (an "ask"
-                                                for a team lead, else a task with your review), hold leaves it waiting,
-                                                ask-owner makes it a card in Decisions, reject refuses it (--note is
-                                                required except to approve); the answer goes back to the conversation
+  node src/cli.mjs request <id> approve|hold|ask-owner|forward|in-progress|reject [--note "<why>"]
+                     [--project <id>] [--run <id>] [--recommend approve|hold|reject] [--title "..."] [--summary "..."]
+                                                approve queues work (use --project to choose where); hold leaves it waiting;
+                                                ask-owner opens a card in Decisions; forward links to a project or run;
+                                                in-progress links to an active run; reject refuses it. --note is required
+                                                except to approve. The answer goes back to the conversation.
   node src/cli.mjs merge <id> [--yes]           merges a finished run's work, only with the owner's authorization: shows
                                                 the pull request (or the branch delivered locally), the checks and the
                                                 review's verdict; with --yes, Chiefmate merges it (a pull request on
@@ -370,7 +370,8 @@ async function chatCommand() {
 async function requestCommand() {
   const { readRequests } = await import('./charge.mjs');
   const [first = 'list', second] = words();
-  const line = r => `#${String(r.id).padEnd(3)} ${r.status.padEnd(8)} ${r.project}: ${r.plan.replace(/\s+/g, ' ').slice(0, 100)}  (${r.size}, risk ${r.risk}${r.urgency ? ', now' : ''}${r.level ? `, level ${r.level}` : ''}${r.run ? `, run ${r.run}` : ''})`;
+  const destination = r => r.run ? `run ${r.run}` : r.targetProject ? `project ${r.targetProject}` : '';
+  const line = r => `#${String(r.id).padEnd(3)} ${r.status.padEnd(8)} ${r.project}: ${r.plan.replace(/\s+/g, ' ').slice(0, 100)}  (${r.size}, risk ${r.risk}${r.urgency ? ', now' : ''}${r.level ? `, level ${r.level}` : ''}${destination(r) ? `, ${destination(r)}` : ''})`;
   if (first === 'list') {
     const all = readRequests().filter(r => (!option('--project') || r.project === option('--project')) && (has('--all') || ['pending', 'waiting', 'owner'].includes(r.status)));
     if (!all.length) console.log(has('--all') ? 'No requests.' : 'No request waiting for an answer.');
@@ -385,14 +386,18 @@ async function requestCommand() {
     console.log(`  Asked (by the owner, ${formatDateTime(r.at)}): ${r.asked}
   Plan (${r.memberName ?? r.member ?? 'the agent in charge'}): ${r.plan}`);
     for (const h of r.history ?? []) console.log(`  ${formatDateTime(h.at)} ${h.by}: ${h.action}${h.note ? ` (${h.note})` : ''}`);
-    if (!second && first !== 'show') console.log(`Answer with node src/cli.mjs request ${r.id} approve|hold|ask-owner|reject --note "<why>" --level 1|2|3.`);
+    if (!second && first !== 'show') console.log(`Answer with node src/cli.mjs request ${r.id} approve|hold|ask-owner|forward|in-progress|reject --note "<why>" --level 1|2|3.`);
     return;
   }
   // Only the manager (or the owner) answers: a step of a run never does.
   if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error('A step of a run cannot answer the requests of the agents in charge.');
-  const result = await api('/api/request', { id: r.id, action: second, note: option('--note'), recommend: option('--recommend'), ...brief() });
+  for (const flag of ['--project', '--run']) {
+    if (has(flag) && (!option(flag) || option(flag).startsWith('--'))) throw new Error(`${flag} needs an ID.`);
+  }
+  const result = await api('/api/request', { id: r.id, action: second, note: option('--note'), recommend: option('--recommend'), project: option('--project'), run: option('--run'), ...brief() });
   const a = result.request;
-  console.log(`Request #${a.id}: ${a.status}${result.run ? `. Queued: ${result.run.title} [${result.run.id}]` : ''}${result.question ? `. Question #${result.question.id} waits for the owner in Decisions; the answer decides the request by itself.` : ''}`);
+  const target = result.run ? `. Queued in ${result.run.project}: ${result.run.title} [${result.run.id}]` : destination(a) ? ` → ${destination(a)}` : '';
+  console.log(`Request #${a.id}: ${a.status}${target}${result.question ? `. Question #${result.question.id} waits for the owner in Decisions; the answer decides the request by itself.` : ''}`);
   console.log('The answer went back to the conversation with the agent in charge.');
 }
 

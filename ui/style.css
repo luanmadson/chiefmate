@@ -791,6 +791,10 @@ button.tab { background: transparent; border-top: 0; border-left: 0; border-righ
 .msg.first summary::-webkit-details-marker { display: none; }
 .msg.first[open] summary { margin-bottom: 6px; }
 .msg.system.ask { color: var(--accent); }
+.msg.request-answer { border-inline-start: 2px solid currentColor; background: var(--raised); }
+.request-answer .msg-head { flex-wrap: wrap; }
+.request-answer .state { border: 1px solid currentColor; padding: 2px 6px; }
+.request-answer .msg-body { color: var(--text); overflow-wrap: anywhere; }
 .live-ask { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 16px; padding: 9px 18px; border-bottom: 1px solid var(--accent); }
 .live-ask .needs-text { flex: 1 1 320px; min-width: 0; }
 .live-ask .needs-label { display: block; color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }

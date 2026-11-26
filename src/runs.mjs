@@ -104,8 +104,7 @@ function workOf(run, config = loadConfig()) {
 export function createRun({
   kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [], plan = null, prompt = null,
   title: givenTitle = null, summary: givenSummary = null, level = null, request = null, tool: givenTool = null, due = null,
-}) {
-  const config = loadConfig();
+}, config = loadConfig()) {
   // The tool chosen for the run's crew steps (--tool); none: each member's own (src/tools.mjs).
   const tool = parseTool(givenTool);
   let title, steps, finalReview, project;

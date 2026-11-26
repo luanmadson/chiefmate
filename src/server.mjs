@@ -616,8 +616,7 @@ export function startServer() {
           return reply(res, 200, decided);
         }
         case '/api/request': {
-          // The manager's answer to a request of a project's agent in charge (cli.mjs request <id> approve|hold|ask-owner|reject).
-          const answered = await answerRequest(body.id, String(body.action ?? ''), { note: body.note, recommend: body.recommend, ...brief(body) });
+          const answered = await answerRequest(body.id, String(body.action ?? ''), { note: body.note, recommend: body.recommend, project: body.project, run: body.run, ...brief(body) });
           if (answered.run) nudgeQueue();
           return reply(res, 200, answered);
         }
