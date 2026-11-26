@@ -139,11 +139,13 @@ class Refused extends Error {
   }
 }
 
-// The innermost root holding "p": a project's working copy (workspaces/<id>) inside Chiefmate's own clone is its own root.
-const innermost = (roots, p, ...fields) => roots
+// The roots holding "p", innermost first: a project's working copy (workspaces/<id>) inside Chiefmate's own clone is its
+// own root.
+const holding = (roots, p, ...fields) => roots
   .map(r => ({ r, at: Math.max(...fields.map(f => (within(p, r[f]) ? r[f].length : -1))) }))
   .filter(x => x.at >= 0)
-  .sort((a, b) => b.at - a.at)[0]?.r;
+  .sort((a, b) => b.at - a.at)
+  .map(x => x.r);
 
 const outside = () => new Refused(t('This file is outside the folders the viewer may open.'));
 const guarded = () => new Refused(t('This file is protected: the viewer never opens it.'));
@@ -157,21 +159,22 @@ function protectedPath(p, root, blocked) {
 /**
  * The real path of "input" (absolute), once it is inside a root and not protected: { real, root }. Refused: a relative
  * path, a device or network path, a stream (file:stream), anything outside the roots, before and after links and
- * junctions are followed, and anything protected. Nothing outside the roots is looked at on the disk.
+ * junctions are followed, and anything protected. Nothing outside the roots is looked at on the disk. "root" is the
+ * innermost root holding it; a protected name counts from every root holding it, so a nested root never hides one.
  */
 export function checkPath(input, roots, { blocked = blockedPlaces() } = {}) {
   const raw = String(input ?? '');
   if (!raw || raw.includes('\0') || /^[\\/]{2}/.test(raw) || !path.isAbsolute(raw) || (windows && raw.replace(/^[a-z]:/i, '').includes(':'))) throw outside();
   const lexical = path.resolve(raw);
-  const near = innermost(roots, lexical, 'dir', 'real');
-  if (!near) throw outside();
-  if (protectedPath(lexical, within(lexical, near.dir) ? near.dir : near.real, blocked)) throw guarded();
+  const near = holding(roots, lexical, 'dir', 'real');
+  if (!near.length) throw outside();
+  if (near.some(r => protectedPath(lexical, within(lexical, r.dir) ? r.dir : r.real, blocked))) throw guarded();
   const real = realOf(lexical);
   if (!real) throw new Refused(t('File not found.'), 404);
-  const root = innermost(roots, real, 'real');
-  if (!root) throw outside();
-  if (protectedPath(real, root.real, blocked)) throw guarded();
-  return { real, root };
+  const held = holding(roots, real, 'real');
+  if (!held.length) throw outside();
+  if (held.some(r => protectedPath(real, r.real, blocked))) throw guarded();
+  return { real, root: held[0] };
 }
 
 // ---------- The disk ----------

@@ -144,6 +144,12 @@ test("a local delivery's Files tab opens your folder first, and the working copy
   assert.deepEqual([own.kind, own.project], ['workspace', 'lessons']);
   assert.equal(listFolder(path.join(hostWs, 'lessons'), roots, { blocked: [] }).parent, null);
   assert.equal(checkPath(path.join(host, 'README.md'), roots, { blocked: [] }).root.project, 'host');
+  // A root nested in a protected folder of another root never opens it.
+  const pkg = path.join(host, 'node_modules', 'pkg');
+  write(path.join(pkg, 'index.js'));
+  const nested = viewerRoots({ ...local, viewer: { extra_roots: [pkg] } }, { workspaces: hostWs });
+  assert.equal(nested.at(-1).kind, 'extra');
+  assert.throws(() => checkPath(path.join(pkg, 'index.js'), nested, { blocked: [] }), e => e.code === 403);
   const first = rootsFor(local, 'lessons', { workspaces: hostWs })[0];
   assert.deepEqual([first.kind, first.path.toLowerCase()], ['clone', realpathSync.native(folder).toLowerCase()]);
   // Delivered as a pull request, the crew's working copy stays first.
