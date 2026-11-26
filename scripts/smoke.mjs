@@ -1777,7 +1777,7 @@ try {
   // in the manager's situation; a fresh, merged or discarded one is neither.
   const halfDay = new Date(Date.now() - 13 * 3600_000).toISOString();
   const staleRuns = [
-    { id: 's-pr', project: 'p', title: 'Stalled PR', status: 'done', created: halfDay, ended: halfDay, pullRequest: 'https://github.com/o/r/pull/9' },
+    { id: 's-pr', project: 'p', title: 'Stalled PR', status: 'done', created: halfDay, ended: halfDay, pullRequest: 'https://github.com/o/r/pull/9', level: 1 },
     { id: 's-local', project: 'q', title: 'Stalled branch', status: 'done', created: halfDay, ended: halfDay, branch: 'cm/stalled', delivered: 'C:/clone' },
     { id: 's-other', project: 'third', title: 'Reviewed by others', status: 'done', created: halfDay, ended: halfDay, pullRequest: 'https://github.com/o/r/pull/10' },
     { id: 's-fresh', project: 'p', title: 'Fresh PR', status: 'done', created: at, ended: at, pullRequest: 'https://github.com/o/r/pull/11' },
@@ -1788,8 +1788,9 @@ try {
   const stale = id => staleList.find(i => i.id === `stale:${id}`);
   expect(stale('s-pr')?.level === 'important' && stale('s-local')?.level === 'important' && stale('s-other')?.level === 'info' && !stale('s-fresh') && !stale('s-merged') && !stale('s-dropped'),
     `a stalled delivery is not an alert, or a fresh, merged or discarded one is: ${JSON.stringify(staleList.map(i => [i.id, i.level]))}`);
-  const managerStale = staleLine(staleRuns, 'Owner');
-  expect(managerStale.includes('[s-pr]') && managerStale.includes('branch cm/stalled') && !managerStale.includes('s-fresh') && !managerStale.includes('s-merged') && staleLine([], 'Owner') === '',
+  const managerStale = staleLine(staleRuns, 'Owner', { projects: { third: { merge_by_owner: false } } });
+  expect(managerStale.includes('[s-pr] Stalled PR (project p, level 1,') && managerStale.includes('branch cm/stalled') && managerStale.includes('(project third, someone else reviews it,')
+    && !managerStale.includes('s-fresh') && !managerStale.includes('s-merged') && staleLine([], 'Owner') === '',
     `the manager's situation does not list the stalled deliveries: ${managerStale}`);
   expect(pendingDeliveries(staleRuns, { project: 'q' }).map(d => d.run.id).join() === 's-local', "one project's deliveries include another's");
   expect(pullRequestTargets(staleList, staleRuns, []).some(x => x.run?.id === 's-local'), "a stalled branch is not checked for a merge outside Chiefmate");

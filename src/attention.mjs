@@ -238,12 +238,13 @@ export function pendingDeliveries(runs, { project = null } = {}) {
 /** Where a delivery waits, in a few words for the manager and the agent in charge. */
 export const deliveryPlace = r => (r.pullRequest ? `pull request ${r.pullRequest}` : `branch ${r.branch ?? '?'} in ${r.delivered}`);
 
-/** For the manager's situation: the stalled deliveries, or '' when none. */
-export function staleLine(runs, owner = 'the owner') {
+/** For the manager's situation: the stalled deliveries, or '' when none; "config" tells the ones someone else reviews. */
+export function staleLine(runs, owner = 'the owner', config = null) {
   const stale = pendingDeliveries(runs).filter(d => d.stale);
   if (!stale.length) return '';
   const hours = ms => `${Math.floor(ms / HOUR)} h`;
-  return `Stalled deliveries (over ${STALE_AFTER / HOUR} hours with no merge and no decision; each is also an alert in the app; remind ${owner} when it fits, and ask whether to merge or discard it): ${stale.slice(0, 10).map(({ run: r, waited }) => `[${r.id}] ${r.title} (project ${r.project}, ${deliveryPlace(r)}, waiting for ${hours(waited)})`).join('; ')}${stale.length > 10 ? `; and ${stale.length - 10} more` : ''}.`;
+  const who = r => (config?.projects?.[r.project]?.merge_by_owner === false ? 'someone else reviews it' : `level ${r.level ?? '?'}`);
+  return `Stalled deliveries (over ${STALE_AFTER / HOUR} hours with no merge and no discard; each is also an alert in the app; settle the level 1 ones when a standing authorization of ${owner}'s covers them, else remind ${owner} when it fits that its card in Decisions waits for Approve or Discard): ${stale.slice(0, 10).map(({ run: r, waited }) => `[${r.id}] ${r.title} (project ${r.project}, ${who(r)}, ${deliveryPlace(r)}, waiting for ${hours(waited)})`).join('; ')}${stale.length > 10 ? `; and ${stale.length - 10} more` : ''}.`;
 }
 
 // ---------- The pull requests and branches already merged ----------

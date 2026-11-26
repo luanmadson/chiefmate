@@ -150,7 +150,7 @@ export function situation(libraries = []) {
   lines.push(computerLine(config));
   lines.push(sessionsLine(config));
   lines.push(planningLine(config.owner || 'the owner'));
-  const stale = staleLine(runs, config.owner || 'the owner');
+  const stale = staleLine(runs, config.owner || 'the owner', config);
   if (stale) lines.push(stale);
   lines.push(radarLine(config.owner || 'the owner'));
   const questions = questionsLine();

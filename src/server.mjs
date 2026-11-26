@@ -238,15 +238,16 @@ async function filesRoute(req, res, url) {
 
 /**
  * A project's page: its facts, your clone and its branch, its development environment, its recent runs (the ones
- * neither waiting nor going on, newest first) and its open matters (src/charge.mjs). The rest of the page (crew, runs going on, planning, memory, sessions)
- * comes from the state.
+ * neither waiting nor going on, newest first) and its open matters (src/charge.mjs). The rest of the page (crew, runs
+ * going on, planning, memory, sessions) comes from the state.
  */
 async function projectPage(id) {
   const config = loadConfig();
   const info = await projectInfo(id, config, computer(config));
   const going = new Set(liveRuns().map(l => l.run));
-  const history = listRuns().filter(r => r.project === id && !['queued', 'waiting'].includes(r.status) && !going.has(r.id)).slice(0, 15).map(summary);
-  return { ...info, history, open: openMatters(config, id, { sessions: listSessions() }) };
+  const runs = listRuns(); // read once: the page asks again every few seconds
+  const history = runs.filter(r => r.project === id && !['queued', 'waiting'].includes(r.status) && !going.has(r.id)).slice(0, 15).map(summary);
+  return { ...info, history, open: openMatters(config, id, { runs, sessions: listSessions() }) };
 }
 
 /** The title and summary given with a new run ("title", "summary"): nothing is generated for what is given. */

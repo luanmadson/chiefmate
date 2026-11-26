@@ -2583,12 +2583,13 @@ function drawProjectOpen(id, info) {
   const m = info && !info.error ? info.open : null;
   if (!m) return draw('#project-open', '', '');
   const stale = m.deliveries.filter(d => d.stale).length;
+  // The summary line names only what there is.
   const parts = [
-    t('{count} delivery(ies) waiting for you', { count: m.deliveries.length }) + (stale ? ` (${t('{count} stalled', { count: stale })})` : ''),
-    t('{count} open item(s)', { count: m.plan.length }),
-    t('{count} run(s) in the last 7 days', { count: m.recent.length }),
-    t('{count} live session(s)', { count: m.sessions.length }),
-  ];
+    m.deliveries.length ? t('{count} delivery(ies) waiting for you', { count: m.deliveries.length }) + (stale ? ` (${t('{count} stalled', { count: stale })})` : '') : '',
+    m.plan.length ? t('{count} open item(s)', { count: m.plan.length }) : '',
+    m.recent.length ? t('{count} run(s) in the last 7 days', { count: m.recent.length }) : '',
+    m.sessions.length ? t('{count} live session(s)', { count: m.sessions.length }) : '',
+  ].filter(Boolean);
   const row = (main, hints, side = '') => `<div class="charge-request"><div class="charge-request-main"><span class="primary">${main}</span>${hints.filter(Boolean).map(h => `<span class="hint">${h}</span>`).join('')}</div><div class="charge-request-state">${side}</div></div>`;
   const runLink = (run, label) => `<a href="#log" data-select="${esc(run)}">${esc(label)}</a>`;
   const group = (title, rows) => (rows.length ? `<div class="label">${esc(title)}</div><div class="charge-requests">${rows.join('')}</div>` : '');
@@ -2603,13 +2604,12 @@ function drawProjectOpen(id, info) {
   const html = `<div class="open-matters">
       <div class="label">${esc(t('Open matters'))}</div>
       <p class="open-matters-line">${esc(empty ? t('Nothing open: no delivery waiting, no open item, no recent run, no live session.') : parts.join(' · '))}</p>
-      ${empty ? '' : `<details class="charge-earlier"><summary>${esc(t('Details'))}</summary>
+      ${empty ? '' : `<details class="charge-earlier" data-keep-open="open-matters-${esc(id)}"><summary>${esc(t('Details'))}</summary>
         ${group(t('Deliveries waiting for you'), deliveries)}${group(t('Open items on the board'), plan)}${group(t('Runs of the last 7 days'), recent)}${group(t('Live sessions'), sessions)}
         <p class="hint">${esc(t('The agent in charge reads the same summary at every message.'))}</p></details>`}
     </div>`;
-  // Kept while open, so a refresh doesn't fold it under the pointer.
-  if ($('#project-open details[open]')) return;
-  draw('#project-open', JSON.stringify([id, m, language()]), html);
+  // Drawn again only when what it shows changes; opened, it stays open.
+  draw('#project-open', html, html);
 }
 
 function drawProjectFacts(info) {

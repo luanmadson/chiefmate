@@ -1756,7 +1756,7 @@
   "{title}: waiting since {when}, neither merged nor discarded.": "{title}: aguardando desde {when}, sem merge nem descarte.",
   "Next: the manager triages it": "Próximo passo: o gerente faz a triagem",
   "Next: you decide": "Próximo passo: você decide",
-  "Next: the crew takes it in its turn": "Próximo passo: a equipe pega na vez dele",
+  "Next: the crew takes it in its turn": "Próximo passo: a equipe faz quando chegar a vez",
   "Next: nothing for now": "Próximo passo: nada por enquanto",
   "Next: not started yet": "Próximo passo: ainda não começou",
   "Next: its run starts": "Próximo passo: a execução começa",
