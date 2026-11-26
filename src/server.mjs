@@ -6,7 +6,7 @@ import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { attentionArchive, attentionItems, attentionSummary, markSeen } from './attention.mjs';
 import { autopilotStatus, changeAutopilot } from './autopilot.mjs';
-import { answerRequest, chargeProfileId, inCharge, projectRequests } from './charge.mjs';
+import { answerRequest, chargeProfileId, inCharge, openMatters, projectRequests } from './charge.mjs';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { EFFORTS, loadAgents, loadConfig, projectCrew, projectEfforts, projectLead, saveConfig } from './config.mjs';
 import { effortHistory, effortSource, runEffortChanges, setEffort } from './effort.mjs';
@@ -237,16 +237,17 @@ async function filesRoute(req, res, url) {
 }
 
 /**
- * A project's page: its facts, your clone and its branch, its development environment, and its recent runs (the ones
- * neither waiting nor going on, newest first). The rest of the page (crew, runs going on, planning, memory, sessions)
- * comes from the state.
+ * A project's page: its facts, your clone and its branch, its development environment, its recent runs (the ones
+ * neither waiting nor going on, newest first) and its open matters (src/charge.mjs). The rest of the page (crew, runs
+ * going on, planning, memory, sessions) comes from the state.
  */
 async function projectPage(id) {
   const config = loadConfig();
   const info = await projectInfo(id, config, computer(config));
   const going = new Set(liveRuns().map(l => l.run));
-  const history = listRuns().filter(r => r.project === id && !['queued', 'waiting'].includes(r.status) && !going.has(r.id)).slice(0, 15).map(summary);
-  return { ...info, history };
+  const runs = listRuns(); // read once: the page asks again every few seconds
+  const history = runs.filter(r => r.project === id && !['queued', 'waiting'].includes(r.status) && !going.has(r.id)).slice(0, 15).map(summary);
+  return { ...info, history, open: openMatters(config, id, { runs, sessions: listSessions() }) };
 }
 
 /** The title and summary given with a new run ("title", "summary"): nothing is generated for what is given. */

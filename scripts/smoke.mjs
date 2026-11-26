@@ -1679,7 +1679,7 @@ try {
 // info, the seen marks (an info notice goes away), and the urgent Windows notification that stays until seen.
 try {
   const src = file => pathToFileURL(path.join(root, 'src', file)).href;
-  const { attentionArchive, attentionItems, attentionSummary, checkPullRequests, markSeen, pullRequestTargets } = await import(src('attention.mjs'));
+  const { attentionArchive, attentionItems, attentionSummary, checkPullRequests, markSeen, pendingDeliveries, pullRequestTargets, staleLine } = await import(src('attention.mjs'));
   const { toastXml } = await import(src('notify.mjs'));
   // gh and git stand-ins; a check done now also keeps the background check (real gh) away for its 5 minutes.
   const checked = [];
@@ -1773,6 +1773,27 @@ try {
     `a pull request closed on GitHub did not mark its run as discarded: ${JSON.stringify(readRun('c-pr'))}`);
   expect(planItem(closedTriaged.id).status === 'triaged' && planItem(closedTriaged.id).rank != null && planItem(closedTriaged.id).recommend === 'later' && planItem(closedPlain.id).status === 'todo',
     `a board item whose pull request was closed without a merge did not go back to the owner's decision: ${JSON.stringify([planItem(closedTriaged.id), planItem(closedPlain.id)])}`);
+  // A delivery past 12 hours with no merge nor discard: an alert (info for a project someone else reviews) and a line
+  // in the manager's situation; a fresh, merged or discarded one is neither.
+  const halfDay = new Date(Date.now() - 13 * 3600_000).toISOString();
+  const staleRuns = [
+    { id: 's-pr', project: 'p', title: 'Stalled PR', status: 'done', created: halfDay, ended: halfDay, pullRequest: 'https://github.com/o/r/pull/9', level: 1 },
+    { id: 's-local', project: 'q', title: 'Stalled branch', status: 'done', created: halfDay, ended: halfDay, branch: 'cm/stalled', delivered: 'C:/clone' },
+    { id: 's-other', project: 'third', title: 'Reviewed by others', status: 'done', created: halfDay, ended: halfDay, pullRequest: 'https://github.com/o/r/pull/10' },
+    { id: 's-fresh', project: 'p', title: 'Fresh PR', status: 'done', created: at, ended: at, pullRequest: 'https://github.com/o/r/pull/11' },
+    { id: 's-merged', project: 'p', title: 'Merged', status: 'done', created: halfDay, ended: halfDay, branch: 'cm/m', delivered: 'C:/clone', merged: { by: 'owner' } },
+    { id: 's-dropped', project: 'p', title: 'Dropped', status: 'done', created: halfDay, ended: halfDay, pullRequest: 'https://github.com/o/r/pull/12', discarded: { by: 'owner' } },
+  ];
+  const staleList = attentionItems({ config: { projects: { third: { merge_by_owner: false } } }, runs: staleRuns });
+  const stale = id => staleList.find(i => i.id === `stale:${id}`);
+  expect(stale('s-pr')?.level === 'important' && stale('s-local')?.level === 'important' && stale('s-other')?.level === 'info' && !stale('s-fresh') && !stale('s-merged') && !stale('s-dropped'),
+    `a stalled delivery is not an alert, or a fresh, merged or discarded one is: ${JSON.stringify(staleList.map(i => [i.id, i.level]))}`);
+  const managerStale = staleLine(staleRuns, 'Owner', { projects: { third: { merge_by_owner: false } } });
+  expect(managerStale.includes('[s-pr] Stalled PR (project p, level 1,') && managerStale.includes('branch cm/stalled') && managerStale.includes('(project third, someone else reviews it,')
+    && !managerStale.includes('s-fresh') && !managerStale.includes('s-merged') && staleLine([], 'Owner') === '',
+    `the manager's situation does not list the stalled deliveries: ${managerStale}`);
+  expect(pendingDeliveries(staleRuns, { project: 'q' }).map(d => d.run.id).join() === 's-local', "one project's deliveries include another's");
+  expect(pullRequestTargets(staleList, staleRuns, []).some(x => x.run?.id === 's-local'), "a stalled branch is not checked for a merge outside Chiefmate");
   const urgent = toastXml('Needs you', 'Sign in', 'chiefmate:operations', { urgent: true });
   expect(urgent.includes('scenario="reminder"') && urgent.includes('activationType="system"') && !toastXml('Done', 'x').includes('scenario'), 'an urgent Windows notification does not stay until seen');
 } catch (error) {
@@ -2579,6 +2600,48 @@ try {
   expect(!turn.tools.some(x => ['Bash', 'Edit', 'Write', 'Agent'].includes(x)) && ['Bash', 'Edit', 'Write', 'Agent'].every(x => turn.disallowed.includes(x)), 'the agent in charge may change things or run commands');
   const denied = dir => turn.disallowed.includes(`Read(${rulePath(dir)}/**)`);
   expect(denied(path.join(WORKSPACES, 'alpha')) && denied(path.join(temp, 'alpha-clone')) && denied(data), "the agent in charge may read other projects or Chiefmate's data/");
+
+  // Its open matters: the board's open items, the deliveries waiting (a stalled one marked), the week's runs with their
+  // final summary and the live sessions, of its project alone, within their ceilings.
+  const hoursAgo = h => new Date(Date.now() - h * 3600_000).toISOString();
+  const mRuns = [
+    { id: 'm-branch', project: 'gamma', title: 'Gamma menu fix', status: 'done', ended: hoursAgo(20), branch: 'cm/menu', delivered: temp, summary: 'The menu on phones.' },
+    { id: 'm-pr', project: 'gamma', title: 'Gamma footer', status: 'done', ended: hoursAgo(2), pullRequest: 'https://example.com/pull/7' },
+    { id: 'm-merged', project: 'gamma', title: 'Gamma header', status: 'done', ended: hoursAgo(30), pullRequest: 'https://example.com/pull/6', merged: { by: 'owner' }, outcome: { done: ['Header redone'], change: 'A new header.', needs: '' } },
+    { id: 'm-old', project: 'gamma', title: 'Gamma ancient', status: 'done', ended: hoursAgo(24 * 10), merged: { by: 'owner' } },
+    { id: 'm-alpha', project: 'alpha', title: 'Alpha secret', status: 'done', ended: hoursAgo(20), branch: 'cm/alpha', delivered: temp },
+    ...Array.from({ length: 14 }, (_, i) => ({ id: `m-many-${i}`, project: 'gamma', title: `Gamma batch ${i}`, status: 'failed', ended: hoursAgo(3 + i), result: 'tests failed' })),
+  ];
+  const mItems = [
+    { id: 41, project: 'gamma', title: 'Gamma menu', status: 'waiting_owner', priority: 'high', run: 'm-branch' },
+    { id: 42, project: 'Gamma', title: 'Gamma search', status: 'triaged', priority: 'medium', recommend_note: 'Worth it.' },
+    { id: 43, project: 'gamma', title: 'Gamma done', status: 'done', priority: 'low' },
+    { id: 44, project: 'alpha', title: 'Alpha plan', status: 'todo', priority: 'high' },
+  ];
+  const mSessions = [
+    { id: 's-g', project: 'gamma', name: 'Gamma live', tool: 'codex', mode: 'app', status: 'open', created: hoursAgo(1) },
+    { id: 's-g-old', project: 'gamma', name: 'Gamma closed', tool: 'claude', status: 'ended', created: hoursAgo(5) },
+    { id: 's-charge', project: 'gamma', name: 'Gamma charge', tool: 'claude', mode: 'app', status: 'open', charge: true, created: hoursAgo(1) },
+    { id: 's-a', project: 'alpha', name: 'Alpha live', tool: 'claude', status: 'open', created: hoursAgo(1) },
+  ];
+  const matters = charge.openMatters(made, 'gamma', { runs: mRuns, items: mItems, sessions: mSessions });
+  expect(matters.plan.map(i => i.id).join() === '41,42' && matters.deliveries.map(d => d.run).join() === 'm-branch,m-pr' && matters.deliveries[0].stale && !matters.deliveries[1].stale,
+    `the open items or the deliveries waiting (oldest first, the stalled one marked) are wrong: ${JSON.stringify([matters.plan, matters.deliveries])}`);
+  expect(matters.recent.length === 10 && !matters.recent.some(r => r.run === 'm-old') && matters.sessions.map(s => s.id).join() === 's-g',
+    `the runs of the week (at most 10) or the live sessions (open, not the conversation itself) are wrong: ${JSON.stringify([matters.recent.map(r => r.run), matters.sessions])}`);
+  const mattersAll = JSON.stringify(matters);
+  expect(!mattersAll.includes('Alpha') && !mattersAll.includes('alpha'), `another project's matters reached this one: ${mattersAll}`);
+  const mText = charge.mattersText(matters, 'Owner');
+  expect(mText.includes('Gamma menu fix') && mText.includes('branch cm/menu') && mText.includes('stalled') && mText.includes("waits for the owner's decision") && mText.includes('Worth it.') && mText.includes('Gamma live') && mText.length <= 9000,
+    `the agent in charge does not read its open matters: ${mText}`);
+  const crowded = charge.mattersText({ ...matters, recent: matters.recent.map(r => ({ ...r, outcome: 'x'.repeat(400) })), plan: Array(12).fill(matters.plan[1]) }, 'Owner');
+  expect(crowded.length <= 9000, `the open matters have no ceiling: ${crowded.length} characters`);
+  const { saveRun: saveMatterRun } = await import(src('store.mjs'));
+  saveMatterRun({ id: 'm-saved', kind: 'task', project: 'gamma', title: 'Gamma saved delivery', status: 'done', created: hoursAgo(14), ended: hoursAgo(13), branch: 'cm/saved', delivered: temp, steps: [] });
+  saveMatterRun({ id: 'm-saved-alpha', kind: 'task', project: 'alpha', title: 'Alpha saved delivery', status: 'done', created: hoursAgo(14), ended: hoursAgo(13), branch: 'cm/alpha', delivered: temp, steps: [] });
+  const withMatters = charge.chargeSystem(made, 'gamma', undefined, { sessions: mSessions });
+  expect(withMatters.includes("## The project's open matters") && withMatters.includes('Gamma saved delivery') && withMatters.includes('Gamma live') && !withMatters.includes('Alpha saved delivery') && !withMatters.includes('Alpha live'),
+    "each turn of the agent in charge does not carry its project's open matters, or carries another project's");
 
   // A request from the conversation: recorded once, for the manager; the answers go back to the conversation.
   const sessionId = 'smoke-charge';

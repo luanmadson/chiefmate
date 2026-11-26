@@ -15,7 +15,9 @@ import { loadAgents, loadConfig, projectCrew } from './config.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { LEAD, readMemory, taskTakers } from './leads.mjs';
 import { reportEvent } from './news.mjs';
-import { readRun } from './store.mjs';
+import { deliveryPlace, pendingDeliveries } from './attention.mjs';
+import { planItems } from './planning.mjs';
+import { listRuns, readRun } from './store.mjs';
 import { clip, DATA, ensureDir, languageName, now, parseLevel, readJson, WORKSPACES, writeJson } from './util.mjs';
 
 /** The profile id of a project's conversation with its agent in charge. */
@@ -222,6 +224,63 @@ export function requestsLine(config = loadConfig()) {
   return `Requests from the agents in charge of the projects, sent from their conversations with ${config.owner || 'the owner'} (answer with node src/cli.mjs request <id> approve|hold|ask-owner|reject --note "..." --level 1|2|3; node src/cli.mjs request show <id> for the whole request): ${open.slice(0, 8).map(line).join('; ')}.`;
 }
 
+// ---------- The project's open matters ----------
+// What the agent in charge (and the project's page) knows of the work still open, beyond the clone's main branch:
+// the board's open items, the latest runs' final summaries, the deliveries waiting for the owner and the live
+// sessions. Only this project's, each list with a ceiling, so a long history never floods the conversation.
+
+const RECENT_FOR = 7 * 24 * 3600_000;
+const MAX = { plan: 12, recent: 10, deliveries: 10, sessions: 8 };
+const MATTERS_MAX = 9000; // characters of the whole section in the instructions
+const OPEN_SESSION = ['login', 'starting', 'open'];
+// An open item's next step, by its status.
+export const NEXT_STEP = {
+  proposed: "waits for the manager's triage", triaged: "waits for the owner's decision", approved: 'approved: waits its turn for the crew',
+  future: 'kept for later', todo: 'to do, not started', queued: 'its run is in the queue', in_progress: 'its run is going on',
+  waiting_owner: 'waits for the owner: approve its delivery or act',
+};
+
+/**
+ * A project's open matters, only of "projectId": { plan (the board's order), recent (newest first), deliveries
+ * (oldest first), sessions }. The sessions are given by the caller (src/sessions.mjs imports this module).
+ */
+export function openMatters(config, projectId, { runs = listRuns(), items = planItems(), sessions = [] } = {}) {
+  const name = config.projects?.[projectId]?.name;
+  const ours = p => p === projectId || (!!name && p === name);
+  const closed = ['done', 'discarded'];
+  const outcome = r => (r.outcome ? [r.outcome.done?.join('; '), r.outcome.change, r.outcome.needs ? `needs the owner: ${r.outcome.needs}` : ''].filter(Boolean).join(' ') : '');
+  const plan = items.filter(i => ours(i.project) && !i.archived && !closed.includes(i.status)).slice(0, MAX.plan)
+    .map(i => ({ id: i.id, title: i.title, status: i.status, priority: i.priority, note: clip(i.recommend_note || i.description, 200), run: i.run ?? null }));
+  const deliveries = pendingDeliveries(runs.filter(r => ours(r.project))).slice(0, MAX.deliveries).map(({ run: r, waited, stale }) => ({
+    run: r.id, title: r.title, summary: clip(r.summary || r.outcome?.change || r.result, 300), pullRequest: r.pullRequest ?? null, branch: r.branch ?? null,
+    place: deliveryPlace(r), ended: r.ended, waited, stale,
+  }));
+  const recent = runs.filter(r => ours(r.project) && ['done', 'failed', 'canceled'].includes(r.status) && r.ended && Date.now() - Date.parse(r.ended) <= RECENT_FOR)
+    .sort((a, b) => b.ended.localeCompare(a.ended)).slice(0, MAX.recent)
+    .map(r => ({ run: r.id, title: r.title, status: r.status, merged: !!r.merged, discarded: !!r.discarded, ended: r.ended, outcome: clip(outcome(r) || r.result, 400) }));
+  const live = sessions.filter(s => ours(s.project) && !s.charge && OPEN_SESSION.includes(s.status)).slice(0, MAX.sessions)
+    .map(s => ({ id: s.id, name: s.name, tool: s.tool, mode: s.mode === 'app' ? 'app' : 'window', started: s.started ?? s.created }));
+  return { plan, recent, deliveries, sessions: live };
+}
+
+/** The open matters, in text for the instructions of the agent in charge (capped at MATTERS_MAX characters). */
+export function mattersText(m, owner = 'the owner') {
+  const none = 'None.';
+  const hours = ms => `${Math.floor(ms / 3600_000)} h`;
+  const sections = [
+    ['### Planning board: open items', m.plan.map(i => `- #${i.id} ${i.title} (${i.status.replace('_', ' ')}, ${i.priority} priority): next, ${NEXT_STEP[i.status] ?? i.status}.${i.note ? ` ${i.note}` : ''}`)],
+    [`### Deliveries waiting for ${owner} (not merged, not discarded)`, m.deliveries.map(d => `- ${d.title} [run ${d.run}]: ${d.place}, waiting for ${hours(d.waited)}${d.stale ? ', stalled' : ''}.${d.summary ? ` ${d.summary}` : ''}`)],
+    ['### Runs of the last 7 days, newest first, with their final summary', m.recent.map(r => `- ${formatDateTime(r.ended)}, ${r.title} [run ${r.run}]: ${r.merged ? 'merged' : r.discarded ? 'discarded' : r.status}.${r.outcome ? ` ${r.outcome}` : ''}`)],
+    [`### Live sessions open on this project (${owner} working with an agent)`, m.sessions.map(s => `- ${s.name} (${s.tool === 'codex' ? 'Codex' : 'Claude Code'}, ${s.mode === 'app' ? 'in the app' : 'in a window'}), open since ${formatDateTime(s.started)}.`)],
+  ];
+  const text = `## The project's open matters, current at every message
+
+Work already done or under way may not be on the main branch of the current folder yet: a delivery waiting for ${owner} lives on its own branch or pull request. When ${owner} asks to carry on with a subject, look for it here first, and say where it stands.
+
+${sections.map(([title, lines]) => `${title}\n${lines.length ? lines.join('\n') : none}`).join('\n\n')}`;
+  return text.length > MATTERS_MAX ? `${text.slice(0, MATTERS_MAX - 1)}…` : text;
+}
+
 // ---------- The conversation's turns ----------
 
 // The agent in charge reads; it never changes anything, runs commands or starts other agents.
@@ -238,10 +297,10 @@ export function chargeFolder(projectId, clone) {
 
 /**
  * What one turn of the conversation gets: { system, model, tools, disallowed, addDirs }. The system prompt is built
- * again every turn, so the project's memory and the requests' state are always current. cloneOf(project) finds the
- * other projects' own clones, kept out of reach like their working copies.
+ * again every turn, so the project's memory, its open matters and the requests' state are always current. cloneOf(project)
+ * finds the other projects' own clones, kept out of reach like their working copies; "sessions" are the live sessions' records.
  */
-export function chargeTurn(config, session, { cloneOf = () => null } = {}) {
+export function chargeTurn(config, session, { cloneOf = () => null, sessions = [] } = {}) {
   const projectId = session.project;
   const project = config.projects?.[projectId];
   if (!project) throw new Error(t('Unknown project: {id}', { id: projectId }));
@@ -254,7 +313,7 @@ export function chargeTurn(config, session, { cloneOf = () => null } = {}) {
   const own = path.resolve(session.cwd ?? '');
   const deny = others.filter(dir => path.resolve(dir) !== own).flatMap(dir => denyRules(dir));
   return {
-    system: chargeSystem(config, projectId, who),
+    system: chargeSystem(config, projectId, who, { sessions }),
     model: who.member.model ?? session.model ?? config.default_model,
     tools: CHARGE_TOOLS,
     disallowed: [...CHARGE_REFUSED, ...access.denied, ...deny],
@@ -262,8 +321,8 @@ export function chargeTurn(config, session, { cloneOf = () => null } = {}) {
   };
 }
 
-/** The instructions of the agent in charge: its own (not the manager's work), its role here, the project, the memory, the requests. */
-export function chargeSystem(config, projectId, who = inCharge(config, projectId)) {
+/** The instructions of the agent in charge: its own (not the manager's work), its role here, the project, the memory, the open matters, the requests. */
+export function chargeSystem(config, projectId, who = inCharge(config, projectId), { sessions = [] } = {}) {
   const owner = config.owner || 'the owner';
   const project = config.projects[projectId];
   const name = project.name ?? projectId;
@@ -297,5 +356,6 @@ ${owner} talks to you directly from the project's page in the Chiefmate app. You
     const run = r.run ? readRun(r.run) : null;
     return `- #${r.id}, ${formatDateTime(r.at)}: ${r.status}${r.note ? ` (${r.by === 'owner' ? owner : 'the manager'}: ${r.note})` : ''}${run ? `; its run "${run.title}" is ${run.merged ? 'merged' : run.status}` : ''}. ${clip(r.plan, 200)}`;
   }).join('\n') : 'None yet.'}`;
-  return [parts.map(p => p.text).join('').trim(), role, facts, memoryText, requestText].filter(Boolean).join('\n\n');
+  const matters = mattersText(openMatters(config, projectId, { sessions }), owner);
+  return [parts.map(p => p.text).join('').trim(), role, facts, memoryText, matters, requestText].filter(Boolean).join('\n\n');
 }

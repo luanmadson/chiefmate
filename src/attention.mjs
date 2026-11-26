@@ -18,6 +18,8 @@ const DAY = 24 * HOUR;
 const FAILED_FOR = 3 * DAY; // a failed run asks for attention for 3 days...
 const PR_FOR = 7 * DAY; // ...a pull request for a week...
 const DONE_FOR = DAY; // ...a finished task and an installed update for a day
+export const STALE_AFTER = 12 * HOUR; // a delivery with no merge or discard by then is stalled...
+const STALE_FOR = 30 * DAY; // ...and stays so for a month at most
 const ARCHIVE_MAX = 500;
 const CHECK_EVERY = 5 * 60_000; // a pull request's state on GitHub is asked at most every 5 minutes
 const WINDOWS = [
@@ -135,6 +137,13 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
     const title = r.pullRequest ? t('Pull request waiting for your approval') : t('Branch waiting for your approval');
     add({ id: `pr:${r.id}`, kind: 'pr', text: r.title, view: 'log', project: r.project, run: r.id, at: r.ended, url: r.pullRequest ?? null, ...prNotice(r.project, title) });
   }
+  // Important: a delivery stalled, past STALE_AFTER with no merge or discard (only info when someone else reviews it).
+  for (const { run: r } of pendingDeliveries(runs).filter(d => d.stale)) {
+    add({
+      id: `stale:${r.id}`, level: byOther(r.project) ? 'info' : 'important', kind: 'stale', lasting: true, title: t('Delivery stalled for over 12 hours'),
+      text: t('{title}: waiting since {when}, neither merged nor discarded.', { title: r.title, when: formatDateTime(r.ended) }), view: 'log', project: r.project, run: r.id, at: r.ended, url: r.pullRequest ?? null,
+    });
+  }
   // Important: a question the manager asked the owner (cli.mjs ask-owner), answered with one click on its card.
   for (const q of questions) {
     add({ id: `question:${q.id}`, level: 'important', kind: 'question', title: t('Question from the manager'), text: q.question, view: 'manager', project: q.project ?? null, at: q.at });
@@ -210,6 +219,34 @@ export function attentionArchive() {
   return Object.values(readState().attention_archive ?? {}).sort((a, b) => String(b.archived).localeCompare(String(a.archived)));
 }
 
+// ---------- The deliveries waiting for the owner ----------
+
+/**
+ * The finished runs whose delivery (a pull request or a local branch) was neither merged nor discarded, of the last
+ * month, oldest first: { run, waited (ms), stale (past STALE_AFTER) }. "project" keeps one project's only.
+ */
+export function pendingDeliveries(runs, { project = null } = {}) {
+  return runs
+    .filter(r => r.status === 'done' && (r.pullRequest || r.delivered) && !r.merged && !r.discarded && (!project || r.project === project) && ago(r.ended, STALE_FOR))
+    .map(r => {
+      const waited = Date.now() - Date.parse(r.ended);
+      return { run: r, waited, stale: waited > STALE_AFTER };
+    })
+    .sort((a, b) => b.waited - a.waited);
+}
+
+/** Where a delivery waits, in a few words for the manager and the agent in charge. */
+export const deliveryPlace = r => (r.pullRequest ? `pull request ${r.pullRequest}` : `branch ${r.branch ?? '?'} in ${r.delivered}`);
+
+/** For the manager's situation: the stalled deliveries, or '' when none; "config" tells the ones someone else reviews. */
+export function staleLine(runs, owner = 'the owner', config = null) {
+  const stale = pendingDeliveries(runs).filter(d => d.stale);
+  if (!stale.length) return '';
+  const hours = ms => `${Math.floor(ms / HOUR)} h`;
+  const who = r => (config?.projects?.[r.project]?.merge_by_owner === false ? 'someone else reviews it' : `level ${r.level ?? '?'}`);
+  return `Stalled deliveries (over ${STALE_AFTER / HOUR} hours with no merge and no discard; each is also an alert in the app; settle the level 1 ones when a standing authorization of ${owner}'s covers them, else remind ${owner} when it fits that its card in Decisions waits for Approve or Discard): ${stale.slice(0, 10).map(({ run: r, waited }) => `[${r.id}] ${r.title} (project ${r.project}, ${who(r)}, ${deliveryPlace(r)}, waiting for ${hours(waited)})`).join('; ')}${stale.length > 10 ? `; and ${stale.length - 10} more` : ''}.`;
+}
+
 // ---------- The pull requests and branches already merged ----------
 // Asked in the background (gh and git), at most every CHECK_EVERY, and kept in memory.
 
@@ -220,9 +257,12 @@ let lastCheck = 0;
 
 const final = state => ['merged', 'closed', 'branch', 'deleted'].includes(state);
 
-/** The run behind a pull request or board notice. */
+// The notices about a delivery: a pull request or branch, a board item waiting for the owner, a stalled delivery.
+const isDelivery = i => /^(pr|plan|stale):/.test(i.id);
+
+/** The run behind a pull request, stalled delivery or board notice. */
 function noticeRun(i, runs, items) {
-  if (i.id.startsWith('pr:')) return runs.find(r => r.id === i.run) ?? null;
+  if (i.id.startsWith('pr:') || i.id.startsWith('stale:')) return runs.find(r => r.id === i.run) ?? null;
   if (!i.id.startsWith('plan:')) return null;
   const item = items.find(x => i.id.startsWith(`plan:${x.id}:`));
   return item?.run ? (runs.find(r => r.id === item.run) ?? null) : null;
@@ -230,7 +270,7 @@ function noticeRun(i, runs, items) {
 
 /** Why a pull request or board notice no longer needs the owner, from what was checked. */
 function resolution(i, runs, items) {
-  if (!i.id.startsWith('pr:') && !i.id.startsWith('plan:')) return null;
+  if (!isDelivery(i)) return null;
   const state = i.url ? prStates.get(i.url)?.state : null;
   if (final(state)) return state;
   const r = noticeRun(i, runs, items);
@@ -240,7 +280,7 @@ function resolution(i, runs, items) {
 /** What to check for the notices shown: the pull requests' addresses and the runs whose branch may be merged. */
 export function pullRequestTargets(list, runs, items) {
   return list
-    .filter(i => i.id.startsWith('pr:') || i.id.startsWith('plan:'))
+    .filter(isDelivery)
     .map(i => ({ url: i.url ?? null, run: noticeRun(i, runs, items) }))
     .filter(x => x.url || x.run?.branch);
 }
