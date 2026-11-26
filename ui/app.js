@@ -499,6 +499,26 @@ function showView() {
     placeBuilder(false);
     openBuilder(builderProjectOf());
   }
+  // Coming into a project's In charge tab: its conversation is brought into view, ready to write.
+  const charge = view === 'project' && pageTab() === 'charge' && state ? pageProject() : null;
+  if (charge && charge !== chargeShown) showChargeChat();
+  chargeShown = charge;
+}
+
+let chargeShown = null; // the project whose In charge tab is on screen, brought into view once
+
+/**
+ * The conversation with the agent in charge in view and its field focused: with the tabs above it on a wide screen;
+ * on a phone, the conversation's column (its height is the visible area's) down to its field.
+ */
+function showChargeChat() {
+  const body = $('#live-body');
+  if (body.hidden || body.parentElement !== $('#project-charge')) return;
+  const behavior = calm() ? 'auto' : 'smooth';
+  if (phoneQuery.matches) body.querySelector('.chat-column').scrollIntoView({ block: 'end', behavior });
+  else $('#project-tabs').scrollIntoView({ block: 'start', behavior });
+  // Not on a touch screen: the keyboard would cover the conversation it just brought up.
+  if (!touchScreen()) $('#live-text').focus({ preventScroll: true });
 }
 window.addEventListener('hashchange', showView);
 phoneQuery.addEventListener('change', () => {
@@ -1002,6 +1022,25 @@ function attnList(list, label, { archived = false } = {}) {
   if (!list.length) return link ? `<div class="attn-archived-only">${link}</div>` : '';
   const head = `<div class="attn-head">${attnMark(list)}<span class="label">${esc(t('{label} ({count})', { label, count: unseen(list).length }))}</span>${link}</div>`;
   return `<div class="attn-list"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>${head}${list.map(i => attnNotice(i)).join('')}</div>`;
+}
+
+/**
+ * The same notices folded into one line (the mark, the count per level) and grouped by level once opened, so a long
+ * list doesn't push what is under it down. "key" keeps it open across redraws.
+ */
+function attnFold(list, label, key) {
+  if (!list.length) return '';
+  const named = { urgent: n => t('{count} urgent', { count: n }), important: n => t('{count} important', { count: n }), info: n => t('{count} for your information', { count: n }) };
+  const fresh = unseen(list);
+  const counts = [...LEVELS.map(l => [fresh.filter(i => i.level === l).length, named[l]]), [list.length - fresh.length, n => t('{count} seen', { count: n })]]
+    .filter(([n]) => n).map(([n, name]) => name(n)).join(' · ');
+  const groups = [...LEVELS.map(l => [levelName(l), list.filter(i => !i.seen && i.level === l)]), [t('Seen'), list.filter(i => i.seen)]]
+    .filter(([, items]) => items.length)
+    .map(([name, items]) => `<div class="attn-group"><span class="label">${esc(t('{label} ({count})', { label: name, count: items.length }))}</span></div>${items.map(i => attnNotice(i)).join('')}`).join('');
+  return `<details class="attn-list attn-fold" data-keep-open="${esc(key)}"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>
+      <summary class="attn-head">${attnMark(list, '', true)}<span class="label">${esc(label)}</span><span class="attn-counts">${esc(counts)}</span><span class="attn-toggle"><span class="when-closed">${esc(t('See all'))}</span><span class="when-open">${esc(t('Hide'))}</span></span></summary>
+      ${groups}
+    </details>`;
 }
 
 /** Why a notice went to the archive (src/attention.mjs). */
@@ -2497,9 +2536,12 @@ function drawProjectMore(id, info) {
   draw('#project-more', html, html);
 }
 
-/** What waits for you in this project, at the top: its notices (requests, failures, pull requests, the board's items). */
+/**
+ * What waits for you in this project, above the tabs: its notices (requests, failures, pull requests, the board's
+ * items), folded into one line so the tabs and the conversation stay where they are.
+ */
 function drawProjectNeeds(id, p) {
-  const html = attnList(attnItems().filter(ofProject(id, p.name)), t('Waiting for you'));
+  const html = attnFold(attnItems().filter(ofProject(id, p.name)), t('Waiting for you'), `needs-${id}`);
   draw('#project-needs', html, html);
 }
 
@@ -4486,8 +4528,12 @@ document.addEventListener('click', async event => {
         await api('/api/session', { profile: state.charge[id].profile });
         await refresh();
       }
-      location.hash = projectHash(id, 'charge');
-      $('#live-text').focus();
+      // A new hash brings the conversation into view (showView); already on the tab, it is brought here.
+      if (location.hash !== projectHash(id, 'charge')) location.hash = projectHash(id, 'charge');
+      else {
+        drawProjectPage();
+        showChargeChat();
+      }
       return;
     } else if (target.dataset.projectPlanning) {
       planFilter.project = target.dataset.projectPlanning;
