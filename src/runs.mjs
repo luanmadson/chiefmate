@@ -7,6 +7,7 @@ import { instructionFiles, stepAccess, stepMcp } from './access.mjs';
 import { browserServers, closeAfterRun } from './browsers.mjs';
 import { contextWindow, runClaude } from './claude.mjs';
 import { loadConfig, projectCrew } from './config.mjs';
+import { currentEffort, effortChangeLine, runEffortChanges } from './effort.mjs';
 import { guardHooks } from './guard.mjs';
 import { askOwner, finishRequest, needsSettings } from './needs.mjs';
 import {
@@ -428,7 +429,7 @@ export function promptParts({ run, step, project, previous, finalReview, changes
   const reports = finalReview && lead ? previous.filter(p => p.agent !== LEAD) : previous;
   if (reports.length) {
     const lines = ['', finalReview ? '## Crew reports' : '## What the previous steps did'];
-    for (const p of reports) lines.push('', `### ${p.agent}${p.role ? `, ${p.role === 'plan' ? 'planning' : 'first review'}` : ''} (${p.status})`, fullReport(p) || p.error || '(no report)');
+    for (const p of reports) lines.push('', `### ${p.agent}${p.role ? `, ${p.role === 'plan' ? 'planning' : 'first review'}` : ''} (${p.status}${p.effort ? `, effort ${p.effort}` : ''})`, fullReport(p) || p.error || '(no report)');
     add('reports', 'The reports of the steps before', lines);
   }
   add('rules', 'Chiefmate (src/runs.mjs, crewRules)', ['', crewRules(config, project, run.project, finalReview ? prLanguage : config.language || 'en')]);
@@ -604,8 +605,9 @@ async function signInFirst(l, run, index, tool) {
 }
 
 async function runStep({ l, run, step, index, dir, project, config, agents, libraries, base, finalReview = false }) {
-  const agent = agents[step.agent];
-  if (!agent) throw new Error(t('Unknown agent: {id}', { id: step.agent }));
+  if (!agents[step.agent]) throw new Error(t('Unknown agent: {id}', { id: step.agent }));
+  // The effort is read again at each step: a change made from the app or the command line counts from the next step.
+  const agent = { ...agents[step.agent], effort: currentEffort(run.project, step.agent, agents[step.agent].effort ?? null) ?? undefined };
   const previous = run.steps.filter(s => s !== step && s.status !== 'pending' && s.status !== 'skipped');
   const changes = finalReview ? await changedFiles(dir, base).catch(() => '') : '';
   const found = finalReview && noTrace(project) ? await traces(dir, base).catch(() => []) : [];
@@ -637,7 +639,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   // A step paused for an update of Chiefmate resumes its own Claude Code session, with its clock and its counts.
   const paused = step.paused ?? null;
   delete step.paused;
-  Object.assign(step, { status: 'running', started: paused ? step.started ?? now() : now(), error: null, model, tool, promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
+  Object.assign(step, { status: 'running', started: paused ? step.started ?? now() : now(), error: null, model, tool, effort: agent.effort ?? null, promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
   Object.assign(l, {
     step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0, talking: false, reply: null, session: null,
     doing: finalReview ? t('reviewing the work') : step.role === 'plan' ? t('planning the request') : t('getting started'),
@@ -804,13 +806,15 @@ function pullRequestBody(run, checks, agents, lang) {
   const main = run.review?.report || run.steps.map(s => `## ${name(s.agent)}\n\n${fullReport(s) || s.error || t('(no report)', {}, lang)}`).join('\n\n');
   // The same final summary the app shows opens the text; the review's report follows (without its own copy of it).
   const summary = run.prOutcome ? outcomeMarkdown(run.prOutcome, run.prOutcome.lang ?? lang) : '';
-  const table = stepsOf(run).map(s => `| ${name(s.agent)} | ${labels[s.status] ?? s.status} | ${formatDuration(s.durationMs)} | ${s.turns ?? ''} |`);
+  const table = stepsOf(run).map(s => `| ${name(s.agent)} | ${labels[s.status] ?? s.status} | ${formatDuration(s.durationMs)} | ${s.turns ?? ''} | ${s.effort ?? t('default', {}, lang)} |`);
+  const efforts = runEffortChanges(run).map(e => `- ${effortChangeLine(e)}`);
   const checkList = checks.map(c => `- ${c.ok ? '✅' : '❌'} \`${c.command}\``);
   return [
     ...(summary ? [summary, '', `### ${t('Full report', {}, lang)}`, ''] : []),
     main, '', '---', '',
     `### ${t('Done by Chiefmate', {}, lang)}`, '',
-    `| ${t('Step', {}, lang)} | ${t('Status', {}, lang)} | ${t('Time', {}, lang)} | ${t('Turns', {}, lang)} |`, '|---|---|---|---|', ...table, '',
+    `| ${t('Step', {}, lang)} | ${t('Status', {}, lang)} | ${t('Time', {}, lang)} | ${t('Turns', {}, lang)} | ${t('Effort', {}, lang)} |`, '|---|---|---|---|---|', ...table, '',
+    ...(efforts.length ? [`**${t('Effort changed during the run:', {}, lang)}**`, ...efforts, ''] : []),
     `**${t('Checks after the review:', {}, lang)}**`, ...(checkList.length ? checkList : [`- ${t('(none)', {}, lang)}`]), '',
     t('Run `{id}`.', { id: run.id }, lang),
   ].join('\n');

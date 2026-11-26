@@ -97,6 +97,22 @@ const joinParts = parts => parts.map(p => p.text).join('');
 /** An agent's instruction parts; an agent made elsewhere (without them) has one: its whole instructions. */
 const partsOf = agent => agent.instructionParts ?? [{ key: 'agent', source: agent.file ?? `agents/${agent.id}.md`, text: agent.instructions ?? '' }];
 
+// The effort levels Claude Code takes (--effort); see src/effort.mjs and docs/effort.md.
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+/** A project's own effort for its members: projects.<id>.effort, { "<member id>": "<level>" }. */
+export function projectEfforts(config, projectId) {
+  const map = config.projects?.[projectId]?.effort;
+  return map && typeof map === 'object' && !Array.isArray(map) ? map : {};
+}
+
+/** The members of a team with the project's own effort applied (effortFrom: 'project'). */
+function withProjectEfforts(team, config, projectId) {
+  const own = projectEfforts(config, projectId);
+  if (!Object.keys(own).length) return team;
+  return Object.fromEntries(Object.entries(team).map(([id, m]) => [id, EFFORTS.includes(own[id]) ? { ...m, effort: own[id], effortFrom: 'project' } : m]));
+}
+
 /** A project's "crew" setting as [member id, settings] pairs: a list of agent ids, or { "<member id>": { ... } }. */
 function memberSpecs(crew) {
   if (Array.isArray(crew)) return crew.map(x => (typeof x === 'string' ? [x, {}] : [x?.id ?? x?.agent, x ?? {}])).filter(([id]) => id);
@@ -106,13 +122,15 @@ function memberSpecs(crew) {
 /**
  * The crew of one project. With "projects.<id>.crew", only its members (plus the manager, who stays global):
  * { "<member id>": { "agent": "<base agent, the member id by default>", "name": "...", "extra_instructions": "...",
- * "model": "...", "max_minutes": 60, "mcp": ["playwright"] } } or simply ["generalist", "designer"].
+ * "model": "...", "effort": "high", "max_minutes": 60, "mcp": ["playwright"] } } or simply ["generalist", "designer"].
  * Without it, the general crew. Each member keeps its base agent's face and instructions.
+ * "projects.<id>.effort" ({ "<member id>": "<level>" }) sets the effort of any member for this project only, the manager's
+ * reviews of its runs included.
  */
 export function projectCrew(config = loadConfig(), projectId, agents = loadAgents(config)) {
   const project = config.projects?.[projectId];
   const lead = projectLead(config, projectId, agents);
-  if (!project?.crew) return lead ? { ...agents, lead } : agents;
+  if (!project?.crew) return withProjectEfforts(lead ? { ...agents, lead } : agents, config, projectId);
   const team = agents.manager ? { manager: agents.manager } : {};
   if (lead) team.lead = lead;
   for (const [id, spec] of memberSpecs(project.crew)) {
@@ -126,7 +144,7 @@ export function projectCrew(config = loadConfig(), projectId, agents = loadAgent
     ];
     team[id] = { ...base, ...settings, id, base: baseId, project: projectId, instructions: joinParts(instructionParts), instructionParts };
   }
-  return team;
+  return withProjectEfforts(team, config, projectId);
 }
 
 // The lead reads and judges; it never changes the project's files.
@@ -170,6 +188,7 @@ export function projectLead(config, projectId, agents = loadAgents(config)) {
     disallowed: [...new Set([...(base.disallowed ?? []), ...LEAD_NO_EDIT, 'Bash(git commit:*)'])],
     instructions: joinParts(instructionParts),
     instructionParts,
+    ...(EFFORTS.includes(projectEfforts(config, projectId).lead) ? { effort: projectEfforts(config, projectId).lead, effortFrom: 'project' } : {}),
   };
 }
 

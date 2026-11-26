@@ -165,6 +165,32 @@ function toolTitle(a) {
 const toolBadge = a => (a?.tool ? `<span class="tool-mark" data-tool="${esc(a.tool)}" title="${esc(toolTitle(a))}">${esc(TOOL_LABELS[a.tool] ?? a.tool)}</span>` : '');
 /** The tools other than Claude Code a run's crew works (or will work) on, as "on Codex". */
 const runToolsLabel = r => (r?.tools ?? []).map(x => t('on {tool}', { tool: TOOL_LABELS[x] ?? x }));
+// Each agent's effort (docs/effort.md): a colored mark and a picker. A change counts from the next step.
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const effortName = level => ({ low: t('effort low'), medium: t('effort medium'), high: t('effort high'), xhigh: t('effort xhigh'), max: t('effort max') })[level] ?? t('effort default');
+function effortFromLabel(from, project) {
+  return ({
+    project: t('set for {project} only', { project: projectName(project) }),
+    member: t("set in this project's crew"),
+    installation: t('set for this installation'),
+    agent: t("the agent's own"),
+    none: t("Claude Code's default for the model"),
+  })[from] ?? '';
+}
+const effortBadge = (level, title = '') => `<span class="effort-mark" data-effort="${esc(level ?? 'default')}"${title ? ` title="${esc(title)}"` : ''}>${esc(level ?? t('default'))}</span>`;
+/** The mark and its picker for a member: chat, the manager's conversation; project, that project only. */
+function effortPick(a, { project = null, chat = false } = {}) {
+  const level = chat ? a.chatEffort ?? null : a.effort ?? null;
+  const title = chat ? t("Effort of the conversation with you: {level}", { level: effortName(level) }) : `${effortName(level)} · ${effortFromLabel(a.effortFrom, project)}`;
+  const options = [`<option value="default"${level ? '' : ' selected'}>${esc(t('default'))}</option>`, ...EFFORTS.map(e => `<option value="${e}"${e === level ? ' selected' : ''}>${esc(e)}</option>`)];
+  return `<span class="effort-pick">${effortBadge(level, title)}<select class="effort-select" data-effort-member="${esc(a.id)}"${project ? ` data-effort-project="${esc(project)}"` : ''}${chat ? ' data-effort-chat="1"' : ''} aria-label="${esc(chat ? t('Change the effort of the conversation') : t('Change the effort of {agent}', { agent: t(a.name ?? a.id) }))}" title="${esc(t('Counts from the next step'))}">${options.join('')}</select></span>`;
+}
+/** A recorded effort change in one line: when, who, the member, from and to. */
+function effortChangeHtml(e) {
+  const who = e.by === 'manager' ? t('Manager') : t('You');
+  return `<div class="effort-change"><span class="num">${shortDate(e.at)}</span> ${esc(who)}: ${esc(agentName(e.member, e.project))}${e.chat ? ` (${esc(t('conversation'))})` : ''}${e.project ? ` · ${esc(projectName(e.project))}` : ''} ${effortBadge(e.from)} → ${effortBadge(e.to)}</div>`;
+}
+
 /** A model's short name; none: the tool's own default. */
 const modelLabel = a => (a.model ? shortModel(a.model) : t('default model'));
 
@@ -1841,12 +1867,16 @@ function drawCrew() {
           <dt>${esc(t('Last work'))}</dt><dd>${esc(last)}</dd>
           <dt>${esc(t('This week'))}</dt><dd>${esc(a.id === 'manager' ? t('{count} answer(s) · {steps} review(s)', { count: a.week.answers, steps: a.week.steps }) : t('{count} step(s) · {minutes} min', { count: a.week.steps, minutes: a.week.minutes }))}</dd>
           <dt>${esc(t('Time limit'))}</dt><dd class="num">${a.maxMinutes ? esc(t('{minutes} min per step', { minutes: a.maxMinutes })) : '—'}</dd>
+          <dt>${esc(a.id === 'manager' ? t('Effort (reviews)') : t('Effort'))}</dt><dd>${effortPick(a)}</dd>
+          ${a.id === 'manager' ? `<dt>${esc(t('Effort (conversation)'))}</dt><dd>${effortPick(a, { chat: true })}</dd>` : ''}
         </dl>
         <div class="actions left">${a.id === 'manager' ? `<a href="#manager" class="button secondary small">${esc(t('Talk'))}</a>` : `<button type="button" class="button secondary small" data-assign="${esc(a.id)}">${esc(t('Assign a task'))}</button>`}</div>
       </div>
     </article>`;
   });
-  const html = `<div class="crew-grid">${cards.join('')}</div>`;
+  const changes = state.effortHistory ?? [];
+  const html = `<div class="crew-grid">${cards.join('')}</div>
+    <details class="effort-history"><summary>${esc(t('Effort changes ({count})', { count: changes.length }))}</summary>${changes.map(effortChangeHtml).join('') || `<div class="hint">${esc(t('No effort change recorded.'))}</div>`}<p class="hint">${esc(t('A change counts from the next step and shows in the report of the runs going on. Guide: docs/effort.md.'))}</p></details>`;
   draw('#crew', html, html);
   drawTeams();
   drawPromptBuilder();
@@ -1867,20 +1897,20 @@ function fillTaskAgents() {
 }
 
 /** A project's team lead, above its crew: its base agent, its memory and what it is doing. */
-function teamLead(a) {
+function teamLead(a, project) {
   const facts = [
     t('Team lead'),
     a.base ? t('Based on {agent}', { agent: agentName(a.base) }) : '',
     a.extra ? t('with instructions for this project') : '',
     a.memory ? t('memory: {count} line(s), updated {when}', { count: a.memory.lines, when: relative(a.memory.updated) }) : t('no memory yet'),
   ];
-  return `<div class="team-member team-lead"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 34)}<div><div class="name">${esc(t(a.name))}</div><div class="hint">${esc(facts.filter(Boolean).join(' · '))}</div></div>${stateHtml(agentStatus(a))}</div>`;
+  return `<div class="team-member team-lead"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 34)}<div><div class="name">${esc(t(a.name))} <span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></div><div class="hint">${esc(facts.filter(Boolean).join(' · '))}</div></div><div class="team-side">${effortPick(a, { project })}${stateHtml(agentStatus(a))}</div></div>`;
 }
 
 /** A project's crew: its lead, then its members, each with what it is doing. */
 function teamBody(team) {
-  const members = team.members.map(a => `<div class="team-member"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 30)}<div><div class="name">${esc(t(a.name))}</div><div class="hint">${esc([a.base && a.base !== a.id ? t('Based on {agent}', { agent: agentName(a.base) }) : t(a.title ?? ''), a.extra ? t('with instructions for this project') : '', (a.mcp ?? []).length ? t('tools: {list}', { list: a.mcp.join(', ') }) : ''].filter(Boolean).join(' · '))}</div></div>${stateHtml(agentStatus(a))}</div>`);
-  return `${team.lead ? teamLead(team.lead) : ''}${members.join('') || `<div class="hint">${esc(t('No members.'))}</div>`}`;
+  const members = team.members.map(a => `<div class="team-member"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 30)}<div><div class="name">${esc(t(a.name))} <span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></div><div class="hint">${esc([a.base && a.base !== a.id ? t('Based on {agent}', { agent: agentName(a.base) }) : t(a.title ?? ''), a.extra ? t('with instructions for this project') : '', (a.mcp ?? []).length ? t('tools: {list}', { list: a.mcp.join(', ') }) : ''].filter(Boolean).join(' · '))}</div></div><div class="team-side">${effortPick(a, { project: team.project })}${stateHtml(agentStatus(a))}</div></div>`);
+  return `${team.lead ? teamLead(team.lead, team.project) : ''}${members.join('') || `<div class="hint">${esc(t('No members.'))}</div>`}`;
 }
 
 function drawTeams() {
@@ -1958,7 +1988,7 @@ async function refreshDetail(force = false) {
   const canCancel = ['running', 'queued', 'waiting', 'paused'].includes(r.status);
   const reports = steps.map((s, i) => {
     const chosen = s.status === 'pending' && !s.review && !['manager', 'lead'].includes(s.agent) ? s.toolAsked ?? r.tool : null;
-    const facts = [s.tool && s.tool !== 'claude' ? TOOL_LABELS[s.tool] ?? s.tool : chosen && chosen !== 'claude' ? t('to run on {tool}', { tool: TOOL_LABELS[chosen] ?? chosen }) : '', s.model ? shortModel(s.model) : '', s.durationMs ? t('{minutes} min', { minutes: Math.round(s.durationMs / 60000) }) : '', s.turns ? t('{count} turns', { count: s.turns }) : '', s.subagents ? t('{count} subagent(s)', { count: s.subagents }) : ''].filter(Boolean);
+    const facts = [s.tool && s.tool !== 'claude' ? TOOL_LABELS[s.tool] ?? s.tool : chosen && chosen !== 'claude' ? t('to run on {tool}', { tool: TOOL_LABELS[chosen] ?? chosen }) : '', s.model ? shortModel(s.model) : '', s.status !== 'pending' && s.started ? effortName(s.effort) : '', s.durationMs ? t('{minutes} min', { minutes: Math.round(s.durationMs / 60000) }) : '', s.turns ? t('{count} turns', { count: s.turns }) : '', s.subagents ? t('{count} subagent(s)', { count: s.subagents }) : ''].filter(Boolean);
     let body = s.report || s.error;
     if (!body) body = s.status === 'pending' ? t('Not started yet.') : s.status === 'running' ? t('Working…') : t('No report.');
     return `
@@ -1977,6 +2007,10 @@ async function refreshDetail(force = false) {
         : q.status === 'open' ? [t('Waiting for your action'), 'warn'] : [t('Done'), 'ok'];
       return `<div>${stateHtml(status)} ${esc(q.what)}${q.url ? ` · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${q.status === 'open' ? `${requestWhy(q)} ${requestButtons(r.id, q, ' small')}${requestReply(r.id, q, ' small')}` : q.answer || q.note ? ` · ${esc(t('Your answer: {answer}', { answer: [q.answer, q.note].filter(Boolean).join(' — ') }))}` : ''}</div>`;
     }).join('')}</div>`
+    : '';
+  // The effort changes made while the run went on (they count from the step after them).
+  const efforts = (r.efforts ?? []).length
+    ? `<div class="report"><div class="report-top"><strong>${esc(t('Effort changed during the run'))}</strong></div>${r.efforts.map(effortChangeHtml).join('')}</div>`
     : '';
   const checks = r.checks?.length
     ? `<div class="report"><div class="report-top"><strong>${esc(t('Checks'))}</strong></div>${r.checks.map(c => `<div>${stateHtml(c.ok ? [t('Passed'), 'ok'] : [t('Failed'), 'error'])} <code>${esc(c.command)}</code></div>`).join('')}</div>`
@@ -1998,7 +2032,7 @@ async function refreshDetail(force = false) {
       ${r.status === 'paused' ? `<button type="button" class="button secondary" data-resume="${esc(r.id)}" data-ignore>${esc(t('Resume past the limit'))}</button>` : ''}
       ${canCancel ? `<button type="button" class="button danger" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button>` : ''}
     </div>
-    ${runFilesHtml(r)}${requests}${reports.join('')}${checks}`;
+    ${runFilesHtml(r)}${requests}${efforts}${reports.join('')}${checks}`;
   $('#log-detail').dataset.filesRun = r.id; // the paths in its reports are looked for in the run's files first
   draw('#log-detail', JSON.stringify([r.id, r.updated, r.status, runFilesCache.get(r.id)?.at]), html);
 }
@@ -3987,6 +4021,23 @@ $('#agent-close').addEventListener('click', closeAgentPanel);
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape' && agentPanel.run && !document.querySelector('dialog[open]')) closeAgentPanel();
 });
+// An effort picker (the crew, the crews by project, a project's page): the change counts from the next step.
+document.addEventListener('change', async event => {
+  const select = event.target.closest('select[data-effort-member]');
+  if (!select || !select.value) return;
+  const { effortMember: member, effortProject: project, effortChat: chat } = select.dataset;
+  try {
+    const e = await api('/api/effort', { member, level: select.value, project: project || null, chat: !!chat });
+    toast(e.changed
+      ? t('{agent}: {from} → {to}. Counts from the next step.', { agent: agentName(member, project), from: e.from ?? t('default'), to: e.to ?? t('default') })
+      : t('{agent} is already at {level}.', { agent: agentName(member, project), level: e.to ?? t('default') }));
+    refresh();
+  } catch (error) {
+    select.value = select.querySelector('option[selected]')?.value ?? 'default';
+    toast(error.message);
+  }
+});
+
 // A click on an agent at work (in Operations, the crew, the teams or the focus) opens its panel; the buttons inside
 // those places keep their own action.
 document.addEventListener('click', event => {
