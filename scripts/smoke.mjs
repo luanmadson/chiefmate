@@ -2762,10 +2762,17 @@ try {
   expect(dry.dryRun && dry.cwd === temp && !dry.copy && dry.prompt.includes('## Now'), `"Work now" (dry run) does not open in the owner's clone: ${JSON.stringify(dry).slice(0, 300)}`);
   live.set('smoke-work-run', { run: 'smoke-work-run', project: 'delta', title: 'A crew task', agent: 'generalist', since: new Date().toISOString() });
   try {
-    const asked = await work.openWork('delta', { dryRun: true, config: made });
-    const copy = await work.openWork('delta', { dryRun: true, choice: 'copy', config: made });
-    expect(asked.conflict?.[0]?.title === 'A crew task' && !asked.dryRun, 'the crew working on the project did not ask the owner to choose');
-    expect(copy.copy && copy.cwd === work.copyFolder('delta') && copy.prompt.includes('separate copy'), `"Work in a separate copy" does not work elsewhere: ${copy.cwd}`);
+    // By default it opens at once in the owner's clone, the crew's task paused; "work_now_mode" may choose otherwise.
+    expect(work.workMode({}) === 'pause' && work.workMode({ work_now_mode: 'copy' }) === 'copy' && work.workMode({ work_now_mode: 'ask' }) === 'ask' && work.workMode({ work_now_mode: 'x' }) === 'pause',
+      '"work_now_mode" does not default to "pause", or "copy" and "ask" are not kept');
+    const paused = await work.openWork('delta', { dryRun: true, config: made });
+    expect(paused.dryRun && !paused.conflict && paused.cwd === temp && !paused.copy && paused.crew?.[0]?.paused && paused.prompt.includes("paused at Owner's click"),
+      `"Work now" with the crew on the project did not open at once in the owner's clone, its task paused: ${JSON.stringify(paused).slice(0, 300)}`);
+    const asked = await work.openWork('delta', { dryRun: true, config: { ...made, work_now_mode: 'ask' } });
+    expect(asked.conflict?.[0]?.title === 'A crew task' && !asked.dryRun, 'with "work_now_mode": "ask", the crew working on the project did not ask the owner to choose');
+    for (const copy of [await work.openWork('delta', { dryRun: true, choice: 'copy', config: made }), await work.openWork('delta', { dryRun: true, config: { ...made, work_now_mode: 'copy' } })]) {
+      expect(copy.copy && copy.cwd === work.copyFolder('delta') && copy.prompt.includes('separate copy') && !copy.crew[0].paused, `"Work in a separate copy" does not work elsewhere: ${copy.cwd}`);
+    }
   } finally {
     live.delete('smoke-work-run');
   }
@@ -2791,6 +2798,25 @@ try {
   writeFileSync(path.join(sessions, 'smoke-work-held.json'), JSON.stringify({ ...record, id: 'smoke-work-held', status: 'ended', ended: new Date().toISOString(), work: { copy: false, held: ['smoke-held-run'] } }));
   await work.closeWork('smoke-work-held');
   expect(readRun('smoke-held-run')?.status === 'canceled' && !readSession('smoke-work-held')?.work?.held?.length, 'ending "Work now" brought back a crew run canceled while it was paused');
+  // A crew run it paused goes back to the queue when the session ends, or before, with "Let it go on". A made-up run
+  // going on in the project keeps the queue from starting them.
+  live.set('smoke-work-busy', { run: 'smoke-work-busy', project: 'delta', title: 'Busy', agent: 'generalist', since: quiet });
+  try {
+    saveRun({ id: 'smoke-paused-run', kind: 'task', project: 'delta', title: 'A paused task', status: 'paused', created: quiet, steps: [] });
+    writeFileSync(path.join(sessions, 'smoke-work-ends.json'), JSON.stringify({ ...record, id: 'smoke-work-ends', status: 'ended', ended: new Date().toISOString(), work: { copy: false, held: ['smoke-paused-run'] } }));
+    await work.closeWork('smoke-work-ends');
+    expect(readRun('smoke-paused-run')?.status === 'queued' && !readSession('smoke-work-ends')?.work?.held?.length, 'ending "Work now" did not bring back the crew run it paused');
+    saveRun({ ...readRun('smoke-paused-run'), status: 'paused' });
+    writeFileSync(path.join(sessions, 'smoke-work-goes.json'), JSON.stringify({ ...record, id: 'smoke-work-goes', work: { copy: false, held: ['smoke-paused-run'], titles: { 'smoke-paused-run': 'A paused task' } } }));
+    const { sessionsState } = await import(src('sessions.mjs'));
+    expect(sessionsState(made, { sessions: [], supported: false }).open.find(s => s.id === 'smoke-work-goes')?.heldTitles?.[0] === 'A paused task', "the session doesn't show the crew's task it paused");
+    const released = await work.releaseWork('smoke-work-goes');
+    expect(released[0] === 'smoke-paused-run' && readRun('smoke-paused-run')?.status === 'queued' && !readSession('smoke-work-goes')?.work?.held?.length,
+      '"Let it go on" did not let the crew run paused by "Work now" go back to the queue');
+  } finally {
+    live.delete('smoke-work-busy');
+    saveRun({ ...readRun('smoke-paused-run'), status: 'canceled', ended: quiet });
+  }
   // The guard of a "Work now" session: with pushing allowed, a branch of the work goes; the main branch never does,
   // however it is named (HEAD is the branch checked out). Before pushing is allowed, a push that could never go is
   // refused at once, without a permission request for the owner (nothing in the log); a branch of the work asks.

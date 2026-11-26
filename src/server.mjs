@@ -7,7 +7,7 @@ import { gzipSync } from 'node:zlib';
 import { attentionArchive, attentionItems, attentionSummary, markSeen } from './attention.mjs';
 import { autopilotStatus, changeAutopilot } from './autopilot.mjs';
 import { answerRequest, chargeProfileId, inCharge, openMatters, projectRequests } from './charge.mjs';
-import { openWork, workNotesView } from './worknow.mjs';
+import { openWork, releaseWork, workNotesView } from './worknow.mjs';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { EFFORTS, loadAgents, loadConfig, projectCrew, projectEfforts, projectLead, saveConfig } from './config.mjs';
 import { effortHistory, effortSource, runEffortChanges, setEffort } from './effort.mjs';
@@ -639,12 +639,15 @@ export function startServer() {
           return reply(res, 200, await openSession(String(body.profile ?? ''), { origin: body.origin ?? 'app', window: !!body.window }));
         }
         case '/api/work-now': {
-          // "Work now", the owner's click on a project's page (src/worknow.mjs): the session, or { conflict } when a
-          // run of the crew goes on in the project ("choice": "pause" or "copy" then). "dryRun" opens nothing.
+          // "Work now", the owner's click on a project's page (src/worknow.mjs): the session, at once; { conflict } only
+          // with "work_now_mode": "ask" while a run of the crew goes on ("choice": "pause" or "copy" then). "dryRun" opens nothing.
           const tool = body.tool === 'codex' ? 'codex' : 'claude';
           const choice = ['pause', 'copy'].includes(body.choice) ? body.choice : null;
           return reply(res, 200, await openWork(String(body.project ?? ''), { tool, choice, dryRun: !!body.dryRun }));
         }
+        case '/api/work-now/release':
+          // "Let it go on": the crew's runs paused by a "Work now" session go on now, in their own working copy.
+          return reply(res, 200, { released: await releaseWork(String(body.id ?? '')) });
         case '/api/session/say':
           return reply(res, 200, sayToSession(String(body.id ?? ''), body.text, { by: body.by === 'manager' ? 'manager' : 'owner' }));
         case '/api/session/interrupt':

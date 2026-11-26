@@ -1794,10 +1794,12 @@ function drawLive() {
     ended && x.resumable ? `<button type="button" class="button small" data-live-resume="${esc(x.id)}">${esc(t('Resume'))}</button>` : '',
     !ended ? `<button type="button" class="button danger small" data-session-end="${esc(x.id)}">${esc(x.work ? t('End and summarize') : t('End'))}</button>` : '',
   ].join('');
-  const work = x.work ? ` <span class="tag">${esc(t('Work now'))}</span>${x.copy ? ` <span class="hint">${esc(t('In a separate copy: the crew goes on in the project.'))}</span>` : ''}${x.held?.length ? ` <span class="hint">${esc(t("The crew's task is paused until you end."))}</span>` : ''}` : '';
+  const work = x.work ? ` <span class="tag">${esc(t('Work now'))}</span>${x.copy ? ` <span class="hint">${esc(t('In a separate copy: the crew goes on in the project.'))}</span>` : ''}` : '';
+  // The crew's task paused for this session: what it is, that it resumes at the end, and "Let it go on" meanwhile.
+  const paused = x.work && !ended && x.held?.length ? `<div class="live-phase">${esc(t('Paused while you work: {tasks}. It resumes by itself when you end.', { tasks: (x.heldTitles ?? x.held).map(v => `"${v}"`).join(', ') }))} <button type="button" class="button secondary small" data-work-release="${esc(x.id)}" title="${esc(t("The crew's task goes on now in its own working copy; you keep working in your clone."))}">${esc(t('Let it go on'))}</button></div>` : '';
   const head = `<div class="live-title"><span class="primary">${esc(x.name)}${work}</span><span class="secondary">${esc([toolName(x.tool), sessionWhere(x), x.cwd ?? '', x.model ?? ''].filter(Boolean).join(' · '))}</span></div>
     <div class="live-facts">${stateHtml(sessionState(x))}<span>${esc(t('Memory'))} <span class="num">${x.ram ? bytes(x.ram) : '—'}</span></span><span>${esc(t('Open for'))} ${ended ? '—' : ticking(x.started)}</span><span>${esc(t('{count} turn(s)', { count: x.turns ?? 0 }))}</span><span class="compose-buttons">${actions}</span></div>
-    <div class="live-phase${['permission', 'login'].includes(x.phase) || x.status === 'login' ? ' warn' : ''}">${esc(livePhaseLine(x))}</div>`;
+    <div class="live-phase${['permission', 'login'].includes(x.phase) || x.status === 'login' ? ' warn' : ''}">${esc(livePhaseLine(x))}</div>${paused}`;
   draw('#live-head', JSON.stringify([x.id, x.status, x.phase, x.ram, x.turns, x.resumable, x.work, x.copy, x.held, language()]), head);
 
   const box = $('#live-feed');
@@ -3232,8 +3234,9 @@ function placeBuilder(inProject) {
 }
 
 /**
- * "Work now": opens (or brings back) the project's session with its agent in charge, which acts in your clone. When
- * the crew is working on the project, you choose first: pause its task, or work in a separate copy.
+ * "Work now": opens (or brings back) the project's session with its agent in charge at once, in your clone. When the
+ * crew is working on the project, "work_now_mode" decides: its task pauses (the default) or you work in a separate
+ * copy; only with "ask" do you choose first.
  */
 async function workNow(id, tool, button) {
   button.disabled = true;
@@ -3244,7 +3247,8 @@ async function workNow(id, tool, button) {
       if (!choice) return;
       r = await api('/api/work-now', { project: id, tool, choice });
     }
-    toast(r.existing ? t('Your session was already open: here it is.') : r.status === 'login' ? t('Codex is not signed in: see the request at the top.') : t('Session open: the agent reads the project and answers in a moment.'));
+    const held = r.work?.held?.length ? ` ${t("The crew's task is paused and resumes when you end.")}` : '';
+    toast(r.existing ? t('Your session was already open: here it is.') : r.status === 'login' ? t('Codex is not signed in: see the request at the top.') : `${t('Session open: the agent reads the project and answers in a moment.')}${held}`);
     await refresh();
     location.hash = sessionHash(r);
   } finally {
@@ -4624,7 +4628,7 @@ document.addEventListener('click', event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-autopilot-mode],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-work-now],[data-work-open],[data-project-manager],[data-browser-focus],[data-browser-close]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-autopilot-mode],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-work-now],[data-work-open],[data-work-release],[data-project-manager],[data-browser-focus],[data-browser-close]');
   if (!target) return;
   // A project's name inside a row that opens on a click (Projects) goes to its page, and nothing else.
   if (event.target.closest('a.project-link') && !target.matches('a')) return;
@@ -4641,6 +4645,12 @@ document.addEventListener('click', async event => {
       return;
     } else if (target.dataset.workNow) {
       await workNow(pageProject(), target.dataset.workNow, target);
+    } else if (target.dataset.workRelease) {
+      target.disabled = true;
+      await api('/api/work-now/release', { id: target.dataset.workRelease });
+      toast(t("The crew's task goes on now in its own working copy."));
+      await refresh();
+      if (liveChat.id === target.dataset.workRelease) pollLive();
       return;
     } else if (target.dataset.workOpen) {
       const x = allSessions().find(s => s.id === target.dataset.workOpen);

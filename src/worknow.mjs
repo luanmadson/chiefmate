@@ -2,9 +2,11 @@
 // with the project's context ready and the manager told. One click on the project's page opens a live session in the
 // app (src/sessions.mjs) with the project's agent in charge (its name and role, src/charge.mjs) that really acts: it
 // reads, edits, runs commands and uses the project's external tools. It takes no place in the queue and doesn't count
-// in max_parallel: it is the owner working. It opens in the owner's clone; when a run of the crew is going on in the
-// same project, the owner chooses first: pause that run (it resumes when the session ends) or work in a separate copy
-// (a git worktree of the clone). The manager is told, never asked: when it opens, at its milestones (a commit, a
+// in max_parallel: it is the owner working. It opens at once in the owner's clone; when a run of the crew is going on
+// in the same project, "work_now_mode" decides, without a question by default: "pause" (the default: the run pauses at
+// a safe point and resumes when the session ends; the owner may let it go on meanwhile, releaseWork), "copy" (the
+// owner works in a separate copy, a git worktree of the clone) or "ask" (the owner chooses first).
+// The manager is told, never asked: when it opens, at its milestones (a commit, a
 // publication asked) and when it ends ("owner_working" news, and a line in its situation). When it ends, or after a
 // while with no activity, a summary of what was done and what is left open is kept in
 // data/projects/<id>/work-notes.jsonl, read by the next session's first message.
@@ -286,11 +288,15 @@ async function crewOn(projectId) {
   return liveRuns().filter(l => l.project === projectId).map(l => ({ run: l.run, title: l.title, agent: l.agent }));
 }
 
+/** "work_now_mode": what "Work now" does when a run of the crew is going on in the project: "pause" (the default), "copy" or "ask". */
+export const workMode = (config = loadConfig()) => (['copy', 'ask'].includes(config.work_now_mode) ? config.work_now_mode : 'pause');
+
 /**
- * "Work now", the owner's click on a project's page: opens (or brings back) the project's session. When a run of the
- * crew is going on in the project and the owner hasn't chosen yet, nothing opens: { conflict: [runs] } asks them to
- * choose "pause" (the run pauses at a safe point and resumes when the session ends) or "copy" (a separate copy).
- * Never opened by an agent: only the app's button calls it. Returns the session (with "existing" when it was open).
+ * "Work now", the owner's click on a project's page: opens (or brings back) the project's session at once. When a run
+ * of the crew is going on in the project, "choice" or else "work_now_mode" decides: "pause" (the run pauses at a safe
+ * point and resumes when the session ends) or "copy" (a separate copy); with "ask" and no choice, nothing opens:
+ * { conflict: [runs] } asks the owner to choose. Never opened by an agent: only the app's button calls it. Returns
+ * the session (with "existing" when it was open).
  */
 export async function openWork(projectId, { tool = 'claude', choice = null, dryRun = false, config = loadConfig() } = {}) {
   const { refuseWhileLocked } = await import('./lockdown.mjs');
@@ -304,8 +310,9 @@ export async function openWork(projectId, { tool = 'claude', choice = null, dryR
   const clone = sessions.projectClone(project);
   if (!clone) throw new Error(t('No clone of yours on this computer: set "local_clone" in its settings.'));
   const crew = await crewOn(projectId);
-  if (crew.length && !['pause', 'copy'].includes(choice)) return { conflict: crew };
-  const copy = crew.length && choice === 'copy';
+  if (!['pause', 'copy'].includes(choice)) choice = crew.length && workMode(config) !== 'ask' ? workMode(config) : null;
+  if (crew.length && !choice) return { conflict: crew };
+  const copy = crew.length > 0 && choice === 'copy';
   const dir = copy ? await separateCopy(clone, projectId, { dryRun }) : clone;
   const where = { dir, copy, crew: crew.map(c => ({ ...c, paused: choice === 'pause' })) };
   if (dryRun) {
@@ -315,12 +322,38 @@ export async function openWork(projectId, { tool = 'claude', choice = null, dryR
   const session = await sessions.openSession(profileId, { config, work: where });
   if (choice === 'pause' && crew.length) {
     const { pauseLive } = await import('./runs.mjs');
-    // Held while the session is open; a session that already ended lets the run go back to the queue (src/runs.mjs).
-    const held = crew.filter(c => pauseLive(c.run, 'owner', { holdWhile: () => sessions.readSession(session.id)?.status !== 'ended' })).map(c => c.run);
-    sessions.updateWork(session.id, { held });
+    // Held while the session is open and the owner hasn't let it go on (releaseWork); otherwise, at its safe point,
+    // the run goes back to the queue (src/runs.mjs).
+    const holdWhile = run => () => {
+      const s = sessions.readSession(session.id);
+      return s?.status !== 'ended' && (s?.work?.held ?? []).includes(run);
+    };
+    const paused = crew.filter(c => pauseLive(c.run, 'owner', { holdWhile: holdWhile(c.run) }));
+    sessions.updateWork(session.id, { held: paused.map(c => c.run), titles: Object.fromEntries(paused.map(c => [c.run, c.title])) });
   }
   tellManager(openedNews(config, sessions.readSession(session.id) ?? session, where.crew), config);
   return sessions.readSession(session.id) ?? session;
+}
+
+/**
+ * "Let it go on", the owner's click on the session's notice: the crew's runs it paused go on now, in the crew's own
+ * working copy, while the owner keeps working in their clone. A run already paused goes back to the queue; one still
+ * pausing goes back by itself at its safe point (holdWhile in openWork). Returns the runs given back.
+ */
+export async function releaseWork(id) {
+  const sessions = await import('./sessions.mjs');
+  const session = sessions.readSession(id);
+  if (!session?.work) throw new Error(t('Session not found.'));
+  const held = session.work.held ?? [];
+  if (!held.length) return [];
+  sessions.updateWork(id, { held: [] });
+  const { resume } = await import('./queue.mjs');
+  for (const run of held) if (readRun(run)?.status === 'paused') resume(run);
+  const config = loadConfig();
+  const titles = held.map(run => session.work.titles?.[run] ?? run);
+  sessions.noteSession(id, t('The crew\'s task goes on now in its own working copy: {titles}.', { titles: titles.map(x => `"${x}"`).join(', ') }));
+  tellManager(`${sessionAbout(config, session)}: ${config.owner || 'the owner'} let the crew's run ${held.join(', ')} go on while they work.`, config);
+  return held;
 }
 
 /**
