@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, renameSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { t } from './i18n.mjs';
+import { refuseWhileLocked } from './lockdown.mjs';
 import { clip, ensureDir, slug, WORKSPACES } from './util.mjs';
 
 /**
@@ -233,7 +234,10 @@ export async function runChecks(dir, commands = []) {
 }
 
 /** Local delivery: copies the run's branch into your own clone of the project. Nothing goes to GitHub. */
-export const deliverToClone = (dir, branch, clone) => git(dir, 'push', clone, `refs/heads/${branch}:refs/heads/${branch}`);
+export const deliverToClone = (dir, branch, clone) => {
+  refuseWhileLocked(t('delivery to your clone'));
+  return git(dir, 'push', clone, `refs/heads/${branch}:refs/heads/${branch}`);
+};
 
 /** The owner's clone in which this run was delivered. */
 export function localDeliveryClone(run, config) {
@@ -381,6 +385,7 @@ export async function traces(dir, base) {
 
 /** Pushes the branch and opens the pull request. Returns its address. */
 export async function openPullRequest(dir, { base, branch, title, body, bodyFile }) {
+  refuseWhileLocked(t('push and pull request'));
   await git(dir, 'push', '--force-with-lease', '-u', 'origin', branch);
   writeFileSync(bodyFile, body);
   const r = await run('gh', ['pr', 'create', '--base', base, '--head', branch, '--title', title, '--body-file', bodyFile], dir);

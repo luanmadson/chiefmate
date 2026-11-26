@@ -8,6 +8,7 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { loadConfig, saveConfig } from './config.mjs';
 import { t } from './i18n.mjs';
+import { isLocked } from './lockdown.mjs';
 import { DATA, ensureDir, now, readJson, writeJson } from './util.mjs';
 
 export const PROFILE_DIR = path.join(DATA, 'browser-profile');
@@ -204,6 +205,7 @@ let reading = null;
 
 /** Reads the page now (one reading at a time). Keeps the latest values when it fails. */
 export function readUsagePage(config = loadConfig()) {
+  if (isLocked()) return Promise.reject(new Error(t('Refused: Chiefmate is in emergency lockdown ({what}). Only the owner can release it, in the app or the command line on this computer.', { what: t('reading claude.ai') })));
   reading ??= (async () => {
     const before = readerStatus();
     const status = { ...before, attempted: now() };

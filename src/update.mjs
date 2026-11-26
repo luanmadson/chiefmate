@@ -10,6 +10,7 @@ import path from 'node:path';
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { reportEvent } from './news.mjs';
+import { isLocked, refuseWhileLocked } from './lockdown.mjs';
 import { notify } from './notify.mjs';
 import { readState, saveState } from './store.mjs';
 import { now, ROOT } from './util.mjs';
@@ -76,7 +77,8 @@ async function installable({ branch, behind }) {
 
 /** Looks for an approved update and, when there is one, installs it as "auto_update_mode" says. */
 async function check() {
-  if (!hooks || updateInfo.installing) return;
+  // No update comes in during an emergency lockdown.
+  if (!hooks || updateInfo.installing || isLocked()) return;
   const found = await look();
   updateInfo.mode = updateMode();
   if (!found?.behind || found.target === failedTarget || !(await installable(found))) return;
@@ -211,6 +213,7 @@ async function restart(beforeRestart) {
  */
 export async function updateNow({ interruptManager = false } = {}) {
   if (!hooks) throw new Error(t('Updates are off in this Chiefmate.'));
+  refuseWhileLocked(t('update'));
   const job = updateInfo.installing;
   if (job) {
     if (interruptManager) job.interruptManager = true;

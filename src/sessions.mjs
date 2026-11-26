@@ -25,6 +25,7 @@ import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { assembleBlocks, builderSettings, parseBlocks } from './prompts.mjs';
 import { codexEnvironment, signedIn, spawnable, toolCommand, where } from './tools.mjs';
+import { isLocked, refuseWhileLocked } from './lockdown.mjs';
 import { updating } from './update.mjs';
 import { clip, DATA, ensureDir, languageName, now, readJson, ROOT, slug, stamp, WORKSPACES, writeJson } from './util.mjs';
 
@@ -273,6 +274,7 @@ function launch(session) {
  * starts the session once that is done.
  */
 export async function openSession(profileId, { origin = 'app', prompt: written = null, window = false, config = loadConfig() } = {}) {
+  refuseWhileLocked(t('live session'));
   const { profile, folder, prompt } = planSession(config, profileId, { prompt: written });
   if (profile.charge && (window || written)) throw new Error(t('The conversation with the agent in charge happens only here in the app.'));
   const mode = window ? 'window' : 'app';
@@ -439,7 +441,7 @@ export function sayToSession(id, text, { by = 'owner' } = {}) {
   let session = appSession(id);
   if (session.status === 'ended') session = resumeSession(id);
   const item = { id: randomUUID().slice(0, 8), text: message, at: now(), ...(by === 'manager' ? { by } : {}) };
-  const queued = live.has(id) || session.status !== 'open' || !!session.paused || updating() || (session.queue ?? []).length > 0;
+  const queued = live.has(id) || session.status !== 'open' || !!session.paused || updating() || isLocked() || (session.queue ?? []).length > 0;
   saveSession({ ...session, queue: [...(session.queue ?? []), item] });
   deliverSession(id);
   return { ...item, queued, position: queued ? (readSession(id)?.queue ?? []).length : 0 };
@@ -517,10 +519,11 @@ const appSystem = owner => [
 
 /**
  * Starts the next turn of a session in the app, with its whole queue, when it is open and free; a turn paused for an
- * update carries on by itself. None starts while an update of Chiefmate is being installed. Returns whether one started.
+ * update carries on by itself. None starts while an update of Chiefmate is being installed, nor in an emergency
+ * lockdown. Returns whether one started.
  */
 export function deliverSession(id) {
-  if (live.has(id) || updating()) return false;
+  if (live.has(id) || updating() || isLocked()) return false;
   const session = readSession(id);
   if (!session || session.mode !== 'app' || session.status !== 'open' || (!(session.queue ?? []).length && !session.paused)) return false;
   const items = session.queue ?? [];
@@ -558,7 +561,7 @@ export function deliverSession(id) {
       dir: session.cwd, prompt, system: charge?.system ?? appSystem(config.owner || 'the owner'), model: charge?.model ?? session.model ?? config.default_model,
       tools: charge ? charge.tools : [...APP_TOOLS, ...mcp.tools, ...(session.allowed ?? []).filter(r => !ASK_FIRST.includes(r))],
       disallowed: charge ? [...charge.disallowed, ...ASK_FIRST] : ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r)), mcpServers: charge ? {} : browserServers(config, mcp.servers, sessionBrowser(session)),
-      addDirs: charge?.addDirs ?? [], hooks: guardHooks({ log: guardLog(id), allowed: charge ? [] : session.allowed ?? [] }),
+      addDirs: charge?.addDirs ?? [], hooks: guardHooks({ log: guardLog(id), allowed: charge ? [] : session.allowed ?? [], who: 'session' }),
       attribution: config.attribution !== false, maxMinutes: TURN_MINUTES,
       session: { id: session.toolSession, resume }, log: rawLog(id), onEvent,
     });
@@ -620,6 +623,9 @@ export function pauseSessionTurns() {
 
 /** Whether a turn of a live session is going on. */
 export const sessionTurnsGoingOn = () => live.size > 0;
+
+/** The emergency lockdown (src/lockdown.mjs): every turn going on stops at once. Returns how many. */
+export const stopSessionTurns = () => [...live.keys()].filter(interruptSession).length;
 
 /** After an update that did not go in, or after the restart: the sessions' turns and queues go on. */
 export function resumeSessions() {

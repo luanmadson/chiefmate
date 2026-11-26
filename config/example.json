@@ -75,5 +75,8 @@
   },
   "ui": {
     "voice_input": true
+  },
+  "security": {
+    "protected_folders": []
   }
 }

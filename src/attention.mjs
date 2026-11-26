@@ -31,9 +31,16 @@ const ago = (iso, span) => iso && Date.now() - Date.parse(iso) <= span;
  * The notices now, most urgent first: { id, level, kind, title, text, view, project, run, at, seen, seenable }.
  * "view" is the app's place that deals with it; a request of a step carries what its buttons need ("I did it", or a question's options).
  */
-export function attentionItems({ config, runs = [], needs = [], usage = {}, machine, items = [], update = {}, questions = [], pushes = [], repos = [] }) {
+export function attentionItems({ config, runs = [], needs = [], usage = {}, machine, items = [], update = {}, questions = [], pushes = [], repos = [], lockdown = null }) {
   const list = [];
   const add = item => list.push({ project: null, run: null, at: null, seenable: true, ...item });
+  // Urgent: the emergency lockdown (src/lockdown.mjs), until the owner releases it, and the security warnings of the day.
+  if (lockdown?.active) {
+    add({ id: `lockdown:${lockdown.since}`, level: 'urgent', kind: 'lockdown', title: t('Emergency lockdown'), text: lockdown.reason ?? '', view: 'operations', at: lockdown.since, seenable: false });
+  }
+  for (const w of lockdown?.warnings ?? []) {
+    add({ id: `security:${w.id}`, level: 'urgent', kind: 'security', title: t('Security warning'), text: w.text, view: 'operations', at: w.at });
+  }
   // Someone else reviews the project's work ("merge_by_owner": false): its pull requests only inform, until merged or closed.
   const byOther = project => config?.projects?.[project]?.merge_by_owner === false;
   const prNotice = (project, title) => (byOther(project)

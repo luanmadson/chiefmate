@@ -10,6 +10,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
+import { refuseWhileLocked } from './lockdown.mjs';
 import { reportEvent } from './news.mjs';
 import { readRun, runDir, saveRun, settleRunOutside } from './store.mjs';
 import { projectClone } from './sessions.mjs';
@@ -140,6 +141,7 @@ export async function refreshCopies(run, where, config = loadConfig(), { library
  * merge fails, the manager hears of it at once and the error says so.
  */
 export async function mergeRun(id, { by = 'owner' } = {}, config = loadConfig()) {
+  refuseWhileLocked(t('merge'));
   const run = readRun(String(id ?? ''));
   const settled = await resolveLocal(run, config);
   if (settled) return settled;
@@ -182,6 +184,7 @@ export async function mergeRun(id, { by = 'owner' } = {}, config = loadConfig())
  * and its branch stays); a local branch is left in the owner's clone, unmerged. Then "run.discarded".
  */
 export async function discardRun(id, config = loadConfig()) {
+  refuseWhileLocked(t('closing a pull request'));
   const run = readRun(String(id ?? ''));
   const where = await target(run, config).catch(error => {
     // A local branch outside the owner's clone can still be discarded: nothing is touched.
@@ -239,6 +242,7 @@ export function previewClose(id, replacedBy) {
  * reopened there; the run is marked discarded, with who asked and what replaced it, so its card settles.
  */
 export async function closeReplaced(id, replacedBy, { by = 'owner' } = {}, config = loadConfig()) {
+  refuseWhileLocked(t('closing a pull request'));
   const p = previewClose(id, replacedBy);
   const who = by === 'manager' ? 'manager' : 'owner';
   const comment = `Replaced by ${p.newUrl} (Chiefmate run ${p.replacedBy}): ${p.why}. Closed by Chiefmate at the ${who}'s request; the branch stays and this pull request can be reopened.`;

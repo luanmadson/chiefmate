@@ -520,6 +520,92 @@ function drawAway() {
   draw('#away', label, `${MOON}<span class="away-label">${esc(label)}</span>`);
 }
 
+// ---------- Emergency lockdown (src/lockdown.mjs) ----------
+
+/** Whether the app is open on this computer (not through the remote access): only here is the lockdown released. */
+const onThisComputer = () => ['localhost', '127.0.0.1'].includes(location.hostname);
+
+/** The red button in the title bar: engages the lockdown, after a confirmation. Hidden while it is on. */
+function drawLockdownButton() {
+  const button = $('#lockdown');
+  button.hidden = !online || !!state?.lockdown?.active;
+  if (button.hidden) return;
+  const label = t('Lockdown');
+  button.title = t('Emergency lockdown: stops every run, the queue, the agents and their browsers at once, and refuses pushes, merges and the remote access until you release it on this computer.');
+  button.setAttribute('aria-label', `${label}. ${button.title}`);
+  draw('#lockdown', label, esc(label));
+}
+
+$('#lockdown').addEventListener('click', async () => {
+  const yes = await confirmDialog(
+    t('Emergency lockdown'),
+    t("Stop everything now? The runs, the queue, the manager, the live sessions and the crew's browsers stop at once; pushes, merges, new repositories, external actions and the remote access are refused. Only you can release it, on this computer."),
+    t('Lock down now'),
+  );
+  if (!yes) return;
+  try {
+    await api('/api/lockdown', { action: 'engage', reason: t('Engaged by the owner in the app') });
+    toast(t('Emergency lockdown on: everything was stopped.'));
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+/** The red band at the top while the lockdown is on, on every page. */
+function lockdownBand() {
+  const l = state?.lockdown;
+  if (!online || !l?.active) return '';
+  const action = onThisComputer()
+    ? `<button type="button" class="button small lockdown-release" data-lockdown-review>${esc(t('Review and release'))}</button>`
+    : `<span class="lockdown-note">${esc(t('Release it on the computer where Chiefmate runs.'))}</span>`;
+  return `<div class="lockdown-band" role="alert">
+      <strong>${esc(t('EMERGENCY LOCKDOWN'))}</strong>
+      <span>${esc(t('Since {time}: {reason}', { time: shortDate(l.since), reason: l.reason ?? '' }))}</span>
+      <span class="lockdown-note">${esc(t('Everything is stopped. Pushes, merges, new repositories, external actions and the remote access are refused.'))}</span>
+      ${action}
+    </div>`;
+}
+
+/** What triggered the lockdown and what it stopped, for the owner to read before releasing it. */
+function lockdownSummaryHtml(l) {
+  const who = { owner: t('you'), auto: t('the automatic detection'), manager: t('the manager'), step: t('an agent at work') }[l.by] ?? l.by;
+  const where = { app: t('the app'), remote: t('the remote access'), cli: t('the command line'), detection: t('the detection') }[l.from] ?? l.from;
+  const names = { runs: t('runs'), manager: t("manager's answer"), sessions: t('live session turns'), browsers: t('browsers') };
+  const stopped = Object.entries(l.stopped ?? {}).filter(([k]) => names[k]).map(([k, n]) => `${names[k]}: ${n}`).join(' · ') || t('nothing was going on');
+  const evidence = (l.evidence ?? []).map(e => `<li><span class="muted">${esc(shortDate(e.at))}</span> ${esc(e.what)}${e.who ? ` (${esc(e.who)})` : ''}: <code>${esc(e.detail)}</code></li>`).join('');
+  return `<p>${esc(t('Since {time}, engaged by {who} from {where}.', { time: shortDate(l.since), who, where }))}</p>
+    <p><strong>${esc(t('Reason'))}:</strong> ${esc(l.reason ?? '')}</p>
+    <p><strong>${esc(t('What was stopped'))}:</strong> ${esc(stopped)}</p>
+    ${evidence ? `<div class="label">${esc(t('Evidence'))}</div><ul class="lockdown-evidence">${evidence}</ul>` : ''}
+    <p class="muted">${esc(t('After the release, the queue goes on. The runs it stopped stay canceled until you resume them.'))}</p>`;
+}
+
+document.addEventListener('click', event => {
+  if (!event.target.closest('[data-lockdown-review]')) return;
+  const l = state?.lockdown;
+  if (!l?.active) return;
+  const dialog = $('#lockdown-dialog');
+  $('#lockdown-summary').innerHTML = lockdownSummaryHtml(l);
+  $('#lockdown-reviewed').checked = false;
+  $('#lockdown-release').disabled = true;
+  dialog.returnValue = '';
+  dialog.showModal();
+  dialog.addEventListener('close', async () => {
+    if (dialog.returnValue !== 'yes' || !$('#lockdown-reviewed').checked) return;
+    try {
+      await api('/api/lockdown', { action: 'release', confirm: true });
+      toast(t('Lockdown released: the queue goes on.'));
+      refresh();
+    } catch (error) {
+      toast(error.message);
+    }
+  }, { once: true });
+});
+$('#lockdown-reviewed').addEventListener('change', event => {
+  $('#lockdown-release').disabled = !event.target.checked;
+});
+
 $('#away').addEventListener('click', async () => {
   const on = !state?.away;
   const button = $('#away');
@@ -783,16 +869,18 @@ function drawAlerts() {
   const view = currentView();
   const listed = { operations: ['operations', 'log'], planning: ['planning'] }[view] ?? [];
   const skip = i => (view === 'manager' ? i.view !== 'manager' : listed.includes(i.view) || (view === 'project' && ofProject(pageProject())(i)));
-  const list = focusMode() ? [] : attnItems().filter(i => !carded.has(i.id) && !(phone && i.level === 'info') && !skip(i));
+  // The lockdown has its own red band, on every page and in focus mode too.
+  const band = lockdownBand();
+  const list = focusMode() ? [] : attnItems().filter(i => !carded.has(i.id) && !(phone && i.level === 'info') && !skip(i) && i.kind !== 'lockdown');
   const fresh = unseen(list);
-  if (!fresh.length && !attnOpen) return draw('#alerts', '', '');
+  if (!fresh.length && !attnOpen) return draw('#alerts', band, band);
   const others = fresh.length - 1;
   const toggle = list.length > 1 || attnOpen
     ? `<button type="button" class="button secondary small" data-attn-more aria-expanded="${attnOpen}">${esc(attnOpen ? t('Show less') : others > 0 ? t('+{count} more', { count: others }) : t('See all'))}</button>`
     : '';
   const all = fresh.some(i => i.seenable) ? `<button type="button" class="button secondary small" data-attn-seen="${esc(fresh.filter(i => i.seenable).map(i => i.id).join(' '))}">${esc(t('Mark all as seen'))}</button>` : '';
   const shown = attnOpen ? list : fresh.slice(0, 1);
-  const html = `<div class="attn-band" data-level="${topLevel(list) ?? 'info'}"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>
+  const html = `${band}<div class="attn-band" data-level="${topLevel(list) ?? 'info'}"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>
       ${shown.map(i => attnNotice(i, true)).join('') || `<div class="attn" data-level="info"><div class="attn-text">${esc(t('Nothing needs you now.'))}</div></div>`}
       ${toggle || (attnOpen && all) ? `<div class="attn-more">${attnOpen ? attnArchivedLink() : ''}${toggle}${attnOpen ? all : ''}</div>` : ''}
     </div>`;
@@ -992,7 +1080,7 @@ const newsEvent = kind => ({
   run_finished: t('run finished'), run_failed: t('run failed'), run_paused: t('run paused'), pr_ready: t('pull request ready'), merged: t('merged'),
   merge_failed: t('merge failed'), needs_you: t('needs you'), update_installed: t('update installed'), update_blocked: t('update blocked'),
   memory_alert: t('memory alert'), usage_alert: t('usage alert'), session_ended: t('live session ended'), plan_proposed: t('new proposal'),
-  idle: t('empty queue'), autopilot_report: t('autopilot report'), watchdog: t('watchdog'),
+  idle: t('empty queue'), autopilot_report: t('autopilot report'), watchdog: t('watchdog'), lockdown: t('emergency lockdown'), security_warning: t('security warning'),
   away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'),
 }[kind] ?? kind);
 
@@ -3764,6 +3852,7 @@ document.addEventListener('click', event => {
 function drawOffline() {
   online = false;
   drawPresence();
+  drawLockdownButton();
   drawAway();
   drawFocus();
   drawAlerts();
@@ -3838,6 +3927,7 @@ async function refresh() {
   if (fresh && state.now) skew = new Date(state.now).getTime() - Date.now();
   $('#version').textContent = `Chiefmate ${state.version}`;
   drawPresence();
+  drawLockdownButton();
   drawAway();
   drawFocus();
   drawMics();
