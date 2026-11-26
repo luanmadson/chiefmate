@@ -2716,10 +2716,32 @@ try {
   expect(!checkIdleWork(Date.now(), async () => {}).includes('smoke-work'), 'a quiet session was summarized twice');
   expect(work.workLine([record], made).includes('Delta with Fixer') && NEWS_EVENTS.includes('owner_working') && work.openedNews(made, record).includes('Nothing waits for your answer'), "the manager doesn't hear of the owner working now");
   expect(work.isCommit('Ran: git -C "x y" commit -m "Fix"') && work.isCommit('Rodou: git commit -am x') && !work.isCommit('Ran: git status'), 'a commit is not recognized as a milestone');
-  // The guard of a "Work now" session: with pushing allowed, a branch of the work goes; the main branch never does.
-  const hook = guardHooks({ log: path.join(temp, 'guard.jsonl'), allowed: ['Bash(git push:*)'], who: 'session', noMain: true }).PreToolUse[0].hooks[0].command;
-  const denies = command => /"permissionDecision":"deny"/.test(execFileSync(hook, { shell: true, encoding: 'utf8', cwd: temp, input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', cwd: temp, tool_input: { command } }) }));
+  const translated = work.parseSummary('**Feito:** Corrigi o menu.\n**Em aberto:** nada');
+  expect(translated?.done === 'Corrigi o menu.' && translated.open === '', `a summary with its labels in Portuguese was misread: ${JSON.stringify(translated)}`);
+  // Ending the session: a crew run it paused, but canceled meanwhile, stays canceled.
+  const { readRun, saveRun } = await import(src('store.mjs'));
+  const { readSession } = await import(src('sessions.mjs'));
+  saveRun({ id: 'smoke-held-run', kind: 'task', project: 'delta', title: 'A crew task', status: 'canceled', created: quiet, ended: quiet, steps: [] });
+  writeFileSync(path.join(sessions, 'smoke-work-held.json'), JSON.stringify({ ...record, id: 'smoke-work-held', status: 'ended', ended: new Date().toISOString(), work: { copy: false, held: ['smoke-held-run'] } }));
+  await work.closeWork('smoke-work-held');
+  expect(readRun('smoke-held-run')?.status === 'canceled' && !readSession('smoke-work-held')?.work?.held?.length, 'ending "Work now" brought back a crew run canceled while it was paused');
+  // The guard of a "Work now" session: with pushing allowed, a branch of the work goes; the main branch never does,
+  // however it is named (HEAD is the branch checked out). Before pushing is allowed, a push that could never go is
+  // refused at once, without a permission request for the owner (nothing in the log); a branch of the work asks.
+  const hookFor = (allowed, log) => guardHooks({ log, allowed, who: 'session', noMain: true }).PreToolUse[0].hooks[0].command;
+  const hook = hookFor(['Bash(git push:*)'], path.join(temp, 'guard.jsonl'));
+  const denies = (command, { cwd = temp, h = hook } = {}) => /"permissionDecision":"deny"/.test(execFileSync(h, { shell: true, encoding: 'utf8', cwd, input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', cwd, tool_input: { command } }) }));
   expect(denies('git push origin main') && denies('git push') && denies('git push --force origin feature') && !denies('git push origin feature/menu'), 'a "Work now" session may push to the main branch, or may not push a branch of the work once allowed');
+  const repo = path.join(temp, 'repo');
+  execFileSync('git', ['init', '-q', repo], { windowsHide: true });
+  execFileSync('git', ['-C', repo, 'symbolic-ref', 'HEAD', 'refs/heads/main'], { windowsHide: true });
+  const mainAsHead = denies('git push origin HEAD', { cwd: repo }) && denies('git push -u origin heads/main', { cwd: repo });
+  execFileSync('git', ['-C', repo, 'symbolic-ref', 'HEAD', 'refs/heads/feature/menu'], { windowsHide: true });
+  expect(mainAsHead && !denies('git push -u origin HEAD', { cwd: repo }), 'a "Work now" session may push the main branch as HEAD, or may not push its own branch as HEAD');
+  const askLog = path.join(temp, 'asked.jsonl');
+  const asking = hookFor([], askLog);
+  const mainNotAsked = denies('git push origin main', { h: asking }) && !existsSync(askLog);
+  expect(mainNotAsked && denies('git push origin feature/menu', { h: asking }) && existsSync(askLog), 'before pushing is allowed, a push to the main branch became a permission request, or a branch of the work did not');
   rmSync(temp, { recursive: true, force: true, maxRetries: 5 });
 } catch (error) {
   failures.push(`work now checks: ${error.message}`);

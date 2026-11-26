@@ -17,7 +17,7 @@ import { formatDateTime, t } from './i18n.mjs';
 import { readMemory } from './leads.mjs';
 import { reportEvent } from './news.mjs';
 import { CLOSED, planItems } from './planning.mjs';
-import { listRuns } from './store.mjs';
+import { listRuns, readRun } from './store.mjs';
 import { clip, DATA, ensureDir, languageName, now, WORKSPACES } from './util.mjs';
 import { noTrace } from './workspace.mjs';
 
@@ -127,7 +127,7 @@ export function workContext(config, projectId, profile, where, { cloneOf = () =>
 ${owner} opened this session with "Work now" on the project's page: they want to act on ${name} right away, with you, as in a terminal. You are ${profile.memberName}, ${profile.lead ? 'the team lead' : 'the agent in charge'} of ${name} in Chiefmate's crew; here you work directly with ${owner}, not as a step of a run: no queue, no review, no manager's authorization. You read, edit, run commands and use the project's tools. Talk in ${languageName(config.language || 'en')}, short and plain.`);
   const crew = where.crew ?? [];
   parts.push(`## Where you work
-${where.copy ? `A separate copy of ${owner}'s clone (a git worktree, detached at the commit their clone had): ${where.dir}. A run of the crew goes on in the project meanwhile. Before you commit, create a branch named for the work (nothing that mentions Chiefmate); ${owner}'s clone sees it at once.` : `${owner}'s own clone of the project: ${where.dir}.`}${crew.length ? `\nThe crew's run${crew.length > 1 ? 's' : ''} in this project: ${crew.map(c => `"${c.title}"${c.paused ? ` (paused at ${owner}'s click; it resumes when this session ends)` : ' (going on, in its own working copy)'}`).join('; ')}.` : ''}`);
+${where.copy ? `A separate copy of ${owner}'s clone (a git worktree, made detached at their clone's commit and kept between sessions: an earlier session may have left it on a branch of its own, so check git status first): ${where.dir}. A run of the crew goes on in the project meanwhile. Before you commit, create a branch named for the work (nothing that mentions Chiefmate); ${owner}'s clone sees it at once.` : `${owner}'s own clone of the project: ${where.dir}.`}${crew.length ? `\nThe crew's run${crew.length > 1 ? 's' : ''} in this project: ${crew.map(c => `"${c.title}"${c.paused ? ` (paused at ${owner}'s click; it resumes when this session ends)` : ' (going on, in its own working copy)'}`).join('; ')}.` : ''}`);
   const rules = [
     `Never push to the main branch, and never publish anything (a push, a pull request, a release, a message to someone) unless ${owner} asks: Chiefmate refuses it until ${owner} allows it in the app.`,
     ...(noTrace(project) ? ['This project carries no trace of Chiefmate: no mention of Chiefmate, its crew or its agents in commits, branches, files or messages, and no co-author line.'] : []),
@@ -177,9 +177,9 @@ export function workSystem(config, session) {
 
 // ---------- The manager, told ----------
 
-/** Tells the manager (never waits for it): "owner_working" news. */
-export function tellManager(text, config = loadConfig()) {
-  reportEvent('owner_working', text, { config });
+/** Tells the manager (never waits for it): "owner_working" news. later: with the next news, not a turn of its own. */
+export function tellManager(text, config = loadConfig(), { later = false } = {}) {
+  reportEvent('owner_working', text, { config, later });
 }
 
 const sessionAbout = (config, s) => `${config.owner || 'The owner'} is working now on ${config.projects?.[s.project]?.name ?? s.project} with ${s.memberName ?? 'its agent in charge'} (${toolName(s.tool)}, "Work now" session ${s.id}, ${s.work?.copy ? 'in a separate copy of their clone' : 'in their own clone'})`;
@@ -188,15 +188,19 @@ const sessionAbout = (config, s) => `${config.owner || 'The owner'} is working n
 export function openedNews(config, session, crew = []) {
   const owner = config.owner || 'the owner';
   const runs = crew.length ? ` The crew's run${crew.length > 1 ? 's' : ''} in this project: ${crew.map(c => `"${c.title}" [${c.run}] ${c.paused ? `paused at ${owner}'s click, resumed when the session ends` : 'goes on in its own working copy'}`).join('; ')}.` : '';
-  return `${sessionAbout(config, session)}.${runs} Nothing waits for your answer. Use it to manage the queue while the session lasts: queue no new work on this project, and when a queued run of it would conflict with what ${owner} is doing, cancel it (node src/cli.mjs cancel <id>) and queue it again once the session ends; keep the parallel load lighter, so ${owner} has room in the account's usage.`;
+  return `${sessionAbout(config, session)}.${runs} Nothing waits for your answer. Use it to manage the queue while the session lasts: queue no new work on this project unless ${owner} asks for it, and when a queued run of it would conflict with what ${owner} is doing, cancel it (node src/cli.mjs cancel <id>) and queue it again once the session ends; keep the parallel load lighter, so ${owner} has room in the account's usage.`;
 }
 
-/** A milestone of the session going on (a commit, a publication asked), at most every MILESTONE_MINUTES for commits. */
+/**
+ * A milestone of the session going on (a commit, a publication asked), at most every MILESTONE_MINUTES for commits.
+ * It goes with the manager's next news (the session going quiet or ending, at the latest): it asks nothing of the
+ * manager, so it doesn't spend a turn of its own, and the owner's usage.
+ */
 export function milestone(config, session, what, { kind = 'commit' } = {}) {
   const last = session.work?.told?.[kind];
   if (kind === 'commit' && last && Date.now() - Date.parse(last) < MILESTONE_MINUTES * 60_000) return false;
   session.work = { ...session.work, told: { ...session.work?.told, [kind]: now() } };
-  tellManager(`${sessionAbout(config, session)}: ${clip(what, 300)}.`, config);
+  tellManager(`${sessionAbout(config, session)}: ${clip(what, 300)}.`, config, { later: true });
   return true;
 }
 
@@ -217,14 +221,14 @@ export function historyDigest(items, size = 12_000) {
   return text.length > size ? text.slice(-size) : text;
 }
 
-/** The summary's two parts from the quick model's answer ("Done: ..." and "Open: ..."), or null. */
+/** The summary's two parts from the quick model's answer ("Done: ..." and "Open: ...", also "Feito:" and "Em aberto:"), or null. */
 export function parseSummary(answer) {
-  const text = String(answer ?? '').trim();
+  const text = String(answer ?? '').replace(/\*\*/g, '').trim();
   if (!text) return null;
-  const done = /done\s*:\s*([\s\S]*?)(?:\n\s*open\s*:|$)/i.exec(text)?.[1]?.trim();
-  const open = /open\s*:\s*([\s\S]*)$/i.exec(text)?.[1]?.trim();
+  const done = /(?:done|feito)\s*:\s*([\s\S]*?)(?:\n\s*(?:open|em aberto)\s*:|$)/i.exec(text)?.[1]?.trim();
+  const open = /(?:^|\n)\s*(?:open|em aberto)\s*:\s*([\s\S]*)$/i.exec(text)?.[1]?.trim();
   if (!done && !open) return { done: clip(text, 1200), open: '' };
-  return { done: clip(done ?? '', 1200), open: /^(none|nothing|nada|nenhum)\.?$/i.test(open ?? '') ? '' : clip(open ?? '', 1200) };
+  return { done: clip(done ?? '', 1200), open: /^(none|nothing|nada|nenhum|nenhuma)\.?$/i.test(open ?? '') ? '' : clip(open ?? '', 1200) };
 }
 
 /**
@@ -235,7 +239,7 @@ export function parseSummary(answer) {
 export async function summarize(config, session, items, ask) {
   const digest = historyDigest(items);
   if (!digest.trim()) return null;
-  const prompt = `Below is a live working session between ${config.owner || 'the owner'} and an AI agent on the project ${config.projects?.[session.project]?.name ?? session.project}. Write, in ${languageName(config.language || 'en')}, a summary for whoever works on it next, in exactly this shape and nothing else:
+  const prompt = `Below is a live working session between ${config.owner || 'the owner'} and an AI agent on the project ${config.projects?.[session.project]?.name ?? session.project}. Write a summary for whoever works on it next, in exactly this shape and nothing else, the labels "Done:" and "Open:" as they are and the rest in ${languageName(config.language || 'en')}:
 Done: <what was done, one to three sentences, with files or commits that matter>
 Open: <what was left open or still to decide, one to three sentences, or "none">
 
@@ -254,7 +258,7 @@ export function workLine(sessions, config = loadConfig()) {
   const open = sessions.filter(s => s.work && s.mode === 'app' && s.status === 'open');
   if (!open.length) return '';
   const owner = config.owner || 'the owner';
-  return `${owner} working now (sessions opened with "Work now"; told to you, not asked: queue no new work on the same project, hold back a queued run of it that would conflict, and keep the parallel load lighter meanwhile): ${open.map(s => `${config.projects?.[s.project]?.name ?? s.project} with ${s.memberName ?? 'its agent'} since ${formatDateTime(s.started ?? s.created)}${s.work?.copy ? ', in a separate copy' : ''}${s.work?.held?.length ? `, the crew's run ${s.work.held.join(', ')} paused` : ''}`).join('; ')}.`;
+  return `${owner} working now (sessions opened with "Work now"; told to you, not asked: queue no new work on the same project unless ${owner} asks for it, hold back a queued run of it that would conflict, and keep the parallel load lighter meanwhile): ${open.map(s => `${config.projects?.[s.project]?.name ?? s.project} with ${s.memberName ?? 'its agent'} since ${formatDateTime(s.started ?? s.created)}${s.work?.copy ? ', in a separate copy' : ''}${s.work?.held?.length ? `, the crew's run ${s.work.held.join(', ')} paused` : ''}`).join('; ')}.`;
 }
 
 /** The latest notes in the app's shape, for a project: { at, done, open }. */
@@ -340,12 +344,17 @@ export async function closeWork(id, { ended = true } = {}) {
   const { askQuick } = await import('./digest.mjs');
   const summary = await summarize(config, session, items, askQuick);
   if (summary) sessions.noteSession(id, t('Summary kept for the next conversation. Done: {done}{open}', { done: summary.done, open: summary.open ? ` ${t('Left open: {open}', { open: summary.open })}` : '' }));
+  // Only the runs still paused: one canceled or failed meanwhile stays as it is. One still pausing goes back to the
+  // queue by itself (holdWhile in openWork).
+  const paused = (session.work.held ?? []).filter(run => readRun(run)?.status === 'paused');
   let resumed = [];
   if (ended && session.work.held?.length) {
     const { resume } = await import('./queue.mjs');
-    resumed = session.work.held.filter(run => resume(run) === 'queued');
+    resumed = paused.filter(run => resume(run) === 'queued');
+    sessions.updateWork(id, { held: [] });
   }
   const about = sessionAbout(config, session);
-  tellManager(`${about}: ${ended ? 'the session ended' : `no activity for ${IDLE_MINUTES} minutes`}. ${summary ? `Done: ${clip(summary.done, 500)}${summary.open ? ` Left open: ${clip(summary.open, 400)}` : ''}` : 'Nothing was done.'}${resumed.length ? ` The crew's run ${resumed.join(', ')} went back to the queue.` : ''}`, config);
+  const nothing = since ? 'Nothing new since its last summary.' : 'Nothing was done.';
+  tellManager(`${about}: ${ended ? 'the session ended' : `no activity for ${IDLE_MINUTES} minutes`}. ${summary ? `Done: ${clip(summary.done, 500)}${summary.open ? ` Left open: ${clip(summary.open, 400)}` : ''}` : nothing}${resumed.length ? ` The crew's run ${resumed.join(', ')} went back to the queue.` : ''}${!ended && paused.length ? ` The crew's run ${paused.join(', ')} stays paused until the session ends.` : ''}`, config);
   return summary;
 }

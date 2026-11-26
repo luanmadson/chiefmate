@@ -402,11 +402,14 @@ async function hook(argv) {
   }
   const found = publishing(command);
   const cwd = call.cwd || process.cwd();
-  // A "Work now" session (src/worknow.mjs): even with pushing allowed, only a plain push of one branch other than
-  // the main one goes.
-  if (argv.includes('--no-main') && allowed.has(PUSH) && found.some(f => f.rule === PUSH)) {
+  // A "Work now" session (src/worknow.mjs): only a plain push of one branch other than the main one may ever go, once
+  // the owner allows pushing; any other push is refused at once, so it never becomes a permission request. HEAD is
+  // the branch checked out, and "heads/<name>" that branch.
+  if (argv.includes('--no-main') && found.some(f => f.rule === PUSH)) {
     const target = plainPush(command, cwd);
-    if (!target.branch || pushFacts(target).main) {
+    const named = /^head$/i.test(target.branch ?? '') ? git(target.dir, 'symbolic-ref', '--short', 'HEAD') : target.branch;
+    const branch = named?.replace(/^(refs\/)?heads\//i, '');
+    if (!branch || pushFacts({ ...target, branch }).main) {
       return deny('Refused by Chiefmate, always: nothing goes straight to the main branch (main, master or the default one), and no push is forced. Only "git push <remote> <branch>" of a branch of the work goes, once the owner allowed pushing. Say what you wanted to send and why, and stop.');
     }
   }
