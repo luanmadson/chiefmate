@@ -645,7 +645,6 @@
   "{lead}: a request, planned into tasks for the crew": "{lead}: um pedido, dividido em tarefas para a equipe",
   "Opening VS Code…": "Abrindo o VS Code…",
   "Opening the folder…": "Abrindo a pasta…",
-  "The window of the development environment of {project} closes, with everything it started.": "A janela do ambiente de desenvolvimento de {project} fecha, com tudo o que ele iniciou.",
   "Development environment stopped.": "Ambiente de desenvolvimento parado.",
   "It was no longer running.": "Ele já não estava rodando.",
   "Development environment starting in a window of its own.": "Ambiente de desenvolvimento iniciando numa janela própria.",
@@ -1825,5 +1824,14 @@
   "Your conversation with the manager, without leaving the project. What you send from here says which project it is about.": "Sua conversa com o gerente, sem sair do projeto. O que você envia daqui diz de qual projeto se trata.",
   "The crew is working on this project": "A equipe está trabalhando neste projeto",
   "Work in a separate copy": "Trabalhar numa cópia separada",
-  "Pause the crew's task": "Pausar a tarefa da equipe"
+  "Pause the crew's task": "Pausar a tarefa da equipe",
+  "Everything is stopped, and the remote access shows nothing else until you release it.": "Tudo está parado, e o acesso remoto não mostra mais nada até você desbloquear.",
+  "Emergency lockdown: release it on the computer where Chiefmate runs.": "Modo emergência: o desbloqueio é no computador onde o Chiefmate roda.",
+  "Bringing one to the front is done on the computer where Chiefmate runs.": "Trazer um deles para a frente é no computador onde o Chiefmate roda.",
+  "Opens from here when the system accepts connections from other devices (such as with --host).": "Abre daqui quando o sistema aceita conexões de outros aparelhos (como com --host).",
+  "System": "Sistema",
+  "Browse the files": "Ver os arquivos",
+  "Opening the folder, VS Code or a window is done on the computer where Chiefmate runs.": "Abrir a pasta, o VS Code ou uma janela é no computador onde o Chiefmate roda.",
+  "The development environment of {project} stops, with everything it started.": "O ambiente de desenvolvimento de {project} para, com tudo o que ele iniciou.",
+  "Development environment starting in the background: its address shows on this page when it is up.": "Ambiente de desenvolvimento iniciando em segundo plano: o endereço dele aparece nesta página quando estiver no ar."
 }

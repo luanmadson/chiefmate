@@ -399,6 +399,10 @@ try {
     const opens = await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder' });
     expect(opens.status === 403 && JSON.parse(opens.text).error?.includes('computer'), `opening a window on the computer from another device was not refused: ${opens.status}`);
     expect((await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder', dryRun: true })).status !== 403, 'a dry run of opening a folder was refused through the remote access');
+    expect((await ask(remote.port, '/api/browser', command, { action: 'focus', pid: 0 })).status === 403, 'bringing a browser to the front from another device was not refused');
+    // A session asked in a window, or the development environment, is not refused there: it has a version from afar.
+    expect((await ask(remote.port, '/api/session', command, { profile: 'no-such-profile', window: true })).status === 400, 'a session in a window was refused from another device instead of opening in the app');
+    expect((await ask(remote.port, '/api/project/dev', command, { project: 'no-such-project', action: 'start' })).status === 400, 'the development environment was refused from another device instead of running in the background');
     const remoteStop = await ask(remote.port, '/api/power', command, { action: 'stop' });
     expect(remoteStop.status === 403 && JSON.parse(remoteStop.text).error?.includes('computer'), `stopping Chiefmate from another device was not refused: ${remoteStop.status}`);
     expect((await ask(port, '/api/state', tailnet)).status === 403, "the app's own port answered the tailnet name");
@@ -411,7 +415,14 @@ try {
       `the lockdown was not engaged, or the app does not show it: ${JSON.stringify(lockState.lockdown)}`);
     const lockedMerge = await post('/api/merge', { run: 'smoke-feed' });
     expect(lockedMerge.status === 400 && /lockdown|emergência/i.test((await lockedMerge.json()).error ?? ''), 'a merge was not refused in the lockdown');
-    expect((await ask(remote.port, '/api/state', tailnet)).status === 423, 'the remote access answered in the lockdown');
+    const lockedAfar = await ask(remote.port, '/api/state', tailnet);
+    const lockedBody = JSON.parse(lockedAfar.text);
+    expect(lockedAfar.status === 423 && lockedBody.lockdown?.active && lockedBody.lockdown.reason === 'Smoke test' && lockedBody.language && !('runs' in lockedBody),
+      `the remote access answered in the lockdown, or without saying why: ${lockedAfar.status} ${lockedAfar.text.slice(0, 200)}`);
+    // The app itself still loads there, to show the lockdown instead of a lost connection; its data stays refused.
+    expect((await ask(remote.port, '/', tailnet)).status === 200, "the app's page did not load through the remote access in the lockdown");
+    expect((await ask(remote.port, '/', { host: remote.host })).status === 403, "the app's page loaded without a Tailscale login in the lockdown");
+    expect((await ask(remote.port, '/api/manager/interrupt', command, {})).status === 423, 'a command through the remote access was taken in the lockdown');
     expect((await ask(remote.port, '/api/lockdown', command, { action: 'release', confirm: true })).status === 403, 'the lockdown was released through the remote access');
     expect((await post('/api/lockdown', { action: 'release' })).status === 400, "the lockdown was released without the owner's confirmation");
     const released = await post('/api/lockdown', { action: 'release', confirm: true });

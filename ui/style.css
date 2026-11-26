@@ -726,6 +726,8 @@ button.tab { background: transparent; border-top: 0; border-left: 0; border-righ
 .menu-item { appearance: none; text-align: left; font: inherit; font-size: 13px; color: var(--text); background: transparent; border: 0; padding: 8px 14px; cursor: pointer; }
 .menu-item:hover { background: var(--hover); color: var(--strong); }
 .menu-item:disabled { opacity: 0.45; cursor: default; background: transparent; }
+a.menu-item { text-decoration: none; }
+.menu-note { margin: 4px 0 0; padding: 8px 14px 4px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); max-width: 260px; }
 /* What waits for the owner in this project: brass, above the tabs */
 /* A live session's conversation in the app (a project's Live tab, or its own view) */
 .live-list, .live-earlier { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin-bottom: 12px; }

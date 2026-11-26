@@ -2,15 +2,17 @@
 // delivered) and what you can do from it besides queuing work: open its folder or VS Code, and start or stop its
 // development environment ("dev_start" in its settings). The environment runs in a window of its own, through
 // "node src/cli.mjs dev-run <project>": the app finds it by that command line (src/machine.mjs), counts its memory in
-// the project's and stops it with everything it started. Every action takes "dryRun", which says what it would do
+// the project's and stops it with everything it started. Started from another device, it runs in the background with
+// no window, its output kept in data/projects/<id>/dev.log, where the app finds the system's address. Every action takes "dryRun", which says what it would do
 // and does nothing (the smoke test uses it).
 import { execFile, spawn, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { computer, devIdOf, processes, refreshProcesses } from './machine.mjs';
 import { openConsole, projectClone, where } from './sessions.mjs';
+import { DATA, ensureDir, ROOT } from './util.mjs';
 
 const validId = id => /^[\w.-]+$/.test(String(id ?? '')) && !String(id).includes('..');
 
@@ -100,14 +102,33 @@ async function devWindows(id, maxAge) {
 }
 
 /** Starts the project's development environment in a window of its own. */
-export async function startDev(id, { dryRun = false, config = loadConfig() } = {}) {
+export async function startDev(id, { dryRun = false, background = false, config = loadConfig(), data = DATA } = {}) {
   const plan = devPlan(config, id);
-  if (dryRun) return { dryRun: true, ...plan, window: ['dev-run', id] };
+  const log = devLog(id, data);
+  if (dryRun) return background ? { dryRun: true, ...plan, background: true, log, run: ['dev-run', id, '--background'] } : { dryRun: true, ...plan, window: ['dev-run', id] };
   if ((await devWindows(id, 5000)).length) throw new Error(t('The development environment of {name} is already running.', { name: plan.name }));
-  const window = openConsole(`${plan.name} (dev)`, plan.cwd, ['dev-run', id]);
+  // An address from an earlier run would be taken for this one's.
+  rmSync(log, { force: true });
+  let window = null;
+  if (background) {
+    ensureDir(path.dirname(log));
+    const out = openSync(log, 'a');
+    const cli = path.join(ROOT, 'src', 'cli.mjs');
+    spawn(process.execPath, [cli, 'dev-run', id, '--background'], { cwd: plan.cwd, detached: true, stdio: ['ignore', out, out], windowsHide: true }).unref();
+    closeSync(out);
+  } else window = openConsole(`${plan.name} (dev)`, plan.cwd, ['dev-run', id]);
   starting.set(id, Date.now());
   setTimeout(() => refreshProcesses(), 4000);
-  return { started: true, window, ...plan };
+  return { started: true, window, background, ...plan };
+}
+
+/** Where a development environment run in the background keeps its output. */
+export const devLog = (id, data = DATA) => path.join(data, 'projects', id, 'dev.log');
+
+/** The first web address in a development environment's output (such as "Local: http://localhost:5173/"), or null. */
+export function devAddress(text) {
+  const plain = String(text ?? '').replace(/\x1b\[[\d;]*m/g, ''); // without the terminal's colors
+  return plain.match(/https?:\/\/[^\s'"<>)\]]+/)?.[0].replace(/[.,;:]+$/, '') ?? null;
 }
 
 /** Stops the development environment: its window's process and everything under it. */
@@ -123,21 +144,27 @@ export async function stopDev(id, { dryRun = false, config = loadConfig() } = {}
 }
 
 /** The environment's state for the app: running (its memory), starting, or stopped. */
-function devState(id, project, machine) {
+function devState(id, project, machine, data = DATA) {
   if (!project.dev_start) return null;
   const found = (machine.dev ?? []).find(d => d.project === id);
+  let url = null;
+  try {
+    url = devAddress(readFileSync(devLog(id, data), 'utf8').slice(0, 64_000));
+  } catch {
+    // started in a window, or not started
+  }
   if (found) {
     starting.delete(id);
-    return { status: 'running', ram: found.ram, pid: found.pids[0] ?? null };
+    return { status: 'running', ram: found.ram, pid: found.pids[0] ?? null, url };
   }
   const since = starting.get(id);
-  if (since && Date.now() - since < 60_000) return { status: 'starting', ram: 0, pid: null };
+  if (since && Date.now() - since < 60_000) return { status: 'starting', ram: 0, pid: null, url };
   starting.delete(id);
   return { status: 'stopped', ram: 0, pid: null };
 }
 
-/** In the environment's window: runs "dev_start" in the project's clone and waits for it to end. */
-export async function runDev(id) {
+/** In the environment's window (or in the background): runs "dev_start" in the project's clone and waits for it to end. */
+export async function runDev(id, { background = false } = {}) {
   const plan = devPlan(loadConfig(), id);
   console.log(`Chiefmate: ${plan.name}, development environment\n> ${plan.command}\n  (in ${plan.cwd})\n`);
   process.on('SIGINT', () => {}); // Ctrl+C belongs to the command
@@ -149,7 +176,7 @@ export async function runDev(id) {
     });
     child.on('exit', c => resolve(c ?? 0));
   });
-  if (code !== 0) {
+  if (code !== 0 && !background) {
     // Leave the window open long enough to read what went wrong.
     console.log(`\nThe development environment ended with code ${code}. Press Enter to close.`);
     await new Promise(resolve => process.stdin.once('data', resolve));
@@ -158,14 +185,14 @@ export async function runDev(id) {
 }
 
 /** What the project's page shows besides the state: the project's facts, your clone and its branch, the environment. */
-export async function projectInfo(id, config = loadConfig(), machine = computer(config)) {
+export async function projectInfo(id, config = loadConfig(), machine = computer(config), data = DATA) {
   const project = projectOf(config, id);
   const clone = projectClone(project);
   return {
     id, name: project.name ?? id, about: project.about ?? '', site: project.site ?? null, repository: project.repository ?? null,
     deliver: project.deliver === 'local' ? 'local' : 'pull_request', mainBranch: project.main_branch ?? null, docs: project.docs ?? null,
     clone, branch: clone ? await currentBranch(clone) : null,
-    devStart: project.dev_start ?? null, dev: devState(id, project, machine),
+    devStart: project.dev_start ?? null, dev: devState(id, project, machine, data),
     vscode: !!vscode(),
   };
 }
