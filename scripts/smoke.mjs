@@ -193,9 +193,9 @@ try {
     const waitingRun = { id: 'smoke-needs', kind: 'task', project: 'none', title: 'Waiting for sign-in', summary: 'Made up.', status: 'paused', created: new Date().toISOString(), steps: [] };
     const waitingFile = path.join(data, 'runs', `${waitingRun.id}.json`);
     writeFileSync(waitingFile, JSON.stringify(waitingRun));
-    const request = await (await post('/api/needs-you', { run: waitingRun.id, what: 'Sign in', wait: true })).json();
+    const request = await (await post('/api/needs-you', { run: waitingRun.id, what: 'Which?', options: 'A|B' })).json();
     const answered = await (await post('/api/needs-you', { run: waitingRun.id, what: 'Which?', options: 'A|B' })).json();
-    await post('/api/needs-you/done', { run: waitingRun.id, id: answered.id, answer: 'B' });
+    await post('/api/needs-you/done', { run: waitingRun.id, id: answered.id, answer: 'B', note: 'My reason' });
     const noticeId = `needs:${waitingRun.id}:${request.id}`;
     const beforeCancel = await (await fetch(`${base}/api/state`)).json();
     expect(beforeCancel.attention.items.some(n => n.id === noticeId && n.level === 'urgent'), 'a paused run lost its open request');
@@ -205,10 +205,12 @@ try {
     expect(!afterCancel.needs.some(n => n.run === waitingRun.id) && !afterCancel.attention.items.some(n => n.id === noticeId) && archive.items.some(n => n.id === noticeId && n.reason === 'resolved'),
       'a canceled run did not clear and archive its urgent request');
     const polled = await (await post('/api/needs-you/poll', { run: waitingRun.id, id: request.id })).json();
-    const late = await (await post('/api/needs-you/done', { run: waitingRun.id, id: request.id })).json();
+    const late = await (await post('/api/needs-you/done', { run: waitingRun.id, id: request.id, note: 'Too late' })).json();
     const saved = JSON.parse(readFileSync(waitingFile, 'utf8'));
-    expect(polled.status === 'closed' && late.status === 'closed' && saved.requests[0].closed === saved.ended && saved.requests[1].answer === 'B',
-      'an unanswered request did not stay closed on disk, or an existing answer was lost');
+    expect(polled.status === 'closed' && late.status === 'closed' && saved.requests[0].closed === saved.ended &&
+      !saved.requests[0].note && saved.requests[1].answer === 'B' && saved.requests[1].note === 'My reason' &&
+      saved.talk.filter(message => message.via === 'request').length === 1,
+    'a late answer changed a closed request, or an existing answer was lost');
     // A merge needs a finished run with a pull request or a branch in the owner's clone.
     expect((await post('/api/merge', { run: 'smoke-feed', preview: true })).status === 400 && (await post('/api/merge', { run: 'no-such-run' })).status === 400, 'a merge of a run with nothing to merge was not refused');
     expect((await fetch(`${base}/api/run/none/context/1`)).status === 404, "a step's context of a run that does not exist did not answer 404");
@@ -788,6 +790,18 @@ try {
   finishRequest(run.id, asked.id, 'owner', 'ses');
   const chosen = pollRequest(run.id, asked.id);
   expect(outside && chosen.status === 'done' && chosen.answer === 'SES', `the option clicked did not answer the question, or an answer outside the options was taken: ${JSON.stringify(chosen)}`);
+  // What the owner writes goes with the option, or answers alone; the waiting command hands it over, and it stays in
+  // the run's conversation.
+  const explained = await askOwner({ run: run.id, step: 1, what: 'Which region?', options: 'US|EU' });
+  finishRequest(run.id, explained.id, 'owner', 'eu', '  Closer to the users.  ');
+  const withNote = pollRequest(run.id, explained.id);
+  const own = await askOwner({ run: run.id, step: 1, what: 'Which plan?', options: 'Free|Pro' });
+  finishRequest(run.id, own.id, 'owner', '', 'Neither: wait for the trial.');
+  const ownWords = pollRequest(run.id, own.id);
+  const said = run.talk.filter(m => m.who === 'owner' && m.via === 'request').map(m => m.text);
+  expect(withNote.answer === 'EU' && withNote.note === 'Closer to the users.' && ownWords.answer === null && ownWords.note === 'Neither: wait for the trial.'
+    && said.includes('EU — Closer to the users.') && said.includes('Neither: wait for the trial.'),
+    `what the owner wrote did not reach the step, or is not in the run's conversation: ${JSON.stringify([withNote, ownWords, said])}`);
   let single = false;
   try {
     await askOwner({ run: run.id, step: 1, what: 'Only one?', options: 'Yes' });
@@ -1650,7 +1664,7 @@ try {
 try {
   process.env.CHIEFMATE_SMOKE = '1';
   const src = file => pathToFileURL(path.join(root, 'src', file)).href;
-  const { addQuestion, decide, decisionCards, openQuestions, verdictRecommendation } = await import(src('decisions.mjs'));
+  const { addQuestion, decide, decisionCards, openQuestions, questionNews, verdictRecommendation } = await import(src('decisions.mjs'));
   const { attentionItems } = await import(src('attention.mjs'));
   const { readRun, saveRun } = await import(src('store.mjs'));
   const { planItems, proposeItem, triageItem } = await import(src('planning.mjs'));
@@ -1739,6 +1753,22 @@ try {
     twice = true;
   }
   expect(twice, 'a question was answered twice');
+  // An answer in the owner's words: with the option, or alone; it reaches the manager in the news.
+  const cardOf = x => ({ id: `question:${x.id}`, kind: 'question', question: x.id, label: 'Question', title: x.question });
+  const q2 = addQuestion({ question: 'Which day?', options: 'Monday|Friday', recommend: 'friday' }, config);
+  const q3 = addQuestion({ question: 'Which color?', options: 'Red|Blue' }, config);
+  let empty = false;
+  try {
+    await decide({ card: `question:${q3.id}`, action: 'answer', option: '', note: '  ' }, [cardOf(q3)]);
+  } catch {
+    empty = true;
+  }
+  const both = await decide({ card: `question:${q2.id}`, action: 'answer', option: 'monday', note: 'Friday is a holiday.' }, [cardOf(q2)]);
+  const words = await decide({ card: `question:${q3.id}`, action: 'answer', note: 'Neither: brass.' }, [cardOf(q3)]);
+  const news = [questionNews({ ...q2, status: 'answered', answer: 'Monday', note: 'Friday is a holiday.' }), questionNews({ ...q3, status: 'answered', answer: null, note: 'Neither: brass.' })];
+  expect(empty && both.done === 'answered' && both.answer === 'Monday' && both.note === 'Friday is a holiday.' && words.done === 'answered' && words.answer === null && words.note === 'Neither: brass.'
+    && !openQuestions().some(x => [q2.id, q3.id].includes(x.id)) && news[0].includes('"Monday". And wrote: "Friday is a holiday."') && news[1].includes('in their own words') && news[1].includes('"Neither: brass."'),
+    `an answer written by the owner was not taken, or does not reach the manager: ${JSON.stringify([both, words, news])}`);
   expect((await decide({ card: local.id, action: 'discard' }, cards)).done === 'discarded' && readRun('d-local').discarded?.by === 'owner', 'a local branch was not discarded from its card');
   await decide({ card: proposal.id, action: 'discard' }, cards);
   const left = cardsFor().map(c => c.id);

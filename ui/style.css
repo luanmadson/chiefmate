@@ -120,6 +120,10 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .request-options { display: inline-flex; flex-wrap: wrap; gap: 8px; }
 .attn-actions .request-options { max-width: 380px; justify-content: flex-end; }
 .request-why { display: block; margin-top: 2px; font-size: 13px; color: var(--accent); }
+/* A question's field to write: an explanation with the option, or an answer of the owner's own */
+.reply { display: flex; align-items: flex-end; gap: 8px; max-width: 640px; margin-top: 8px; }
+.reply textarea { flex: 1; min-width: 0; min-height: 36px; margin: 0; padding: 7px 10px; }
+.reply .button { flex: none; }
 .talk-options { margin-top: 6px; }
 .talk-options .request-why { margin: 0 0 6px; }
 .attn-band { background: var(--panel); border-bottom: 1px solid var(--line); }
@@ -1042,6 +1046,8 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   .decision-buttons .button { min-height: 44px; padding: 0 12px; }
   .decision-buttons .long { display: none; }
   .decision-buttons .short { display: inline; }
+  .reply { max-width: none; }
+  .reply textarea { min-height: 44px; }
   .decisions-later > summary { padding: 13px 12px; }
   /* The field with its buttons to the right, as in a messaging app; the suggestions in one row below, scrolling sideways */
   .compose { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 8px; }
