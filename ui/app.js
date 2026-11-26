@@ -769,8 +769,11 @@ const replyField = (key, send, size = '') => `<div class="reply">
     <button type="button" class="button secondary${size}" ${send} data-reply-send>${esc(t('Send'))}</button>
   </div>`;
 
-/** A step's question with its field to write: under the question's text (the band and the run's report). */
-const requestReply = (run, q, size = '') => (q?.options?.length && q.status === 'open'
+/**
+ * A step's question with its field to write: under the question's text (the notices and the run's report). A notice's
+ * request carries no status: only open requests become notices.
+ */
+const requestReply = (run, q, size = '') => (q?.options?.length && (q.status ?? 'open') === 'open'
   ? replyField(`req:${q.id}`, `data-needs-done="${esc(run)}" data-request="${esc(q.id)}"`, size)
   : '');
 

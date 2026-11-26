@@ -1,7 +1,7 @@
 // The owner's decisions as cards, decided with one click: a pull request or a branch to merge, a proposal the manager
 // triaged, and a question the manager asked (cli.mjs ask-owner), answered with an option, in the owner's own words, or
-// both. Each card says what it is, what changes if approved,
-// the risk and the manager's recommendation, with the project beside its number ("PR #34 of Chiefmate").
+// both. Each card says what it is, what changes if approved, the risk and the manager's recommendation, with the
+// project beside its number ("PR #34 of Chiefmate").
 // Cards are built from the attention notices (src/attention.mjs), so a card leaves when its notice does. "Not now"
 // marks the notice as seen (the card fades to the end of the list); every decision reaches the manager as news
 // ("owner_decided"; a merge is "merged" news, src/merge.mjs). A project whose work someone else reviews
@@ -480,7 +480,8 @@ const tell = text => reportEvent('owner_decided', text);
 
 /**
  * The owner decides a card from the app: { card (its id), action: approve | later | discard | answer, option (the
- * answer to a question), note (what the owner wrote to a question: with the option, or instead of one), reason }. The card is checked against "cards", what is pending now.
+ * answer to a question), note (what the owner wrote to a question: with the option, or instead of one), reason }.
+ * The card is checked against "cards", what is pending now.
  */
 export async function decide({ card, action, option, note, reason } = {}, cards = []) {
   const id = String(card ?? '');
