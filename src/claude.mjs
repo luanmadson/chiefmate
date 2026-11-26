@@ -344,6 +344,10 @@ export function readFeed(file, dir, from = null, tail = 1_000_000) {
       } catch {
         continue;
       }
+      if (event.type === 'chiefmate_action' && typeof event.text === 'string') {
+        items.push({ type: 'action', text: event.text });
+        continue;
+      }
       if (event.type !== 'assistant' || event.parent_tool_use_id) continue;
       for (const block of event.message?.content ?? []) {
         if (block.type === 'text' && block.text.trim()) items.push({ type: 'say', text: clip(block.text, 4000) });

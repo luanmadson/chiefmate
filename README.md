@@ -644,6 +644,8 @@ Chiefmate can be one of its own projects. Its crew then works on Chiefmate the s
 4. the turns of the live sessions in the app pause the same way (a Codex turn is awaited) and carry on by themselves after the restart; their windows and the sessions waiting for your message are left as they are;
 5. Chiefmate installs, checks the new version and restarts. The paused runs go first in the queue and resume by themselves, and the messages in the queue go to the manager. If the checks fail, Chiefmate goes back to the version it had and resumes everything the same way (that version is not tried again on its own: a newer one, or **Update now**, is).
 
+When a run resumes with an unfinished merge, cherry-pick, revert or rebase, Chiefmate aborts the operation before checking out the run's branch. It keeps the run's committed work, records the recovery in the step's log and tells the agent to redo the unfinished work. If recovery fails, the run ends with instructions for repairing the working copy and resuming.
+
 With `"wait"`, the update installs only once no run is going on, the manager is free and no live session's turn is going on. Either way, if the work doesn't pause within an hour, Chiefmate stays on the current version, resumes everything and tries again later. Sessions in a window and development environments are never paused or waited for.
 
 The self-update only touches Chiefmate's own files. Your settings, the history and the working copies are never in git, so they are never overwritten. If Chiefmate's files were changed by hand in your installation, it does not update, and the app says so.

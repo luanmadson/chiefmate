@@ -186,7 +186,34 @@ export async function libraryFileCommit(dir, file, branch = 'main') {
 }
 
 export const createBranch = (dir, branch) => git(dir, 'checkout', '-B', branch);
-export const checkoutBranch = (dir, branch) => git(dir, 'checkout', branch);
+
+/** Returns a working copy to its run branch, recovering any Git operation left by an interrupted step. */
+export async function checkoutBranch(dir, branch, onRecovery = () => {}) {
+  if (!existsSync(path.join(dir, '.git'))) throw new Error(t('No Git working copy found at "{path}".', { path: dir }));
+  const gitDir = await git(dir, 'rev-parse', '--absolute-git-dir');
+  const operation = [
+    ['rebase', ['rebase-merge', 'rebase-apply']],
+    ['merge', ['MERGE_HEAD']],
+    ['cherry-pick', ['CHERRY_PICK_HEAD']],
+    ['revert', ['REVERT_HEAD']],
+  ].find(([, markers]) => markers.some(marker => existsSync(path.join(gitDir, marker))))?.[0];
+  if (operation) {
+    try {
+      const sequenceHead = path.join(gitDir, 'sequencer', 'head');
+      // A sequence's --abort would roll back its completed commits too. Clear the conflict at the current HEAD.
+      const keepCommits = ['cherry-pick', 'revert'].includes(operation) && existsSync(sequenceHead)
+        && readFileSync(sequenceHead, 'utf8').trim() !== await headCommit(dir);
+      if (keepCommits) await git(dir, 'reset', '--merge', 'HEAD');
+      else await git(dir, operation, '--abort');
+    } catch (error) {
+      throw new Error(t('Could not abort the Git {operation}. In "{path}", run "git status", finish or abort the operation, then resume the run. {error}', {
+        operation, path: dir, error: error.message,
+      }), { cause: error });
+    }
+    onRecovery(operation);
+  }
+  return git(dir, 'checkout', branch);
+}
 
 /** If the agent left changes without committing, Chiefmate commits them on its behalf. */
 export async function commitPending(dir, message) {

@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE, projectColor, shouldClose, themeManifest, windowName } from '../src/browsers.mjs';
+import { readFeed } from '../src/claude.mjs';
 import { loadAgents, projectCrew } from '../src/config.mjs';
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
@@ -22,7 +23,7 @@ import {
   qualityRecords, qualitySummary, runTools, toolAvailable, toolEffort, toolModel,
 } from '../src/tools.mjs';
 import { parseLevel } from '../src/util.mjs';
-import { behindOrigin, fastForward, projectLibraries, sameRepository } from '../src/workspace.mjs';
+import { behindOrigin, checkoutBranch, fastForward, projectLibraries, sameRepository } from '../src/workspace.mjs';
 import { SAMPLE_CSV, sampleXlsx, zip } from './fixtures.mjs';
 import { compose, Dictation, nextState, recognizer, transcript } from '../ui/voice.js';
 
@@ -431,6 +432,75 @@ test("your clone moves forward only by a fast forward, with nothing of yours in 
   assert.equal(await fastForward(behindClone, 'FETCH_HEAD', 'main'), null);
   assert.ok(existsSync(path.join(behindClone, 'merged.md')));
   assert.deepEqual(await behindOrigin(behindClone, 'main'), { branch: 'main', behind: 0 });
+});
+
+function conflictingRun() {
+  const dir = mkdtempSync(path.join(temp, 'git-recovery-'));
+  const git = (...args) => gitIn(dir, ...args);
+  const file = path.join(dir, 'doc.md');
+  const commit = (name, contents) => {
+    write(name, contents);
+    git('add', '--', name);
+    git('commit', '-qm', contents.trim());
+  };
+  git('init', '-q', '-b', 'main');
+  commit(file, 'Base\n');
+  git('branch', 'run');
+  commit(file, 'Main\n');
+  commit(path.join(dir, 'extra.md'), 'Extra\n');
+  git('checkout', '-q', 'run');
+  commit(file, 'Run\n');
+  return { dir, git };
+}
+
+for (const { operation, args, marker, sequence } of [
+  { operation: 'merge', args: ['main'], marker: 'MERGE_HEAD' },
+  { operation: 'cherry-pick', args: ['main~'], marker: 'CHERRY_PICK_HEAD' },
+  { operation: 'revert', args: ['--no-edit', 'main~'], marker: 'REVERT_HEAD' },
+  { operation: 'rebase', args: ['--merge', 'main'], marker: 'rebase-merge' },
+  { operation: 'rebase', args: ['--apply', 'main'], marker: 'rebase-apply' },
+  { operation: 'cherry-pick', args: ['main', 'main~'], marker: 'CHERRY_PICK_HEAD', sequence: true },
+  { operation: 'revert', args: ['--no-edit', 'main', 'main~'], marker: 'REVERT_HEAD', sequence: true },
+]) {
+  test(`resuming aborts git ${operation} ${args.join(' ')} and keeps the run's commits`, async () => {
+    const { dir, git } = conflictingRun();
+    if (operation === 'revert' && sequence) git('cherry-pick', 'main');
+    const before = git('rev-parse', 'run');
+    assert.throws(() => git(operation, ...args));
+    const state = path.join(dir, '.git', marker);
+    assert.ok(existsSync(state));
+    const interrupted = git('rev-parse', 'run');
+    assert.equal(sequence ? git('rev-parse', 'run~') : interrupted, before);
+    const recovered = [];
+    await checkoutBranch(dir, 'run', name => recovered.push(name));
+    assert.deepEqual(recovered, [operation]);
+    assert.equal(git('branch', '--show-current'), 'run');
+    assert.equal(git('rev-parse', 'HEAD'), interrupted);
+    assert.equal(git('status', '--porcelain'), '');
+    assert.equal(existsSync(state), false);
+    assert.equal(existsSync(path.join(dir, '.git', 'sequencer')), false);
+  });
+}
+
+test('a failed Git abort leaves the branch and conflict in place and tells the owner how to resume', async () => {
+  const { dir, git } = conflictingRun();
+  const before = git('rev-parse', 'run');
+  assert.throws(() => git('merge', 'main'));
+  write(path.join(dir, '.git', 'index.lock'));
+  await assert.rejects(checkoutBranch(dir, 'run', () => assert.fail('The abort failed')), error => {
+    assert.ok(error.message.includes(dir));
+    assert.match(error.message, /git status/);
+    assert.match(error.message, /git merge --abort/);
+    return true;
+  });
+  assert.equal(git('rev-parse', 'run'), before);
+  assert.ok(existsSync(path.join(dir, '.git', 'MERGE_HEAD')));
+});
+
+test('the step feed shows a recovery action written after an interrupted log line', () => {
+  const log = path.join(temp, 'git-recovery.jsonl');
+  write(log, '{"type":\n{"type":"chiefmate_action","text":"Aborted the unfinished Git merge before checkout."}\n');
+  assert.deepEqual(readFeed(log, temp).items, [{ type: 'action', text: 'Aborted the unfinished Git merge before checkout.' }]);
 });
 
 // ---------- The crew's tools (src/tools.mjs): which one a member runs on, until when, and how each is started ----------
