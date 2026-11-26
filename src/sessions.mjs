@@ -954,7 +954,7 @@ export function codexItem(event, dir) {
 function runCodex({ session, prompt, log, onEvent }) {
   const tool = spawnable('codex');
   // Without Windows' app aliases on the PATH, which Codex's sandbox can't start (see codexEnvironment).
-  const child = spawn(tool.command, [...tool.prefix, ...codexArgs(session)], { cwd: session.cwd, env: codexEnvironment(sessionEnv(session.id)),stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  const child = spawn(tool.command, [...tool.prefix, ...codexArgs(session)], { cwd: session.cwd, env: codexEnvironment(sessionEnv(session.id)), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   const out = createWriteStream(log, { flags: 'a' });
   let thread = null;
   let failure = null;

@@ -769,9 +769,9 @@ node src/cli.mjs radar choose|later|discard|restore <n>
                                               manager to turn the idea into a project (discard: --reason "...")
 node src/cli.mjs chat [n]                     the conversation with the manager: the last n messages, what it is doing, the queue
 node src/cli.mjs chat say "..."               writes to the manager; while it answers, the message waits in the queue
+                                              (from a live session or a step, it goes as that agent's message)
 node src/cli.mjs chat edit <id> "..."         changes a message still in the queue (chat remove <id> takes it out)
 node src/cli.mjs chat interrupt               ends the current answer; the conversation goes on and the queue goes next
-                                              (from a live session or a step, chat say goes as that agent's message)
 node src/cli.mjs defect report "..."          an agent reports a defect of Chiefmate (recorded, repeats joined, news)
 node src/cli.mjs defect list [--all]          the open defects (--all: the closed too)
 node src/cli.mjs defect close <id> [--note "..."]  the manager (or you) closes a defect once its fix is in
