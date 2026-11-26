@@ -1,5 +1,6 @@
 // Unit tests with no dependency (node:test): the file viewer's checks of paths, its choice among a project's copies and
-// its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation.
+// its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation;
+// the emergency lockdown and its detection.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -9,6 +10,8 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE, projectColor, shouldClose, themeManifest, windowName } from '../src/browsers.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
+import { riskyCommand } from '../src/guard.mjs';
+import { checkSignals, engage, isLocked, readLockdown, recordSignal, refuseWhileLocked, release, RULES, weigh, WINDOW_MINUTES } from '../src/lockdown.mjs';
 import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
 import { askedTool, stepTool } from '../src/runs.mjs';
@@ -608,4 +611,119 @@ test("A process's start, as Windows PowerShell writes it", () => {
   assert.equal(startedAt({ value: '/Date(0)/' }), new Date(0).toISOString());
   assert.equal(startedAt(null), null);
   assert.equal(startedAt('nonsense'), null);
+});
+
+// ---------- The emergency lockdown (src/lockdown.mjs): made-up signals and made-up actions, nothing stopped for real ----------
+
+const lockDir = () => mkdtempSync(path.join(temp, 'lockdown-'));
+/** Made-up hooks: they count what the lockdown asks for, and stop or open nothing. */
+function fakeHooks() {
+  const calls = { stopAll: 0, resume: 0, told: [] };
+  return { calls, h: { stopAll: async () => (calls.stopAll++, { runs: 2, manager: 1, sessions: 0, browsers: 1 }), resume: () => calls.resume++, tell: x => calls.told.push(x.kind) } };
+}
+
+test('The lockdown: the owner engages it, everything is refused, and only the owner on this computer releases it', async () => {
+  const dir = lockDir();
+  const { calls, h } = fakeHooks();
+  assert.equal(isLocked(dir), false);
+  assert.doesNotThrow(() => refuseWhileLocked('merge', dir));
+  const state = await engage({ reason: 'Something odd', by: 'owner', from: 'app' }, { dir, h });
+  assert.equal(state.active, true);
+  assert.equal(state.reason, 'Something odd');
+  assert.deepEqual(state.stopped, { runs: 2, manager: 1, sessions: 0, browsers: 1 });
+  assert.equal(calls.stopAll, 1);
+  assert.deepEqual(calls.told, ['lockdown']);
+  assert.equal(isLocked(dir), true);
+  assert.throws(() => refuseWhileLocked('merge', dir), /lockdown|emergência/i);
+  // Engaged again: what started meanwhile stops too, and the owner is not told twice.
+  await engage({ reason: 'Again', evidence: [{ at: new Date().toISOString(), kind: 'mass_delete', detail: 'x' }] }, { dir, h });
+  const again = readLockdown(dir);
+  assert.equal(again.reason, 'Something odd');
+  assert.equal(again.stopped.runs, 4);
+  assert.equal(again.evidence.length, 1);
+  assert.deepEqual(calls.told, ['lockdown']);
+  // Never through the remote access, never by anyone else.
+  assert.throws(() => release({ by: 'owner', from: 'remote' }, { dir, h }), /remote|remoto/i);
+  assert.throws(() => release({ by: 'manager', from: 'app' }, { dir, h }));
+  assert.equal(isLocked(dir), true);
+  const released = release({ by: 'owner', from: 'app' }, { dir, h });
+  assert.equal(released.active, false);
+  assert.equal(released.history.at(-1).reason, 'Something odd');
+  assert.equal(calls.resume, 1);
+  assert.doesNotThrow(() => refuseWhileLocked('merge', dir));
+  assert.throws(() => release({ by: 'owner', from: 'app' }, { dir, h }));
+});
+
+test('The lockdown: the detection warns first and locks only for what is grave', async () => {
+  const at = Date.parse('2026-11-26T03:00:00Z');
+  const s = (kind, minutes = 1) => ({ at: new Date(at - minutes * 60_000).toISOString(), kind, detail: kind, who: 'step' });
+  // Pure: counts within the window, warn and lock thresholds, nothing from before the last release.
+  assert.deepEqual(weigh([s('publish_refused'), s('publish_refused')], {}, at), { lock: null, warnings: [] });
+  assert.deepEqual(weigh([1, 2, 3].map(() => s('publish_refused')), {}, at).warnings.map(w => w.kind), ['publish_refused']);
+  assert.equal(weigh(Array.from({ length: RULES.publish_refused.lock }, () => s('publish_refused')), {}, at).lock.kind, 'publish_refused');
+  assert.equal(weigh([s('publish_refused', WINDOW_MINUTES + 1), s('publish_refused'), s('publish_refused')], {}, at).warnings.length, 0);
+  assert.equal(weigh([s('protected_access')], {}, at).lock.kind, 'protected_access');
+  assert.equal(weigh([s('protected_access', 5)], { history: [{ until: new Date(at - 60_000).toISOString() }] }, at).lock, null);
+  assert.equal(weigh([1, 2, 3].map(() => s('publish_refused')), { warned: { publish_refused: new Date(at - 60_000).toISOString() } }, at).warnings.length, 0);
+  assert.equal(weigh([s('mass_delete')], {}, at).warnings[0].kind, 'mass_delete');
+  assert.equal(weigh([s('unknown_origin')], {}, at).warnings.length, 0);
+
+  // Warned once, then locked when an agent reaches into a protected folder; released, the old signal locks no more.
+  const dir = lockDir();
+  const { calls, h } = fakeHooks();
+  for (let i = 0; i < 3; i++) recordSignal('publish_refused', 'cli.mjs merge', { who: 'step', dir });
+  let r = await checkSignals({ dir, h });
+  assert.deepEqual([r.locked, r.warnings.length, isLocked(dir)], [false, 1, false]);
+  assert.equal(readLockdown(dir).warnings.length, 1);
+  r = await checkSignals({ dir, h });
+  assert.equal(r.warnings.length, 0); // not warned twice in the window
+  recordSignal('protected_access', 'cat <profile>', { who: 'step', dir });
+  r = await checkSignals({ dir, h });
+  assert.equal(r.locked, true);
+  const state = readLockdown(dir);
+  assert.deepEqual([state.active, state.by, state.from, state.evidence[0].kind], [true, 'auto', 'detection', 'protected_access']);
+  assert.equal(calls.stopAll, 1);
+  assert.deepEqual(calls.told, ['security_warning', 'lockdown']);
+  release({ by: 'owner', from: 'cli' }, { dir, h });
+  r = await checkSignals({ dir, h, at: Date.now() + 1000 });
+  assert.equal(r.locked, false);
+  assert.equal(isLocked(dir), false);
+  assert.equal(recordSignal('no_such_kind', 'x', { dir }), null);
+});
+
+test("The lockdown's detection in a shell command: protected folders and deletions, never a folder's name in a text", () => {
+  const home = path.join(temp, 'home');
+  const cwd = path.join(home, 'Documents', 'GitHub', 'app', 'workspaces', 'demo');
+  const root = path.join(home, 'Documents', 'GitHub', 'app');
+  const profile = path.join(root, 'data', 'browser-profile');
+  const tmp = path.join(temp, 'tmp');
+  const kinds = command => riskyCommand(command, { cwd, protect: [profile], home, root, temp: tmp }).map(f => f.kind);
+  // A protected folder, however it is reached.
+  assert.deepEqual(kinds(`cat "${path.join(profile, 'a', 'b.txt')}"`), ['protected_access']);
+  assert.deepEqual(kinds('ls ../../data/browser-profile'), ['protected_access']);
+  assert.deepEqual(kinds(`bash -c "dir ${profile}"`), ['protected_access']);
+  // Its name in a search or a message is not a path to it.
+  assert.deepEqual(kinds('grep -rn "data/browser-profile" src'), []);
+  assert.deepEqual(kinds('git commit -m "Never read data/browser-profile"'), []);
+  // Deletions: inside the agent's own folder, nothing; outside it, a warning; a whole drive, home, a folder above,
+  // Chiefmate or a protected one, grave.
+  assert.deepEqual(kinds('rm -rf node_modules dist'), []);
+  assert.deepEqual(kinds('rm notes.txt ../other.txt'), []);
+  assert.deepEqual(kinds(`rm -rf '${path.join(tmp, 'scratch')}' /tmp/build "$TMPDIR/x"`), []);
+  assert.deepEqual(kinds(`rm -rf '${path.join(home, 'Documents', 'GitHub', 'other')}'`), ['mass_delete']);
+  assert.deepEqual(kinds('rm -rf *'), ['mass_delete']);
+  assert.deepEqual(kinds('rm -rf ..'), ['wide_delete']);
+  assert.deepEqual(kinds('rm -rf ~'), ['wide_delete']);
+  assert.deepEqual(kinds('rm -rf ~/Documents'), ['wide_delete']);
+  assert.deepEqual(kinds(`Remove-Item -Recurse -Force "${root}"`), ['wide_delete']);
+  assert.deepEqual(kinds(`rd /s /q '${path.parse(cwd).root}'`), ['wide_delete']);
+  assert.deepEqual(kinds(`rm -rf '${path.join(root, 'data')}'`), ['wide_delete']);
+  assert.deepEqual(kinds(`Remove-Item -Force "${root}"`), []); // not recursive
+  assert.deepEqual(kinds('cd x && rm -fr ../../..'), ['wide_delete']);
+  // Git Bash's drive paths on Windows (/c/Users/...).
+  if (process.platform === 'win32') {
+    const bash = p => p.replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`).replace(/\\/g, '/');
+    assert.deepEqual(kinds(`rm -rf ${bash(path.join(home, 'Documents'))}`), ['wide_delete']);
+    assert.deepEqual(kinds(`rm -rf ${bash(path.join(tmp, 'scratch'))}`), []);
+  }
 });

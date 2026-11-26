@@ -15,6 +15,7 @@ import { addQuestion, decide, decisionCards, openPushes, openQuestions, openRepo
 import { listFolder, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
+import { engage, isLocked, lockdownView, recordSignal, release } from './lockdown.mjs';
 import { closeBrowser, focusBrowser, openBrowsers } from './browsers.mjs';
 import { computer, latestProcesses, processes, stoppable, stopProject } from './machine.mjs';
 import { chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
@@ -358,7 +359,8 @@ function buildState() {
   const questions = openQuestions();
   const pushes = openPushes();
   const repos = openRepoRequests();
-  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo, questions, pushes, repos });
+  const security = lockdownView();
+  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo, questions, pushes, repos, lockdown: security });
   const lastOf = id => runs.find(r => r.mission === id && !['queued', 'waiting'].includes(r.status));
   return {
     now: now(),
@@ -414,6 +416,8 @@ function buildState() {
       messages: conversation.slice(-80), responding: chat.responding, interrupting: chat.interrupting, since: chat.since, partial: chat.partial,
       actions: chat.actions.slice(-12), lastAction: chat.actions.at(-1) ?? null, pending: readPending(), context: managerContext(),
     },
+    // The emergency lockdown (src/lockdown.mjs): whether it is on, why, its evidence and the security warnings of the day.
+    lockdown: security,
     // The away mode (src/news.mjs): { since, held } while the owner is away, else null.
     away: awayInfo(),
     notifications: readNotifications().slice(-8).reverse(),
@@ -481,10 +485,19 @@ export function startServer() {
   const handle = async (req, res, remote = null) => {
     try {
       // Guards against another website open in the browser trying to send commands here.
+      // Each refusal is a signal for the emergency lockdown's detection (src/lockdown.mjs).
       if (remote) {
         const refused = remoteRefusal(req, remote);
-        if (refused) return reply(res, 403, { error: refused });
-      } else if (!allowed.has(req.headers.host)) return reply(res, 403, { error: 'address not allowed' });
+        if (refused) {
+          recordSignal(refused === 'not allowed in' ? 'login_failed' : 'unknown_origin', `${req.method} ${clip(String(req.url), 120)} (${refused})`, { who: 'remote' });
+          return reply(res, 403, { error: refused });
+        }
+        // In an emergency lockdown, the remote access is off: only engaging it again is taken.
+        if (isLocked() && !(req.method === 'POST' && req.url === '/api/lockdown')) return reply(res, 423, { error: t('Chiefmate is in emergency lockdown: the remote access is off until the owner releases it on the computer.') });
+      } else if (!allowed.has(req.headers.host)) {
+        recordSignal('unknown_origin', `${req.method} ${clip(String(req.url), 120)} (host ${clip(String(req.headers.host ?? ''), 80)})`, { who: 'app' });
+        return reply(res, 403, { error: 'address not allowed' });
+      }
       const url = new URL(req.url, `http://${req.headers.host}`);
       if (req.method === 'GET') {
         if (url.pathname === '/api/health') return reply(res, 200, { ok: true, version: VERSION });
@@ -536,6 +549,7 @@ export function startServer() {
       if (req.method !== 'POST') return reply(res, 405, { error: 'method not allowed' });
       const origin = req.headers.origin;
       if (req.headers['x-chiefmate'] !== '1' || (!remote && origin && !allowed.has(origin.replace(/^https?:\/\//, '')))) {
+        recordSignal('unknown_origin', `POST ${clip(String(req.url), 120)} (origin ${clip(String(origin ?? 'none'), 80)})`, { who: remote ? 'remote' : 'app' });
         return reply(res, 403, { error: 'request refused' });
       }
       const body = await readBody(req);
@@ -685,6 +699,21 @@ export function startServer() {
           return reply(res, 200, await updateNow({ interruptManager: !!body.interruptManager }));
         case '/api/update-check':
           return reply(res, 200, await checkNow());
+        case '/api/lockdown': {
+          // The emergency lockdown (src/lockdown.mjs): "engage" from the app, the remote access or the command line;
+          // "release" only on this computer, confirmed by the owner.
+          if (body.action === 'engage') {
+            const by = ['manager', 'step'].includes(body.by) ? body.by : 'owner';
+            const from = remote ? 'remote' : body.origin === 'cli' ? 'cli' : 'app';
+            return reply(res, 200, { lockdown: lockdownView(await engage({ reason: String(body.reason ?? ''), by, from })) });
+          }
+          if (body.action === 'release') {
+            if (remote) return reply(res, 403, { error: t('The lockdown is released only on the computer where Chiefmate runs, not through the remote access.') });
+            if (body.confirm !== true) return reply(res, 400, { error: t('Confirm that you reviewed what triggered the lockdown.') });
+            return reply(res, 200, { lockdown: lockdownView(release({ by: 'owner', from: body.origin === 'cli' ? 'cli' : 'app' })) });
+          }
+          return reply(res, 400, { error: 'unknown action' });
+        }
         case '/api/away':
           // The owner stepped out or is back: the manager is told at once (src/news.mjs).
           return reply(res, 200, { away: setAway(!!body.on) });

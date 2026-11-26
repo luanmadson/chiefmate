@@ -60,6 +60,19 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .away[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
 .away svg { width: 13px; height: 13px; flex: none; }
 .away:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+/* Emergency lockdown: the red button in the title bar, the red band on every page and the release dialog */
+.lockdown-button { appearance: none; flex: none; background: transparent; border: 1px solid rgba(255, 92, 82, 0.55); border-radius: 0; color: var(--urgent); font: inherit; font-size: 12px; letter-spacing: 0.04em; padding: 3px 9px; cursor: pointer; white-space: nowrap; }
+.lockdown-button:hover { background: var(--urgent-bg); border-color: var(--urgent); }
+.lockdown-button:focus-visible { outline: 1px solid var(--urgent); outline-offset: 1px; }
+.lockdown-band { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 9px 16px; background: #5c1410; border-bottom: 1px solid var(--urgent); color: #fff; font-size: 13px; }
+.lockdown-band strong { letter-spacing: 0.08em; }
+.lockdown-note { color: rgba(255, 255, 255, 0.78); }
+.button.lockdown-release { background: var(--urgent); border-color: var(--urgent); color: #1a0705; }
+.button.lockdown-release:disabled { opacity: 0.45; cursor: not-allowed; }
+.lockdown-dialog { width: min(620px, calc(100vw - 32px)); border-color: var(--urgent); }
+.lockdown-evidence { margin: 4px 0 10px; padding-left: 18px; max-height: 32vh; overflow-y: auto; font-size: 12px; line-height: 1.5; }
+.lockdown-evidence code { word-break: break-all; }
+.lockdown-check { display: flex; gap: 8px; align-items: flex-start; margin: 10px 0 4px; }
 .presence { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
 .presence .state { overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
 .focus { flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: 10px; margin: 0 20px; padding-left: 16px; border-left: 1px solid var(--line); font-size: 12px; white-space: nowrap; overflow: hidden; }
@@ -1149,6 +1162,7 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
 html.chat-focus .app { grid-template: "content" minmax(0, 1fr) / minmax(0, 1fr); }
 html.chat-focus .titlebar, html.chat-focus .nav, html.chat-focus .alerts, html.chat-focus .statusbar, html.chat-focus #view-manager .view-header { display: none; }
 html.chat-focus #view-manager { padding: 0; }
+html.chat-focus .alerts:has(.lockdown-band) { display: block; position: fixed; top: 0; left: 0; right: 0; z-index: 40; }
 html.chat-focus .focus-bar {
   display: flex; align-items: center; gap: 14px; flex: none; min-height: 44px; padding: 4px 16px;
   padding-top: max(4px, env(safe-area-inset-top)); background: var(--panel); border-bottom: 1px solid var(--line);

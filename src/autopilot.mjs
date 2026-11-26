@@ -9,6 +9,7 @@ import { newsSettings, reportEvent } from './news.mjs';
 import { current, weekPace } from './plan.mjs';
 import { byRank, CLOSED, decideItem, planItem, planItems, startApproved } from './planning.mjs';
 import { listRuns, readState, readUsage, saveState } from './store.mjs';
+import { isLocked } from './lockdown.mjs';
 import { updating } from './update.mjs';
 import { clip, now } from './util.mjs';
 
@@ -174,7 +175,7 @@ export async function checkAutopilot({ config = loadConfig(), usage = readUsage(
   const a = (state.autopilot ??= { woken: {}, log: [], wakes: [] });
   a.woken ??= {};
   const before = JSON.stringify(a);
-  if (settings.enabled && !updating()) {
+  if (settings.enabled && !updating() && !isLocked()) {
     const items = planItems();
     const idle = idleProjects(config, runs);
     // Approved items normally start by themselves when the run before them ends; this catches any left behind.

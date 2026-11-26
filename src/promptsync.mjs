@@ -7,6 +7,7 @@ import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
+import { isLocked } from './lockdown.mjs';
 import { builderSettings, SYNC_FILE } from './prompts.mjs';
 import { ensureDir, now, readJson, writeJson } from './util.mjs';
 import { libraryFileCommit, prepareLibrary } from './workspace.mjs';
@@ -59,6 +60,7 @@ async function fromLibrary(config) {
 
 /** Brings the document up to date now (one at a time) and records the result in data/prompt-builder.json. */
 export function syncPrompts(config = loadConfig()) {
+  if (isLocked()) return Promise.reject(new Error(t('Refused: Chiefmate is in emergency lockdown ({what}). Only the owner can release it, in the app or the command line on this computer.', { what: t('reloading the document') })));
   syncing ??= (async () => {
     const status = { ...readJson(SYNC_FILE, {}), attempted: now() };
     const { origin, file } = builderSettings(config);

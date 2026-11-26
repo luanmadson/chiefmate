@@ -21,6 +21,7 @@ import { describeSchedule, nextRun } from './schedule.mjs';
 import { sessionsLine } from './sessions.mjs';
 import { talkSituation } from './talk.mjs';
 import { addMessage, listRuns, readPending, readState, readUsage, savePending, saveState, stepsOf } from './store.mjs';
+import { isLocked } from './lockdown.mjs';
 import { updateInfo, updating } from './update.mjs';
 import { DATA, ensureDir, languageName, now, ROOT, VERSION } from './util.mjs';
 import { noTrace } from './workspace.mjs';
@@ -192,7 +193,7 @@ export function sendToManager(text) {
   if (!message) throw new Error(t('Write a message.'));
   const list = readPending();
   if (list.length >= MAX_PENDING) throw new Error(t('The queue already has {count} messages. Wait for the manager, or remove some.', { count: list.length }));
-  const queued = chat.responding || list.length > 0 || updating();
+  const queued = chat.responding || list.length > 0 || updating() || isLocked();
   const item = { id: randomUUID().slice(0, 8), text: message, at: now(), queued };
   list.push(item);
   savePending(list);
@@ -211,7 +212,7 @@ export function deliverNews(events) {
   let item = list.find(m => m.from === 'chiefmate');
   if (item) item.events = [...item.events, ...events].slice(-30);
   else {
-    item = { id: randomUUID().slice(0, 8), from: 'chiefmate', events: [...events], at: now(), queued: chat.responding || list.length > 0 || updating() };
+    item = { id: randomUUID().slice(0, 8), from: 'chiefmate', events: [...events], at: now(), queued: chat.responding || list.length > 0 || updating() || isLocked() };
     list.push(item);
   }
   item.text = item.events.map(e => `${e.kind}: ${e.text}`).join('\n');
@@ -247,10 +248,11 @@ export const managerBusy = () => chat.responding || readPending().length > 0;
 
 /**
  * When the manager is free, hands it the whole queue as one message. Returns whether an answer started. While an update
- * of Chiefmate is being installed, the queue waits: it goes after the update (or the restart).
+ * of Chiefmate is being installed, the queue waits: it goes after the update (or the restart). In an emergency
+ * lockdown, it waits for the owner's release.
  */
 export function deliverPending() {
-  if (chat.responding || updating()) return false;
+  if (chat.responding || updating() || isLocked()) return false;
   const items = readPending();
   if (!items.length) return false;
   savePending([]);

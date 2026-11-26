@@ -353,6 +353,25 @@ try {
     expect((await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder', dryRun: true })).status !== 403, 'a dry run of opening a folder was refused through the remote access');
     expect((await ask(port, '/api/state', tailnet)).status === 403, "the app's own port answered the tailnet name");
 
+    // The emergency lockdown (src/lockdown.mjs), engaged and released through the API. This server stops nothing for
+    // real (no queue, no runs, no hooks given), and the lockdown's state lives in the temporary data folder.
+    const engaged = await post('/api/lockdown', { action: 'engage', reason: 'Smoke test' });
+    const lockState = await (await fetch(`${base}/api/state`)).json();
+    expect(engaged.ok && lockState.lockdown?.active && lockState.lockdown.reason === 'Smoke test' && lockState.attention.items.some(i => i.kind === 'lockdown' && i.level === 'urgent'),
+      `the lockdown was not engaged, or the app does not show it: ${JSON.stringify(lockState.lockdown)}`);
+    const lockedMerge = await post('/api/merge', { run: 'smoke-feed' });
+    expect(lockedMerge.status === 400 && /lockdown|emergência/i.test((await lockedMerge.json()).error ?? ''), 'a merge was not refused in the lockdown');
+    expect((await ask(remote.port, '/api/state', tailnet)).status === 423, 'the remote access answered in the lockdown');
+    expect((await ask(remote.port, '/api/lockdown', command, { action: 'release', confirm: true })).status === 403, 'the lockdown was released through the remote access');
+    expect((await post('/api/lockdown', { action: 'release' })).status === 400, "the lockdown was released without the owner's confirmation");
+    const released = await post('/api/lockdown', { action: 'release', confirm: true });
+    const afterRelease = await (await fetch(`${base}/api/state`)).json();
+    expect(released.ok && !afterRelease.lockdown?.active && afterRelease.lockdown?.last?.reason === 'Smoke test', 'the owner could not release the lockdown on this computer');
+    expect((await ask(remote.port, '/api/state', tailnet)).status === 200, 'the remote access stayed off after the release');
+    // The refused requests above (a login not allowed, an unknown address) became signals for the detection.
+    const signals = readFileSync(path.join(data, 'security', 'signals.jsonl'), 'utf8');
+    expect(/"kind":"login_failed"/.test(signals) && /"kind":"unknown_origin"/.test(signals), 'the refused requests were not noted for the detection');
+
     // The file viewer: an image, a CSV and a workbook open, read only, with the safety headers; what is outside its
     // folders, protected or asked by another site is refused; the remote access asks for its login here too.
     const fileUrl = (what, p, extra = '') => `/api/files/${what}?path=${encodeURIComponent(p)}${extra}`;
@@ -1211,6 +1230,17 @@ try {
     const noted = readFileSync(guardLog, 'utf8').trim().split('\n').length;
     expect(hook.includes('guard.mjs') && !hook.includes('--allow') && !wrong.length && noted === publish.length,
       `the guard of the crew and the manager misjudged what publishes: ${JSON.stringify({ hook, wrong, noted })}`);
+    // In an emergency lockdown, the guard refuses every command. A command reaching into a protected folder is refused
+    // and noted for the detection. (The lockdown's state and signals are in the temporary data folder.)
+    const security = path.join(data, 'security');
+    mkdirSync(security, { recursive: true });
+    writeFileSync(path.join(security, 'lockdown.json'), JSON.stringify({ active: true, since: new Date().toISOString(), reason: 'smoke' }));
+    const lockedRefused = refuses('git status');
+    rmSync(path.join(security, 'lockdown.json'));
+    const profileRefused = refuses(`ls "${path.join(data, 'browser-profile')}"`);
+    const protectedNoted = readFileSync(path.join(security, 'signals.jsonl'), 'utf8').includes('"kind":"protected_access"');
+    expect(lockedRefused && !refuses('git status') && profileRefused && protectedNoted,
+      `the guard misjudged the lockdown or a protected folder: ${JSON.stringify({ lockedRefused, profileRefused, protectedNoted })}`);
   } finally {
     rmSync(guardDir, { recursive: true, force: true });
   }

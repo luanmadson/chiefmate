@@ -638,6 +638,28 @@ function updateLine(u) {
   return `Installing the new version: Chiefmate checks it and restarts by itself.${paused}`;
 }
 
+/** The emergency lockdown in a few lines, for the terminal. */
+function lockdownText(v) {
+  if (!v.active) {
+    const last = v.last ? `\nLast: ${formatDateTime(v.last.since)} to ${formatDateTime(v.last.until)}, ${v.last.reason}` : '';
+    const warnings = v.warnings.map(w => `\nWarning ${formatDateTime(w.at)}: ${w.text}`).join('');
+    return `Chiefmate is not locked down.${last}${warnings}`;
+  }
+  const stopped = Object.entries(v.stopped).map(([k, n]) => `${k} ${n}`).join(', ') || 'nothing';
+  return [
+    `EMERGENCY LOCKDOWN since ${formatDateTime(v.since)} (by ${v.by}, from ${v.from})`,
+    `Reason: ${v.reason}`,
+    `Stopped: ${stopped}`,
+    ...v.evidence.map(e => `Evidence ${formatDateTime(e.at)} [${e.what}${e.who ? `, ${e.who}` : ''}]: ${e.detail}`),
+  ].join('\n');
+}
+
+/** A command refused to a step of a run: noted for the emergency lockdown's detection (src/lockdown.mjs), then refused. */
+async function crewRefused(what, message) {
+  (await import('./lockdown.mjs')).recordSignal('publish_refused', `cli.mjs ${what}`, { who: 'step' });
+  throw new Error(message);
+}
+
 const machineBytes = n => `${Math.round((n ?? 0) / 1024 ** 2)} MB`;
 
 async function main() {
@@ -688,6 +710,45 @@ async function main() {
           },
           beforeRestart: close,
         });
+        // The emergency lockdown (src/lockdown.mjs): what it stops, what a release resumes, and who is told.
+        const lockdown = await import('./lockdown.mjs');
+        const { cancelLive } = await import('./runs.mjs');
+        const { stopSessionTurns } = await import('./sessions.mjs');
+        const { closeBrowser, findBrowsers } = await import('./browsers.mjs');
+        const { processes } = await import('./machine.mjs');
+        const { reportEvent } = await import('./news.mjs');
+        const { t } = await import('./i18n.mjs');
+        lockdown.setLockdownHooks({
+          stopAll: async () => {
+            const runs = [...live.keys()].filter(id => {
+              live.get(id)?.preparing?.abort();
+              return cancelLive(id, t('stopped by the emergency lockdown'));
+            }).length;
+            const manager = interruptManager() ? 1 : 0;
+            const sessions = stopSessionTurns();
+            let browsers = 0;
+            try {
+              const { list } = await processes(0);
+              for (const b of findBrowsers(loadConfig(), list ?? [])) {
+                await closeBrowser(b.pid).catch(() => null);
+                browsers++;
+              }
+            } catch {
+              // listed on Windows only
+            }
+            return { runs, manager, sessions, browsers };
+          },
+          resume: () => {
+            nudgeQueue();
+            deliverPending();
+            resumeSessions();
+          },
+          tell: ({ kind, title, text, news }) => {
+            notify(title, text, 'chiefmate:operations', { urgent: true });
+            reportEvent(kind, news ?? text, { urgent: true });
+          },
+        });
+        lockdown.startLockdownWatch();
         deliverPending(); // messages left in the queue when Chiefmate stopped
         (await import('./news.mjs')).startNews(); // and the news for the manager, such as "update installed"
       }
@@ -894,7 +955,7 @@ async function main() {
     }
     case 'merge': {
       // Never from a step of a run: only the owner authorizes a merge, from the app or through the manager.
-      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error('The crew never merges: only the owner authorizes a merge.');
+      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) await crewRefused('merge', 'The crew never merges: only the owner authorizes a merge.');
       const id = rest[0];
       if (!id || id.startsWith('--')) throw new Error('Which run? node src/cli.mjs merge <id> [--yes]');
       if (!has('--yes')) {
@@ -918,7 +979,7 @@ async function main() {
     }
     case 'close-pr': {
       // Never from a step of a run: the crew doesn't close pull requests.
-      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error('The crew never closes pull requests.');
+      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) await crewRefused('close-pr', 'The crew never closes pull requests.');
       const id = rest[0];
       const newer = option('--replaced-by');
       if (!id || id.startsWith('--') || !newer) throw new Error('Which runs? node src/cli.mjs close-pr <run> --replaced-by <newer run> [--yes]');
@@ -934,7 +995,8 @@ async function main() {
     }
     case 'push': {
       // Only the push the owner allowed the manager on its card (src/decisions.mjs), once: never from a step of a run.
-      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error('The crew never pushes: Chiefmate does that at the end of a run.');
+      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) await crewRefused('push', 'The crew never pushes: Chiefmate does that at the end of a run.');
+      (await import('./lockdown.mjs')).refuseWhileLocked('push');
       const [dir, branch] = words();
       if (!dir || !branch) throw new Error('Which folder and branch? node src/cli.mjs push <folder> <branch>');
       const { pushesFile } = await import('./decisions.mjs');
@@ -954,7 +1016,7 @@ async function main() {
     }
     case 'repo-create': {
       // A private repository for a local folder, created only once the owner allows it on its card (src/decisions.mjs).
-      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error('The crew never creates repositories: ask the owner with needs-you.');
+      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) await crewRefused('repo-create', 'The crew never creates repositories: ask the owner with needs-you.');
       const [name] = words();
       if (!name || !option('--from')) throw new Error('Which name and folder? node src/cli.mjs repo-create <name> --private --from <folder> [--description "<text>"]');
       const visibility = has('--public') || has('--internal') ? 'public' : has('--private') ? 'private' : '';
@@ -973,6 +1035,35 @@ async function main() {
       const u = await api('/api/update-check', {});
       if (!u.waiting) console.log(`Chiefmate ${(await api('/api/health')).version} is up to date.`);
       else console.log(`An approved update is waiting (${u.waiting} change(s)). ${updateLine(u)}`);
+      return;
+    }
+    case 'lockdown': {
+      // The emergency lockdown (src/lockdown.mjs): "lockdown status" shows it; "lockdown [reason]" engages it at once.
+      const lockdown = await import('./lockdown.mjs');
+      if (words()[0] === 'status') return console.log(lockdownText(lockdown.lockdownView()));
+      const reason = words().join(' ').trim();
+      const by = process.env.CHIEFMATE_MANAGER ? 'manager' : process.env.CHIEFMATE_RUN ? 'step' : 'owner';
+      // Without Chiefmate running, only the state is written: it holds from its next start.
+      const state = await apiOr('/api/lockdown', { action: 'engage', reason, by, origin: 'cli' }, () => lockdown.engage({ reason, by, from: 'cli' }));
+      console.log(lockdownText(state.lockdown ?? lockdown.lockdownView(state)));
+      return;
+    }
+    case 'unlock': {
+      // Only the owner, at this computer's terminal: never a step, the manager or the rescuer, never a command with no
+      // terminal (what an agent runs), and after reading what triggered it.
+      if (process.env.CHIEFMATE_RUN || process.env.CHIEFMATE_MANAGER || process.env.CHIEFMATE_RESCUER) throw new Error('Only the owner releases the emergency lockdown, in the app or in a terminal on this computer.');
+      if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Run "node src/cli.mjs unlock" yourself, in a terminal on this computer: it asks you to confirm.');
+      const lockdown = await import('./lockdown.mjs');
+      const view = lockdown.lockdownView();
+      if (!view.active) return console.log('Chiefmate is not locked down.');
+      console.log(lockdownText(view));
+      const { createInterface } = await import('node:readline/promises');
+      const prompt = createInterface({ input: process.stdin, output: process.stdout });
+      const typed = (await prompt.question('\nType UNLOCK to release it (anything else keeps it): ')).trim();
+      prompt.close();
+      if (typed !== 'UNLOCK') return console.log('Kept locked down.');
+      await apiOr('/api/lockdown', { action: 'release', confirm: true, origin: 'cli' }, () => lockdown.release({ by: 'owner', from: 'cli' }));
+      console.log('Released. The queue goes on; the runs the lockdown stopped stay canceled until you resume them.');
       return;
     }
     case 'update-now': {

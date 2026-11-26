@@ -7,8 +7,11 @@
 // standard input).
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isLocked, protectedFolders, recordSignal } from './lockdown.mjs';
+import { ROOT } from './util.mjs';
 
 // The rules a finding is filed under: the same as Claude Code's, so allowing one releases both.
 export const PUSH = 'Bash(git push:*)';
@@ -176,6 +179,89 @@ function inWeb(program, args) {
   return writes ? [{ rule: API, part: [program, ...args].join(' '), dir: null }] : [];
 }
 
+// ---------- What the emergency lockdown's detection looks for (src/lockdown.mjs) ----------
+
+const DELETERS = new Set(['rm', 'rmdir', 'rd', 'del', 'erase', 'remove-item', 'ri', 'rimraf']);
+
+/** Whether "inner" is "outer" or inside it (on Windows, whatever the case). */
+const inside = (inner, outer) => {
+  const rel = path.relative(process.platform === 'win32' ? outer.toLowerCase() : outer, process.platform === 'win32' ? inner.toLowerCase() : inner);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+};
+
+/** A word as a path from "cwd": the home folder's usual spellings expanded, an option's value ("--path=x") taken. */
+function asPath(word, cwd, home) {
+  let w = String(word).replace(/^-{1,2}[\w-]+=/, '');
+  w = w.replace(/^(~|\$HOME|\$\{HOME\}|\$env:USERPROFILE|\$env:HOME|%USERPROFILE%)(?=$|[\\/])/i, home);
+  if (!w || /^[a-z][a-z0-9+.-]*:\/\//i.test(w)) return null;
+  // Git Bash's drive paths on Windows: /c/Users -> C:/Users.
+  if (process.platform === 'win32') w = w.replace(/^\/([a-z])(?=$|\/)/i, (_, d) => `${d.toUpperCase()}:/`);
+  return path.resolve(cwd, w);
+}
+
+/**
+ * What a shell command does that the lockdown's detection weighs: [{ kind, detail }], kind 'protected_access' (a word
+ * that is a path inside a protected folder), 'wide_delete' (a recursive deletion of a drive, the home folder or one of
+ * its folders, a folder above cwd, Chiefmate's own folder or a protected one: grave) or 'mass_delete' (a recursive
+ * deletion outside cwd, or of all of it; the system's temporary folder aside). Only real paths count: a folder's name
+ * in a search or a text is not one.
+ */
+export function riskyCommand(command, { cwd = process.cwd(), protect = [], home = os.homedir(), root = null, temp = os.tmpdir() } = {}, depth = 0) {
+  const found = [];
+  if (depth > 4) return found;
+  const add = (kind, detail) => found.push({ kind, detail: clip(detail) });
+  // A protected folder's full path anywhere in the text, whatever its slashes: PowerShell keeps backslashes that the
+  // shell's words below take as escapes.
+  const flat = s => String(s).replace(/\\+/g, '/').replace(/\/+$/, '').toLowerCase();
+  const text = flat(command);
+  if (depth === 0 && protect.some(dir => new RegExp(`${flat(dir).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w.-])`).test(text))) add('protected_access', String(command));
+  const all = tokens(command);
+  const commands = [];
+  for (let i = 0, start = 0; i <= all.length; i++) {
+    if (i === all.length || all[i] === '|') {
+      if (i > start) commands.push(all.slice(start, i));
+      start = i + 1;
+    }
+  }
+  for (const words of commands) {
+    for (const w of words) if (/\s/.test(w)) found.push(...riskyCommand(w, { cwd, protect, home, root, temp }, depth + 1));
+    for (const w of words) {
+      const p = asPath(w, cwd, home);
+      if (p && protect.some(dir => inside(p, dir))) add('protected_access', words.join(' '));
+    }
+    let i = 0;
+    while (i < words.length && (/^[A-Za-z_][\w]*=/.test(words[i]) || WRAPPERS.has(programName(words[i])))) i++;
+    const program = programName(words[i] ?? '');
+    if (!DELETERS.has(program)) continue;
+    const args = words.slice(i + 1);
+    // rm -rf / -Rf / -r, --recursive; Remove-Item -Recurse (or its short forms); rd, rmdir and del /s; rimraf.
+    const recursive = program === 'rimraf'
+      || args.some(a => /^-[a-z]{1,3}$/i.test(a) && /r/i.test(a))
+      || args.some(a => /^(--recursive|-rec(u(r(se?)?)?)?|\/s)$/i.test(a));
+    if (!recursive) continue;
+    for (const target of args.filter(a => !/^(-|\/[a-z]$)/i.test(a))) {
+      // The temporary folder as the shell names it (Git Bash's /tmp, $TMPDIR, %TEMP%...).
+      if (/^(\/tmp|\$\{?(TMPDIR|TEMP|TMP)\}?|\$env:(TEMP|TMP)|%(TEMP|TMP)%)([\\/]|$)/i.test(target)) continue;
+      const p = asPath(target.replace(/[\\/]?\*+$/, '') || '.', cwd, home);
+      if (!p) continue;
+      const wide = samePath(path.parse(p).root, p) // a whole drive
+        || inside(home, p) // the home folder, or above it
+        || samePath(path.dirname(p), home) // a folder right in it (Documents, Desktop...)
+        || (inside(cwd, p) && !samePath(cwd, p)) // a folder above the agent's own
+        || (root && inside(root, p)) // Chiefmate itself
+        || protect.some(dir => inside(p, dir) || inside(dir, p));
+      if (wide) add('wide_delete', words.join(' '));
+      else if ((samePath(p, cwd) || !inside(p, cwd)) && !inside(p, temp)) add('mass_delete', words.join(' '));
+    }
+  }
+  // One finding per deletion, and one for the protected folders however many times they are named.
+  const seen = new Set();
+  const key = f => (f.kind === 'protected_access' ? f.kind : `${f.kind} ${f.detail}`);
+  return found.filter(f => !seen.has(key(f)) && seen.add(key(f)));
+}
+
+const clip = s => (s.length > 300 ? `${s.slice(0, 299)}…` : s);
+
 // ---------- The manager's push, allowed once by the owner ----------
 // The manager is refused every publication, like the crew. The one exception is the owner's: a plain push of one
 // branch (never the main one, never forced) that the manager tried, allowed on its card in the app (src/decisions.mjs),
@@ -276,25 +362,44 @@ export function takeGrant(file, target, facts = target?.branch ? pushFacts(targe
  * The settings that make Claude Code run this file before each command, refusing what is not in "allowed". grants:
  * the manager's push requests and grants (see takeGrant).
  */
-export function guardHooks({ log, allowed = [], grants = null }) {
+export function guardHooks({ log, allowed = [], grants = null, who = grants ? 'manager' : 'step' }) {
   const q = s => `"${String(s).replace(/\\/g, '/')}"`;
   // Only the guard's own rules: any other text would go into a shell command line.
   const rules = [PUSH, REMOTE, PR, REPO, API].filter(r => allowed.includes(r));
-  const command = [q(process.execPath), q(fileURLToPath(import.meta.url)), '--log', q(log), ...rules.flatMap(r => ['--allow', q(r)]), ...(grants ? ['--grants', q(grants)] : [])].join(' ');
+  const by = ['step', 'manager', 'session'].includes(who) ? who : 'step';
+  const command = [q(process.execPath), q(fileURLToPath(import.meta.url)), '--log', q(log), '--who', by, ...rules.flatMap(r => ['--allow', q(r)]), ...(grants ? ['--grants', q(grants)] : [])].join(' ');
   return { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command, timeout: 30 }] }] };
 }
 
-/** The hook: refuses a command that publishes without the owner's permission, and notes it in the log. */
+const deny = reason => process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } }));
+
+/**
+ * The hook: refuses every command while Chiefmate is in emergency lockdown; refuses a command that reaches into the
+ * protected folders or deletes a whole drive, a personal folder or Chiefmate, and one that publishes without the
+ * owner's permission, noting it in the log. What it finds goes to the lockdown's detection as signals.
+ */
 async function hook(argv) {
   const opt = name => argv.flatMap((a, i) => (a === name ? [argv[i + 1]] : []));
   const [log] = opt('--log');
   const [grants] = opt('--grants');
+  const who = opt('--who')[0] ?? 'step';
   const allowed = new Set(opt('--allow'));
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
   const call = JSON.parse(input || '{}');
+  if (isLocked()) return deny('Refused by Chiefmate: it is in emergency lockdown, and nothing runs until the owner releases it. Stop now.');
   if (call.tool_name !== 'Bash') return;
   const command = String(call.tool_input?.command ?? '');
+  let risky = [];
+  try {
+    risky = riskyCommand(command, { cwd: call.cwd || process.cwd(), protect: protectedFolders(), root: ROOT });
+  } catch {
+    // the detection never blocks a command by failing
+  }
+  for (const r of risky) recordSignal(r.kind, r.detail, { who });
+  if (risky.some(r => r.kind !== 'mass_delete')) {
+    return deny("Refused by Chiefmate: this reaches into Chiefmate's protected folders, or deletes a whole drive, a personal folder or Chiefmate. The owner was warned. Don't try it another way: say why you wanted it, and stop.");
+  }
   const refused = publishing(command).filter(f => !allowed.has(f.rule));
   if (!refused.length) return;
   const cwd = call.cwd || process.cwd();
@@ -314,7 +419,9 @@ async function hook(argv) {
         : target
           ? `Refused by Chiefmate: this push needs the owner's permission. If it is a plain push of one branch, the owner now gets a card to allow it once (this repository and branch, for ${GRANT_MINUTES} minutes); you are told when they do, and may run the same command again. Only "git -C <folder> push <remote> <branch>" can be allowed, alone and with no other option. Say what you want to send and why, and stop.`
           : `Refused by Chiefmate: this publishes (${rules}), and the manager never does. Say what you wanted to run and why.`;
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } }));
+  // A live session's refusal becomes a permission request for the owner, present; the crew's and the manager's count.
+  if (who !== 'session') recordSignal('publish_refused', refused.map(f => f.part).join('; '), { who });
+  deny(reason);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

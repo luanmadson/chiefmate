@@ -20,6 +20,7 @@ import { loadConfig } from './config.mjs';
 import { GRANT_MINUTES, plainPush, pushFacts, readPushes, repoOf, samePath } from './guard.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { discardRun, mergeRun, prNumber, verdict } from './merge.mjs';
+import { refuseWhileLocked } from './lockdown.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { decideItem } from './planning.mjs';
@@ -248,6 +249,7 @@ export const answerRepo = (id, allow) => answerRequest(reposFile(), openRepoRequ
  * repository created, always private, the folder's "origin" and its branch sent ({ created }). Throws what refuses it.
  */
 export function repoCreate({ name, from, description = '', visibility = '' }) {
+  refuseWhileLocked(t('creating a repository'));
   if (visibility !== 'private') {
     throw new Error(visibility
       ? 'Chiefmate never creates a public or internal repository: only a private one (--private).'
