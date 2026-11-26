@@ -544,7 +544,7 @@ The Radar section keeps ideas for new systems and sites with high potential. The
 
 Chiefmate measures what really counts on a subscription plan: your account's usage in the 5-hour window and in the plan's week, which Claude Code reports on every run. There are no spending caps in dollars.
 
-- **Before a run starts and before every step**, Chiefmate checks your account (the same account for every run going on). If the 5-hour window or the plan's week is above the share you set in the Usage section (85% and 90% by default), the run waits for the reset and then carries on by itself.
+- **Before a run starts and before every step**, Chiefmate checks your account against the latest settings (85% for the 5-hour window and 90% for the plan's week by default). A run that reaches a configured limit waits until the reset. If you raise the limit in Usage or with `limits` and the current usage fits within both limits, the run returns to the queue automatically.
 - **If the account runs out in the middle of a step**, that step starts over after the reset.
 - **Each step has a time limit** (in the agent's header), in case an agent gets stuck.
 - **Alerts at 70% and 90%** of the 5-hour window and of the plan's week, once per threshold and window. They don't pause anything.
