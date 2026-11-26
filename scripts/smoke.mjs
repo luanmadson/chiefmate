@@ -492,6 +492,55 @@ try {
       decisionRefused = /only adds and updates/.test(String(error.stderr));
     }
     expect(decisionRefused, "a step of a run made the owner's decision on a radar idea");
+
+    // The manager's tools from the command line, through the running Chiefmate (whose queue never starts here):
+    // the queue numbered, moved, held and released; a queued run changed; a failed step redone; guidance refused
+    // with no agent at work; and a command Chiefmate lacks, recorded as a tool gap.
+    const at = minutes => new Date(Date.now() - minutes * 60_000).toISOString();
+    const readJson = file => JSON.parse(readFileSync(file, 'utf8'));
+    const queuedRun = (id, minutes, extra = {}) => writeFileSync(path.join(data, 'runs', `${id}.json`), JSON.stringify({
+      id, kind: 'task', project: 'none', title: `Smoke ${id}`, status: 'queued', created: at(minutes), steps: [{ agent: 'generalist', part: 'Do it.', status: 'pending' }], review: null, ...extra,
+    }));
+    queuedRun('smoke-q1', 30);
+    queuedRun('smoke-q2', 20);
+    const manager = { CHIEFMATE_MANAGER: '1', CHIEFMATE_RUN: '' };
+    const order = () => cli(['queue']).split('\n').filter(l => /smoke-q/.test(l)).map(l => /\[(smoke-q\d)\]/.exec(l)[1]).join();
+    expect(order() === 'smoke-q1,smoke-q2', `the queue is not listed in order: ${cli(['queue'])}`);
+    cli(['queue', 'move', 'smoke-q2', '--top'], manager);
+    expect(order() === 'smoke-q2,smoke-q1', `a run was not moved to the top of the queue: ${cli(['queue'])}`);
+    cli(['queue', 'move', 'smoke-q2', '--before', 'smoke-q1'], manager);
+    cli(['queue', 'hold', 'smoke-q1'], manager);
+    expect(/smoke-q1\].*ON HOLD/.test(cli(['queue'])) && readJson(path.join(data, 'runs', 'smoke-q1.json')).onHold?.by === 'manager', 'a run was not held in the queue');
+    expect((await (await fetch(`${base}/api/state`)).json()).queue.find(r => r.id === 'smoke-q1')?.onHold === true, 'the app is not told that a run is on hold');
+    cli(['queue', 'release', 'smoke-q1'], manager);
+    expect(!readJson(path.join(data, 'runs', 'smoke-q1.json')).onHold, 'a held run was not released');
+    cli(['edit', 'smoke-q1', '--instruction-append', 'Also check the footer.', '--title', 'Smoke edited', '--agent', 'designer', '--level', '2'], manager);
+    const changedRun = readJson(path.join(data, 'runs', 'smoke-q1.json'));
+    expect(changedRun.title === 'Smoke edited' && changedRun.briefBy?.title === 'given' && changedRun.steps[0].agent === 'designer' && changedRun.level === 2
+      && changedRun.additions?.[0]?.text === 'Also check the footer.' && changedRun.edits?.[0]?.by === 'manager', `a queued run was not changed: ${JSON.stringify(changedRun)}`);
+    const refusedCli = (args, env) => {
+      try {
+        cli(args, env);
+        return '';
+      } catch (error) {
+        return String(error.stderr);
+      }
+    };
+    // The server's errors come in the installation's language: what is checked is that it refused and changed nothing.
+    expect(/Error/.test(refusedCli(['edit', 'smoke-q1', '--agent', 'nobody'], manager)) && readJson(path.join(data, 'runs', 'smoke-q1.json')).steps[0].agent === 'designer', 'a queued run took an agent outside the crew');
+    expect(/only the manager steers/.test(refusedCli(['queue', 'move', 'smoke-q1', '--top'], { CHIEFMATE_RUN: 'x', CHIEFMATE_MANAGER: '' })), 'a step of a run moved the queue');
+    queuedRun('smoke-failed', 10, { status: 'failed', ended: at(5), steps: [{ agent: 'generalist', part: 'One.', status: 'done' }, { agent: 'generalist', part: 'Two.', status: 'failed' }] });
+    expect(/Error/.test(refusedCli(['edit', 'smoke-failed', '--title', 'x'], manager)) && readJson(path.join(data, 'runs', 'smoke-failed.json')).title === 'Smoke smoke-failed', 'a run that ended was changed as if it were queued');
+    cli(['retry', 'smoke-failed', '--agent', 'designer'], manager);
+    const retried = readJson(path.join(data, 'runs', 'smoke-failed.json'));
+    expect(retried.status === 'queued' && retried.steps[0].status === 'done' && retried.steps[1].status === 'pending' && retried.steps[1].agent === 'designer' && retried.retries?.[0]?.step === 2,
+      `a failed step was not redone with another agent: ${JSON.stringify(retried)}`);
+    expect(/Error/.test(refusedCli(['guide', 'smoke-q1', 'Look at the footer'], manager)) && !readJson(path.join(data, 'runs', 'smoke-q1.json')).talk, 'guidance went to a run with no agent at work');
+    const firstGap = refusedCli(['frobnicate', 'x'], manager);
+    const secondGap = refusedCli(['frobnicate', 'y'], manager);
+    expect(/tool gap #\d+ \(1x\)/.test(firstGap) && /tool gap #\d+ \(2x\)/.test(secondGap) && /frobnicate/.test(cli(['gap', 'list'])), `a command the manager lacked was not recorded as a tool gap: ${firstGap} / ${secondGap}`);
+    expect(!/tool gap/.test(refusedCli(['frobnicate'], { CHIEFMATE_MANAGER: '' })), "the owner's unknown command was recorded as the manager's gap");
+    for (const id of ['smoke-q1', 'smoke-q2', 'smoke-failed']) rmSync(path.join(data, 'runs', `${id}.json`), { force: true });
   }
 } catch (error) {
   failures.push(error.message);
@@ -2192,6 +2241,13 @@ try {
       'gh api repos/a/b/pulls -f title=T': 'gh api', 'gh api -X POST repos/a/b/pulls': 'gh api', 'curl -X POST https://api.github.com/repos/a/b/pulls -d @pr.json': 'gh api',
       'git -C x remote set-url origin u': 'git remote', 'gh pr create --fill': 'gh pr',
       'git status && git log': '', 'git commit -m "explain git push"': '', 'gh api repos/a/b/pulls': '', 'curl https://api.github.com/repos/a/b': '',
+      // What only reads publishes nothing; what writes, however placed, does.
+      'gh pr view 12': '', 'gh pr list --repo a/b --state open': '', 'gh -R a/b pr checks 3': '', 'gh pr diff 3': '', 'gh pr status': '', 'gh repo view a/b --json name': '', 'gh repo list': '',
+      'gh pr --repo a/b merge 3': 'gh pr', 'gh repo create x --public': 'gh repo', 'gh pr': 'gh pr', 'gh repo delete a/b': 'gh repo',
+      // An instruction for Chiefmate's command line (or a script's argument) that only names a command is text.
+      'node src/cli.mjs task p generalist "Fix it.\ngh pr create, then git push (gh repo view)"': '', 'python tool.py "a; git push"': '',
+      // Text that a shell or inline code runs is still looked at.
+      'echo "git push" | sh': 'git push', 'eval "git push"': 'git push', 'node -e "run(\'git push\')"': 'git push', 'gh alias set p --shell "git push"': 'git push',
     };
     const misread = Object.entries(guarded).filter(([c, r]) => rules(c) !== r);
     expect(!misread.length, `the guard misreads what a command publishes: ${misread.map(([c]) => `${c} -> ${rules(c) || '(nothing)'}`).join('; ')}`);
@@ -2638,6 +2694,46 @@ try {
   rmSync(temp, { recursive: true, force: true, maxRetries: 5 });
 } catch (error) {
   failures.push(`agent in charge checks: ${error.message}`);
+}
+
+// The manager's tools, in this process: its guidance to an agent at work (recorded as the manager's, never answering a
+// request made to the owner), a run on hold skipped by the queue, and a tool gap that comes back proposed on the board.
+try {
+  process.env.CHIEFMATE_SMOKE = '1'; // the proposals here never reach the manager
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const { live } = await import(src('runs.mjs'));
+  const { ownerTurn, pendingTalk, talkSection, talkSituation, talkTo } = await import(src('talk.mjs'));
+  const run = { id: 'smoke-guide', title: 'Generalist: smoke', project: 'none', status: 'running', created: new Date().toISOString(), steps: [{ agent: 'generalist', status: 'running' }], requests: [] };
+  let interrupted = 0;
+  run.requests.push({ id: 'r1', step: 1, agent: 'generalist', what: 'Which file?', wait: true, status: 'open', at: new Date().toISOString() });
+  live.set(run.id, { run: run.id, memory: run, agent: 'generalist', step: 1, talking: true, heldUntil: Date.now() + 20_000, actions: [], process: { interrupt: () => interrupted++ } });
+  const guided = talkTo(run.id, 'Run the tests before you commit', { by: 'manager' });
+  expect(guided.who === 'manager' && guided.status === 'pending' && interrupted === 1 && run.requests[0].status === 'open' && pendingTalk(run, 1).length === 1,
+    `the manager's guidance was not kept for the agent, or answered a request made to the owner: ${JSON.stringify(guided)}`);
+  const turn = ownerTurn([guided], { owner: 'Owner', language: 'en' });
+  expect(turn.includes("Chiefmate's manager") && turn.includes('Run the tests before you commit') && turn.includes('First answer the manager'), `the agent is not told the guidance is the manager's: ${turn}`);
+  expect(talkSection(run, 1, id => id, { owner: 'Owner', language: 'en' }).includes('Run the tests before you commit') && talkSituation([run], 'Owner').includes('You (the manager) guided step 1'),
+    "the manager's guidance is not in the step's report or in its situation");
+  live.delete(run.id);
+
+  const { pickNext } = await import(src('queue.mjs'));
+  const waiting = [{ id: 'h1', project: 'a', onHold: { by: 'manager' } }, { id: 'h2', project: 'a' }, { id: 'h3', project: 'b' }];
+  expect(pickNext(waiting, [], 3).map(r => r.id).join() === 'h2,h3', `the queue started a run on hold, or held up its project: ${pickNext(waiting, [], 3).map(r => r.id).join()}`);
+
+  const gaps = await import(src('gaps.mjs'));
+  const config = { projects: { mine: { name: 'Mine', repository: 'https://github.com/someone/chiefmate.git' } } };
+  expect(gaps.chiefmateProject(config) === 'mine' && gaps.chiefmateProject({ projects: { x: { repository: 'a/b' } } }) === null, "Chiefmate's own project was not found by its repository");
+  const once = await gaps.recordGap({ what: 'Rename a mission', example: 'node src/cli.mjs mission rename a b' }, { config });
+  const twice = await gaps.recordGap({ what: 'rename a  mission', example: 'node src/cli.mjs mission-rename a b' }, { config });
+  const { readBoard } = await import(src('planning.mjs'));
+  const item = readBoard().items.find(i => i.id === twice.plan);
+  expect(once.id === twice.id && !once.plan && twice.count === 2 && twice.status === 'proposed' && item?.title === 'Manager tool: Rename a mission' && item.status === 'proposed',
+    `a tool gap that came back did not become a proposal: ${JSON.stringify([twice, item])}`);
+  expect(gaps.gapsLine().includes(`#${twice.id} Rename a mission (2x, proposed as board item #${item?.id})`), `the manager's situation does not list the open gaps: ${gaps.gapsLine()}`);
+  gaps.closeGap(twice.id, 'Done.');
+  expect(!gaps.readGaps().some(g => g.id === twice.id && g.status !== 'closed'), 'a gap was not closed');
+} catch (error) {
+  failures.push(`manager tools checks: ${error.message}`);
 }
 
 try {

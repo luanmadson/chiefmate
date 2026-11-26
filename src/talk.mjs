@@ -12,19 +12,23 @@ import { activeRun, liveOf } from './runs.mjs';
 import { saveRun } from './store.mjs';
 import { clip, languageName, now } from './util.mjs';
 
-/** Sends the owner's message to the agent of a run going on. Returns the message, as recorded. */
-export function talkTo(runId, text) {
+/**
+ * Sends a message to the agent of a run going on: the owner's, from the agent's panel, or the manager's (by
+ * "manager", cli.mjs guide), recorded as the manager's. Returns the message, as recorded.
+ */
+export function talkTo(runId, text, { by = 'owner' } = {}) {
   const message = String(text ?? '').trim();
   if (!message) throw new Error(t('Write your message to the agent.'));
   const id = String(runId ?? '');
   const l = liveOf(id);
   const run = activeRun(id);
   if (!l || !run || !l.agent || !l.talking) throw new Error(t('No agent is at work on this run now: a message only goes to a step going on.'));
-  const entry = { id: randomUUID().slice(0, 8), at: now(), who: 'owner', step: l.step, agent: l.agent, text: clip(message, 4000), status: 'pending' };
+  const who = by === 'manager' ? 'manager' : 'owner';
+  const entry = { id: randomUUID().slice(0, 8), at: now(), who, step: l.step, agent: l.agent, text: clip(message, 4000), status: 'pending' };
   (run.talk ??= []).push(entry);
-  // The agent is waiting for the owner right now (its waiting command asked within the last 20 seconds): the message
-  // answers that request, and nothing is interrupted.
-  const request = Date.now() < l.heldUntil ? [...(run.requests ?? [])].reverse().find(r => r.status === 'open' && r.wait && r.step === l.step) : null;
+  // The agent is waiting for the owner right now (its waiting command asked within the last 20 seconds): the owner's
+  // message answers that request, and nothing is interrupted. The manager's never answers for the owner.
+  const request = who === 'owner' && Date.now() < l.heldUntil ? [...(run.requests ?? [])].reverse().find(r => r.status === 'open' && r.wait && r.step === l.step) : null;
   if (request) {
     Object.assign(request, { status: 'done', done: now(), by: 'owner', answer: entry.text });
     Object.assign(entry, { status: 'delivered', delivered: now(), via: 'request', request: request.id });
@@ -35,8 +39,8 @@ export function talkTo(runId, text) {
   return entry;
 }
 
-/** The owner's messages of a step not delivered yet. */
-export const pendingTalk = (run, step) => (run.talk ?? []).filter(m => m.who === 'owner' && m.status === 'pending' && m.step === step);
+/** The messages to a step (the owner's and the manager's) not delivered yet. */
+export const pendingTalk = (run, step) => (run.talk ?? []).filter(m => (m.who === 'owner' || m.who === 'manager') && m.status === 'pending' && m.step === step);
 
 /** Records something the agent said in the conversation: its answer to the owner, or a request (needs-you). */
 export function agentSays(run, { step, agent, text, kind = 'answer', request = null, replyTo = null }) {
@@ -47,18 +51,23 @@ export function agentSays(run, { step, agent, text, kind = 'answer', request = n
   return entry;
 }
 
-/** The next turn of a resumed session: the owner's messages, and what to do with them. */
+/** The next turn of a resumed session: the messages of the owner (and of the manager), and what to do with them. */
 export function ownerTurn(messages, config = loadConfig()) {
   const owner = config.owner || 'the owner';
+  const fromManager = messages.some(m => m.who === 'manager');
+  const fromOwner = messages.some(m => m.who !== 'manager');
+  const from = fromManager && fromOwner ? `${owner} and from Chiefmate's manager` : fromManager ? "Chiefmate's manager" : owner;
   const lines = [
-    `${messages.length > 1 ? `Messages from ${owner}` : `Message from ${owner}`}, sent to you directly from the Chiefmate app while you were working.`,
+    `${messages.length > 1 ? `Messages from ${from}` : `Message from ${from}`}, sent to you directly while you were working${fromOwner ? ' (from the Chiefmate app)' : ''}.`,
     'Your work was paused at a safe point: the branch, the files and this session are as you left them.',
+    ...(fromManager ? [`The manager coordinates the crew for ${owner}: follow its guidance as you would ${owner}'s, within the rules you already have.`] : []),
     '',
   ];
-  for (const m of messages) lines.push(messages.length > 1 ? `[sent ${formatDateTime(m.at)}]\n${m.text}\n` : m.text);
+  const sender = m => (m.who === 'manager' ? 'the manager' : owner);
+  for (const m of messages) lines.push(messages.length > 1 || fromManager ? `[from ${sender(m)}, sent ${formatDateTime(m.at)}]\n${m.text}\n` : m.text);
   lines.push(
     '',
-    `First answer ${owner} in one short message, in ${languageName(config.language || 'en')}: it shows in the app, next to the message.`,
+    `First answer ${fromOwner ? owner : 'the manager'} in one short message, in ${languageName(config.language || 'en')}: it shows in the app, next to the message.`,
     "Then go on with your part, taking the message into account. When you finish, your last message is still the step's full report.",
   );
   return lines.join('\n');
@@ -69,6 +78,7 @@ export function talkLines(run, step, agentName = id => id, config = loadConfig()
   const owner = config.owner || t('the owner');
   return (run.talk ?? []).filter(m => m.step === step).map(m => {
     if (m.who === 'owner') return t('{owner} guided: "{text}"', { owner, text: clip(m.text, 600) }) + (m.status === 'undelivered' ? ` (${t('not delivered')})` : '');
+    if (m.who === 'manager') return t('The manager guided: "{text}"', { text: clip(m.text, 600) }) + (m.status === 'undelivered' ? ` (${t('not delivered')})` : '');
     if (m.kind === 'request') return t('{agent} asked for help: "{text}"', { agent: agentName(m.agent), text: clip(m.text, 400) });
     return t('{agent} answered: "{text}"', { agent: agentName(m.agent), text: clip(m.text, 600) });
   });
@@ -76,9 +86,13 @@ export function talkLines(run, step, agentName = id => id, config = loadConfig()
 
 /** The section added to a step's report when the owner talked to the agent during it. Empty when they didn't. */
 export function talkSection(run, step, agentName, config = loadConfig()) {
-  if (!(run.talk ?? []).some(m => m.step === step && m.who === 'owner')) return '';
+  const talk = (run.talk ?? []).filter(m => m.step === step);
+  if (!talk.some(m => m.who === 'owner' || m.who === 'manager')) return '';
   const lines = talkLines(run, step, agentName, config);
-  return `\n\n---\n**${t('Direct talk with {owner} during this step', { owner: config.owner || t('the owner') })}**\n${lines.map(l => `- ${l}`).join('\n')}`;
+  const heading = talk.some(m => m.who === 'owner')
+    ? t('Direct talk with {owner} during this step', { owner: config.owner || t('the owner') })
+    : t('Guidance from the manager during this step');
+  return `\n\n---\n**${heading}**\n${lines.map(l => `- ${l}`).join('\n')}`;
 }
 
 /** For the manager's <situation>: the direct talk in the runs given (going on and latest), newest last. */
@@ -86,14 +100,15 @@ export function talkSituation(runs, owner = 'the owner') {
   const lines = [];
   for (const run of runs) {
     const talk = run.talk ?? [];
-    if (!talk.some(m => m.who === 'owner')) continue;
+    if (!talk.some(m => m.who === 'owner' || m.who === 'manager')) continue;
     const said = talk.slice(-6).map(m => {
       if (m.who === 'owner') return `${owner} guided step ${m.step} (${m.agent}): "${clip(m.text, 200)}"`;
+      if (m.who === 'manager') return `You (the manager) guided step ${m.step} (${m.agent}): "${clip(m.text, 200)}"${m.status === 'pending' ? ' (waiting for a safe point)' : ''}`;
       return `${m.agent} ${m.kind === 'request' ? 'asked for help' : 'answered'}: "${clip(m.text, 160)}"`;
     });
     lines.push(`- [${run.id}] ${run.title}: ${said.join('; ')}`);
   }
   return lines.length
-    ? [`Direct talk between ${owner} and the crew (from the agent's panel in the app; take it into account, above all in final reviews):`, ...lines.slice(-6)].join('\n')
+    ? [`Direct talk between ${owner} and the crew (from the agent's panel in the app, and your own "guide"; take it into account, above all in final reviews):`, ...lines.slice(-6)].join('\n')
     : `Direct talk between ${owner} and the crew: none in these runs.`;
 }

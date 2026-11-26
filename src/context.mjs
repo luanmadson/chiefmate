@@ -533,7 +533,7 @@ export function readHistory(id, limit = 40) {
 
 const PART_TITLES = {
   agent: "The agent's instructions", installation: 'Notes for this installation', 'project-member': "Notes for this project's crew",
-  'lead-role': 'The team lead\'s role', 'lead-notes': 'Notes for the team lead', header: 'The run and the task', memory: 'Project memory',
+  'lead-role': 'The team lead\'s role', 'lead-notes': 'Notes for the team lead', header: 'The run and the task', additions: 'Added by the manager', memory: 'Project memory',
   lead: 'How the team lead reviews', playbook: "The mission's playbook", builder: 'Project instructions (prompt builder)', notes: "The project's notes",
   'agent-notes': "The project's notes for this member", libraries: 'Libraries and personal documentation', review: 'The final review',
   'lead-review': "The team lead's plan and opinion", reports: 'The reports of the steps before', rules: "Chiefmate's rules for the crew",

@@ -1391,13 +1391,15 @@ function drawQueue() {
   const busy = new Set(going().map(a => a.project));
   let room = (state.parallel?.max ?? 1) - going().length;
   const expected = r => {
+    // Held by the manager (cli.mjs queue hold): it keeps its place and starts once released.
+    if (r.onHold) return t('on hold, until released');
     if (busy.has(r.project)) return t('when the run of its project ends');
     busy.add(r.project);
     return room-- > 0 ? t('in a moment') : t('when a run ends');
   };
   const rows = list.map((r, i) => `<tr class="${i === 0 ? 'next' : ''}">
       <td class="num">${i + 1}</td>
-      <td>${i === 0 ? `<span class="tag">${esc(t('Next'))}</span>` : ''}${lateTag(r)}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span></td>
+      <td>${i === 0 && !r.onHold ? `<span class="tag">${esc(t('Next'))}</span>` : ''}${r.onHold ? `<span class="tag">${esc(t('On hold'))}</span>` : ''}${lateTag(r)}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span></td>
       <td>${stateHtml(runState(r.status))}</td>
       <td class="num">${r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? `${shortDate(r.notBefore)} (${esc(relative(r.notBefore))})` : esc(expected(r))}</td>
       <td class="row-actions"><button type="button" class="button danger small" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button></td>
@@ -1406,7 +1408,7 @@ function drawQueue() {
     ? `<div class="label" style="margin-top:24px">${esc(t('Queue'))}</div>
     <table class="table queue"><thead><tr><th>#</th><th>${esc(t('Run'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Expected start'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
     : '';
-  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools, r.due]), Math.floor(Date.now() / 60000)]), html);
+  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools, r.due, !!r.onHold]), Math.floor(Date.now() / 60000)]), html);
 }
 
 /** A run going on: who is at work, the step out of how many, the time counting and the last action, all live. */
@@ -2636,6 +2638,7 @@ function contextPartTitle(key) {
     case 'lead-role': return t("The team lead's role");
     case 'lead-notes': return t('Notes for the team lead');
     case 'header': return t('The run and the task');
+    case 'additions': return t('Added by the manager');
     case 'memory': return t('Project memory');
     case 'lead': return t('How the team lead reviews');
     case 'playbook': return t("The mission's playbook");
@@ -3977,9 +3980,11 @@ function drawAgentTalk(f) {
   const open = new Map(f.requests.map(r => [r.id, r]));
   const entries = f.talk.map(m => {
     const meta = [clockTime(m.at), t('step {n}', { n: m.step })];
-    if (m.who === 'owner') {
+    if (m.who === 'owner' || m.who === 'manager') {
       const status = { pending: t('waiting for a safe point'), delivered: m.via === 'request' ? t('delivered as the answer to the request') : t('delivered'), undelivered: t('not delivered') }[m.status];
-      return `<div class="talk owner"><div class="talk-head"><span class="talk-who">${esc(t('You'))}</span> · ${esc([...meta, status].filter(Boolean).join(' · '))}</div><div class="talk-text">${esc(m.text)}</div></div>`;
+      // The manager's guidance (cli.mjs guide) shows on your side, with its name.
+      const who = m.who === 'manager' ? t('Manager') : t('You');
+      return `<div class="talk owner"><div class="talk-head"><span class="talk-who">${esc(who)}</span> · ${esc([...meta, status].filter(Boolean).join(' · '))}</div><div class="talk-text">${esc(m.text)}</div></div>`;
     }
     const asking = m.kind === 'request';
     const request = asking ? open.get(m.request) : null;

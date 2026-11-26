@@ -1718,5 +1718,22 @@
   "Waiting: the plan's week is used up ({used}); it starts again {when}.": "Aguardando: a semana do plano se esgotou ({used}); recomeça em {when}.",
   "Stop at this share of the 5-hour window": "Parar nesta fração da janela de 5 horas",
   "Now: stopped during the quiet hours ({hours}).": "Agora: parado no horário de silêncio ({hours}).",
-  "On, working": "Ligado, trabalhando"
+  "On, working": "Ligado, trabalhando",
+  "This run is not waiting in the queue (it is {status}).": "Esta execução não está esperando na fila (está {status}).",
+  "Say where: --before <run> or --top.": "Diga para onde: --before <execução> ou --top.",
+  "{id} is not in the queue.": "{id} não está na fila.",
+  "Only a run still in the queue can be changed (this one is {status}). To redo a step of a run that ended, use retry.": "Só uma execução ainda na fila pode ser alterada (esta está {status}). Para refazer um passo de uma execução que terminou, use retry.",
+  "This run has no crew step to change the agent of: its team lead plans the tasks.": "Esta execução não tem passo da equipe para trocar o agente: o líder de equipe planeja as tarefas.",
+  "Nothing to change: give --instruction-append, --title, --summary, --agent, --tool or --level.": "Nada a alterar: informe --instruction-append, --title, --summary, --agent, --tool ou --level.",
+  "This run is going on: guide its agent instead, or cancel it first.": "Esta execução está em andamento: oriente o agente dela, ou cancele-a antes.",
+  "Only a run that failed, was canceled or paused (or still waits) can redo a step (this one is {status}): queue a new task instead.": "Só uma execução que falhou, foi cancelada ou pausada (ou ainda espera) pode refazer um passo (esta está {status}): coloque uma nova tarefa na fila.",
+  "Step {n} does not exist: this run has {count} step(s).": "O passo {n} não existe: esta execução tem {count} passo(s).",
+  "Step {n} runs again ({agent}).": "O passo {n} roda de novo ({agent}).",
+  "The team lead's steps stay the team lead's: choose another member of the crew.": "Os passos do líder de equipe continuam com ele: escolha outro membro da equipe.",
+  "Say \"move\", \"hold\" or \"release\".": "Diga \"move\", \"hold\" ou \"release\".",
+  "The manager guided: \"{text}\"": "O gerente orientou: \"{text}\"",
+  "Guidance from the manager during this step": "Orientação do gerente durante este passo",
+  "on hold, until released": "segurada, até ser liberada",
+  "On hold": "Segurada",
+  "Added by the manager": "Acrescentado pelo gerente"
 }

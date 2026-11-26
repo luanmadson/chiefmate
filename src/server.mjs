@@ -29,8 +29,9 @@ import { changeRadar, RADAR_STATUSES, radarIdeas } from './radar.mjs';
 import { openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
-import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
-import { activeRun, createRun, describeLater, doingNow, liveRuns, needsBrief, outcomeLater, setRunLevel } from './runs.mjs';
+import { cancel, editQueued, focus, holdRun, maxParallel, moveInQueue, nudgeQueue, queued, resume } from './queue.mjs';
+import { activeRun, createRun, describeLater, doingNow, liveRuns, needsBrief, outcomeLater, retryRun, setRunLevel } from './runs.mjs';
+import { closeGap, recordGap } from './gaps.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import {
   answerPermission, endSession, finishSessionRequest, interruptSession, listSessions, openSession, planSession, profileFor, removeQueued, resumeSession, sayToSession,
@@ -131,7 +132,7 @@ function readBody(req) {
 const summary = run => ({
   id: run.id, title: run.title, summary: run.summary ?? null, outcome: run.outcome ?? null, kind: run.kind, mission: run.mission, project: run.project, origin: run.origin, status: run.status,
   created: run.created, started: run.started, ended: run.ended, notBefore: run.notBefore, due: run.due ?? null, note: run.note, result: run.result,
-  pullRequest: run.pullRequest, needsYou: (run.requests ?? []).filter(r => r.status === 'open').length,
+  pullRequest: run.pullRequest, needsYou: (run.requests ?? []).filter(r => r.status === 'open').length, onHold: !!run.onHold,
   steps: stepsOf(run).map(s => ({ agent: s.agent, status: s.status, review: s === run.review, role: s.role ?? null, task: s.task ?? null, tool: s.tool ?? null })),
   // Codex or Grok, when the run's crew steps ran (or were chosen to run) on them: the cards, the queue and the log show it.
   tools: runTools(run),
@@ -613,7 +614,28 @@ export function startServer() {
           // Marks notices as seen: they fade (an info notice goes to the archive).
           return reply(res, 200, { seen: markSeen(Array.isArray(body.ids) ? body.ids : [body.id]) });
         case '/api/run/talk':
-          return reply(res, 200, talkTo(body.run, body.text));
+          // "by": "manager" for the manager's guidance (cli.mjs guide); the owner's from the agent's panel otherwise.
+          return reply(res, 200, talkTo(body.run, body.text, { by: body.by === 'manager' ? 'manager' : 'owner' }));
+        case '/api/queue': {
+          // The manager's (or the owner's) changes to the queue: move a run, hold it or release it (src/queue.mjs).
+          const id = String(body.id ?? '');
+          if (body.action === 'move') return reply(res, 200, { queue: moveInQueue(id, { before: body.before ?? null, top: !!body.top }).map(summary) });
+          if (body.action === 'hold' || body.action === 'release') return reply(res, 200, summary(holdRun(id, body.action === 'hold', body.by === 'owner' ? 'owner' : 'manager')));
+          return reply(res, 400, { error: t('Say "move", "hold" or "release".') });
+        }
+        case '/api/run/edit':
+          // A run still in the queue: more instructions, its title, summary, agent, tool or level (src/runs.mjs, editRun).
+          return reply(res, 200, summary(editQueued(body.id, body.changes ?? {}, { by: body.by === 'owner' ? 'owner' : 'manager' })));
+        case '/api/retry': {
+          // Redoes a step of a run that stopped, with another agent or tool if given (src/runs.mjs, retryRun).
+          const run = retryRun(body.id, { step: body.step, agent: body.agent, tool: body.tool }, { by: body.by === 'owner' ? 'owner' : 'manager' });
+          nudgeQueue();
+          return reply(res, 200, summary(run));
+        }
+        case '/api/gap':
+          // The manager's tool gaps (src/gaps.mjs): "record" one more case, or "close" one.
+          if (body.action === 'close') return reply(res, 200, { gap: closeGap(body.id, body.note) });
+          return reply(res, 200, { gap: await recordGap({ what: body.what, example: body.example, by: body.by ?? 'manager' }) });
         case '/api/session': {
           // With "dryRun": the folder and the first message it would open with, and nothing opens.
           if (body.dryRun) {

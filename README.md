@@ -113,7 +113,7 @@ Everything the lead decides stays in the run (`lead` in `data/runs/<id>.json`: t
 queue ─► fresh working copy ─► the crew, one after another ─► manager's review ─► checks ─► pull request
 ```
 
-1. **One per project.** The queue runs one run per project at a time, in the order they were asked for. Runs of different projects go on side by side, up to `max_parallel` at once (3 by default; 1 brings back one run at a time). No agent sets off others in a chain.
+1. **One per project.** The queue runs one run per project at a time, in the order they were asked for, unless the manager reorders it (`queue move`) or holds a run in its place (`queue hold`, shown as "On hold" in the queue until `queue release`). Runs of different projects go on side by side, up to `max_parallel` at once (3 by default; 1 brings back one run at a time). No agent sets off others in a chain.
 2. **A working copy.** Each project has a copy of its own for the crew, in `workspaces/<project>`, refreshed from GitHub at the start of every run. Nobody touches the folder you work in.
 3. **The crew in sequence.** Each agent does its part on the run's branch and leaves a report. The next one reads what came before.
 4. **The review.** The manager checks the work, fixes what is needed and writes the pull request text with its verdict.
@@ -211,6 +211,7 @@ A click on an agent at work (in Operations, the Crew section, the crews by proje
 - **Live, step by step.** The step and the task, then each action of the agent (a command it ran, a file it read or edited, a search) and the text it writes, read from the step's log (`data/runs/<id>/<NN>-<agent>.jsonl`) as it grows. The panel scrolls by itself while you are at its end, follows the run to its next step and never reloads the app.
 - **Direct talk.** Write to the agent in the panel. Your message reaches it without losing its work: Chiefmate waits for the actions under way to finish (at most 2 minutes), stops the agent at that safe point and resumes the same Claude Code session (`--resume`) with your message as its next turn, on the same branch and working copy, with the step's clock kept. The agent answers you in one short message, shown next to yours, and goes on. Every step keeps its session for this.
 - **The agent can ask you too.** A request the agent makes with `needs-you` (see above) shows in the panel. While the agent waits for it (`--wait`), what you write answers the request: the waiting command hands your answer over and nothing is interrupted.
+- **The manager can guide too.** When a step goes the wrong way, the manager writes to its agent the same way (`node src/cli.mjs guide <run> "<message>"`). Its message shows in the panel under "Manager", the agent is told it comes from the manager, and it never answers a request the agent made to you.
 
 Every exchange is kept in the run (`talk` in `data/runs/<id>.json`). At the end of the step, its report gets a section "Direct talk with <you> during this step" ("<you> guided: …", "<agent> answered: …"), which the next steps and the manager's final review read. The manager also gets a summary of the latest direct talk in the situation it receives with each of your messages, and the review checks that the work follows what you said. A message can only go to a step going on: between two steps, or when the run was canceled or hit the account's limit before it was delivered, it is marked as not delivered.
 
@@ -753,6 +754,18 @@ node src/cli.mjs dev <project>                starts the project's development e
                                               its own (--dry-run shows what would run); dev stop <project> stops it
 node src/cli.mjs cancel <id>                  cancels a run
 node src/cli.mjs resume <id>                  resumes a run (--ignore-limits goes past the limits this one time)
+node src/cli.mjs queue [list]                 the queue in the order it runs, numbered, with the runs on hold
+node src/cli.mjs queue move <run> --before <run> | --top
+                                              reorders the queue (still one run per project at a time)
+node src/cli.mjs queue hold <run>             holds a run in its place without canceling it; queue release <run> lets it go
+node src/cli.mjs edit <run> [--instruction-append "..."] [--title ...] [--summary ...] [--agent ...] [--tool ...] [--level ...]
+                                              changes a run still in the queue
+node src/cli.mjs guide <run> "<message>"      the manager's guidance to the agent at work, delivered at a safe point
+node src/cli.mjs retry <run> [--step n] [--agent ...] [--tool ...]
+                                              redoes one step of a run that failed, was canceled or paused
+node src/cli.mjs gap "<what was missing>"     for the manager: records a tool Chiefmate lacks (a command it doesn't
+                                              know is recorded by itself); the second time, it becomes a proposal on
+                                              the planning board. gap list; gap close <n>
 node src/cli.mjs ask-owner "<question>" --options "Yes|No|Wait" [--context "..."] [--recommend <option>] [--project <id>] [--level 1|2|3]
                                               for the manager: a question for you, as a card with one button per option (and a field to write)
 node src/cli.mjs request [list] [--project <id>] [--all]

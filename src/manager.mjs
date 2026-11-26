@@ -11,7 +11,8 @@ import { autopilotLine } from './autopilot.mjs';
 import { awayInfo, awayLine } from './news.mjs';
 import { computerLine, planLine } from './plan.mjs';
 import { pushesFile, pushesLine, pushRequestsFrom, questionsLine, reposLine } from './decisions.mjs';
-import { PUSH, readPushes } from './guard.mjs';
+import { gapsLine } from './gaps.mjs';
+import { PR, PUSH, readPushes, REPO } from './guard.mjs';
 import { requestsLine } from './charge.mjs';
 import { planningLine } from './planning.mjs';
 import { radarLine } from './radar.mjs';
@@ -50,7 +51,13 @@ const guardHistory = () => path.join(ensureDir(MANAGER_DIR), 'guard-history.json
 // In the conversation the manager works in Chiefmate's own folder: it never commits there, and never pushes (the guard,
 // guard.mjs, also refuses a publication written any other way; each refusal is kept in guard-history.jsonl). The one exception
 // is a push the owner allowed once on its card (src/decisions.mjs): while one is allowed, "git push" is left to the guard.
-const CHAT_DISALLOWED = ['Agent', 'WebSearch', 'WebFetch', 'Bash(git commit:*)', ...ALWAYS_DISALLOWED];
+// It may read pull requests and repositories (gh pr view, gh repo list...: GH_READS in guard.mjs), so "gh pr" and
+// "gh repo" are refused here by action, the ones that write; the guard refuses every other one, however written.
+const GH_WRITES = [
+  ...['create', 'merge', 'close', 'reopen', 'edit', 'comment', 'review', 'ready', 'lock', 'unlock', 'update-branch'].map(a => `Bash(gh pr ${a}:*)`),
+  ...['create', 'delete', 'edit', 'rename', 'archive', 'unarchive', 'fork', 'sync', 'deploy-key', 'set-default'].map(a => `Bash(gh repo ${a}:*)`),
+];
+export const CHAT_DISALLOWED = ['Agent', 'WebSearch', 'WebFetch', 'Bash(git commit:*)', ...ALWAYS_DISALLOWED.filter(r => r !== PR && r !== REPO), ...GH_WRITES];
 
 // The manager reads every reference library; the copies are refreshed at most every 10 minutes.
 let libraryCopies = [];
@@ -124,11 +131,9 @@ export function situation(libraries = []) {
       : `Running: nothing (up to ${maxParallel(config)} runs of different projects go on at once).`,
   );
   const queue = queued();
-  lines.push(
-    queue.length
-      ? `Queue: ${queue.map(r => `${r.title} [${r.id}]${r.notBefore ? ` (not before ${formatDateTime(r.notBefore)})` : ''}`).join('; ')}.`
-      : 'Queue: empty.',
-  );
+  // In the order it runs (one per project at a time); "queue move|hold|release" changes it.
+  const queueEntry = (r, i) => `${i + 1}. ${r.title} [${r.id}] (project ${r.project}${r.onHold ? ', ON HOLD until you release it' : ''}${r.notBefore ? `, not before ${formatDateTime(r.notBefore)}` : ''})`;
+  lines.push(queue.length ? `Queue, in order: ${queue.map(queueEntry).join('; ')}.` : 'Queue: empty.');
   const latest = listRuns().filter(r => !['queued', 'waiting'].includes(r.status)).slice(0, 5);
   lines.push('Latest runs:');
   for (const r of latest) {
@@ -156,6 +161,8 @@ export function situation(libraries = []) {
   if (repos) lines.push(repos);
   const requests = requestsLine(config);
   if (requests) lines.push(requests);
+  const gaps = gapsLine();
+  if (gaps) lines.push(gaps);
   lines.push(autopilotLine(config, usage));
   const away = awayLine(config.owner || 'the owner');
   if (away) lines.push(away);

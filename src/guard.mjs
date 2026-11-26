@@ -85,16 +85,25 @@ export function publishing(command, depth = 0) {
       start = i + 1;
     }
   }
+  // A line that hands text to a shell through a pipe (echo "..." | sh, ... | iex): every quoted word may run.
+  const feedsShell = commands.slice(1).some(words => words.some(w => SHELLS.has(programName(w)) || STDIN_RUNNERS.has(programName(w))));
   for (const words of commands) {
-    // A quoted word with a command in it (bash -c "...", cmd /c "...", eval "..."): looked at as a command too.
-    for (const w of words) if (/\s/.test(w)) found.push(...publishing(w, depth + 1));
+    // A quoted word with a command in it (bash -c "...", cmd /c "...", eval "..."): looked at as a command too. Not
+    // the text given to a program that only reads it (a commit message, an instruction for Chiefmate's command line).
+    if (feedsShell || !onlyText(words)) for (const w of words) if (/\s/.test(w)) found.push(...publishing(w, depth + 1));
     found.push(...inCommand(words, depth));
   }
   const seen = new Set();
   return found.filter(f => !seen.has(`${f.rule} ${f.part}`) && seen.add(`${f.rule} ${f.part}`));
 }
 
-function inCommand(words, depth) {
+// What runs the text it reads from a pipe, besides the shells.
+const STDIN_RUNNERS = new Set(['iex', 'invoke-expression', 'eval', 'source', '.']);
+// Interpreters: running a script file, their quoted words are that script's arguments, never run as commands.
+const SCRIPT_RUNNERS = new Set(['node', 'python', 'python3', 'py', 'deno', 'bun', 'ruby', 'perl', 'php']);
+
+/** A command's program and its arguments: { program, args }, with variables (A=1) and wrappers (env, sudo...) taken off. */
+function programOf(words) {
   let i = 0;
   // Variables set for the command (A=1 git push) and wrappers (env, sudo, xargs...), with their options.
   for (;;) {
@@ -107,9 +116,27 @@ function inCommand(words, depth) {
     }
     break;
   }
-  if (i >= words.length) return [];
-  const program = programName(words[i]);
-  const args = words.slice(i + 1);
+  return i >= words.length ? { program: null, args: [], at: i } : { program: programName(words[i]), args: words.slice(i + 1), at: i };
+}
+
+/**
+ * Whether a command's quoted words are only text for it: git and gh (messages, bodies, queries; not "gh alias", which
+ * can define a shell command), and an interpreter running a script file (node src/cli.mjs task ... "<instruction>"),
+ * with no inline code (-e, -c, --eval, eval...) before the script.
+ */
+function onlyText(words) {
+  const { program, args } = programOf(words);
+  if (program === 'git') return true;
+  if (program === 'gh') return !args.includes('alias');
+  if (!SCRIPT_RUNNERS.has(program)) return false;
+  const script = args.findIndex(a => !a.startsWith('-'));
+  if (script < 0 || /^(eval|exec|run|x)$/i.test(args[script])) return false;
+  return !args.slice(0, script).some(a => /^(-[a-z]*[ecpr][a-z]*|--(eval|print|command|exec|require|import|loader)(=.*)?)$/i.test(a));
+}
+
+function inCommand(words, depth) {
+  const { program, args, at: i } = programOf(words);
+  if (!program) return [];
   if (SHELLS.has(program)) {
     // pwsh -Command git push, bash -c git push: the rest is the command.
     const at = args.findIndex(a => /^(-c|-lc|-ic|-command|\/c|\/k|-e|--exec|--)$/i.test(a));
@@ -142,14 +169,25 @@ function inGit(args) {
   return [];
 }
 
+// The actions of "gh pr" and "gh repo" that only read: they publish nothing.
+export const GH_READS = { pr: new Set(['view', 'list', 'diff', 'checks', 'status']), repo: new Set(['view', 'list']) };
+
 function inGh(args) {
   let at = 0;
   for (; at < args.length && args[at].startsWith('-'); at++) if (args[at] === '-R' || args[at] === '--repo') at++;
   const [sub, ...rest] = args.slice(at);
   if (!sub) return [];
   const part = ['gh', sub, ...rest].join(' ');
-  if (sub === 'pr') return [{ rule: PR, part, dir: null }];
-  if (sub === 'repo') return [{ rule: REPO, part, dir: null }];
+  if (sub === 'pr' || sub === 'repo') {
+    let action = null;
+    for (let j = 0; j < rest.length && !action; j++) {
+      if (rest[j] === '-R' || rest[j] === '--repo') j++;
+      else if (!rest[j].startsWith('-')) action = rest[j];
+    }
+    // Any other action publishes, or is not known: refused.
+    if (GH_READS[sub].has(action)) return [];
+    return [{ rule: sub === 'pr' ? PR : REPO, part, dir: null }];
+  }
   if (sub !== 'api') return [];
   // gh api: a GET unless -X/--method says otherwise, or a POST when it sends fields or a body.
   let method = null;
