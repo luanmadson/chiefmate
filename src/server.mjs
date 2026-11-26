@@ -11,7 +11,7 @@ import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
 import { agentTool, runTools, toolModel } from './tools.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
-import { addQuestion, decide, decisionCards, openPushes, openQuestions, openRepoRequests } from './decisions.mjs';
+import { addQuestion, decide, decisionCards, openPushes, openQuestions, openRepoRequests, recentDecisions, undoDecision } from './decisions.mjs';
 import { listFolder, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
@@ -411,6 +411,8 @@ function buildState() {
     attention: { items: attention, ...attentionSummary(attention), archived: attentionArchive().length },
     // The owner's decisions as cards (src/decisions.mjs): pull requests and branches to merge, proposals, the manager's questions.
     decisions: decisionCards({ config, attention, items, questions, pushes, repos }),
+    // The owner's decisions of the last day, each with whether it can still be undone (src/decisions.mjs).
+    decisionLog: recentDecisions(),
     // The owner's planning board (data/plan.json): every item, archived ones included, in the board's order.
     planning: { items, priorities: PRIORITIES, statuses: STATUSES },
     // The project radar (data/radar.json): ideas for new projects, highest potential first.
@@ -592,10 +594,10 @@ export function startServer() {
           return reply(res, 200, pollRequest(body.run, body.id));
         case '/api/needs-you/done':
           if (body.session) return reply(res, 200, finishSessionRequest(String(body.session), String(body.id ?? '')));
-          return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner', body.answer ?? null, body.note ?? null));
+          return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner', body.answer ?? null, body.note ?? null, remote ? 'remote' : 'app'));
         case '/api/decide': {
           // The owner's click on a decision card: approve (a merge goes through src/merge.mjs), later, discard or answer.
-          const decided = await decide({ card: body.card, action: body.action, option: body.option, note: body.note, reason: body.reason }, buildState().decisions);
+          const decided = await decide({ card: body.card, action: body.action, option: body.option, note: body.note, reason: body.reason, via: remote ? 'remote' : 'app' }, buildState().decisions);
           // A request of an agent in charge, authorized on its card, has its run queued: the queue looks at once.
           if (decided.run) nudgeQueue();
           return reply(res, 200, decided);
@@ -775,7 +777,10 @@ export function startServer() {
           return reply(res, 400, { error: 'unknown action' });
         }
         case '/api/planning':
-          return reply(res, 200, { item: await changePlan(body) });
+          return reply(res, 200, { item: await changePlan({ ...body, via: remote ? 'remote' : body.via === 'cli' ? 'cli' : 'app' }) });
+        case '/api/undo':
+          // The owner takes a decision back while it has had no effect (src/decisions.mjs): the card comes back.
+          return reply(res, 200, undoDecision(body.id, { by: 'owner', via: remote ? 'remote' : 'app' }));
         case '/api/radar':
           return reply(res, 200, { idea: changeRadar(body) });
         case '/api/reset-grants':

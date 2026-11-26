@@ -13,7 +13,7 @@ import { t } from './i18n.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { activeRun, liveOf } from './runs.mjs';
-import { listRuns, readRun, runEnded, saveRun, stepsOf } from './store.mjs';
+import { listRuns, readRun, recordDecision, runEnded, saveRun, stepsOf } from './store.mjs';
 import { agentSays } from './talk.mjs';
 import { browserPath, PROFILE_DIR } from './usagepage.mjs';
 import { clip, ensureDir, now } from './util.mjs';
@@ -128,6 +128,11 @@ export function pollRequest(runId, id) {
   const max = needsSettings().maxWaitMinutes * 60_000;
   const going = liveOf(run.id);
   if (request.status === 'open' && waited < max && going) going.heldUntil = Date.now() + 20_000;
+  // The agent has the answer now: from here, the owner can no longer take it back (requestUndoBlock).
+  if (request.status === 'done' && !request.read) {
+    request.read = now();
+    saveRun(run);
+  }
   return { status: request.status, by: request.by ?? null, answer: request.answer ?? null, note: request.note ?? null, waitedMinutes: Math.floor(waited / 60_000), maxWaitMinutes: max / 60_000, timedOut: waited >= max };
 }
 
@@ -135,7 +140,7 @@ export function pollRequest(runId, id) {
  * "I did it": the owner did it (or the agent's check succeeded); for a question, the option the owner chose and/or
  * what they wrote ("note": an explanation with the option, or an answer of their own instead of one).
  */
-export function finishRequest(runId, id, by = 'owner', answer = null, note = null) {
+export function finishRequest(runId, id, by = 'owner', answer = null, note = null, via = 'app') {
   const { run, request } = findRequest(runId, id);
   const given = answer == null || String(answer).trim() === '' ? null : answer;
   const choice = given == null ? null : request.options?.find(o => same(o, given));
@@ -148,6 +153,34 @@ export function finishRequest(runId, id, by = 'owner', answer = null, note = nul
     const text = [choice, written].filter(Boolean).join(' — ');
     (run.talk ??= []).push({ id: randomUUID().slice(0, 8), at: now(), who: 'owner', step: request.step, agent: request.agent, text, status: 'delivered', delivered: now(), via: 'request', request: request.id });
   }
+  saveRun(run);
+  if (by === 'owner') {
+    const logged = recordDecision({
+      kind: 'request', ref: `${run.id}:${request.id}`, label: run.title ?? run.id, title: request.what, from: 'open', to: choice || written ? 'answered' : 'done',
+      answer: [choice, written].filter(Boolean).join(' — ') || null, by, via, undo: { run: run.id, request: request.id },
+    });
+    return { ...request, logged: logged.id };
+  }
+  return request;
+}
+
+/** Whether the owner's answer to a request can still be taken back: null when it can, else why not. */
+export function requestUndoBlock(entry) {
+  const run = runFor(String(entry.undo?.run ?? ''));
+  const request = run?.requests?.find(r => r.id === entry.undo?.request);
+  if (!request || request.status !== 'done') return 'changed';
+  if (request.read) return 'read';
+  return runEnded(run) ? 'ended' : null;
+}
+
+/** Takes the owner's answer back, before the agent read it: the request is open again, its answer out of the talk. */
+export function reopenRequest(entry) {
+  const why = requestUndoBlock(entry);
+  if (why) throw new Error(why === 'read' ? t('The agent already read your answer: it can no longer be changed.') : t('This decision can no longer be undone.'));
+  const { run, request } = findRequest(entry.undo.run, entry.undo.request);
+  for (const key of ['done', 'by', 'answer', 'note']) delete request[key];
+  request.status = 'open';
+  run.talk = (run.talk ?? []).filter(m => !(m.via === 'request' && m.request === request.id));
   saveRun(run);
   return request;
 }

@@ -16,7 +16,7 @@
     <header class="titlebar">
       <div class="brand"><img src="/icon-32.png" alt="" width="18" height="18"><span>CHIEFMATE</span></div>
       <div id="focus" class="focus" aria-live="polite"></div>
-      <div class="titlebar-right"><select id="project-jump" class="project-jump" aria-label="Go to a project's page" data-t-label="Go to a project's page"></select><span id="power" class="power" hidden></span><button type="button" id="lockdown" class="lockdown-button" hidden></button><button type="button" id="away" class="away" aria-pressed="false" hidden></button><div id="presence" class="presence"></div><span id="clock" class="clock"></span></div>
+      <div class="titlebar-right"><select id="project-jump" class="project-jump" aria-label="Go to a project's page" data-t-label="Go to a project's page"></select><span id="power" class="power" hidden></span><button type="button" id="away" class="away" aria-pressed="false" hidden></button><div id="presence" class="presence"></div><span id="clock" class="clock"></span></div>
     </header>
 
     <nav class="nav" aria-label="Sections" data-t-label="Sections">
@@ -381,11 +381,30 @@
       </div>
     </form>
   </dialog>
+  <!-- A strong confirmation (strongConfirm in app.js): hold the button for 2 seconds, or type the word. -->
+  <dialog id="strong-confirm" class="confirm strong-confirm">
+    <form method="dialog">
+      <div class="label" id="strong-title"></div>
+      <p id="strong-text"></p>
+      <button type="button" class="hold-button" id="strong-hold"><span class="hold-fill" aria-hidden="true"></span><span class="hold-label" id="strong-hold-label"></span></button>
+      <label class="strong-type"><span id="strong-type-label"></span><input id="strong-word" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false"></label>
+      <div class="actions">
+        <button value="no" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="yes" class="button danger" id="strong-yes" disabled></button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="power-dialog" class="confirm power-dialog">
     <form method="dialog">
       <div class="label" data-t="Power">Power</div>
       <p class="hint" id="power-now"></p>
       <div class="power-modes" id="power-modes"></div>
+      <!-- The emergency lockdown, kept here, apart from the everyday buttons; it asks for a strong confirmation. -->
+      <div class="power-emergency">
+        <div class="label" data-t="Emergency">Emergency</div>
+        <p class="hint" data-t="Stops every run, the queue, the agents and their browsers at once, and refuses pushes, merges and the remote access until you release it on this computer.">Stops every run, the queue, the agents and their browsers at once, and refuses pushes, merges and the remote access until you release it on this computer.</p>
+        <button type="button" id="lockdown" class="lockdown-button" hidden></button>
+      </div>
       <div class="actions">
         <button value="no" class="button secondary" data-t="Close">Close</button>
       </div>
@@ -429,6 +448,7 @@
     </div>
     <div id="viewer-body" class="viewer-body"></div>
   </dialog>
+  <div id="undo-bar" class="undo-bar" role="status" aria-live="polite" hidden></div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/app.js" type="module"></script>
 </body>

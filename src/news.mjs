@@ -75,12 +75,13 @@ function schedule(first) {
  * later: only kept on disk, for the next Chiefmate to start (the watchdog, when Chiefmate doesn't answer).
  * urgent: handed over at once, without waiting for the minute (an owner's merge that failed).
  */
-export function reportEvent(kind, text, { config, later = false, urgent = false } = {}) {
+export function reportEvent(kind, text, { config, later = false, urgent = false, ref = null } = {}) {
   if (process.env.CHIEFMATE_SMOKE || !NEWS_EVENTS.includes(kind)) return null;
   try {
     const settings = newsSettings(config ?? loadConfig());
     if (!OWNER_EVENTS.includes(kind) && (!settings.enabled || !settings.events.has(kind))) return null;
-    const event = { kind, text: String(text ?? '').trim(), at: now() };
+    // ref: lets an owner's decision undone take its news back before the manager reads it (withdrawNews).
+    const event = { kind, text: String(text ?? '').trim(), at: now(), ...(ref ? { ref } : {}) };
     const state = readState();
     if (state.away && HELD_WHILE_AWAY.includes(kind)) {
       saveState({ ...state, away: { ...state.away, held: [...(state.away.held ?? []), event].slice(-MAX_EVENTS) } });
@@ -107,6 +108,28 @@ export async function flushNews() {
   writeJson(newsFile(), []);
   const { deliverNews } = await import('./manager.mjs'); // here, not at the top: manager.mjs imports runs.mjs
   return deliverNews(events);
+}
+
+/** Whether the news with this ref still waits, not handed to the manager yet (in its minute or held while away). */
+export function newsPending(ref) {
+  if (!ref) return false;
+  return readNews().some(e => e.ref === ref) || (readState().away?.held ?? []).some(e => e.ref === ref);
+}
+
+/** Takes back the news with this ref before the manager reads it. True when it was still waiting. */
+export function withdrawNews(ref) {
+  if (!ref) return false;
+  const list = readNews();
+  const kept = list.filter(e => e.ref !== ref);
+  if (kept.length !== list.length) {
+    writeJson(newsFile(), kept);
+    return true;
+  }
+  const state = readState();
+  const held = state.away?.held ?? [];
+  if (!held.some(e => e.ref === ref)) return false;
+  saveState({ ...state, away: { ...state.away, held: held.filter(e => e.ref !== ref) } });
+  return true;
 }
 
 /** At start: the news left when Chiefmate stopped (such as "update installed") goes once its minute is up. */

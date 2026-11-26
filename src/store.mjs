@@ -90,6 +90,31 @@ export function recordUsage(info) {
 export const readState = () => readJson(STATE_FILE, { schedule: {}, reminders_sent: {}, manager: {} });
 export const saveState = state => writeJson(STATE_FILE, state);
 
+// ---------- The owner's decisions on record (data/manager/decision-log.json) ----------
+// Every decision from a card, a request or the board: who, when, from where, from what to what, and what undoing it
+// needs ("undo"; none when it can't be undone, "final"). The undoing itself is in src/decisions.mjs (undoDecision).
+
+const DECISION_LOG_FILE = path.join(DATA, 'manager', 'decision-log.json');
+const DECISION_LOG_MAX = 300;
+export const readDecisionLog = () => readJson(DECISION_LOG_FILE, []);
+export const saveDecisionLog = list => writeJson(DECISION_LOG_FILE, list.slice(-DECISION_LOG_MAX));
+
+/**
+ * Records a decision: { kind (seen, plan, question, push, repo, request, merge), ref, label, title, from, to, answer,
+ * by (owner, manager, autopilot), via (app, remote, cli), undo (what reverses it) or final, news (the ref of its news) }.
+ */
+export function recordDecision({ kind, ref, label = '', title = '', from = '', to = '', answer = null, by = 'owner', via = 'app', undo = null, news = null, undoes = null }) {
+  ensureDir(path.dirname(DECISION_LOG_FILE));
+  const list = readDecisionLog();
+  const entry = {
+    id: `d${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, at: now(), kind, ref: String(ref ?? ''),
+    label: String(label).slice(0, 160), title: String(title).slice(0, 240), from, to, by, via,
+    ...(answer ? { answer: String(answer).slice(0, 300) } : {}), ...(undo ? { undo } : { final: true }), ...(news ? { news } : {}), ...(undoes ? { undoes } : {}),
+  };
+  saveDecisionLog([...list, entry]);
+  return entry;
+}
+
 // ---------- The conversation with the manager ----------
 
 export const readConversation = () => readJson(CONVERSATION_FILE, []);

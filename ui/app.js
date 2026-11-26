@@ -42,6 +42,110 @@ function confirmDialog(title, text, yes) {
   return new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue === 'yes'), { once: true }));
 }
 
+// ---------- Strong confirmation: hold the button for HOLD_MS, or type the word (lockdown, stop, shut down) ----------
+
+const HOLD_MS = 2000;
+const plainWord = s => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+let holdTimer = null;
+
+function strongConfirm(title, text, yes, word) {
+  const dialog = $('#strong-confirm');
+  $('#strong-title').textContent = title;
+  $('#strong-text').textContent = text;
+  $('#strong-hold-label').textContent = t('Hold for 2 seconds: {action}', { action: yes });
+  $('#strong-type-label').textContent = t('Or type {word} and confirm', { word });
+  $('#strong-word').value = '';
+  $('#strong-yes').textContent = yes;
+  $('#strong-yes').disabled = true;
+  dialog.dataset.word = plainWord(word);
+  dialog.returnValue = '';
+  dialog.showModal();
+  return new Promise(resolve => dialog.addEventListener('close', () => {
+    stopHold();
+    resolve(dialog.returnValue === 'yes');
+  }, { once: true }));
+}
+
+function startHold() {
+  if (holdTimer) return;
+  $('#strong-hold').classList.add('holding');
+  holdTimer = setTimeout(() => {
+    holdTimer = null;
+    $('#strong-confirm').close('yes');
+  }, HOLD_MS);
+}
+
+function stopHold() {
+  clearTimeout(holdTimer);
+  holdTimer = null;
+  $('#strong-hold').classList.remove('holding');
+}
+
+{
+  const hold = $('#strong-hold');
+  const holdKey = e => e.key === ' ' || e.key === 'Enter';
+  hold.addEventListener('pointerdown', event => {
+    event.preventDefault();
+    hold.setPointerCapture?.(event.pointerId);
+    startHold();
+  });
+  for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) hold.addEventListener(name, stopHold);
+  // A long press on a phone opens no menu; a key held down counts once, from its first press.
+  hold.addEventListener('contextmenu', event => event.preventDefault());
+  hold.addEventListener('keydown', event => {
+    if (!holdKey(event)) return;
+    event.preventDefault();
+    if (!event.repeat) startHold();
+  });
+  hold.addEventListener('keyup', event => holdKey(event) && stopHold());
+  hold.addEventListener('blur', stopHold);
+  const word = $('#strong-word');
+  word.addEventListener('input', () => {
+    $('#strong-yes').disabled = plainWord(word.value) !== $('#strong-confirm').dataset.word;
+  });
+  word.addEventListener('keydown', event => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    if (!$('#strong-yes').disabled) $('#strong-confirm').close('yes');
+  });
+}
+
+// ---------- Undo: "Done: <what> — Undo" for UNDO_MS after a decision (undoDecision in src/decisions.mjs) ----------
+
+const UNDO_MS = 10_000;
+
+/** A decision's state in words, for the undo band and the history. */
+const decisionWord = code => ({
+  pending: t('pending'), open: t('open'), later: t('left for later'), approved: t('approved'), discarded: t('discarded'), dismissed: t('discarded'),
+  answered: t('answered'), done: t('done'), allowed: t('allowed'), refused: t('refused'), merged: t('merged'), future: t('later'),
+  triaged: t('waiting for you'), proposed: t('proposed'), todo: t('to do'), queued: t('queued'), in_progress: t('in progress'),
+}[code] ?? code);
+
+/** Shows the undo band for a decision on record ("id"), with what was done. */
+function showUndo(id, what) {
+  if (!id) return;
+  const bar = $('#undo-bar');
+  clearTimeout(showUndo.timer);
+  bar.innerHTML = `<span>${esc(t('Done: {what}', { what }))}</span><button type="button" class="button small" data-undo="${esc(id)}">${esc(t('Undo'))}</button>`;
+  bar.hidden = false;
+  showUndo.timer = setTimeout(() => (bar.hidden = true), UNDO_MS);
+}
+
+document.addEventListener('click', async event => {
+  const button = event.target.closest('[data-undo]');
+  if (!button) return;
+  button.disabled = true;
+  try {
+    await api('/api/undo', { id: button.dataset.undo });
+    $('#undo-bar').hidden = true;
+    toast(t('Undone: it is back for your decision.'));
+  } catch (error) {
+    toast(error.message);
+    button.disabled = false;
+  }
+  await refresh();
+});
+
 // ---------- Text and formats ----------
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -538,7 +642,10 @@ function drawAway() {
 /** Whether the app is open on this computer (not through the remote access): only here is the lockdown released. */
 const onThisComputer = () => ['localhost', '127.0.0.1'].includes(location.hostname);
 
-/** The red button in the title bar: engages the lockdown, after a confirmation. Hidden while it is on. */
+/**
+ * The red button, in the power dialog, apart from the everyday buttons: engages the lockdown after a strong
+ * confirmation (hold for 2 seconds or type the word). Hidden while it is on.
+ */
 function drawLockdownButton() {
   const button = $('#lockdown');
   button.hidden = !online || !!state?.lockdown?.active;
@@ -550,10 +657,12 @@ function drawLockdownButton() {
 }
 
 $('#lockdown').addEventListener('click', async () => {
-  const yes = await confirmDialog(
+  if ($('#power-dialog').open) $('#power-dialog').close();
+  const yes = await strongConfirm(
     t('Emergency lockdown'),
     t("Stop everything now? The runs, the queue, the manager, the live sessions and the crew's browsers stop at once; pushes, merges, new repositories, external actions and the remote access are refused. Only you can release it, on this computer."),
     t('Lock down now'),
+    t('EMERGENCY'),
   );
   if (!yes) return;
   try {
@@ -715,6 +824,8 @@ async function confirmPower(action) {
     if (preview.unsaved.length) lines.push(t('Changes not committed: {folders}.', { folders: preview.unsaved.map(u => t('{folder} ({count} file(s))', { folder: u.folder, count: u.files })).join('; ') }));
     if (notSent) lines.push(t('There is text not sent in the app: it will be lost.'));
   }
+  // Stopping Chiefmate and shutting down take a strong confirmation, as the lockdown: no accidental click.
+  if (['stop', 'shutdown'].includes(action)) return strongConfirm(mode.title, lines.join('\n\n'), mode.yes, t('SHUT DOWN'));
   return confirmDialog(mode.title, lines.join('\n\n'), mode.yes);
 }
 

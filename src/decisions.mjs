@@ -8,6 +8,8 @@
 // ("merge_by_owner": false) shows its pull requests as waiting for that review, with no Approve. A push the manager
 // tried and the guard refused becomes a card too: the owner allows that one push (src/guard.mjs, takeGrant) or refuses it.
 // So does a private repository the manager asks to create (cli.mjs repo-create; see repoCreate).
+// Every click is on record (recordDecision in src/store.mjs): who, when, from where, from what to what. What has had
+// no effect yet can be undone (undoDecision): the card comes back for another answer. A merge or a discard can't.
 // Each card carries the approval level the manager gave its run, item or question ("approval": 1, the manager
 // decides and does it; 2, the owner approves; 3, never without the owner; null, not given). The app folds the level 1
 // cards apart and counts only the others as needing the owner.
@@ -15,17 +17,18 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { attentionArchive, markSeen } from './attention.mjs';
+import { attentionArchive, markSeen, unmarkSeen } from './attention.mjs';
 import { ownerAnswered } from './charge.mjs';
 import { loadConfig } from './config.mjs';
 import { GRANT_MINUTES, plainPush, pushFacts, readPushes, repoOf, samePath } from './guard.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { discardRun, mergeRun, prNumber, verdict } from './merge.mjs';
 import { refuseWhileLocked } from './lockdown.mjs';
-import { reportEvent } from './news.mjs';
+import { reopenRequest, requestUndoBlock } from './needs.mjs';
+import { newsPending, reportEvent, withdrawNews } from './news.mjs';
 import { notify } from './notify.mjs';
-import { decideItem } from './planning.mjs';
-import { readRun } from './store.mjs';
+import { decideItem, itemUndoBlock, undoItemDecision } from './planning.mjs';
+import { readDecisionLog, readRun, readState, recordDecision, saveDecisionLog } from './store.mjs';
 import { localDeliveryClone } from './workspace.mjs';
 import { clip, DATA, ensureDir, now, parseLevel, readJson, ROOT, writeJson } from './util.mjs';
 
@@ -86,6 +89,17 @@ function closeQuestion(id, answer, note = null) {
   if (given != null && !choice) throw new Error(`Answer with one of: ${q.options.join(', ')}.`);
   const written = clip(String(note ?? '').trim(), 2000);
   Object.assign(q, { status: choice || written ? 'answered' : 'dismissed', answer: choice, answered_at: now() }, written ? { note: written } : {});
+  saveQuestions(questions);
+  return q;
+}
+
+/** A question answered or discarded comes back open (its answer undone, undoDecision). */
+function reopenQuestion(id, was) {
+  const questions = readQuestions();
+  const q = questions.find(x => x.id === Number(id));
+  if (!q || q.status !== was) throw new Error(t('This decision can no longer be undone.'));
+  Object.assign(q, { status: 'open', answer: null, answered_at: null });
+  delete q.note;
   saveQuestions(questions);
   return q;
 }
@@ -167,6 +181,18 @@ function answerRequest(file, open, id, allow) {
   Object.assign(p, allow
     ? { status: 'allowed', decided: now(), expires: new Date(Date.now() + GRANT_MINUTES * 60_000).toISOString() }
     : { status: 'refused', decided: now() });
+  writeJson(file, list);
+  return p;
+}
+
+/** A push or repository request answered comes back open, its grant taken back. Refused once used or past its day. */
+function reopenRequestIn(file, open, id, was) {
+  const list = readPushes(file);
+  const p = list.find(x => x.id === String(id ?? ''));
+  if (!p || p.status !== was || !open([{ ...p, status: 'open' }]).length) throw new Error(t('This decision can no longer be undone.'));
+  p.status = 'open';
+  delete p.decided;
+  delete p.expires;
   writeJson(file, list);
   return p;
 }
@@ -476,14 +502,15 @@ export function decisionCards({ config = loadConfig(), attention = [], items = [
 
 // ---------- The owner's click ----------
 
-const tell = text => reportEvent('owner_decided', text);
+/** Tells the manager; "ref" lets an undo take the news back while it waits. Returns the ref when told, else null. */
+const tell = (text, ref = null, urgent = false) => (reportEvent('owner_decided', text, { ref, urgent }) && ref) || null;
 
 /**
  * The owner decides a card from the app: { card (its id), action: approve | later | discard | answer, option (the
  * answer to a question), note (what the owner wrote to a question: with the option, or instead of one), reason }.
  * The card is checked against "cards", what is pending now.
  */
-export async function decide({ card, action, option, note, reason } = {}, cards = []) {
+export async function decide({ card, action, option, note, reason, via = 'app' } = {}, cards = []) {
   const id = String(card ?? '');
   const c = cards.find(x => x.id === id);
   if (!c) {
@@ -496,45 +523,54 @@ export async function decide({ card, action, option, note, reason } = {}, cards 
     throw new Error(t('This decision is no longer pending.'));
   }
   const about = `${c.label} "${c.title}"`;
+  const ref = randomUUID().slice(0, 8);
+  // On record: who, when, from where, from what to what, and what undoing it needs (none: it can't be undone).
+  const log = (fields, news = null) => recordDecision({ kind: c.kind, ref: c.id, label: c.label, title: c.title, from: 'pending', by: 'owner', via, news, ...fields }).id;
   if (action === 'later') {
     markSeen([c.id]);
-    tell(`The owner chose "not now" for ${about} from the app: it stays pending; don't ask again today.`);
-    return { card: c.id, done: 'later' };
+    const news = tell(`The owner chose "not now" for ${about} from the app: it stays pending; don't ask again today.`, ref);
+    return { card: c.id, done: 'later', logged: log({ kind: 'seen', to: 'later', undo: { seen: c.id } }, news) };
   }
   if (c.kind === 'merge') {
     if (action === 'approve') {
       if (!c.approve) throw new Error(t('Someone else reviews and merges the work of this project.'));
       const merge = await mergeRun(c.run, { by: 'owner' });
-      return { card: c.id, done: merge.discarded ? 'branch_deleted' : merge.merged.by === 'outside' ? 'already_merged' : 'merged', merge };
+      const done = merge.discarded ? 'branch_deleted' : merge.merged.by === 'outside' ? 'already_merged' : 'merged';
+      if (done === 'merged') log({ to: 'merged' });
+      return { card: c.id, done, merge };
     }
     if (action === 'discard') {
       // Someone else's review: its pull request is theirs to close.
       if (c.thirdParty) throw new Error(t('Someone else reviews and merges the work of this project.'));
       const result = await discardRun(c.run);
-      if (c.item) await decideItem(c.item, 'discard', { reason: clip(reason, 200) || 'Discarded by the owner', by: 'owner' }).catch(() => null);
+      if (c.item) await decideItem(c.item, 'discard', { reason: clip(reason, 200) || 'Discarded by the owner', by: 'owner', via, undoable: false }).catch(() => null);
       tell(`The owner discarded ${about} (run ${c.run}) from the app: ${result.kind === 'pr' ? `pull request ${result.url} closed on GitHub` : `branch ${result.branch} left unmerged`}.`);
+      log({ to: 'discarded' });
       return { card: c.id, done: 'discarded' };
     }
   } else if (c.kind === 'decision' && ['approve', 'discard'].includes(action)) {
-    await decideItem(c.item, action, { reason, by: 'owner' });
-    tell(`The owner ${action === 'approve' ? 'approved' : 'discarded'} ${about} (planning item #${c.item}) from the app${action === 'approve' ? ': its task starts in its turn' : ''}.`);
-    return { card: c.id, done: action === 'approve' ? 'approved' : 'discarded' };
+    // The item's own record (decideItem) is the decision's: it carries this news, to take back with an undo.
+    const item = await decideItem(c.item, action, { reason, by: 'owner', via, news: ref });
+    tell(`The owner ${action === 'approve' ? 'approved' : 'discarded'} ${about} (planning item #${c.item}) from the app${action === 'approve' ? ': its task starts in its turn' : ''}.`, ref);
+    return { card: c.id, done: action === 'approve' ? 'approved' : 'discarded', logged: item.logged };
   } else if (c.kind === 'push' && ['approve', 'discard'].includes(action)) {
     const p = answerPush(c.push, action === 'approve');
+    let news = null;
     if (p.status === 'allowed') {
       reportEvent('push_allowed', `The owner allowed, from the app, your push of branch ${p.branch} to ${p.repo} (from ${p.dir}), once, until ${formatDateTime(p.expires)}. Run it now: the same command (${p.command}) or ${cliPush(p)}.`, { urgent: true });
     } else {
-      tell(`The owner refused, from the app, your push of branch ${p.branch} to ${p.repo} (from ${p.dir}). Don't try it again.`);
+      news = tell(`The owner refused, from the app, your push of branch ${p.branch} to ${p.repo} (from ${p.dir}). Don't try it again.`, ref);
     }
-    return { card: c.id, done: p.status };
+    return { card: c.id, done: p.status, logged: log({ to: p.status, undo: { push: p.id } }, news) };
   } else if (c.kind === 'repo' && ['approve', 'discard'].includes(action)) {
     const r = answerRepo(c.repoRequest, action === 'approve');
+    let news = null;
     if (r.status === 'allowed') {
       reportEvent('repo_allowed', `The owner allowed, from the app, the private repository ${r.repo} with ${r.dir} sent to it (branch ${r.branch}), once, until ${formatDateTime(r.expires)}. Run it now: ${cliRepo(r)}.`, { urgent: true });
     } else {
-      tell(`The owner refused, from the app, the private repository ${r.repo} from ${r.dir}. Don't ask for it again.`);
+      news = tell(`The owner refused, from the app, the private repository ${r.repo} from ${r.dir}. Don't ask for it again.`, ref);
     }
-    return { card: c.id, done: r.status };
+    return { card: c.id, done: r.status, logged: log({ to: r.status, undo: { repo: r.id } }, news) };
   } else if (c.kind === 'question' && ['answer', 'discard'].includes(action)) {
     if (action === 'answer' && !String(option ?? '').trim() && !String(note ?? '').trim()) throw new Error(t('Choose an option or write your answer.'));
     const q = action === 'answer' ? closeQuestion(c.question, option ?? null, note) : closeQuestion(c.question, null);
@@ -543,10 +579,105 @@ export async function decide({ card, action, option, note, reason } = {}, cards 
     const request = !followed ? '' : followed.error
       ? ` Request #${q.request} could not follow it (${followed.error}).`
       : ` Chiefmate applied it to request #${q.request}: ${followed.status}${followed.run ? `, run ${followed.run} queued` : ''}; don't answer that request again.`;
-    tell(questionNews(q) + request);
-    return { card: c.id, done: q.status === 'answered' ? 'answered' : 'discarded', answer: q.answer, note: q.note ?? null, run: followed?.run ?? null };
+    const news = tell(questionNews(q) + request, ref);
+    // A request of an agent in charge already followed the answer (a run queued, perhaps): that one can't be undone.
+    const logged = log({ to: q.status, answer: [q.answer, q.note].filter(Boolean).join(' — ') || null, undo: followed ? null : { question: q.id } }, news);
+    return { card: c.id, done: q.status === 'answered' ? 'answered' : 'discarded', answer: q.answer, note: q.note ?? null, run: followed?.run ?? null, logged };
   }
   throw new Error(t('This decision does not take that action.'));
+}
+
+// ---------- Undoing a decision ----------
+
+const HISTORY_HOURS = 24; // the decisions the app lists
+
+/**
+ * Whether a decision on record can still be undone: null when it can, else why not ("final": a merge, a discard or
+ * anything else that can't; "undone"; "read": the manager or the agent already has it; "started", "used", "expired",
+ * "ended", "changed", "gone").
+ */
+export function undoBlock(entry) {
+  if (entry.final) return 'final';
+  if (entry.undone) return 'undone';
+  // No news on record (the manager's updates off): nobody read it.
+  const unread = entry.news ? newsPending(entry.news) : true;
+  switch (entry.kind) {
+    case 'seen':
+      return readState().attention_seen?.[entry.ref] ? null : 'changed';
+    case 'plan':
+      return itemUndoBlock(entry);
+    case 'request':
+      return requestUndoBlock(entry);
+    case 'question': {
+      const q = readQuestions().find(x => x.id === Number(entry.undo.question));
+      if (!q || q.status !== entry.to) return 'changed';
+      return unread ? null : 'read';
+    }
+    case 'push':
+    case 'repo': {
+      const [file, open, id] = entry.kind === 'push' ? [pushesFile(), openPushes, entry.undo.push] : [reposFile(), openRepoRequests, entry.undo.repo];
+      const p = readPushes(file).find(x => x.id === id);
+      if (!p) return 'gone';
+      if (p.status === 'used') return 'used';
+      if (p.status !== entry.to) return 'changed';
+      if (!open([{ ...p, status: 'open' }]).length) return 'expired';
+      // A permission is taken back any time before it is used; a refusal, until the manager reads it.
+      return p.status === 'allowed' || unread ? null : 'read';
+    }
+    default:
+      return 'final';
+  }
+}
+
+/** The owner's decisions of the last day, newest first, each with whether it can still be undone ("canUndo"). */
+export function recentDecisions(max = 20) {
+  const since = Date.now() - HISTORY_HOURS * 3600_000;
+  return readDecisionLog().filter(e => Date.parse(e.at) >= since).reverse().slice(0, max).map(e => {
+    let block;
+    try {
+      block = undoBlock(e);
+    } catch {
+      block = 'gone';
+    }
+    const { undo, news, ...shown } = e;
+    return { ...shown, block, canUndo: !block };
+  });
+}
+
+/**
+ * Undoes a decision while it has had no effect: the card (the request, the item) is back as it was, for another answer.
+ * Its news is taken back if the manager hasn't read it yet, else the manager is told. On record too, from and to swapped.
+ */
+export function undoDecision(id, { by = 'owner', via = 'app' } = {}) {
+  const list = readDecisionLog();
+  const entry = list.find(e => e.id === String(id ?? ''));
+  if (!entry) throw new Error(t('This decision is not on record.'));
+  const why = undoBlock(entry);
+  if (why) {
+    throw new Error({
+      final: t("This decision can't be undone."), undone: t('This decision was already undone.'),
+      read: t('The agent already read your answer: it can no longer be changed.'), started: t("Its task has already started: it can't be undone."),
+      used: t('The permission was already used.'), expired: t('This request expired.'), ended: t('The run has ended.'),
+    }[why] ?? t('This decision can no longer be undone.'));
+  }
+  if (entry.kind === 'seen') unmarkSeen([entry.ref]);
+  else if (entry.kind === 'plan') undoItemDecision(entry);
+  else if (entry.kind === 'request') reopenRequest(entry);
+  else if (entry.kind === 'question') reopenQuestion(entry.undo.question, entry.to);
+  else if (entry.kind === 'push') reopenRequestIn(pushesFile(), openPushes, entry.undo.push, entry.to);
+  else if (entry.kind === 'repo') reopenRequestIn(reposFile(), openRepoRequests, entry.undo.repo, entry.to);
+  // Its news, not read yet, goes back; already read (or a permission given), the manager hears of the change.
+  const withdrawn = withdrawNews(entry.news);
+  const allowed = ['push', 'repo'].includes(entry.kind) && entry.to === 'allowed';
+  if (!withdrawn && (allowed || entry.news)) {
+    tell(allowed
+      ? `The owner took back, from the app, the permission they gave for ${entry.label} "${entry.title}": don't do it; it waits for their decision again.`
+      : `The owner undid, from the app, their decision on ${entry.label} "${entry.title}" (${entry.from} → ${entry.to}): it is back to ${entry.from}, waiting for their new decision. Ignore the earlier news about it.`, null, allowed);
+  }
+  entry.undone = { at: now(), by, via };
+  saveDecisionLog(list);
+  recordDecision({ kind: entry.kind, ref: entry.ref, label: entry.label, title: entry.title, from: entry.to, to: entry.from, by, via, undoes: entry.id });
+  return { undone: entry.id, kind: entry.kind, to: entry.from };
 }
 
 /** The manager's line: the questions it asked that still wait for the owner. */
