@@ -777,7 +777,7 @@ function attnList(list, label, { archived = false } = {}) {
   const link = archived ? attnArchivedLink() : '';
   if (!list.length) return link ? `<div class="attn-archived-only">${link}</div>` : '';
   const head = `<div class="attn-head">${attnMark(list)}<span class="label">${esc(t('{label} ({count})', { label, count: unseen(list).length }))}</span>${link}</div>`;
-  return `<div class="attn-list"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>${head}${list.map(attnNotice).join('')}</div>`;
+  return `<div class="attn-list"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>${head}${list.map(i => attnNotice(i)).join('')}</div>`;
 }
 
 /** Why a notice went to the archive (src/attention.mjs). */
