@@ -16,7 +16,7 @@
     <header class="titlebar">
       <div class="brand"><img src="/icon-32.png" alt="" width="18" height="18"><span>CHIEFMATE</span></div>
       <div id="focus" class="focus" aria-live="polite"></div>
-      <div class="titlebar-right"><select id="project-jump" class="project-jump" aria-label="Go to a project's page" data-t-label="Go to a project's page"></select><button type="button" id="lockdown" class="lockdown-button" hidden></button><button type="button" id="away" class="away" aria-pressed="false" hidden></button><div id="presence" class="presence"></div><span id="clock" class="clock"></span></div>
+      <div class="titlebar-right"><select id="project-jump" class="project-jump" aria-label="Go to a project's page" data-t-label="Go to a project's page"></select><span id="power" class="power" hidden></span><button type="button" id="lockdown" class="lockdown-button" hidden></button><button type="button" id="away" class="away" aria-pressed="false" hidden></button><div id="presence" class="presence"></div><span id="clock" class="clock"></span></div>
     </header>
 
     <nav class="nav" aria-label="Sections" data-t-label="Sections">
@@ -379,6 +379,16 @@
       <div class="actions">
         <button value="no" class="button secondary" data-t="Keep it locked">Keep it locked</button>
         <button value="yes" class="button lockdown-release" id="lockdown-release" disabled data-t="Release">Release</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="power-dialog" class="confirm power-dialog">
+    <form method="dialog">
+      <div class="label" data-t="Power">Power</div>
+      <p class="hint" id="power-now"></p>
+      <div class="power-modes" id="power-modes"></div>
+      <div class="actions">
+        <button value="no" class="button secondary" data-t="Close">Close</button>
       </div>
     </form>
   </dialog>

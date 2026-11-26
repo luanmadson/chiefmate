@@ -1,7 +1,10 @@
 // The schedule: starts missions on their days and times, sends the eve reminder and catches up on a missed run.
+// A mission whose time came while Chiefmate was off or on standby (src/power.mjs) runs once at the next chance, however
+// many of its times went by: the run is marked late ("due") and starts at once.
 import { loadConfig } from './config.mjs';
 import { formatDateTime, locale, t } from './i18n.mjs';
 import { notify } from './notify.mjs';
+import { held } from './power.mjs';
 import { nudgeQueue } from './queue.mjs';
 import { createRun } from './runs.mjs';
 import { readState, saveState } from './store.mjs';
@@ -51,16 +54,21 @@ export function describeSchedule(schedule) {
   return t('Every week: {days} at {time}', { days: list, time: schedule.time });
 }
 
+/** More than this late, a mission's run is "late": the computer or Chiefmate was off, or on standby. */
+export const LATE_MINUTES = 20;
+
+/** Whether a mission due at "last" is late at "at". */
+export const isLate = (last, at = Date.now()) => (at - last.getTime()) / 60000 > LATE_MINUTES;
+
 function startScheduledRun(id, mission, last) {
-  const lateMinutes = (Date.now() - last.getTime()) / 60000;
+  const late = isLate(last);
   try {
-    if (lateMinutes <= 20) {
-      createRun({ kind: 'mission', missionId: id, origin: 'schedule' });
-    } else {
-      createRun({ kind: 'mission', missionId: id, origin: 'schedule-late', notBefore: new Date(Date.now() + 5 * 60000).toISOString() });
+    createRun({ kind: 'mission', missionId: id, origin: late ? 'schedule-late' : 'schedule', due: late ? last.toISOString() : null });
+    if (late) {
       notify(
         t('Late mission'),
-        t('"{name}" was due at {when} and the computer was off. Starting in 5 minutes; to cancel, open Chiefmate.', { name: mission.name, when: formatDateTime(last) }),
+        t('"{name}" was due at {when}, while Chiefmate was off or on standby. It runs now; to cancel, open Chiefmate.', { name: mission.name, when: formatDateTime(last) }),
+        'chiefmate:operations',
       );
     }
     nudgeQueue();
@@ -83,7 +91,8 @@ function check() {
       // The first time Chiefmate sees this mission: start counting from here, without catching up on the past.
       state.schedule[id] = (last ?? new Date()).toISOString();
       changed = true;
-    } else if (last && new Date(recorded) < last) {
+    } else if (last && new Date(recorded) < last && !held()) {
+      // Only the last time missed counts: one run, never one per time missed. On standby it waits, and runs once after.
       state.schedule[id] = last.toISOString();
       changed = true;
       startScheduledRun(id, mission, last);

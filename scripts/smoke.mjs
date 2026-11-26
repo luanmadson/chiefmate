@@ -183,6 +183,15 @@ try {
     // Updates are off in the smoke test: "update now" and "update check" answer so, and nothing is fetched or installed.
     expect(['pause', 'wait'].includes(state.update.mode) && state.update.installing === null, `/api/state has no update mode, or an update going on: ${JSON.stringify(state.update)}`);
     expect((await post('/api/update-now', {})).status === 400 && (await post('/api/update-check', {})).status === 400, 'an update was tried in the smoke test, where updates are off');
+    // The power modes: on at the top; standby and back on; stopping is off in the smoke test (nothing ends or shuts down).
+    expect(state.power?.mode === 'on' && html.includes('id="power"') && html.includes('id="power-dialog"'), `/api/state has no power mode, or the app no power panel: ${JSON.stringify(state.power)}`);
+    const standby = await (await post('/api/power', { action: 'standby' })).json();
+    const standbyState = await (await fetch(`${base}/api/state`)).json();
+    const backOn = await (await post('/api/power', { action: 'on' })).json();
+    expect(standby.mode === 'standby' && standbyState.power?.mode === 'standby' && backOn.mode === 'on', `standby did not go on and off: ${JSON.stringify([standby, standbyState.power, backOn])}`);
+    expect((await post('/api/power', { action: 'stop' })).status === 400 && (await post('/api/power', { action: 'nap' })).status === 400, 'a stop was tried in the smoke test, or an unknown power mode was accepted');
+    const powerPreview = await (await post('/api/power', { action: 'preview' })).json();
+    expect(Array.isArray(powerPreview.runs) && Array.isArray(powerPreview.sessions) && Array.isArray(powerPreview.unsaved), `the power preview lacks the runs, sessions or changes: ${JSON.stringify(powerPreview)}`);
     expect(Array.isArray(state.teams) && state.teams.every(x => x.project && Array.isArray(x.members)), '/api/state has no crews by project');
     expect(Array.isArray(state.needs), "/api/state has no list of the owner's requests");
     expect((await post('/api/needs-you', { what: 'Sign in' })).status === 400, 'a request for the owner without a run was not refused');
@@ -193,9 +202,9 @@ try {
     const waitingRun = { id: 'smoke-needs', kind: 'task', project: 'none', title: 'Waiting for sign-in', summary: 'Made up.', status: 'paused', created: new Date().toISOString(), steps: [] };
     const waitingFile = path.join(data, 'runs', `${waitingRun.id}.json`);
     writeFileSync(waitingFile, JSON.stringify(waitingRun));
-    const request = await (await post('/api/needs-you', { run: waitingRun.id, what: 'Sign in', wait: true })).json();
+    const request = await (await post('/api/needs-you', { run: waitingRun.id, what: 'Which?', options: 'A|B' })).json();
     const answered = await (await post('/api/needs-you', { run: waitingRun.id, what: 'Which?', options: 'A|B' })).json();
-    await post('/api/needs-you/done', { run: waitingRun.id, id: answered.id, answer: 'B' });
+    await post('/api/needs-you/done', { run: waitingRun.id, id: answered.id, answer: 'B', note: 'My reason' });
     const noticeId = `needs:${waitingRun.id}:${request.id}`;
     const beforeCancel = await (await fetch(`${base}/api/state`)).json();
     expect(beforeCancel.attention.items.some(n => n.id === noticeId && n.level === 'urgent'), 'a paused run lost its open request');
@@ -205,10 +214,12 @@ try {
     expect(!afterCancel.needs.some(n => n.run === waitingRun.id) && !afterCancel.attention.items.some(n => n.id === noticeId) && archive.items.some(n => n.id === noticeId && n.reason === 'resolved'),
       'a canceled run did not clear and archive its urgent request');
     const polled = await (await post('/api/needs-you/poll', { run: waitingRun.id, id: request.id })).json();
-    const late = await (await post('/api/needs-you/done', { run: waitingRun.id, id: request.id })).json();
+    const late = await (await post('/api/needs-you/done', { run: waitingRun.id, id: request.id, note: 'Too late' })).json();
     const saved = JSON.parse(readFileSync(waitingFile, 'utf8'));
-    expect(polled.status === 'closed' && late.status === 'closed' && saved.requests[0].closed === saved.ended && saved.requests[1].answer === 'B',
-      'an unanswered request did not stay closed on disk, or an existing answer was lost');
+    expect(polled.status === 'closed' && late.status === 'closed' && saved.requests[0].closed === saved.ended &&
+      !saved.requests[0].note && saved.requests[1].answer === 'B' && saved.requests[1].note === 'My reason' &&
+      saved.talk.filter(message => message.via === 'request').length === 1,
+    'a late answer changed a closed request, or an existing answer was lost');
     // A merge needs a finished run with a pull request or a branch in the owner's clone.
     expect((await post('/api/merge', { run: 'smoke-feed', preview: true })).status === 400 && (await post('/api/merge', { run: 'no-such-run' })).status === 400, 'a merge of a run with nothing to merge was not refused');
     expect((await fetch(`${base}/api/run/none/context/1`)).status === 404, "a step's context of a run that does not exist did not answer 404");
@@ -375,6 +386,8 @@ try {
     const opens = await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder' });
     expect(opens.status === 403 && JSON.parse(opens.text).error?.includes('computer'), `opening a window on the computer from another device was not refused: ${opens.status}`);
     expect((await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder', dryRun: true })).status !== 403, 'a dry run of opening a folder was refused through the remote access');
+    const remoteStop = await ask(remote.port, '/api/power', command, { action: 'stop' });
+    expect(remoteStop.status === 403 && JSON.parse(remoteStop.text).error?.includes('computer'), `stopping Chiefmate from another device was not refused: ${remoteStop.status}`);
     expect((await ask(port, '/api/state', tailnet)).status === 403, "the app's own port answered the tailnet name");
 
     // The emergency lockdown (src/lockdown.mjs), engaged and released through the API. This server stops nothing for
@@ -507,6 +520,8 @@ try {
   const waiting = { ...healthy, update: { ...healthy.update, waiting: 2, blocked: 'changes' } };
   expect(ids(watch.findProblems({ health: true, state: waiting, memory, seen: { update_waiting: ago(150) }, at })) === 'update_waiting:warn', 'a blocked update waiting for hours was not a warning');
   expect(watch.findProblems({ health: true, state: { ...waiting, update: { waiting: 2, mode: 'wait' }, running: [{ id: 'r', project: 'p', actions: [{ at: ago(1) }] }] }, memory, seen: { update_waiting: ago(150) }, at }).length === 0, 'an update waiting for the crew in "wait" mode was taken as a problem');
+  expect(watch.findProblems({ health: false, state: null, memory, at, off: true }).length === 0, 'the watchdog took a Chiefmate stopped by the owner as down');
+  expect(watch.findProblems({ health: true, state: { ...stuckQueue, power: { mode: 'standby' } }, memory, seen: { queue_stuck: ago(20) }, at }).length === 0, 'a queue held by standby was taken as stuck');
   expect(ids(watch.findProblems({ health: true, state: healthy, memory: { free: 1, total: 16 }, at })) === 'memory_low:warn', 'low memory was missed');
   // Orphans: only the crew's kinds of process, alive for long, whose parent is gone or took a newer process's id.
   const list = [
@@ -788,6 +803,18 @@ try {
   finishRequest(run.id, asked.id, 'owner', 'ses');
   const chosen = pollRequest(run.id, asked.id);
   expect(outside && chosen.status === 'done' && chosen.answer === 'SES', `the option clicked did not answer the question, or an answer outside the options was taken: ${JSON.stringify(chosen)}`);
+  // What the owner writes goes with the option, or answers alone; the waiting command hands it over, and it stays in
+  // the run's conversation.
+  const explained = await askOwner({ run: run.id, step: 1, what: 'Which region?', options: 'US|EU' });
+  finishRequest(run.id, explained.id, 'owner', 'eu', '  Closer to the users.  ');
+  const withNote = pollRequest(run.id, explained.id);
+  const own = await askOwner({ run: run.id, step: 1, what: 'Which plan?', options: 'Free|Pro' });
+  finishRequest(run.id, own.id, 'owner', '', 'Neither: wait for the trial.');
+  const ownWords = pollRequest(run.id, own.id);
+  const said = run.talk.filter(m => m.who === 'owner' && m.via === 'request').map(m => m.text);
+  expect(withNote.answer === 'EU' && withNote.note === 'Closer to the users.' && ownWords.answer === null && ownWords.note === 'Neither: wait for the trial.'
+    && said.includes('EU — Closer to the users.') && said.includes('Neither: wait for the trial.'),
+    `what the owner wrote did not reach the step, or is not in the run's conversation: ${JSON.stringify([withNote, ownWords, said])}`);
   let single = false;
   try {
     await askOwner({ run: run.id, step: 1, what: 'Only one?', options: 'Yes' });
@@ -1030,6 +1057,77 @@ try {
   live.delete('smoke-pause-b');
 } catch (error) {
   failures.push(`update checks: ${error.message}`);
+}
+
+// The power modes, in this process, with made-up hooks (nothing paused for real, closed or shut down): standby holds
+// the queue and resumes it; a stop pauses the crew, interrupts the manager, counts down for a shutdown, saves "off",
+// closes the crew's browsers and processes, shuts down and ends; one canceled resumes the work; a start after a stop
+// is "on" again. A mission missed while off is late. As in the temporary Chiefmate, no notification reaches the screen.
+const smokeBefore = process.env.CHIEFMATE_SMOKE;
+process.env.CHIEFMATE_SMOKE = '1';
+try {
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const power = await import(src('power.mjs'));
+  const { readState, saveState } = await import(src('store.mjs'));
+  const { updatedTurn } = await import(src('runs.mjs'));
+  const schedule = await import(src('schedule.mjs'));
+  const calls = [];
+  let busy = 0;
+  let answering = false;
+  const hooks = {
+    pollMs: 10, countdownMs: 60,
+    pauseRuns: why => (calls.push(`pause:${why}`), busy > 0 ? ['smoke-power-a'] : []),
+    pauseSessions: () => [],
+    crewBusy: () => busy-- > 0,
+    sessionsBusy: () => false,
+    crewWaiting: () => [],
+    managerAnswering: () => answering,
+    interruptManager: () => (calls.push('interrupt'), (answering = false), true),
+    resume: () => calls.push('resume'),
+    updating: () => false,
+    closeBrowsers: async () => calls.push('browsers'),
+    stopCrew: async () => calls.push('crew'),
+    powerOff: async () => calls.push('poweroff'),
+    finish: async () => calls.push('finish'),
+  };
+  saveState({ ...readState(), power: { mode: 'off', since: new Date().toISOString(), target: 'stop', paused: ['x'] } });
+  power.startPower(hooks);
+  expect(!readState().power && power.powerInfo().mode === 'on' && !power.held(), 'a start after a stop did not turn Chiefmate back on');
+
+  busy = 1;
+  expect(power.setStandby(true).mode === 'standby' && power.held() && readState().power?.mode === 'standby' && calls.includes('pause:standby'), `standby did not hold the queue or pause the runs: ${calls}`);
+  expect(power.setStandby(false).mode === 'on' && !power.held() && !readState().power && calls.at(-1) === 'resume', `back from standby, the queue did not go on: ${calls}`);
+  expect(updatedTurn([], { owner: 'Owner', language: 'en' }, 'standby').startsWith('Chiefmate was put on standby'), 'a step resumed after standby is told of an update');
+
+  calls.length = 0;
+  busy = 2;
+  answering = true;
+  const job = { target: 'shutdown', since: new Date().toISOString(), stage: 'pausing', paused: [], sessions: [], waitingFor: [], countdownUntil: null, canceled: false };
+  expect(await power.shutDown(job, hooks), 'a shutdown did not go to the end');
+  const order = calls.filter(c => !c.startsWith('pause')).join();
+  expect(calls[0] === 'pause:stop' && order === 'interrupt,browsers,crew,poweroff,finish' && job.paused.join() === 'smoke-power-a' && job.countdownUntil && readState().power?.mode === 'off',
+    `a shutdown did not pause, interrupt the manager, count down, save "off", close and shut down in that order: ${calls} ${JSON.stringify(readState().power)}`);
+  const { power: _off, ...cleared } = readState();
+  saveState(cleared);
+
+  // A stop canceled while it waits for the crew: nothing closes, the work goes on.
+  calls.length = 0;
+  busy = 1000;
+  expect(power.stopSystem('stop').mode === 'stopping' && power.held() && power.stopping(), 'a stop did not hold the queue');
+  await new Promise(resolve => setTimeout(resolve, 40));
+  expect(power.cancelStop().mode === 'on' && !power.held() && calls.includes('resume'), `a canceled stop did not resume the work: ${calls}`);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  expect(!calls.some(c => ['browsers', 'crew', 'finish', 'poweroff'].includes(c)) && !readState().power, `a canceled stop still closed something: ${calls}`);
+  busy = 0;
+  expect(power.powerOffCommand({ dryRun: true }).args.join(' ') === '/s /t 0', "Windows' shutdown is forced or delayed");
+
+  const at = Date.now();
+  expect(schedule.isLate(new Date(at - 30 * 60_000), at) && !schedule.isLate(new Date(at - 10 * 60_000), at), 'a mission missed for 30 minutes is not late, or one 10 minutes behind is');
+} catch (error) {
+  failures.push(`power checks: ${error.message}`);
+} finally {
+  if (smokeBefore === undefined) delete process.env.CHIEFMATE_SMOKE;
+  else process.env.CHIEFMATE_SMOKE = smokeBefore;
 }
 
 // A command stopped by its time limit or by a pause ends with every process it started (on Windows, git's download
@@ -1650,7 +1748,7 @@ try {
 try {
   process.env.CHIEFMATE_SMOKE = '1';
   const src = file => pathToFileURL(path.join(root, 'src', file)).href;
-  const { addQuestion, decide, decisionCards, openQuestions, verdictRecommendation } = await import(src('decisions.mjs'));
+  const { addQuestion, decide, decisionCards, openQuestions, questionNews, verdictRecommendation } = await import(src('decisions.mjs'));
   const { attentionItems } = await import(src('attention.mjs'));
   const { readRun, saveRun } = await import(src('store.mjs'));
   const { planItems, proposeItem, triageItem } = await import(src('planning.mjs'));
@@ -1739,6 +1837,22 @@ try {
     twice = true;
   }
   expect(twice, 'a question was answered twice');
+  // An answer in the owner's words: with the option, or alone; it reaches the manager in the news.
+  const cardOf = x => ({ id: `question:${x.id}`, kind: 'question', question: x.id, label: 'Question', title: x.question });
+  const q2 = addQuestion({ question: 'Which day?', options: 'Monday|Friday', recommend: 'friday' }, config);
+  const q3 = addQuestion({ question: 'Which color?', options: 'Red|Blue' }, config);
+  let empty = false;
+  try {
+    await decide({ card: `question:${q3.id}`, action: 'answer', option: '', note: '  ' }, [cardOf(q3)]);
+  } catch {
+    empty = true;
+  }
+  const both = await decide({ card: `question:${q2.id}`, action: 'answer', option: 'monday', note: 'Friday is a holiday.' }, [cardOf(q2)]);
+  const words = await decide({ card: `question:${q3.id}`, action: 'answer', note: 'Neither: brass.' }, [cardOf(q3)]);
+  const news = [questionNews({ ...q2, status: 'answered', answer: 'Monday', note: 'Friday is a holiday.' }), questionNews({ ...q3, status: 'answered', answer: null, note: 'Neither: brass.' })];
+  expect(empty && both.done === 'answered' && both.answer === 'Monday' && both.note === 'Friday is a holiday.' && words.done === 'answered' && words.answer === null && words.note === 'Neither: brass.'
+    && !openQuestions().some(x => [q2.id, q3.id].includes(x.id)) && news[0].includes('"Monday". And wrote: "Friday is a holiday."') && news[1].includes('in their own words') && news[1].includes('"Neither: brass."'),
+    `an answer written by the owner was not taken, or does not reach the manager: ${JSON.stringify([both, words, news])}`);
   expect((await decide({ card: local.id, action: 'discard' }, cards)).done === 'discarded' && readRun('d-local').discarded?.by === 'owner', 'a local branch was not discarded from its card');
   await decide({ card: proposal.id, action: 'discard' }, cards);
   const left = cardsFor().map(c => c.id);

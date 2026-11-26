@@ -197,6 +197,8 @@ function stopwatch(from) {
 const ticking = from => (from ? `<span class="num" data-since="${esc(from)}">${stopwatch(from)}</span>` : '—');
 function tickClocks() {
   for (const el of document.querySelectorAll('[data-since]')) el.textContent = stopwatch(el.dataset.since);
+  // Countdowns (the computer shutting down): the seconds left, on the server's clock.
+  for (const el of document.querySelectorAll('[data-until]')) el.textContent = String(Math.max(0, Math.ceil((Date.parse(el.dataset.until) - Date.now() - skew) / 1000)));
 }
 
 function runState(status) {
@@ -252,8 +254,16 @@ function draw(selector, signature, html) {
   signatures[selector] = signature;
   // What the owner opened ([data-keep-open] details) stays open when the content is drawn again.
   const opened = [...$(selector).querySelectorAll('details[data-keep-open][open]')].map(d => d.dataset.keepOpen);
+  // And the answer being written ([data-reply], its text kept in replyDrafts) keeps the focus and the cursor.
+  const field = document.activeElement;
+  const typing = field?.dataset?.reply && $(selector).contains(field) ? { key: field.dataset.reply, start: field.selectionStart, end: field.selectionEnd } : null;
   $(selector).innerHTML = html;
   for (const d of $(selector).querySelectorAll('details[data-keep-open]')) if (opened.includes(d.dataset.keepOpen)) d.open = true;
+  const again = typing && [...$(selector).querySelectorAll('[data-reply]')].find(x => x.dataset.reply === typing.key);
+  if (again) {
+    again.focus({ preventScroll: true });
+    again.setSelectionRange(typing.start, typing.end);
+  }
   return true;
 }
 
@@ -352,6 +362,9 @@ function queueOrder() {
 }
 
 const liveDot = () => '<span class="live-dot" aria-hidden="true"></span>';
+
+/** A mission run missed while Chiefmate was off or on standby (src/schedule.mjs): "late, runs now", with when it was due. */
+const lateTag = r => (r?.due ? `<span class="tag late" title="${esc(t('Due at {when}', { when: shortDate(r.due) }))}">${esc(t('Late, runs now'))}</span>` : '');
 
 /** The runs going on now, oldest first (runs of different projects go on at the same time). */
 const going = () => (online && state ? state.running ?? (state.current ? [state.current] : []) : []);
@@ -625,6 +638,108 @@ $('#away').addEventListener('click', async () => {
   }
 });
 
+// ---------- Power modes (src/power.mjs): standby, stop Chiefmate, shut the computer down ----------
+
+// The power symbol in line art.
+const POWER_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8v6M4.6 4.2a5 5 0 1 0 6.8 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="square"/></svg>';
+
+// The last mode seen: once Chiefmate has stopped, the top says "Off" instead of only "no connection".
+let lastPower = null;
+
+/** The mode at the top, always visible: [label, kind, the one-click action's html]. */
+function powerLook() {
+  const p = online ? state.power ?? { mode: 'on' } : null;
+  if (p) lastPower = p;
+  if (!p) return lastPower?.mode === 'stopping' ? [t('Off'), 'neutral', ''] : null;
+  if (p.mode === 'standby') return [t('On standby'), 'warn', `<button type="button" class="button small" data-power="on">${esc(t('Resume'))}</button>`];
+  if (p.mode === 'stopping') {
+    const cancel = p.stage === 'closing' ? '' : `<button type="button" class="button danger small" data-power="cancel">${esc(t('Cancel'))}</button>`;
+    const label = p.stage === 'countdown'
+      ? `${t('Shutting down')} · <span class="num" data-until="${esc(p.countdownUntil)}"></span> s`
+      : esc(p.target === 'shutdown' ? t('Shutting down…') : t('Stopping…'));
+    return [label, 'error', cancel, true];
+  }
+  return [t('On'), 'ok', ''];
+}
+
+function drawPower() {
+  const look = powerLook();
+  const box = $('#power');
+  box.hidden = !look;
+  if (!look) return;
+  const [label, kind, action, html] = look;
+  const help = t('Power: standby, stop Chiefmate or shut the computer down');
+  const chip = `<button type="button" class="power-chip" data-power-open title="${esc(help)}" aria-label="${esc(help)}">${POWER_ICON}<span class="state state-${kind}">${html ? label : esc(label)}</span></button>`;
+  if (draw('#power', JSON.stringify([label, kind, action]), chip + action)) tickClocks();
+}
+
+/** What each mode does, in one line, and its confirmation. */
+const POWER_MODES = () => ({
+  standby: { title: t('Standby'), line: t('Nothing new starts; what is running pauses at a safe point; live sessions go on.'), yes: t('Go on standby') },
+  on: { title: t('Back on'), line: t('The queue goes on, the paused runs first; each mission missed meanwhile runs once.'), yes: t('Turn back on') },
+  stop: { title: t('Stop Chiefmate'), line: t("Pauses everything at a safe point, closes the crew's browsers and ends Chiefmate; the next start resumes the work."), yes: t('Stop Chiefmate') },
+  shutdown: { title: t('Shut the computer down'), line: t('As stopping Chiefmate, then Windows shuts down after a 60-second countdown you can cancel.'), yes: t('Shut down') },
+});
+
+function openPowerDialog() {
+  const p = state?.power ?? { mode: 'on' };
+  const modes = POWER_MODES();
+  const ids = p.mode === 'standby' ? ['on', 'stop', 'shutdown'] : ['standby', 'stop', 'shutdown'];
+  const now = p.mode === 'standby' ? t('On standby since {time}: nothing new starts.', { time: clockTime(p.since) })
+    : p.mode === 'stopping' ? t('Chiefmate is stopping: cancel it at the top.') : t('On: the queue, the missions and the autopilot work as usual.');
+  $('#power-now').textContent = now;
+  $('#power-modes').innerHTML = ids.map(id => `<button type="button" class="power-mode${id === 'shutdown' ? ' danger' : ''}" data-power="${id}"${p.mode === 'stopping' ? ' disabled' : ''}>
+      <strong>${esc(modes[id].title)}</strong><span>${esc(modes[id].line)}</span></button>`).join('');
+  $('#power-dialog').showModal();
+}
+
+/** The confirmation of a mode, with what the owner should know first (runs, live sessions, changes not saved). */
+async function confirmPower(action) {
+  const mode = POWER_MODES()[action];
+  const notSent = $('#message').value.trim() !== '' || $('#agent-form').text.value.trim() !== '';
+  let preview = { runs: [], sessions: [], unsaved: [] };
+  try {
+    preview = await api('/api/power', { action: 'preview' });
+  } catch (error) {
+    toast(error.message);
+    return false;
+  }
+  const lines = [mode.line];
+  if (preview.runs.length) lines.push(t('Pause at a safe point: {runs}.', { runs: preview.runs.map(r => r.title).join('; ') }));
+  if (['stop', 'shutdown'].includes(action)) {
+    if (preview.sessions.length) {
+      lines.push(action === 'shutdown'
+        ? t('Live sessions open: {names}. Their turns pause; a session in its own window ends with the computer.', { names: preview.sessions.map(s => s.name).join('; ') })
+        : t('Live sessions open: {names}. Their turns pause and carry on at the next start.', { names: preview.sessions.map(s => s.name).join('; ') }));
+    }
+    if (preview.unsaved.length) lines.push(t('Changes not committed: {folders}.', { folders: preview.unsaved.map(u => t('{folder} ({count} file(s))', { folder: u.folder, count: u.files })).join('; ') }));
+    if (notSent) lines.push(t('There is text not sent in the app: it will be lost.'));
+  }
+  return confirmDialog(mode.title, lines.join('\n\n'), mode.yes);
+}
+
+async function setPower(action) {
+  if (!['on', 'cancel'].includes(action) && !(await confirmPower(action))) return;
+  try {
+    const p = await api('/api/power', { action });
+    if (action === 'standby') toast(t('On standby: nothing new starts until you resume.'));
+    else if (action === 'on') toast(t('Back on: the queue goes on.'));
+    else if (action === 'cancel') toast(p.mode === 'on' ? t('Canceled: the paused work goes on.') : t('Canceled: still on standby.'));
+    else toast(action === 'shutdown' ? t('Shutting down: the work pauses at a safe point, then the countdown starts.') : t('Stopping: the work pauses at a safe point, then Chiefmate ends.'));
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+document.addEventListener('click', event => {
+  if (event.target.closest('[data-power-open]')) return openPowerDialog();
+  const button = event.target.closest('[data-power]');
+  if (!button || button.disabled) return;
+  if (button.closest('#power-dialog')) $('#power-dialog').close();
+  setPower(button.dataset.power);
+});
+
 /** The project in focus: the run going on now, else the next one in the queue. */
 function drawFocus() {
   const f = online ? state.focus : null;
@@ -746,6 +861,29 @@ function requestButtons(run, q, size = '') {
   return `<span class="request-options">${q.options.map(option).join('')}</span>`;
 }
 
+// What the owner writes to a question ("Explain / another answer"), by field ("req:<id>", "card:<id>"): it survives
+// the lists being drawn again, and goes with the option clicked or alone with "Send".
+const replyDrafts = new Map();
+const replyText = key => (replyDrafts.get(key) ?? '').trim();
+document.addEventListener('input', event => {
+  const key = event.target.dataset?.reply;
+  if (key) replyDrafts.set(key, event.target.value);
+});
+
+/** The field to write an answer, with its "Send" button ("send": the button's attributes). */
+const replyField = (key, send, size = '') => `<div class="reply">
+    <textarea data-reply="${esc(key)}" rows="1" maxlength="2000" placeholder="${esc(t('Explain / another answer (optional)'))}" aria-label="${esc(t('Explain / another answer (optional)'))}">${esc(replyDrafts.get(key) ?? '')}</textarea>
+    <button type="button" class="button secondary${size}" ${send} data-reply-send>${esc(t('Send'))}</button>
+  </div>`;
+
+/**
+ * A step's question with its field to write: under the question's text (the notices and the run's report). A notice's
+ * request carries no status: only open requests become notices.
+ */
+const requestReply = (run, q, size = '') => (q?.options?.length && (q.status ?? 'open') === 'open'
+  ? replyField(`req:${q.id}`, `data-needs-done="${esc(run)}" data-request="${esc(q.id)}"`, size)
+  : '');
+
 /** A question's recommendation and its reason, in one line ("Recommends: Resend. Simpler to set up."). */
 const requestWhy = q => (q?.options?.length && (q.recommend || q.why)
   ? `<span class="request-why">${esc([q.recommend ? t('Recommends: {what}', { what: q.recommend }) : '', q.why ?? ''].filter(Boolean).join('. '))}</span>`
@@ -816,7 +954,7 @@ function attnNotice(i, brief = false) {
     : `${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
   return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
       <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
-      <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}${brief ? '' : requestWhy(r)}${where || links.length ? `<span class="hint">${[esc(where), ...links].filter(Boolean).join(' · ')}</span>` : ''}${brief ? '' : permissionFacts(r?.explain, r?.id)}</div>
+      <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}${brief ? '' : requestWhy(r)}${brief || !r?.run ? '' : requestReply(r.run, r, ' small')}${where || links.length ? `<span class="hint">${[esc(where), ...links].filter(Boolean).join(' · ')}</span>` : ''}${brief ? '' : permissionFacts(r?.explain, r?.id)}</div>
       <div class="attn-actions">${actions}</div>
     </div>`;
 }
@@ -835,7 +973,7 @@ function attnList(list, label, { archived = false } = {}) {
   const link = archived ? attnArchivedLink() : '';
   if (!list.length) return link ? `<div class="attn-archived-only">${link}</div>` : '';
   const head = `<div class="attn-head">${attnMark(list)}<span class="label">${esc(t('{label} ({count})', { label, count: unseen(list).length }))}</span>${link}</div>`;
-  return `<div class="attn-list"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>${head}${list.map(attnNotice).join('')}</div>`;
+  return `<div class="attn-list"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>${head}${list.map(i => attnNotice(i)).join('')}</div>`;
 }
 
 /** Why a notice went to the archive (src/attention.mjs). */
@@ -988,6 +1126,8 @@ function decisionCardHtml(c) {
     c.thirdParty ? '' : button('discard', label(c.kind === 'push' || c.kind === 'repo' ? t('Refuse') : t('Discard')), ' danger'),
     button('talk', label(t('Talk about this'), t('Talk')), ' secondary'),
   ].join('');
+  // A question also takes an answer in the owner's words: with the option clicked, or alone with "Send".
+  const reply = c.kind === 'question' ? replyField(`card:${c.id}`, `data-decide="answer" data-card="${esc(c.id)}"`) : '';
   const about = [esc(c.label), c.at ? esc(relative(c.at)) : ''].filter(Boolean).join(' · ');
   // The recommendation's verdict only ("Approve with caveats", src/decisions.mjs); its reason is under Details.
   const verdict = c.recommendShort || c.recommend;
@@ -1003,6 +1143,7 @@ function decisionCardHtml(c) {
       ${verdict ? `<div class="decision-verdict">${esc(t('Recommends: {what}', { what: verdict }))}</div>` : ''}
       ${c.thirdParty ? `<p class="decision-third">${esc(t('Someone else reviews and merges the work of this project: nothing for you to approve here.'))}</p>` : ''}
       <div class="decision-buttons">${buttons}</div>
+      ${reply}
       ${detail ? `<details class="decision-detail" data-detail="${esc(c.id)}"><summary>${esc(t('Details'))}</summary>${detail}</details>` : ''}
     </article>`;
 }
@@ -1057,14 +1198,18 @@ $('#decisions').addEventListener('click', async event => {
   if (c.kind === 'push' && action === 'approve' && !(await confirmDialog(t('Allow this push'), `${c.title}. ${c.what} ${c.change}`, t('Allow push')))) return;
   // And creating a repository: the manager may then create it, private, and send the folder once.
   if (c.kind === 'repo' && action === 'approve' && !(await confirmDialog(t('Allow this repository'), `${c.what} ${c.change}`, t('Allow creation')))) return;
+  // What the owner wrote goes with the answer; "Send" needs something written.
+  const note = action === 'answer' ? replyText(`card:${c.id}`) : '';
+  if (button.hasAttribute('data-reply-send') && !note) return toast(t('Write your answer first.'));
   const card = button.closest('.decision');
   for (const b of card.querySelectorAll('button')) b.disabled = true;
   try {
-    const r = await api('/api/decide', { card: c.id, action, option: button.dataset.option });
+    const r = await api('/api/decide', { card: c.id, action, option: button.dataset.option, note });
+    if (r.done === 'answered') replyDrafts.delete(`card:${c.id}`);
     toast({
       merged: [t('Merged.'), r.merge?.copiesNote].filter(Boolean).join(' '), later: c.thirdParty ? t('Hidden: it is in the archive.') : t('Left for later: the card stays at the end, faded.'), discarded: t('Discarded.'),
       already_merged: t('Branch already merged'), branch_deleted: t('Local branch deleted'),
-      approved: t('Approved: it becomes a task for its agent, in its turn.'), allowed: t('Allowed: the manager may send it once now.'), refused: t('Refused: the manager is told.'), answered: t('Answer sent to the manager: {answer}', { answer: r.answer ?? '' }),
+      approved: t('Approved: it becomes a task for its agent, in its turn.'), allowed: t('Allowed: the manager may send it once now.'), refused: t('Refused: the manager is told.'), answered: t('Answer sent to the manager: {answer}', { answer: [r.answer, r.note].filter(Boolean).join(' — ') }),
     }[r.done] ?? '');
   } catch (error) {
     toast(error.message);
@@ -1081,7 +1226,7 @@ const newsEvent = kind => ({
   merge_failed: t('merge failed'), needs_you: t('needs you'), update_installed: t('update installed'), update_blocked: t('update blocked'),
   memory_alert: t('memory alert'), usage_alert: t('usage alert'), session_ended: t('live session ended'), plan_proposed: t('new proposal'),
   idle: t('empty queue'), autopilot_report: t('autopilot report'), watchdog: t('watchdog'), lockdown: t('emergency lockdown'), security_warning: t('security warning'),
-  away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'),
+  away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'), power: t('power mode'),
 }[kind] ?? kind);
 
 let chatScrolled = false;
@@ -1252,7 +1397,7 @@ function drawQueue() {
   };
   const rows = list.map((r, i) => `<tr class="${i === 0 ? 'next' : ''}">
       <td class="num">${i + 1}</td>
-      <td>${i === 0 ? `<span class="tag">${esc(t('Next'))}</span>` : ''}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span></td>
+      <td>${i === 0 ? `<span class="tag">${esc(t('Next'))}</span>` : ''}${lateTag(r)}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span></td>
       <td>${stateHtml(runState(r.status))}</td>
       <td class="num">${r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? `${shortDate(r.notBefore)} (${esc(relative(r.notBefore))})` : esc(expected(r))}</td>
       <td class="row-actions"><button type="button" class="button danger small" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button></td>
@@ -1261,7 +1406,7 @@ function drawQueue() {
     ? `<div class="label" style="margin-top:24px">${esc(t('Queue'))}</div>
     <table class="table queue"><thead><tr><th>#</th><th>${esc(t('Run'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Expected start'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
     : '';
-  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools]), Math.floor(Date.now() / 60000)]), html);
+  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools, r.due]), Math.floor(Date.now() / 60000)]), html);
 }
 
 /** A run going on: who is at work, the step out of how many, the time counting and the last action, all live. */
@@ -1274,7 +1419,7 @@ function liveCard(a, key) {
   return `<div class="panel live${online ? '' : ' stalled'}"${a.agent ? opensPanel(a.id) : ''}>
       ${face(working, look, 56, `${who}: ${t('Running')}`)}
       <div class="live-main">
-        <div class="live-label">${online ? liveDot() : ''}<span class="label">${esc(t('Running now'))}</span></div>
+        <div class="live-label">${online ? liveDot() : ''}<span class="label">${esc(t('Running now'))}</span>${lateTag(a)}</div>
         <div class="live-title" title="${esc(a.title)}">${esc(a.title)}</div>
         ${a.summary ? `<div class="live-summary" title="${esc(a.summary)}">${esc(a.summary)}</div>` : ''}
         <div class="hint">${esc([projectName(a.project), kindLabel(a.kind), ...runToolsLabel(a), t('started at {time}', { time: clockTime(a.started) })].join(' · '))}</div>
@@ -1663,7 +1808,7 @@ function drawMissions() {
   const html = state.missions.map(m => `
     <div class="panel mission">
       <div class="mission-top">
-        <div><h2>${esc(m.name)}</h2><div class="hint">${esc(m.description ?? '')}</div></div>
+        <div><h2>${m.late ? lateTag(m.late) : ''}${esc(m.name)}</h2><div class="hint">${esc(m.description ?? '')}</div></div>
         <button type="button" class="button" data-run="${esc(m.id)}">${esc(t('Run now'))}</button>
       </div>
       <dl class="facts">
@@ -1830,7 +1975,7 @@ async function refreshDetail(force = false) {
     ? `<div class="report"><div class="report-top"><strong>${esc(t('Asked of you'))}</strong></div>${r.requests.map(q => {
       const status = q.status === 'closed' ? [t('No longer needed'), 'neutral']
         : q.status === 'open' ? [t('Waiting for your action'), 'warn'] : [t('Done'), 'ok'];
-      return `<div>${stateHtml(status)} ${esc(q.what)}${q.url ? ` · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${q.status === 'open' ? `${requestWhy(q)} ${requestButtons(r.id, q, ' small')}` : q.answer ? ` · ${esc(t('Your answer: {answer}', { answer: q.answer }))}` : ''}</div>`;
+      return `<div>${stateHtml(status)} ${esc(q.what)}${q.url ? ` · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${q.status === 'open' ? `${requestWhy(q)} ${requestButtons(r.id, q, ' small')}${requestReply(r.id, q, ' small')}` : q.answer || q.note ? ` · ${esc(t('Your answer: {answer}', { answer: [q.answer, q.note].filter(Boolean).join(' — ') }))}` : ''}</div>`;
     }).join('')}</div>`
     : '';
   const checks = r.checks?.length
@@ -1893,6 +2038,7 @@ function drawUsage() {
 /** Why the autopilot waits now (src/autopilot.mjs, blockInfo). */
 function autopilotWait(b) {
   switch (b?.reason) {
+    case 'standby': return t('Waiting: Chiefmate is on standby.');
     case 'quiet': return t('Waiting: quiet hours ({hours}).', { hours: b.quiet });
     case 'window': return t('Waiting: the 5-hour window is at {used}, and the autopilot stops at {limit}.', { used: percent(b.used), limit: percent(b.limit) });
     case 'week': return t("Waiting: the plan's week is at {used} with {elapsed} of it gone, ahead of the pace that ends it at {target}.", { used: percent(b.used), elapsed: percent(b.elapsed), target: percent(b.target) });
@@ -3857,6 +4003,7 @@ function drawOffline() {
   online = false;
   drawPresence();
   drawLockdownButton();
+  drawPower();
   drawAway();
   drawFocus();
   drawAlerts();
@@ -3932,6 +4079,7 @@ async function refresh() {
   $('#version').textContent = `Chiefmate ${state.version}`;
   drawPresence();
   drawLockdownButton();
+  drawPower();
   drawAway();
   drawFocus();
   drawMics();
@@ -4314,8 +4462,14 @@ document.addEventListener('click', async event => {
       await api('/api/reset-grants', { action: 'remove', index: Number(target.dataset.resetRemove) });
     } else if (target.dataset.needsDone) {
       const answer = target.dataset.answer ?? null;
-      await api('/api/needs-you/done', { run: target.dataset.needsDone, id: target.dataset.request, answer });
-      toast(answer ? t('Answer sent: {answer}. The crew goes on.', { answer }) : t('Marked as done. The crew goes on.'));
+      // What the owner wrote to a question goes with the option, or alone with "Send".
+      const key = `req:${target.dataset.request}`;
+      const note = replyText(key);
+      if (target.hasAttribute('data-reply-send') && !note) return toast(t('Write your answer first.'));
+      await api('/api/needs-you/done', { run: target.dataset.needsDone, id: target.dataset.request, answer, note: note || null });
+      replyDrafts.delete(key);
+      const sent = [answer, note].filter(Boolean).join(' — ');
+      toast(sent ? t('Answer sent: {answer}. The crew goes on.', { answer: sent }) : t('Marked as done. The crew goes on.'));
       if (selectedRun === target.dataset.needsDone) await refreshDetail(true);
     } else if (target.dataset.needsSession) {
       const permission = (state.needs ?? []).some(n => n.id === target.dataset.request && n.kind === 'permission');

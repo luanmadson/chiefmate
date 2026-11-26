@@ -10,6 +10,7 @@ import { current, weekPace } from './plan.mjs';
 import { byRank, CLOSED, decideItem, planItem, planItems, startApproved } from './planning.mjs';
 import { listRuns, readState, readUsage, saveState } from './store.mjs';
 import { isLocked } from './lockdown.mjs';
+import { held } from './power.mjs';
 import { updating } from './update.mjs';
 import { clip, now } from './util.mjs';
 
@@ -55,11 +56,12 @@ export function autopilotSettings(config = loadConfig()) {
 }
 
 /**
- * Why the autopilot can't put anything on the queue now, for the app: { reason: "off" | "quiet" | "window" | "week",
+ * Why the autopilot can't put anything on the queue now, for the app: { reason: "off" | "standby" | "quiet" | "window" | "week",
  * and its values }, or null when it can.
  */
 export function blockInfo(settings, usage = readUsage(), at = new Date()) {
   if (!settings.enabled) return { reason: 'off' };
+  if (held()) return { reason: 'standby' };
   if (inQuietHours(settings.quiet_hours, at)) return { reason: 'quiet', quiet: settings.quiet_hours.text };
   const w = usage.five_hour;
   if (current(w) && w.used >= settings.stop_at_5h_window) return { reason: 'window', used: w.used, limit: settings.stop_at_5h_window };
@@ -74,6 +76,7 @@ export function blockReason(settings, usage = readUsage(), at = new Date()) {
   const b = blockInfo(settings, usage, at);
   switch (b?.reason) {
     case 'off': return 'the autopilot is off';
+    case 'standby': return 'Chiefmate is on standby (or shutting down): nothing new starts';
     case 'quiet': return `quiet hours (${b.quiet})`;
     case 'window': return `the 5-hour window is at ${formatPercent(b.used)} (the autopilot stops at ${formatPercent(b.limit)})`;
     case 'week': return `the plan's week is at ${formatPercent(b.used)} with ${formatPercent(b.elapsed)} of it gone, ahead of the pace that ends it at ${formatPercent(b.target)}`;
@@ -175,7 +178,7 @@ export async function checkAutopilot({ config = loadConfig(), usage = readUsage(
   const a = (state.autopilot ??= { woken: {}, log: [], wakes: [] });
   a.woken ??= {};
   const before = JSON.stringify(a);
-  if (settings.enabled && !updating() && !isLocked()) {
+  if (settings.enabled && !updating() && !held() && !isLocked()) {
     const items = planItems();
     const idle = idleProjects(config, runs);
     // Approved items normally start by themselves when the run before them ends; this catches any left behind.

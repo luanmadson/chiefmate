@@ -272,6 +272,27 @@ export function closeAfterRun() {
   }, 5000).unref();
 }
 
+/**
+ * Closes every browser of the crew, whatever its task (Chiefmate stopping, src/power.mjs): first as a click on its
+ * close button, then forced after a few seconds if it is still there. Returns the pids.
+ */
+export async function closeAllBrowsers() {
+  if (!SUPPORTED) return [];
+  const pids = findBrowsers(loadConfig(), (await processes(0)).list).map(b => b.pid);
+  for (const pid of pids) spawnSync('taskkill', ['/PID', String(pid)], { windowsHide: true });
+  const alive = pid => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  for (let i = 0; i < 16 && pids.some(alive); i++) await new Promise(resolve => setTimeout(resolve, 500));
+  for (const pid of pids.filter(alive)) spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+  return pids;
+}
+
 /** A browser of the list, read again now: a pid that is no longer one of the crew's browsers is refused. */
 async function browserOf(pid) {
   if (!SUPPORTED) throw new Error(t('The browsers are listed on Windows only.'));

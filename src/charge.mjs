@@ -209,7 +209,8 @@ export async function ownerAnswered(q) {
   if (!q?.request) return null;
   const index = q.answer == null ? -1 : q.options.indexOf(q.answer);
   const action = ['approve', 'hold', 'reject'][index] ?? 'hold';
-  const note = q.answer == null ? t('closed the question without answering') : '';
+  // What the owner wrote goes with it; written without an option, the request waits on hold with those words.
+  const note = q.note || (q.answer == null ? t('closed the question without answering') : '');
   return answerRequest(q.request, action, { by: 'owner', note });
 }
 

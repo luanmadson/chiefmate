@@ -23,8 +23,12 @@ import { talkSituation } from './talk.mjs';
 import { addMessage, listRuns, readPending, readState, readUsage, savePending, saveState, stepsOf } from './store.mjs';
 import { isLocked } from './lockdown.mjs';
 import { updateInfo, updating } from './update.mjs';
+import { stopping } from './power.mjs';
 import { DATA, ensureDir, languageName, now, ROOT, VERSION } from './util.mjs';
 import { noTrace } from './workspace.mjs';
+
+// No new answer or turn starts while an update is installed or Chiefmate stops for the owner (src/power.mjs).
+const held = () => updating() || stopping();
 
 /**
  * What the app shows while the manager thinks (or writes the summary that renews the conversation): since when, the
@@ -193,7 +197,7 @@ export function sendToManager(text) {
   if (!message) throw new Error(t('Write a message.'));
   const list = readPending();
   if (list.length >= MAX_PENDING) throw new Error(t('The queue already has {count} messages. Wait for the manager, or remove some.', { count: list.length }));
-  const queued = chat.responding || list.length > 0 || updating() || isLocked();
+  const queued = chat.responding || list.length > 0 || held() || isLocked();
   const item = { id: randomUUID().slice(0, 8), text: message, at: now(), queued };
   list.push(item);
   savePending(list);
@@ -212,7 +216,7 @@ export function deliverNews(events) {
   let item = list.find(m => m.from === 'chiefmate');
   if (item) item.events = [...item.events, ...events].slice(-30);
   else {
-    item = { id: randomUUID().slice(0, 8), from: 'chiefmate', events: [...events], at: now(), queued: chat.responding || list.length > 0 || updating() || isLocked() };
+    item = { id: randomUUID().slice(0, 8), from: 'chiefmate', events: [...events], at: now(), queued: chat.responding || list.length > 0 || held() || isLocked() };
     list.push(item);
   }
   item.text = item.events.map(e => `${e.kind}: ${e.text}`).join('\n');
@@ -252,7 +256,7 @@ export const managerBusy = () => chat.responding || readPending().length > 0;
  * lockdown, it waits for the owner's release.
  */
 export function deliverPending() {
-  if (chat.responding || updating() || isLocked()) return false;
+  if (chat.responding || held() || isLocked()) return false;
   const items = readPending();
   if (!items.length) return false;
   savePending([]);
@@ -476,7 +480,7 @@ async function renewIfFull() {
   const state = readState();
   const c = state.manager?.context;
   const session = state.manager?.session;
-  if (!session || !c?.used || !c.window || c.used / c.window < RENEW_AT || chat.responding || updating()) return;
+  if (!session || !c?.used || !c.window || c.used / c.window < RENEW_AT || chat.responding || held()) return;
   const config = loadConfig();
   const manager = loadAgents(config).manager;
   if (!manager) return;

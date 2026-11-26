@@ -81,7 +81,7 @@ function crewRules(config, project, projectId, reportLang = config.language || '
 - If you find work worth doing outside your part, don't do it: propose it for ${config.owner || 'the owner'}'s planning board, during the step or at its end, with \`${cliCommand()} plan propose ${projectId} "<short title, at most ${TITLE_MAX} characters: what will be done>" --summary "<1-2 sentences: what and why>" --agent <member who should do it> --priority high|medium|low\`. Propose only what has a clear gain, one item per idea, and check \`${cliCommand()} plan list --project ${projectId} --all\` first so you don't repeat an item. The manager triages the proposals and ${config.owner || 'the owner'} decides. Don't propose fixes within your own task or the next run of a mission already approved: those you just do.
 - Never read, list or copy Chiefmate's \`data/\` folder (including \`data/browser-profile\`, the browser profile Chiefmate uses for the owner), other projects' working copies or other projects' personal documentation. You only get the folders this step needs.
 - When you need ${config.owner || 'the owner'} to act (sign in somewhere, confirm something, do what only a person can do), don't stop and don't work around it: run \`${cliCommand()} needs-you "<what to do, in ${owner}>" [--url <address>] [--wait] [--check "<command that succeeds once it is done>"]\` with the Bash tool's timeout at 600000 ms. Chiefmate shows the request to the owner and opens the address in their browser. With --wait the command returns once the owner clicks "I did it" (or the check succeeds); if it says it is still waiting, run the command it prints. If it gives up waiting, finish what you can and say in your report what is left for the owner. Never type passwords or codes yourself.
-- ${config.owner || 'The owner'} may write to you directly from the app while you work: the message arrives as your next turn, with your work kept as it was. Answer it in one short message, then go on. To ask ${config.owner || 'the owner'} to choose ("Resend or SES?"), run \`${cliCommand()} needs-you "<the question, in ${owner}>" --options "<option>|<option>" --recommend <option> --why "<one short sentence: why you recommend it>"\` (2 to 6 short options, in ${owner}): they get one button per option, and the command waits and prints the answer. Keep needs-you without options for what they must do outside the app. For an open question, use needs-you with --wait: they can answer from the app, and the answer comes back as the command's output.
+- ${config.owner || 'The owner'} may write to you directly from the app while you work: the message arrives as your next turn, with your work kept as it was. Answer it in one short message, then go on. To ask ${config.owner || 'the owner'} to choose ("Resend or SES?"), run \`${cliCommand()} needs-you "<the question, in ${owner}>" --options "<option>|<option>" --recommend <option> --why "<one short sentence: why you recommend it>"\` (2 to 6 short options, in ${owner}): they get one button per option and a field to write, and the command waits and prints the answer: the option, their own words, or both. Keep needs-you without options for what they must do outside the app. For an open question, use needs-you with --wait: they can answer from the app, and the answer comes back as the command's output.
 - Your last message is the step's report, in ${languageName(reportLang)}: short markdown with what you did (and the files), the sources you used, what you left out and why, and what the reviewer should check. ${config.owner || 'The owner'} must understand it in seconds, so it starts with this final summary, in plain words and with these headings exactly, the full report under the last one ("Needs you?" says whether ${config.owner || 'the owner'} must do something besides reviewing the work, and what):
 ${fenced(outcomeTemplate(reportLang), 'markdown')}`;
 }
@@ -102,7 +102,7 @@ function workOf(run, config = loadConfig()) {
  */
 export function createRun({
   kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [], plan = null, prompt = null,
-  title: givenTitle = null, summary: givenSummary = null, level = null, request = null, tool: givenTool = null,
+  title: givenTitle = null, summary: givenSummary = null, level = null, request = null, tool: givenTool = null, due = null,
 }) {
   const config = loadConfig();
   // The tool chosen for the run's crew steps (--tool); none: each member's own (src/tools.mjs).
@@ -170,6 +170,8 @@ export function createRun({
     level: parseLevel(level),
     // The request of the project's agent in charge that the manager (or the owner) authorized (src/charge.mjs).
     ...(request != null ? { ownerRequest: Number(request) } : {}),
+    // A mission missed while Chiefmate was off or on standby: when it was due (src/schedule.mjs). The app marks it late.
+    ...(due ? { due } : {}),
   });
   describeLater(run.id, run);
   return run;
@@ -246,23 +248,37 @@ export function cancelLive(id, reason) {
  * when it resumes; one running its checks or opening its pull request pauses only at its next step, or ends first.
  * Returns false when it is not going on, or was already asked.
  */
-export function pauseLive(id) {
+export function pauseLive(id, why = 'update') {
   const l = live.get(id);
   if (!l || l.cancelRequest || l.pauseRequest) return false;
-  l.pauseRequest = true;
+  l.pauseRequest = why;
   l.process?.interrupt?.();
   l.preparing?.abort();
-  logAction(l, { type: 'action', text: t('Pausing at a safe point for an update of Chiefmate') });
+  const text = why === 'standby' ? t('Pausing at a safe point: Chiefmate is going on standby')
+    : why === 'stop' ? t('Pausing at a safe point: Chiefmate is shutting down')
+      : t('Pausing at a safe point for an update of Chiefmate');
+  logAction(l, { type: 'action', text });
   return true;
 }
 
-/** Asks every run going on to pause for an update of Chiefmate (see pauseLive). Returns the ids it asked. */
-export const pauseAll = () => [...live.keys()].filter(pauseLive);
+/**
+ * Asks every run going on to pause (see pauseLive). why: "update" (the default), "standby" or "stop" (the power modes,
+ * src/power.mjs). Returns the ids it asked.
+ */
+export const pauseAll = (why = 'update') => [...live.keys()].filter(id => pauseLive(id, why));
+
+/** The note of a run paused for an update or a power mode, until it resumes. */
+function pausedNote(why) {
+  if (why === 'standby') return t('Paused at a safe point for standby. It resumes by itself when Chiefmate is turned back on.');
+  if (why === 'stop') return t('Paused at a safe point because Chiefmate was shut down. It resumes by itself at the next start.');
+  return t('Paused for an update of Chiefmate. It resumes by itself as soon as the update is over.');
+}
 
 /** The next turn of a step resumed after an update of Chiefmate, with the owner's messages sent meanwhile. */
-export function updatedTurn(messages, config = loadConfig()) {
+export function updatedTurn(messages, config = loadConfig(), why = 'update') {
   const lines = [
-    'Chiefmate was updated while you were working: your work was paused at a safe point so the new version could be installed, and this session now resumes.',
+    why === 'update' ? 'Chiefmate was updated while you were working: your work was paused at a safe point so the new version could be installed, and this session now resumes.'
+      : `Chiefmate was ${why === 'standby' ? 'put on standby' : 'shut down'} by its owner while you were working: your work was paused at a safe point, and this session now resumes.`,
     'Continue from where you left off. The branch, the files and this session are as you left them. A command that was still running when you were paused may have been cut off: check its result before you go on.',
     "When you finish, your last message is still the step's full report.",
   ];
@@ -686,8 +702,8 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     const messages = pendingTalk(run, index + 1);
     for (const m of messages) Object.assign(m, { status: 'delivered', delivered: now(), via: 'resume' });
     if (messages.length) l.reply = messages.at(-1).id;
-    turn = updatedTurn(messages, config);
-    logAction(l, { type: 'action', text: t('Chiefmate was updated: the agent goes on in the same session') });
+    turn = updatedTurn(messages, config, paused.why ?? 'update');
+    logAction(l, { type: 'action', text: (paused.why ?? 'update') === 'update' ? t('Chiefmate was updated: the agent goes on in the same session') : t('Back from the pause: the agent goes on in the same session') });
   }
   let r;
   let pausedNow = false;
@@ -751,8 +767,8 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   }
   l.reply = null;
   if (pausedNow) {
-    Object.assign(step, { status: 'pending', paused: { session: r.session ?? l.session ?? session.id, spentMs, total, at: now() } });
-    logAction(l, { type: 'action', text: t('Paused for the update: the step resumes in the same session afterwards') });
+    Object.assign(step, { status: 'pending', paused: { session: r.session ?? l.session ?? session.id, spentMs, total, at: now(), why: l.pauseRequest } });
+    logAction(l, { type: 'action', text: l.pauseRequest === 'update' ? t('Paused for the update: the step resumes in the same session afterwards') : t('Paused: the step resumes in the same session afterwards') });
     saveRun(run);
     return { paused: true };
   }
@@ -900,7 +916,7 @@ export async function execute(run) {
 
   // Paused for an update of Chiefmate: back to the front of the queue, to resume as soon as the update is over.
   const pauseForUpdate = () => {
-    Object.assign(run, { status: 'queued', resumeFirst: true, note: t('Paused for an update of Chiefmate. It resumes by itself as soon as the update is over.') });
+    Object.assign(run, { status: 'queued', resumeFirst: true, note: pausedNote(l.pauseRequest) });
     saveRun(run);
   };
 
