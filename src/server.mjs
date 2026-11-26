@@ -405,7 +405,7 @@ function buildState() {
       reader: { ...readerSettings(config), signedIn: signedIn(), reading: isReading(), status: readerStatus() },
     },
     // The autopilot (src/autopilot.mjs): its settings, whether it may act now and what it did today.
-    autopilot: autopilotStatus(config, usage),
+    autopilot: autopilotStatus(config, usage, new Date(), runs),
     alerts: alerts(config, usage, machine),
     // What needs the owner, in three levels (src/attention.mjs): the band at the top, the sections, the title and the icon.
     attention: { items: attention, ...attentionSummary(attention), archived: attentionArchive().length },
@@ -758,8 +758,8 @@ export function startServer() {
           return reply(res, 200, { ui: uiSettings(config) });
         }
         case '/api/autopilot':
-          // The autopilot's switch and limits, from the Usage section (src/autopilot.mjs).
-          changeAutopilot(body);
+          // The autopilot's switch, mode and limits, from the Usage section (src/autopilot.mjs), kept with who changed them.
+          changeAutopilot(body, { by: remote ? `remote:${String(req.headers['tailscale-user-login'] ?? '').trim().toLowerCase()}` : 'app' });
           return reply(res, 200, autopilotStatus());
         case '/api/stop-project': {
           // With "preview", only lists what would stop. Otherwise stops the processes you confirmed, never Chiefmate or the crew.

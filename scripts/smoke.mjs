@@ -174,7 +174,7 @@ try {
       `dictation lacks its setting, notice or module: ${JSON.stringify(state.ui)}`);
     // The autopilot's panel in the Usage section: its state, and limits refused before anything is saved.
     const ap = state.autopilot;
-    expect(ap && typeof ap.enabled === 'boolean' && ap.stop_at_5h_window > 0 && ap.week_pace > 0 && Array.isArray(ap.queued) && Array.isArray(ap.wakes) && (ap.enabled || ap.blocked?.reason === 'off'),
+    expect(ap && typeof ap.enabled === 'boolean' && ap.stop_at_5h_window > 0 && (ap.week_pace === null || ap.week_pace > 0) && typeof ap.mode === 'string' && ap.now?.state && Array.isArray(ap.changes) && Array.isArray(ap.queued) && Array.isArray(ap.wakes) && (ap.enabled || ap.blocked?.reason === 'off'),
       `/api/state has no autopilot's state: ${JSON.stringify(ap)}`);
     expect(html.includes('id="autopilot"') && html.includes('id="autopilot-form"'), "the Usage section has no autopilot's panel");
     expect((await post('/api/autopilot', { quiet_hours: 'soon' })).status === 400 && (await post('/api/autopilot', { week_pace: 'much' })).status === 400, "the autopilot's invalid limits were not refused");
@@ -729,7 +729,7 @@ try {
   const { readState, saveState } = await import(pathToFileURL(path.join(root, 'src', 'store.mjs')).href);
   const { newsMessage } = await import(pathToFileURL(path.join(root, 'src', 'manager.mjs')).href);
   const defaults = autopilot.autopilotSettings({});
-  expect(!defaults.enabled && defaults.week_pace === 0.95 && defaults.stop_at_5h_window === 0.85 && !defaults.quiet_hours && defaults.daily_report === '08:00', `the autopilot's defaults are wrong: ${JSON.stringify(defaults)}`);
+  expect(!defaults.enabled && defaults.week_pace === 1 && defaults.mode === 'normal' && defaults.stop_at_5h_window === 0.85 && !defaults.quiet_hours && defaults.daily_report === '08:00', `the autopilot's defaults are wrong: ${JSON.stringify(defaults)}`);
   const quiet = autopilot.parseQuietHours('23:00-07:00');
   const at = (h, m = 0) => new Date(2026, 0, 5, h, m);
   expect(autopilot.inQuietHours(quiet, at(23, 30)) && autopilot.inQuietHours(quiet, at(6, 59)) && !autopilot.inQuietHours(quiet, at(7)) && !autopilot.parseQuietHours('soon'), 'the quiet hours across midnight are wrong');
@@ -744,7 +744,35 @@ try {
   const changed = autopilot.changeAutopilot({ enabled: true, week_pace: '0.8', stop_at_5h_window: 2, quiet_hours: '22:00-06:30', daily_report: 'off' }, { config: { autopilot: { enabled: false } }, dryRun: true });
   expect(changed.enabled === true && changed.week_pace === 0.8 && changed.stop_at_5h_window === 1 && changed.quiet_hours === '22:00-06:30' && changed.daily_report === false, `the autopilot's settings from the app are wrong: ${JSON.stringify(changed)}`);
   const invalid = body => { try { autopilot.changeAutopilot(body, { config: {}, dryRun: true }); return false; } catch { return true; } };
-  expect(invalid({ quiet_hours: '7-8' }) && invalid({ daily_report: '25:00' }) && invalid({ week_pace: '' }), "the autopilot's invalid settings were accepted");
+  expect(invalid({ quiet_hours: '7-8' }) && invalid({ daily_report: '25:00' }) && invalid({ week_pace: '' }) && invalid({ week_pace: 'much' }) && invalid({ mode: 'turbo' }), "the autopilot's invalid settings were accepted");
+  // The spending modes and a week's pace above 1, kept as given in the settings and when read.
+  const dry = body => autopilot.changeAutopilot(body, { config: { autopilot: {} }, dryRun: true });
+  expect(dry({ mode: 'save' }).week_pace === 0.9 && dry({ mode: 'normal' }).week_pace === 1 && dry({ mode: 'all' }).week_pace === 'all' && dry({ week_pace: '1.3' }).week_pace === 1.3 && dry({ week_pace: 'all' }).week_pace === 'all',
+    `the spending modes or a pace above 1 are wrong: ${JSON.stringify([dry({ mode: 'all' }), dry({ week_pace: '1.3' })])}`);
+  const read = week_pace => autopilot.autopilotSettings({ autopilot: { enabled: true, week_pace } });
+  expect(read(1.3).week_pace === 1.3 && read(1.3).mode === 'custom' && read('all').week_pace === null && read('all').mode === 'all' && read(0.9).mode === 'save', "a week's pace above 1 or the mode \"all\" is not read back");
+  // "all": no week's pace, but a used-up week and the 5-hour window still stop it.
+  const all = autopilot.autopilotSettings({ autopilot: { enabled: true, week_pace: 'all' } });
+  expect(autopilot.blockInfo(all, week(0.9, 3.5), at(12)) === null && autopilot.blockInfo(all, week(1, 3.5), at(12))?.reason === 'week_full' && autopilot.blockInfo(all, { five_hour: { used: 0.9, resets: later(2) } }, at(12))?.reason === 'window',
+    'the mode "all" kept a week\'s pace, or did not stop at a used-up week or the 5-hour window');
+  expect(autopilot.blockInfo(read(1.3), week(0.6, 3.5), at(12)) === null, "a week's pace above 1 was cut down to 1");
+  // Each change is kept with who made it and when (the settings saved nowhere here).
+  const own = { autopilot: { enabled: false, week_pace: 1 } };
+  autopilot.changeAutopilot({ enabled: true, mode: 'all' }, { config: own, by: 'app', save: () => {} });
+  const logged = readState().autopilot?.changes?.at(-1);
+  expect(logged?.by === 'app' && logged.at && logged.changes.enabled?.join() === 'false,true' && logged.changes.week_pace?.[1] === 'all', `the autopilot's change was not recorded with who and when: ${JSON.stringify(logged)}`);
+  expect(autopilot.autopilotStatus(own, {}).changes[0]?.by === 'app', "the app does not get the autopilot's latest changes");
+  // The "Now" line: the exact reason it is stopped, or working.
+  const nowOf = (cfg, usage = {}, runs = [], items = []) => autopilot.autopilotNow(autopilot.autopilotSettings(cfg), { config: cfg, usage, runs, items, at: at(12) });
+  const base = { projects: { Auto: {} }, autopilot: { enabled: true } };
+  expect(nowOf({ ...base, autopilot: {} }).reason === 'off' && nowOf(base).reason === 'nothing' && nowOf(base, {}, [{ id: 'r', project: 'Auto', status: 'running' }]).state === 'working'
+    && nowOf({ ...base, autopilot: { enabled: true, week_pace: 'all' }, limits: { pause_at_plan_week: 0.9 } }, week(0.92, 3.5)).reason === 'limits', `the autopilot's "Now" line is wrong: ${JSON.stringify(nowOf(base))}`);
+  // With the "idle" news off, only the items triaged "now" wait (approved ones start by themselves); the queue's limits
+  // count only with a known reset ahead, as the queue reads them.
+  const newsOff = { ...base, manager_updates: false };
+  expect(nowOf(newsOff, {}, [], [{ id: 1, project: 'Auto', status: 'triaged', recommend: 'now', agent: 'someone' }]).reason === 'news_off'
+    && nowOf(newsOff, {}, [], [{ id: 2, project: 'Auto', status: 'approved' }]).state === 'ready'
+    && nowOf({ ...base, limits: { pause_at_5h_window: 0.5 } }, { five_hour: { used: 0.6 } }).reason === 'nothing', `the autopilot's "Now" line blamed the news or the queue's limits wrongly`);
   const config = { owner: 'Owner', projects: { Auto: {} }, autopilot: { enabled: true, daily_report: false } };
   const item = planning.proposeItem({ project: 'Auto', title: 'Smoke autopilot item', agent: 'someone', by: 'manager' });
   planning.triageItem(item.id, { recommend: 'now' });

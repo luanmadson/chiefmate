@@ -2039,12 +2039,58 @@ function drawUsage() {
 function autopilotWait(b) {
   switch (b?.reason) {
     case 'standby': return t('Waiting: Chiefmate is on standby.');
+    case 'lockdown': return t('Waiting: Chiefmate is in emergency lockdown.');
+    case 'updating': return t('Waiting: Chiefmate is installing an update.');
     case 'quiet': return t('Waiting: quiet hours ({hours}).', { hours: b.quiet });
     case 'window': return t('Waiting: the 5-hour window is at {used}, and the autopilot stops at {limit}.', { used: percent(b.used), limit: percent(b.limit) });
+    case 'week_full': return t("Waiting: the plan's week is used up ({used}); it starts again {when}.", { used: percent(b.used), when: b.resets ? shortDate(b.resets) : '—' });
     case 'week': return t("Waiting: the plan's week is at {used} with {elapsed} of it gone, ahead of the pace that ends it at {target}.", { used: percent(b.used), elapsed: percent(b.elapsed), target: percent(b.target) });
     default: return '';
   }
 }
+
+/** The card's "Now" line: working, or stopped and the exact reason (src/autopilot.mjs, autopilotNow). */
+function autopilotNowLine(n) {
+  const going = n.running ? ' ' + t('Runs going on: {count}.', { count: n.running }) : '';
+  if (n.state === 'working') return t('Now: working ({count} run(s) going on).', { count: n.running });
+  if (n.state === 'ready') return t('Now: ready; the next item "do now" goes on the queue as soon as a queue empties.');
+  const why = n.reason === 'off' ? t('Now: stopped, because the autopilot is off.')
+    : n.reason === 'limits' ? t('Now: stopped, because the queue pauses every run at {limit} of {window} (Limits, above), and it is at {used}.', { limit: percent(n.limit), used: percent(n.used), window: n.which === '5h' ? t('the 5-hour window') : t("the plan's week") })
+    : n.reason === 'nothing' ? t('Now: stopped, because no item is triaged "do now" or approved on the board.')
+    : n.reason === 'news_off' ? t('Now: stopped, because the "empty queue" news is off in manager_updates.')
+    : n.reason === 'quiet' ? t('Now: stopped during the quiet hours ({hours}).', { hours: n.quiet })
+    : t('Now: stopped, because {why}', { why: autopilotWait(n).replace(/^[^:]+:\s*/, '') });
+  return why + going;
+}
+
+// The spending modes: the week's pace (src/autopilot.mjs, MODES).
+const AUTOPILOT_MODES = () => [
+  ['save', t('Save usage'), t('Paces the week to end it at about 90% of the plan.')],
+  ['normal', t('Normal'), t('Paces the week to end it at 100% of the plan.')],
+  ['all', t('Spend all'), t("No week's pace: only the 5-hour window and a used-up week stop it.")],
+];
+
+/** Who changed the autopilot ("by" in src/autopilot.mjs, recordChange). */
+function autopilotWho(by) {
+  if (by === 'app') return t('you, in the app');
+  if (by?.startsWith('remote:')) return t('you, through the remote access ({login})', { login: by.slice(7) });
+  if (by === 'cli') return t('the command line');
+  if (by === 'manager') return t('the manager');
+  if (by?.startsWith('step:')) return t('a step of run {run}', { run: by.slice(5) });
+  return by ?? '';
+}
+
+// a setting missing from the settings shows its default (src/autopilot.mjs, autopilotSettings)
+const AUTOPILOT_DEFAULTS = { enabled: false, week_pace: 1, stop_at_5h_window: 0.85, daily_report: '08:00' };
+const autopilotValue = (key, v) => {
+  if (v === null || v === undefined) v = AUTOPILOT_DEFAULTS[key] ?? '';
+  if (key === 'enabled') return v ? t('on') : t('off');
+  if (v === '' || v === false) return t('none');
+  if (key === 'week_pace') return v === 'all' ? t('Spend all') : v === 0.9 ? t('Save usage') : v === 1 ? t('Normal') : percent(Number(v));
+  if (key === 'stop_at_5h_window') return percent(Number(v));
+  return String(v);
+};
+const AUTOPILOT_KEYS = () => ({ enabled: t('switch'), week_pace: t('mode'), stop_at_5h_window: t('5-hour window'), quiet_hours: t('quiet hours'), daily_report: t('daily report') });
 
 function autopilotItemState(status) {
   if (status === 'archived') return [t('Archived item'), 'neutral'];
@@ -2055,11 +2101,26 @@ function autopilotItemState(status) {
 function drawAutopilot() {
   const a = state.autopilot;
   if (!a) return;
-  const now = !a.enabled ? [t('Off'), 'neutral'] : a.blocked ? [t('On, waiting'), 'warn'] : [t('On, ready'), 'ok'];
+  const now = !a.enabled ? [t('Off'), 'neutral'] : a.now?.state === 'stopped' ? [t('On, waiting'), 'warn'] : a.now?.state === 'working' ? [t('On, working'), 'ok'] : [t('On, ready'), 'ok'];
   const line = !a.enabled
     ? t('Nothing goes on the queue without you. Approved items still start by themselves, one per project at a time.')
-    : a.blocked ? autopilotWait(a.blocked)
     : t('When the queue of a project empties, the manager puts its next item triaged "do now" on the queue.');
+  const modes = AUTOPILOT_MODES();
+  const mode = modes.find(m => m[0] === a.mode);
+  const modeHtml = `<div class="label autopilot-today-label">${esc(t('Spending mode'))}</div>
+    <div class="tabs autopilot-modes" role="group" aria-label="${esc(t('Spending mode'))}">${modes.map(([key, label]) =>
+      `<button type="button" class="tab${key === a.mode ? ' active' : ''}" aria-pressed="${key === a.mode}" data-autopilot-mode="${key}">${esc(label)}</button>`).join('')}</div>
+    <p class="hint">${esc(mode ? mode[2] : t('Custom pace: it ends the week at {target} (set on the command line or in the settings).', { target: percent(a.week_pace) }))}</p>
+    ${a.reset && a.mode !== 'all' ? `<p class="hint state-warn">${esc(a.reset.expires
+      ? t('You have a free reset of the plan until {when}: "Spend all" uses the whole week before it.', { when: shortDate(a.reset.expires) })
+      : t('You have a free reset of the plan: "Spend all" uses the whole week before it.'))}
+      <button type="button" class="button small" data-autopilot-mode="all">${esc(t('Use "Spend all"'))}</button></p>` : ''}`;
+  const keys = AUTOPILOT_KEYS();
+  const changes = (a.changes ?? []).map(c => `<li>
+      <span>${clockTime(c.at)}</span>
+      <span><span class="primary">${esc(Object.entries(c.changes ?? {}).map(([k, [from, to]]) => `${keys[k] ?? k}: ${autopilotValue(k, from)} → ${autopilotValue(k, to)}`).join('; '))}</span><span class="secondary">${esc(autopilotWho(c.by))} · ${esc(shortDate(c.at))}</span></span>
+      <span></span>
+    </li>`);
   const items = a.queued.map(e => `<li>
       <span>${clockTime(e.at)}</span>
       <span><span class="primary">#${e.item} ${esc(e.title)}</span><span class="secondary">${projectLink(e.project)} · ${esc(e.agent ?? '')}${e.pr ? ` · <a href="${esc(e.pr)}" target="_blank" rel="noopener">${esc(t('Pull request'))}</a>` : ''}</span></span>
@@ -2071,20 +2132,24 @@ function drawAutopilot() {
       ${stateHtml(now)}
       <button type="button" class="button ${a.enabled ? 'secondary' : ''} small" data-autopilot="${a.enabled ? 'off' : 'on'}">${esc(a.enabled ? t('Turn off') : t('Turn on'))}</button>
     </div>
-    <p>${esc(line)}</p>
+    <p class="autopilot-now">${esc(a.now ? autopilotNowLine(a.now) : '')}</p>
+    <p class="hint">${esc(line)}</p>
     ${a.enabled && !a.idle_news ? `<p class="hint state-warn">${esc(t('The "empty queue" news is off in manager_updates: the manager is never woken, so only the items you approved start.'))}</p>` : ''}
+    ${modeHtml}
     <div class="label autopilot-today-label">${esc(t('Today'))}</div>
     ${items.length ? `<ul class="autopilot-today">${items.join('')}</ul>` : `<p class="hint">${esc(t('It put nothing on the queue today.'))}</p>`}
     <p class="hint">${esc(woke.length ? t('It woke the manager {count} time(s) for an empty queue: {projects}.', { count: a.wakes.length, projects: woke.map(projectName).join(', ') }) : t('It woke the manager for no empty queue today.'))}${items.length ? ` <a href="#planning">${esc(t('See on the board'))}</a>` : ''}</p>
-    <p class="hint">${esc(t('Items recommended "later" always wait for you. With the away mode on, it carries on within these limits; the daily report tells you what it did.'))}</p>`;
+    <p class="hint">${esc(t('Items recommended "later" always wait for you. With the away mode on, it carries on within these limits; the daily report tells you what it did.'))}</p>
+    <div class="label autopilot-today-label">${esc(t('Latest changes'))}</div>
+    ${changes.length ? `<ul class="autopilot-today">${changes.join('')}</ul>` : `<p class="hint">${esc(t('No change recorded yet.'))}</p>`}`;
   draw('#autopilot', html, html);
   // the form follows the settings (changed here, on the command line or by hand) unless it is being edited
   const form = $('#autopilot-form');
-  const settings = JSON.stringify([a.stop_at_5h_window, a.week_pace, a.quiet_hours, a.daily_report]);
+  const settings = JSON.stringify([a.stop_at_5h_window, a.quiet_hours, a.daily_report]);
   if (!form.contains(document.activeElement) && form.dataset.filled !== settings) {
     const [from = '', to = ''] = a.quiet_hours ? a.quiet_hours.split('-').map(x => x.trim().padStart(5, '0')) : [];
     form.window.value = Math.round(a.stop_at_5h_window * 100);
-    form.pace.value = Math.round(a.week_pace * 100);
+    form.windowOut.value = `${form.window.value}%`;
     form.quietFrom.value = from;
     form.quietTo.value = to;
     form.report.value = a.daily_report ? a.daily_report.padStart(5, '0') : '';
@@ -2092,6 +2157,7 @@ function drawAutopilot() {
   }
 }
 
+$('#autopilot-form').window.addEventListener('input', event => (event.target.form.windowOut.value = `${event.target.value}%`));
 $('#autopilot-form').addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.target;
@@ -2101,7 +2167,6 @@ $('#autopilot-form').addEventListener('submit', async event => {
   try {
     await api('/api/autopilot', {
       stop_at_5h_window: Number(form.window.value) / 100,
-      week_pace: Number(form.pace.value) / 100,
       quiet_hours: from ? `${from}-${to}` : 'off',
       daily_report: form.report.value || 'off',
     });
@@ -4344,7 +4409,7 @@ document.addEventListener('click', event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-browser-focus],[data-browser-close]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-autopilot-mode],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-browser-focus],[data-browser-close]');
   if (!target) return;
   // A project's name inside a row that opens on a click (Projects) goes to its page, and nothing else.
   if (event.target.closest('a.project-link') && !target.matches('a')) return;
@@ -4518,6 +4583,10 @@ document.addEventListener('click', async event => {
       const on = target.dataset.autopilot === 'on';
       await api('/api/autopilot', { enabled: on });
       toast(on ? t('Autopilot turned on.') : t('Autopilot turned off.'));
+    } else if (target.dataset.autopilotMode) {
+      const mode = target.dataset.autopilotMode;
+      await api('/api/autopilot', { mode });
+      toast(t('Spending mode: {mode}.', { mode: AUTOPILOT_MODES().find(m => m[0] === mode)?.[1] ?? mode }));
     } else if (target.dataset.reader) {
       const action = target.dataset.reader;
       await api('/api/usage-reader', action === 'now' ? { read: true } : { enabled: action === 'on' });
