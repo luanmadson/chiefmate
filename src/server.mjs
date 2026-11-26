@@ -7,6 +7,7 @@ import { gzipSync } from 'node:zlib';
 import { attentionArchive, attentionItems, attentionSummary, markSeen } from './attention.mjs';
 import { autopilotStatus, changeAutopilot } from './autopilot.mjs';
 import { answerRequest, chargeProfileId, inCharge, openMatters, projectRequests } from './charge.mjs';
+import { openWork, workNotesView } from './worknow.mjs';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { EFFORTS, loadAgents, loadConfig, projectCrew, projectEfforts, projectLead, saveConfig } from './config.mjs';
 import { effortHistory, effortSource, runEffortChanges, setEffort } from './effort.mjs';
@@ -330,9 +331,13 @@ function crew(agents, config, runs, going, queue, conversation) {
 // When this Chiefmate started. The app loads itself again when it changes, after an update or a restart.
 const STARTED = now();
 
-/** Per project: { agent, name, lead, profile, session (its conversation: the open one, else the latest), requests }. */
+/**
+ * Per project: { agent, name, lead, profile, session (its conversation: the open one, else the latest), requests,
+ * work: { session (the "Work now" session open, else null), notes (the latest summaries) } }.
+ */
 function chargeState(config, agents) {
-  const sessions = listSessions().filter(s => s.charge && s.mode === 'app');
+  const all = listSessions();
+  const sessions = all.filter(s => s.charge && s.mode === 'app');
   return Object.fromEntries(Object.keys(config.projects ?? {}).map(id => {
     const who = inCharge(config, id, agents);
     const own = sessions.filter(s => s.project === id);
@@ -340,6 +345,7 @@ function chargeState(config, agents) {
     return [id, who ? {
       agent: who.member.id, name: who.member.name ?? who.member.id, base: who.member.base ?? who.member.id, lead: who.lead, profile: chargeProfileId(id),
       session: session?.id ?? null, requests: projectRequests(id, 8),
+      work: { session: all.find(s => s.work && s.project === id && s.mode === 'app' && s.status !== 'ended')?.id ?? null, notes: workNotesView(id) },
     } : null];
   }));
 }
@@ -631,6 +637,13 @@ export function startServer() {
           }
           // "window": in a window of its own (Windows Terminal), instead of the conversation in the app.
           return reply(res, 200, await openSession(String(body.profile ?? ''), { origin: body.origin ?? 'app', window: !!body.window }));
+        }
+        case '/api/work-now': {
+          // "Work now", the owner's click on a project's page (src/worknow.mjs): the session, or { conflict } when a
+          // run of the crew goes on in the project ("choice": "pause" or "copy" then). "dryRun" opens nothing.
+          const tool = body.tool === 'codex' ? 'codex' : 'claude';
+          const choice = ['pause', 'copy'].includes(body.choice) ? body.choice : null;
+          return reply(res, 200, await openWork(String(body.project ?? ''), { tool, choice, dryRun: !!body.dryRun }));
         }
         case '/api/session/say':
           return reply(res, 200, sayToSession(String(body.id ?? ''), body.text, { by: body.by === 'manager' ? 'manager' : 'owner' }));
