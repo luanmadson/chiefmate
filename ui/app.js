@@ -2321,7 +2321,7 @@ async function refreshProjectPage() {
   if (pageProject() === id && state) drawProjectPage();
 }
 
-const PAGE_PARTS = ['#project-title', '#project-more', '#project-status', '#project-actions', '#project-needs', '#project-tabs', '#project-summary', '#project-facts', '#project-team', '#project-runs', '#project-history', '#project-planning', '#project-computer', '#project-sessions', '#project-live-list', '#project-charge-top'];
+const PAGE_PARTS = ['#project-title', '#project-more', '#project-status', '#project-actions', '#project-needs', '#project-tabs', '#project-summary', '#project-open', '#project-facts', '#project-team', '#project-runs', '#project-history', '#project-planning', '#project-computer', '#project-sessions', '#project-live-list', '#project-charge-top'];
 // Each tab and the part of the page it shows.
 const TAB_PARTS = { overview: '#project-overview', charge: '#project-charge', live: '#project-live', crew: '#project-crew', tasks: '#project-tasks', planning: '#project-planning', files: '#project-files', context: '#project-context', builder: '#project-builder' };
 
@@ -2381,6 +2381,7 @@ function drawProjectPage() {
   } else if (tab === 'planning') drawProjectPlanning(id, p);
   else {
     drawProjectSummary(id, p, info);
+    drawProjectOpen(id, info);
     drawProjectFacts(info);
     drawProjectComputer(id, info);
   }
@@ -2521,6 +2522,49 @@ function drawProjectSummary(id, p, info) {
     : `<span class="primary">${esc(t('Nothing open'))}</span>`;
   const html = `<div class="project-summary">${card('tasks', t('Crew now'), crewNow)}${card('tasks', t('Last run'), result)}${card('planning', t('Planning'), board)}</div>`;
   draw('#project-summary', html, html);
+}
+
+// An open item's next step, by its status (the same the agent in charge reads, NEXT_STEP in src/charge.mjs).
+const nextStep = status => ({
+  proposed: t('Next: the manager triages it'), triaged: t('Next: you decide'), approved: t('Next: the crew takes it in its turn'), future: t('Next: nothing for now'),
+  todo: t('Next: not started yet'), queued: t('Next: its run starts'), in_progress: t('Next: its run ends with a delivery'), waiting_owner: t('Next: you approve or act'),
+})[status] ?? '';
+
+/**
+ * The project's open matters, the same the agent in charge reads: a summary line first, the detail folded (the board's
+ * open items, the deliveries waiting for you, the runs of the week and the live sessions).
+ */
+function drawProjectOpen(id, info) {
+  const m = info && !info.error ? info.open : null;
+  if (!m) return draw('#project-open', '', '');
+  const stale = m.deliveries.filter(d => d.stale).length;
+  const parts = [
+    t('{count} delivery(ies) waiting for you', { count: m.deliveries.length }) + (stale ? ` (${t('{count} stalled', { count: stale })})` : ''),
+    t('{count} open item(s)', { count: m.plan.length }),
+    t('{count} run(s) in the last 7 days', { count: m.recent.length }),
+    t('{count} live session(s)', { count: m.sessions.length }),
+  ];
+  const row = (main, hints, side = '') => `<div class="charge-request"><div class="charge-request-main"><span class="primary">${main}</span>${hints.filter(Boolean).map(h => `<span class="hint">${h}</span>`).join('')}</div><div class="charge-request-state">${side}</div></div>`;
+  const runLink = (run, label) => `<a href="#log" data-select="${esc(run)}">${esc(label)}</a>`;
+  const group = (title, rows) => (rows.length ? `<div class="label">${esc(title)}</div><div class="charge-requests">${rows.join('')}</div>` : '');
+  const deliveries = m.deliveries.map(d => row(esc(d.title), [
+    esc(d.summary), `${d.pullRequest ? prLink(d.pullRequest) : `<code>${esc(d.branch ?? '')}</code>`} · ${esc(t('waiting for {time}', { time: elapsed(d.ended) }))} · ${runLink(d.run, t('Reports'))}`,
+  ], d.stale ? stateHtml([t('Stalled'), 'warn']) : stateHtml([t('Waiting for you'), 'accent'])));
+  const plan = m.plan.map(i => row(esc(`#${i.id} ${i.title}`), [esc(nextStep(i.status)), esc(i.note)], stateHtml(planState(i.status))));
+  const recent = m.recent.map(r => row(esc(r.title), [esc(r.outcome), `${esc(relative(r.ended))} · ${runLink(r.run, t('Reports'))}`],
+    stateHtml(r.merged ? [t('Merged'), 'ok'] : r.discarded ? [t('Discarded'), 'neutral'] : runState(r.status))));
+  const sessions = m.sessions.map(s => row(esc(s.name), [esc(`${toolName(s.tool)} · ${s.mode === 'app' ? t('in the app') : t('in a window')} · ${relative(s.started)}`)]));
+  const empty = !deliveries.length && !plan.length && !recent.length && !sessions.length;
+  const html = `<div class="open-matters">
+      <div class="label">${esc(t('Open matters'))}</div>
+      <p class="open-matters-line">${esc(empty ? t('Nothing open: no delivery waiting, no open item, no recent run, no live session.') : parts.join(' · '))}</p>
+      ${empty ? '' : `<details class="charge-earlier"><summary>${esc(t('Details'))}</summary>
+        ${group(t('Deliveries waiting for you'), deliveries)}${group(t('Open items on the board'), plan)}${group(t('Runs of the last 7 days'), recent)}${group(t('Live sessions'), sessions)}
+        <p class="hint">${esc(t('The agent in charge reads the same summary at every message.'))}</p></details>`}
+    </div>`;
+  // Kept while open, so a refresh doesn't fold it under the pointer.
+  if ($('#project-open details[open]')) return;
+  draw('#project-open', JSON.stringify([id, m, language()]), html);
 }
 
 function drawProjectFacts(info) {

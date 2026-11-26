@@ -553,7 +553,7 @@ export function deliverSession(id) {
   let charge = null;
   if (session.charge) {
     try {
-      charge = chargeTurn(config, session, { cloneOf: projectClone });
+      charge = chargeTurn(config, session, { cloneOf: projectClone, sessions: listSessions() });
     } catch (error) {
       charge = { error: error.message };
     }

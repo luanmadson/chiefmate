@@ -738,6 +738,9 @@ button.tab { background: transparent; border-top: 0; border-left: 0; border-righ
 .charge-request-state { display: flex; align-items: center; gap: 8px; }
 .charge-earlier { margin-bottom: 10px; }
 .charge-earlier > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.open-matters { padding: 12px 16px; margin-bottom: 20px; background: var(--panel); border: 1px solid var(--line); }
+.open-matters-line { margin: 4px 0 8px; color: var(--strong); }
+.open-matters .charge-earlier { margin-bottom: 0; }
 @media (max-width: 600px) {
   .charge-request { grid-template-columns: minmax(0, 1fr); }
 }
