@@ -48,11 +48,19 @@ function writeIfChanged(dir, value) {
 // Free text written by the owner (notes, instructions, descriptions): it is where personal data ends up, so the
 // redacted copy drops it whole, wherever it is (projects, their crews and leads, the crew, missions, libraries).
 const FREE_TEXT_KEYS = new Set(['about', 'notes', 'agent_notes', 'extra_instructions', 'description', 'part', 'note']);
-const SECRET_KEY = /token|secret|password|passwd|api_?key|authorization|cookie|credential/i;
+// What names a secret: a setting's key, a command's flag ("--api-key") or an address's parameter ("?token=").
+const SECRET = String.raw`token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|auth(?:orization)?(?![a-z])|cookie|credential|(?<![a-z])pin(?![a-z])`;
+const SECRET_KEY = new RegExp(SECRET, 'i');
+const SECRET_FLAG = new RegExp(String.raw`^--?[\w-]*(?:${SECRET})[\w-]*$`, 'i');
 const MARK = { text: '[removed from this copy]', secret: '[secret]', id: '[id]', login: '[login]' };
-// Personal data left in the other strings: e-mails, Brazilian documents, phone numbers and amounts of money.
+// What is left in the other strings: secrets (a login inside an address, the value after a flag, parameter or header
+// named like one, known token formats), then e-mails (not "git@host" nor "package@1.2.3"), Brazilian documents,
+// phone numbers and amounts of money.
 const PATTERNS = [
-  [/[\w.+-]+@[\w-]+(\.[\w-]+)+/g, '[email]'],
+  [/(\/\/)[^\s/@:]+:[^\s/@]+@/g, '$1[secret]@'],
+  [new RegExp(String.raw`((?:(?:${SECRET})[\w-]*(?:=|:\s*)|--?[\w-]*(?:${SECRET})[\w-]*\s+(?!-))['"]?(?:(?:Bearer|Basic)\s+)?)[^\s&#"']+`, 'gi'), '$1[secret]'],
+  [/\b(?:(?:gh[pousr]|github_pat|sk_live|sk_test|rk_live|sbp)_|(?:sk|xai|glpat|xox[abprs])-)[\w-]{16,}|\bAKIA[0-9A-Z]{16}\b|\bAIza[\w-]{35}\b/g, '[secret]'],
+  [/(?<![\w.+-])(?!git@)[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}\b/gi, '[email]'],
   [/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b|\b\d{3}\.\d{3}\.\d{3}-\d{2}\b/g, '[document]'],
   [/(\+\d{2}\s?)?\(?\b\d{2}\)?\s?9?\d{4}-\d{4}\b/g, '[phone]'],
   [/(R\$|US\$|U\$|€|£|\$)\s?\d[\d.,]*|\b\d[\d.]*,\d{2}\b|\b\d[\d.,]*\s?(mil\s)?(reais|real|d[oó]lares|euros)\b/gi, '[amount]'],
@@ -61,27 +69,28 @@ const scrub = text => PATTERNS.reduce((t, [re, mark]) => t.replace(re, mark), te
 
 /**
  * The settings without personal data, for a copy kept in a repository: the free text becomes a marker, secrets
- * (in MCP servers' env and headers, or any key named like a token), remote logins and document ids are masked, and
- * e-mails, documents, phones and amounts left in other strings are replaced. The structure stays, enough to rebuild
- * the installation with the full local copy at hand.
+ * (in MCP servers' env and headers, under any key named like a secret, or after such a flag in a list of arguments),
+ * remote logins and document ids are masked, and what PATTERNS finds in the other strings is replaced. The structure
+ * stays, enough to rebuild the installation with the full local copy at hand.
  */
 export function redactConfig(config) {
-  const walk = (value, key = '', parent = '') => {
-    if (Array.isArray(value)) return value.map(v => walk(v, key, parent));
+  // "mark": what every string or number inside becomes, once a key on the way says it is free text or a secret.
+  const walk = (value, key = '', mark = null) => {
+    mark ??= FREE_TEXT_KEYS.has(key) ? MARK.text : SECRET_KEY.test(key) ? MARK.secret : null;
+    if (Array.isArray(value)) return value.map((v, i) => walk(v, key, mark ?? (i > 0 && SECRET_FLAG.test(value[i - 1]) ? MARK.secret : null)));
     if (value && typeof value === 'object') {
-      // agent_notes: { "<agent>": "<text>" } keeps its keys.
-      if (FREE_TEXT_KEYS.has(key)) return Object.fromEntries(Object.keys(value).map(k => [k, MARK.text]));
-      return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, walk(v, k, key)]));
+      const inner = mark ?? (key === 'env' || key === 'headers' ? MARK.secret : null);
+      return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, walk(v, k, inner)]));
     }
-    if (typeof value !== 'string' || value === '') return value;
-    if (FREE_TEXT_KEYS.has(key)) return MARK.text;
-    if (SECRET_KEY.test(key) || parent === 'env' || parent === 'headers') return MARK.secret;
+    if (value === '' || (typeof value !== 'string' && typeof value !== 'number')) return value;
+    if (mark) return mark;
+    if (typeof value === 'number') return value;
     if (key === 'logins') return MARK.login;
     if (key === 'doc_id') return MARK.id;
     return scrub(value);
   };
   return {
-    backup_note: 'Redacted copy: notes, instructions and personal data are replaced by markers. The full copy stays on the computer, in data/config-backup/chiefmate.json of the installation.',
+    backup_note: 'Redacted copy: notes, instructions, secrets and personal data are replaced by markers. The full copy stays on the computer, in data/config-backup/chiefmate.json of the installation.',
     ...walk(config),
   };
 }

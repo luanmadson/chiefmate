@@ -918,18 +918,21 @@ test("the settings' backup: a redacted copy in backup_dir, the full one only on 
     },
     missions: { weekly: { name: 'Weekly', project: 'demo', description: 'Text', steps: [{ agent: 'writer', part: 'Text' }], review: { agent: 'manager', part: 'Text' }, schedule: { days: ['mon'], time: '09:00' } } },
     crew: { manager: { max_minutes: 60, extra_instructions: 'Private' } },
-    library: { acervo: { name: 'Acervo', repository: 'https://github.com/someone/acervo.git', about: 'Private' } },
-    mcp_servers: { api: { command: 'npx', args: ['tool'], env: { SERVICE_KEY: 'abc123' }, headers: { 'X-Any': 'xyz' } } },
-    remote_access: { enabled: true, logins: ['owner@example.com'], api_token: 'tk-9f8e' },
+    library: { acervo: { name: 'Acervo', repository: 'git@github.com:someone/acervo.git', about: 'Private' } },
+    mcp_servers: {
+      api: { command: 'npx', args: ['tool@1.2.3', '--access-token', 'sbp_0123456789abcdef0123', '--api-key=sk_live_0123456789abcdef'], env: { SERVICE_KEY: 'abc123' }, headers: { 'X-Any': 'xyz' } },
+      web: { type: 'http', url: 'https://me:pa55word@mcp.example.net/mcp?api_key=s3cr3t&lang=en' },
+    },
+    remote_access: { enabled: true, logins: ['owner@example.com'], api_token: 'tk-9f8e', pin: 4321 },
     prompt_builder: { doc_id: '1AbCdEfGh', environment: 'Home' },
     plan_resets: [{ kind: 'full', expires: '2026-12-10T19:00:00-03:00', used: false, note: 'Free reset' }],
-    sessions: { live: { name: 'Live', tool: 'claude', setup: 'Budget of US$ 300; CPF 123.456.789-09' } },
+    sessions: { live: { name: 'Live', tool: 'claude', setup: 'Budget of US$ 300; CPF 123.456.789-09; write to ana@example.com' } },
   };
   const before = JSON.stringify(config);
   const red = redactConfig(config);
   assert.equal(JSON.stringify(config), before, 'the settings given are not changed');
   const text = JSON.stringify(red);
-  for (const word of ['Jane', 'example.com', '1.234,56', '99876', '300', 'abc123', 'xyz', 'tk-9f8e', '1AbCdEfGh', '123.456.789', 'Private', 'Free reset']) {
+  for (const word of ['Jane', 'example.com', '1.234,56', '99876', '300', 'abc123', 'xyz', 'tk-9f8e', '4321', '1AbCdEfGh', '123.456.789', 'Private', 'Free reset', 'sbp_0123', 'sk_live', 'pa55word', 's3cr3t']) {
     assert.ok(!text.includes(word), `${word} left in the redacted copy`);
   }
   const demo = red.projects.demo;
@@ -938,9 +941,13 @@ test("the settings' backup: a redacted copy in backup_dir, the full one only on 
   assert.deepEqual(red.missions.weekly.schedule, { days: ['mon'], time: '09:00' });
   assert.equal(red.missions.weekly.steps[0].agent, 'writer');
   assert.deepEqual([red.mcp_servers.api.command, red.mcp_servers.api.env.SERVICE_KEY, red.mcp_servers.api.headers['X-Any']], ['npx', '[secret]', '[secret]']);
-  assert.deepEqual([red.remote_access.logins, red.remote_access.api_token, red.prompt_builder.doc_id], [['[login]'], '[secret]', '[id]']);
+  // A secret after a flag or in an address goes; a pinned package and a git remote over SSH are not e-mails.
+  assert.deepEqual(red.mcp_servers.api.args, ['tool@1.2.3', '--access-token', '[secret]', '--api-key=[secret]']);
+  assert.equal(red.mcp_servers.web.url, 'https://[secret]@mcp.example.net/mcp?api_key=[secret]&lang=en');
+  assert.equal(red.library.acervo.repository, 'git@github.com:someone/acervo.git');
+  assert.deepEqual([red.remote_access.logins, red.remote_access.api_token, red.remote_access.pin, red.prompt_builder.doc_id], [['[login]'], '[secret]', '[secret]', '[id]']);
   assert.equal(red.plan_resets[0].expires, '2026-12-10T19:00:00-03:00', 'dates are not amounts or phones');
-  assert.equal(red.sessions.live.setup, 'Budget of [amount]; CPF [document]');
+  assert.equal(red.sessions.live.setup, 'Budget of [amount]; CPF [document]; write to [email]');
   assert.deepEqual([red.owner, red.port, red.backup_dir], ['Someone', 4747, config.backup_dir]);
   assert.match(red.backup_note, /Redacted copy/);
 
