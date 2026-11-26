@@ -4,12 +4,12 @@
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE, projectColor, shouldClose, themeManifest, windowName } from '../src/browsers.mjs';
-import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
+import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
 import { riskyCommand } from '../src/guard.mjs';
 import { checkSignals, engage, isLocked, readLockdown, recordSignal, refuseWhileLocked, release, RULES, weigh, WINDOW_MINUTES } from '../src/lockdown.mjs';
 import { startedAt } from '../src/machine.mjs';
@@ -122,6 +122,33 @@ test("a folder's list leaves out what is protected or leads outside", () => {
   assert.deepEqual(top.entries.map(e => e.name), ['readme.md']);
   assert.equal(top.parent, null);
   assert.equal(listFolder(path.join(work, 'img'), roots, { blocked }).parent.toLowerCase(), check(work).real.toLowerCase());
+});
+
+// A new project delivered locally: its own folder (no remote) is its repository and your clone, and its crew's working
+// copy lies inside Chiefmate's own clone, a root of another project.
+test("a local delivery's Files tab opens your folder first, and the working copy is its own root", () => {
+  const host = path.join(temp, 'host');
+  const hostWs = path.join(host, 'workspaces');
+  const folder = path.join(temp, 'Lessons');
+  write(path.join(host, 'README.md'), '# Host');
+  write(path.join(hostWs, 'lessons', 'draft.md'), '# Draft');
+  write(path.join(folder, 'tasks.md'), '# Tasks');
+  const local = {
+    projects: {
+      host: { name: 'Host', repository: 'https://example.com/host.git', local_clone: host },
+      lessons: { name: 'Lessons', repository: folder, local_clone: folder, deliver: 'local', main_branch: 'main' },
+    },
+  };
+  const roots = viewerRoots(local, { workspaces: hostWs });
+  const own = checkPath(path.join(hostWs, 'lessons', 'draft.md'), roots, { blocked: [] }).root;
+  assert.deepEqual([own.kind, own.project], ['workspace', 'lessons']);
+  assert.equal(listFolder(path.join(hostWs, 'lessons'), roots, { blocked: [] }).parent, null);
+  assert.equal(checkPath(path.join(host, 'README.md'), roots, { blocked: [] }).root.project, 'host');
+  const first = rootsFor(local, 'lessons', { workspaces: hostWs })[0];
+  assert.deepEqual([first.kind, first.path.toLowerCase()], ['clone', realpathSync.native(folder).toLowerCase()]);
+  // Delivered as a pull request, the crew's working copy stays first.
+  const pr = { projects: { ...local.projects, lessons: { ...local.projects.lessons, deliver: 'pull_request' } } };
+  assert.equal(rootsFor(pr, 'lessons', { workspaces: hostWs })[0].kind, 'workspace');
 });
 
 test('kinds and headers: nothing runs in the app', () => {

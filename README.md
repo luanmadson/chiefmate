@@ -298,7 +298,7 @@ Below, the tabs (`#project/<id>/<tab>`):
 - **Crew** (`crew`): its crew, with its team lead above it when it has one, each with what it is doing (a click on a member at work opens its panel); and its live sessions, those open with **End** and its profiles with **Open**.
 - **Tasks and history** (`tasks`): its runs going on and in the queue, each with a button to cancel it, the form for a new task, and its recent history: the latest runs, with their result, the pull request and a **Reports** button that opens each step's report in the Log.
 - **Planning** (`planning`): its open items on the planning board, with a button that opens Planning filtered by the project.
-- **Files** (`files`): the project's folders, to browse and open in the viewer (see "Viewing files"): the crew's working copy, your clone, the libraries and the extra folders of `viewer`.
+- **Files** (`files`): the project's folders, to browse and open in the viewer (see "Viewing files"): the crew's working copy, your clone, the libraries and the extra folders of `viewer`. With local delivery (`"deliver": "local"`), your clone comes first, since the work lands there.
 - **Context** (`context`): see below.
 - **Builder** (`builder`, when `prompt_builder` is set): the prompt builder with the project chosen (see "The prompt builder in the app").
 

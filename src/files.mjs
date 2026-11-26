@@ -139,6 +139,12 @@ class Refused extends Error {
   }
 }
 
+// The innermost root holding "p": a project's working copy (workspaces/<id>) inside Chiefmate's own clone is its own root.
+const innermost = (roots, p, ...fields) => roots
+  .map(r => ({ r, at: Math.max(...fields.map(f => (within(p, r[f]) ? r[f].length : -1))) }))
+  .filter(x => x.at >= 0)
+  .sort((a, b) => b.at - a.at)[0]?.r;
+
 const outside = () => new Refused(t('This file is outside the folders the viewer may open.'));
 const guarded = () => new Refused(t('This file is protected: the viewer never opens it.'));
 
@@ -157,12 +163,12 @@ export function checkPath(input, roots, { blocked = blockedPlaces() } = {}) {
   const raw = String(input ?? '');
   if (!raw || raw.includes('\0') || /^[\\/]{2}/.test(raw) || !path.isAbsolute(raw) || (windows && raw.replace(/^[a-z]:/i, '').includes(':'))) throw outside();
   const lexical = path.resolve(raw);
-  const near = roots.find(r => within(lexical, r.dir) || within(lexical, r.real));
+  const near = innermost(roots, lexical, 'dir', 'real');
   if (!near) throw outside();
   if (protectedPath(lexical, within(lexical, near.dir) ? near.dir : near.real, blocked)) throw guarded();
   const real = realOf(lexical);
   if (!real) throw new Refused(t('File not found.'), 404);
-  const root = roots.find(r => within(real, r.real));
+  const root = innermost(roots, real, 'real');
   if (!root) throw outside();
   if (protectedPath(real, root.real, blocked)) throw guarded();
   return { real, root };
@@ -446,8 +452,13 @@ export async function viewFile(what, params, { config, readRun, dest = '' }) {
   throw new Refused('not found', 404);
 }
 
-/** The roots for a project's folder browser: the project's own first, then the libraries and the extra folders. */
-export function rootsFor(config, project) {
-  const roots = viewerRoots(config).filter(r => !r.project || r.project === project);
-  return roots.sort((a, b) => Number(b.project === project) - Number(a.project === project)).map(r => ({ path: r.real, kind: r.kind, label: r.label, project: r.project }));
+/**
+ * The roots for a project's folder browser: the project's own first, then the libraries and the extra folders. With
+ * local delivery, your clone comes first: the work lands there, and the crew's working copy is only a scratch copy.
+ */
+export function rootsFor(config, project, { workspaces = WORKSPACES } = {}) {
+  const roots = viewerRoots(config, { workspaces }).filter(r => !r.project || r.project === project);
+  const local = config?.projects?.[project]?.deliver === 'local';
+  const rank = r => (r.project !== project ? 2 : local && r.kind === 'clone' ? 0 : 1);
+  return roots.sort((a, b) => rank(a) - rank(b)).map(r => ({ path: r.real, kind: r.kind, label: r.label, project: r.project }));
 }
