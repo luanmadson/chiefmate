@@ -4,8 +4,9 @@
 // carries the project's memory and context, and only this project's. The agent in charge talks, answers and plans,
 // but changes nothing: it reads only (no shell, no editing). When there is something to do, it ends its message with a
 // ~~~manager-request block; Chiefmate records the request (data/manager/owner-requests.json), shows it on the
-// project's page and tells the manager ("owner_request" news). Each answer goes back to the conversation, and the
-// agent reads its requests' state in every turn.
+// project's page and tells the manager ("owner_request" news). The manager answers with "cli.mjs request <id>
+// approve|hold|ask-owner|forward|in-progress|reject" (answerRequest). Each answer goes back to the conversation, and
+// the agent reads its requests' state in every turn's input.
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { denyRules, stepAccess } from './access.mjs';
@@ -348,7 +349,7 @@ export function chargeTurn(config, session, { cloneOf = () => null, sessions = [
   };
 }
 
-/** The instructions of the agent in charge: its role, project, memory and open matters. */
+/** The instructions of the agent in charge: its own (not the manager's work), its role here, the project, the memory and the open matters. */
 export function chargeSystem(config, projectId, who = inCharge(config, projectId), { sessions = [] } = {}) {
   const owner = config.owner || 'the owner';
   const project = config.projects[projectId];
@@ -361,7 +362,7 @@ export function chargeSystem(config, projectId, who = inCharge(config, projectId
 ${owner} talks to you directly from the project's page in the Chiefmate app. You are ${member.name ?? member.id}, ${who.lead ? 'the team lead' : 'the main member of the crew'} of the project ${name}, and the one in charge of it in this conversation. The instructions above describe your usual work in the crew; here you talk, answer questions and plan with ${owner}, in ${languageName(config.language || 'en')}, and you carry out nothing yourself. Ignore what they say about editing, committing, queueing work or Chiefmate's command line.
 - You only read: this project's files (the current folder), its documentation and the web. You have no shell and cannot edit, commit, push or publish anything; never ask for it, and don't try another way.
 - You see only this project. Other projects' files are out of reach: don't look for them.
-- When there is something to do (a change, a fix, research, a text), don't do it: agree on it with ${owner}, then send a request to the manager (Chiefmate). Say in one line that you are sending it and what happens next. Send it by ending your message with this block (one request per message):
+- When there is something to do (a change, a fix, research, a text), don't do it: agree on it with ${owner}, then send a request to the manager (Chiefmate), who authorizes it, forwards it to where it belongs, links it to work already going on, asks to wait, or takes it to ${owner} as a decision. Say in one line that you are sending it and what happens next. Send it by ending your message with this block (one request per message):
 ~~~manager-request
 {"asked": "what ${owner} asked, in their words", "plan": "what you intend to do: who in the crew, where (files, pages) and how", "size": "S | M | L", "risk": "low | medium | high", "urgency": "now or empty"}
 ~~~

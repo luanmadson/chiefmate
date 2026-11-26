@@ -371,7 +371,7 @@ async function requestCommand() {
   const { readRequests } = await import('./charge.mjs');
   const [first = 'list', second] = words();
   const destination = r => r.run ? `run ${r.run}` : r.targetProject ? `project ${r.targetProject}` : '';
-  const line = r => `#${String(r.id).padEnd(3)} ${r.status.padEnd(8)} ${r.project}: ${r.plan.replace(/\s+/g, ' ').slice(0, 100)}  (${r.size}, risk ${r.risk}${r.urgency ? ', now' : ''}${r.level ? `, level ${r.level}` : ''}${destination(r) ? `, ${destination(r)}` : ''})`;
+  const line = r => `#${String(r.id).padEnd(3)} ${r.status.padEnd(11)} ${r.project}: ${r.plan.replace(/\s+/g, ' ').slice(0, 100)}  (${r.size}, risk ${r.risk}${r.urgency ? ', now' : ''}${r.level ? `, level ${r.level}` : ''}${destination(r) ? `, ${destination(r)}` : ''})`;
   if (first === 'list') {
     const all = readRequests().filter(r => (!option('--project') || r.project === option('--project')) && (has('--all') || ['pending', 'waiting', 'owner'].includes(r.status)));
     if (!all.length) console.log(has('--all') ? 'No requests.' : 'No request waiting for an answer.');

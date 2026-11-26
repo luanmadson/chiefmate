@@ -503,21 +503,34 @@ try {
     }
     expect(decisionRefused, "a step of a run made the owner's decision on a radar idea");
 
-    // The CLI sends the destination options to the running API. Hold the queue while testing the approval.
+    // The CLI sends the destination options to the running API. The queue is held while the approval is tested, and
+    // the run it queues (in a real project) is canceled: a later part of this test wakes the queue up.
     const charge = await import('../src/charge.mjs');
-    const { readRun, readState, saveState } = await import('../src/store.mjs');
+    const { readRun, readState, saveRun, saveState } = await import('../src/store.mjs');
     const target = state.projects.find(p => state.charge?.[p.id])?.id;
     if (target) {
       const previous = readState();
+      let queuedRun = null;
       try {
         const held = await post('/api/power', { action: 'standby' });
-        if (!held.ok) throw Error('Could not hold the smoke queue');
+        if (!held.ok) throw new Error('Could not hold the smoke queue');
         const answer = args => cli(['request', ...args], { CHIEFMATE_RUN: '' });
-        const source = { manager_updates: false, projects: { 'smoke-source': { name: 'Smoke source' } } };        const request = plan => charge.addRequest({ project: 'smoke-source', asked: plan, plan }, source);        const approve = request('Approve in another project');        answer([String(approve.id), 'approve', '--project', target, '--title', 'Smoke approval', '--summary', 'Made up.']);
-        const saved = charge.readRequests().find(r => r.id === approve.id);        expect(saved?.project === 'smoke-source' && saved.status === 'approved' && readRun(saved.run)?.project === target,          'request approve --project did not queue in the destination project');        const forward = request('Forward to the project');        const progress = request('Already queued');        const forwarded = answer([String(forward.id), 'forward', '--project', target, '--note', 'Belongs to this project.']);
+        const source = { manager_updates: false, projects: { 'smoke-source': { name: 'Smoke source' } } };
+        const request = plan => charge.addRequest({ project: 'smoke-source', asked: plan, plan }, source);
+        const approve = request('Approve in another project');
+        answer([String(approve.id), 'approve', '--project', target, '--title', 'Smoke approval', '--summary', 'Made up.']);
+        const saved = charge.readRequests().find(r => r.id === approve.id);
+        queuedRun = saved?.run ?? null;
+        expect(saved?.project === 'smoke-source' && saved.status === 'approved' && readRun(saved.run)?.project === target,
+          'request approve --project did not queue in the destination project');
+        const forward = request('Forward to the project');
+        const progress = request('Already queued');
+        const forwarded = answer([String(forward.id), 'forward', '--project', target, '--note', 'Belongs to this project.']);
         const linked = answer([String(progress.id), 'in-progress', '--run', saved.run, '--note', 'Covered by the queued run.']);
         expect(forwarded.includes(`forwarded → project ${target}`) && linked.includes(`in-progress → run ${saved.run}`), 'the CLI did not send or show the request destinations');
       } finally {
+        const left = queuedRun && readRun(queuedRun);
+        if (left) saveRun({ ...left, status: 'canceled', ended: new Date().toISOString() });
         saveState(previous);
       }
     }
@@ -2609,7 +2622,7 @@ try {
   const { decide } = await import(src('decisions.mjs'));
   const { rulePath } = await import(src('access.mjs'));
   const { NEWS_EVENTS } = await import(src('news.mjs'));
-  const { readRun, listRuns } = await import(src('store.mjs'));
+  const { readRun, listRuns, saveRun } = await import(src('store.mjs'));
   const { WORKSPACES } = await import(src('util.mjs'));
   const { t } = await import(src('i18n.mjs'));
   const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-charge-'));
@@ -2783,6 +2796,8 @@ try {
   expect(requestContext().includes('forwarded; the manager: Belongs to Alpha.; project alpha [open project](#project/alpha)')
     && requestContext().includes(`in-progress; the manager: Already covered.; run "Smoke request" [open run](#log/${run.id}) (queued)`)
     && requestContext('alpha').endsWith('None yet.'), 'the request context did not show the new outcomes and links, or leaked across projects');
+  // The runs queued here never start: a later part of this test wakes the queue up.
+  for (const queued of [askRun, run]) saveRun({ ...readRun(queued.id), status: 'canceled', ended: new Date().toISOString() });
   rmSync(temp, { recursive: true, force: true, maxRetries: 5 });
 } catch (error) {
   failures.push(`agent in charge checks: ${error.message}`);

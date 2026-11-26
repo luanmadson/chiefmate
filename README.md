@@ -358,10 +358,10 @@ Each project has an agent in charge: its team lead when it has one (`lead`), els
   - **approve** queues the work linked to the request. Use `--project <id>` to queue it in a different project. The destination's team lead gets an `ask`; without a lead, its agent in charge gets a task with the manager's review;
   - **hold** leaves it waiting, with the reason;
   - **ask-owner** brings it to you as a card in Decisions, with **Authorize**, **Wait** and **Refuse**: your click decides the request at once;
-  - **forward** links the request to its destination (`--project <id>` or `--run <id>`);
-  - **in-progress** links the request to an active run that already covers it (`--run <id>`);
-  - **reject** refuses it and says why.
-- **Where you see it.** Each answer comes back to the original conversation with a colored outcome badge, the manager's note when provided, and a direct link when there is a destination. The agent reads the latest status, note and link with every message, along with the linked run's current state. The **In charge** (or **Team lead**) tab also lists the requests, with final answers folded under **Answered**.
+  - **forward** links the request to where it belongs, a project (`--project <id>`) or a run (`--run <id>`, a delivery already made included), without queueing anything;
+  - **in-progress** links the request to a run that already covers it, queued, going on or paused (`--run <id>`);
+  - **reject** refuses it and says why. A request for another project, or one already covered, is forwarded or linked, never refused.
+- **Where you see it.** Each answer comes back to the original conversation with the outcome's colored badge, the note and a link to its run or project. The agent reads its requests' latest state with every message, in the message itself (so a resumed conversation gets it too): the outcome, the manager's note and the linked run's state. The **In charge** (or **Team lead**) tab lists the requests with their state: **With the manager**, **Authorized** (with its run and the run's state; **Done** once merged), **Waiting**, **With you** (with **Decide**, which opens Decisions), **Forwarded**, **Already in progress** and **Refused**; the answered ones fold under "Answered".
 - **What still holds.** The manager answers within its usual rules (the account's usage, the size of what it queues, your authorization for what is big or risky), and nothing goes live without your approval.
 
 The requests are kept in `data/manager/owner-requests.json`; the conversation, as any live session's, in `data/sessions/`.

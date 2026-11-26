@@ -2511,7 +2511,7 @@ function drawProjectActions(id, info) {
 function requestState(r) {
   if (r.status === 'approved') return r.merged ? [t('Done'), 'ok'] : [t('Authorized'), 'ok'];
   return {
-    pending: [t('With the manager'), 'info'], waiting: [t('Waiting'), 'warn'], owner: [t('With you'), 'accent'], rejected: [t('Refused'), 'error'],
+    pending: [t('With the manager'), 'info'], waiting: [t('Waiting'), 'warn'], owner: [t('With you'), 'accent'], rejected: [t('Refused'), 'neutral'],
     forwarded: [t('Forwarded'), 'info'], 'in-progress': [t('Already in progress'), 'ok'],
   }[r.status] ?? [r.status, 'neutral'];
 }
