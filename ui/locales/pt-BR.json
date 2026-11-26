@@ -1716,5 +1716,7 @@
   "No change recorded yet.": "Nenhuma mudança registrada ainda.",
   "Spending mode: {mode}.": "Modo de gasto: {mode}.",
   "Waiting: the plan's week is used up ({used}); it starts again {when}.": "Aguardando: a semana do plano se esgotou ({used}); recomeça em {when}.",
-  "Stop at this share of the 5-hour window": "Parar nesta fração da janela de 5 horas"
+  "Stop at this share of the 5-hour window": "Parar nesta fração da janela de 5 horas",
+  "Now: stopped during the quiet hours ({hours}).": "Agora: parado no horário de silêncio ({hours}).",
+  "On, working": "Ligado, trabalhando"
 }

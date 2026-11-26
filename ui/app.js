@@ -2058,6 +2058,7 @@ function autopilotNowLine(n) {
     : n.reason === 'limits' ? t('Now: stopped, because the queue pauses every run at {limit} of {window} (Limits, above), and it is at {used}.', { limit: percent(n.limit), used: percent(n.used), window: n.which === '5h' ? t('the 5-hour window') : t("the plan's week") })
     : n.reason === 'nothing' ? t('Now: stopped, because no item is triaged "do now" or approved on the board.')
     : n.reason === 'news_off' ? t('Now: stopped, because the "empty queue" news is off in manager_updates.')
+    : n.reason === 'quiet' ? t('Now: stopped during the quiet hours ({hours}).', { hours: n.quiet })
     : t('Now: stopped, because {why}', { why: autopilotWait(n).replace(/^[^:]+:\s*/, '') });
   return why + going;
 }
@@ -2079,9 +2080,12 @@ function autopilotWho(by) {
   return by ?? '';
 }
 
+// a setting missing from the settings shows its default (src/autopilot.mjs, autopilotSettings)
+const AUTOPILOT_DEFAULTS = { enabled: false, week_pace: 1, stop_at_5h_window: 0.85, daily_report: '08:00' };
 const autopilotValue = (key, v) => {
-  if (v === null || v === undefined || v === '' || v === false) return key === 'enabled' ? t('off') : t('none');
+  if (v === null || v === undefined) v = AUTOPILOT_DEFAULTS[key] ?? '';
   if (key === 'enabled') return v ? t('on') : t('off');
+  if (v === '' || v === false) return t('none');
   if (key === 'week_pace') return v === 'all' ? t('Spend all') : v === 0.9 ? t('Save usage') : v === 1 ? t('Normal') : percent(Number(v));
   if (key === 'stop_at_5h_window') return percent(Number(v));
   return String(v);
@@ -2097,7 +2101,7 @@ function autopilotItemState(status) {
 function drawAutopilot() {
   const a = state.autopilot;
   if (!a) return;
-  const now = !a.enabled ? [t('Off'), 'neutral'] : a.now?.state === 'stopped' ? [t('On, waiting'), 'warn'] : [t('On, ready'), 'ok'];
+  const now = !a.enabled ? [t('Off'), 'neutral'] : a.now?.state === 'stopped' ? [t('On, waiting'), 'warn'] : a.now?.state === 'working' ? [t('On, working'), 'ok'] : [t('On, ready'), 'ok'];
   const line = !a.enabled
     ? t('Nothing goes on the queue without you. Approved items still start by themselves, one per project at a time.')
     : t('When the queue of a project empties, the manager puts its next item triaged "do now" on the queue.');

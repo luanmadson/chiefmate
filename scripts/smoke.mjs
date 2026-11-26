@@ -767,6 +767,12 @@ try {
   const base = { projects: { Auto: {} }, autopilot: { enabled: true } };
   expect(nowOf({ ...base, autopilot: {} }).reason === 'off' && nowOf(base).reason === 'nothing' && nowOf(base, {}, [{ id: 'r', project: 'Auto', status: 'running' }]).state === 'working'
     && nowOf({ ...base, autopilot: { enabled: true, week_pace: 'all' }, limits: { pause_at_plan_week: 0.9 } }, week(0.92, 3.5)).reason === 'limits', `the autopilot's "Now" line is wrong: ${JSON.stringify(nowOf(base))}`);
+  // With the "idle" news off, only the items triaged "now" wait (approved ones start by themselves); the queue's limits
+  // count only with a known reset ahead, as the queue reads them.
+  const newsOff = { ...base, manager_updates: false };
+  expect(nowOf(newsOff, {}, [], [{ id: 1, project: 'Auto', status: 'triaged', recommend: 'now', agent: 'someone' }]).reason === 'news_off'
+    && nowOf(newsOff, {}, [], [{ id: 2, project: 'Auto', status: 'approved' }]).state === 'ready'
+    && nowOf({ ...base, limits: { pause_at_5h_window: 0.5 } }, { five_hour: { used: 0.6 } }).reason === 'nothing', `the autopilot's "Now" line blamed the news or the queue's limits wrongly`);
   const config = { owner: 'Owner', projects: { Auto: {} }, autopilot: { enabled: true, daily_report: false } };
   const item = planning.proposeItem({ project: 'Auto', title: 'Smoke autopilot item', agent: 'someone', by: 'manager' });
   planning.triageItem(item.id, { recommend: 'now' });

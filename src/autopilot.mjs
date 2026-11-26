@@ -176,15 +176,18 @@ export function autopilotNow(settings, { config = loadConfig(), usage = readUsag
   const running = runs.filter(r => r.status === 'running').length;
   const blocked = blockInfo(settings, usage, at);
   if (blocked) return { state: 'stopped', running, ...blocked };
+  // the queue's own limits, read as checkLimits in src/runs.mjs reads them (only with a known reset ahead)
   const limits = config.limits ?? {};
   for (const [which, w, ceiling] of [['5h', usage.five_hour, limits.pause_at_5h_window], ['week', usage.seven_day, limits.pause_at_plan_week]]) {
-    if (ceiling && current(w) && w.used >= ceiling) return { state: 'stopped', running, reason: 'limits', which, used: w.used, limit: ceiling };
+    if (ceiling && current(w) && w.resets && w.used >= ceiling) return { state: 'stopped', running, reason: 'limits', which, used: w.used, limit: ceiling };
   }
   if (running) return { state: 'working', running };
-  const ready = Object.keys(config.projects ?? {}).some(p => candidates(p, items).length || items.some(i => open(i) && i.project === p && i.status === 'approved'));
-  if (!ready) return { state: 'stopped', running, reason: 'nothing' };
+  const projects = Object.keys(config.projects ?? {});
+  // approved items start by themselves; the ones triaged "now" need the manager, woken by the "idle" news
+  const approved = items.some(i => open(i) && i.status === 'approved' && projects.includes(i.project));
+  if (!approved && !projects.some(p => candidates(p, items).length)) return { state: 'stopped', running, reason: 'nothing' };
   const news = newsSettings(config);
-  if (!(news.enabled && news.events.has('idle'))) return { state: 'stopped', running, reason: 'news_off' };
+  if (!approved && !(news.enabled && news.events.has('idle'))) return { state: 'stopped', running, reason: 'news_off' };
   return { state: 'ready', running };
 }
 
@@ -284,8 +287,12 @@ export async function checkAutopilot({ config = loadConfig(), usage = readUsage(
     }
   }
   done.report = dailyReport(settings, a, at, config);
-  // read again: others may have saved the state meanwhile (startApproved is awaited)
-  if (JSON.stringify(a) !== before) saveState({ ...readState(), autopilot: a });
+  // read again: others may have saved the state meanwhile (startApproved is awaited); the log and the changes are
+  // written only by autopilotApprove and recordChange, so theirs are kept
+  if (JSON.stringify(a) !== before) {
+    const fresh = readState();
+    saveState({ ...fresh, autopilot: { ...a, log: fresh.autopilot?.log ?? a.log, changes: fresh.autopilot?.changes ?? a.changes } });
+  }
   return done;
 }
 
