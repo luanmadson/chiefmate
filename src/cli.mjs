@@ -346,7 +346,7 @@ async function chatCommand() {
 async function requestCommand() {
   const { readRequests } = await import('./charge.mjs');
   const [first = 'list', second] = words();
-  const line = r => `#${String(r.id).padEnd(3)} ${r.status.padEnd(8)} ${r.project}: ${r.plan.replace(/\s+/g, ' ').slice(0, 100)}  (${r.size}, risk ${r.risk}${r.urgency ? ', now' : ''}${r.run ? `, run ${r.run}` : ''})`;
+  const line = r => `#${String(r.id).padEnd(3)} ${r.status.padEnd(8)} ${r.project}: ${r.plan.replace(/\s+/g, ' ').slice(0, 100)}  (${r.size}, risk ${r.risk}${r.urgency ? ', now' : ''}${r.level ? `, level ${r.level}` : ''}${r.run ? `, run ${r.run}` : ''})`;
   if (first === 'list') {
     const all = readRequests().filter(r => (!option('--project') || r.project === option('--project')) && (has('--all') || ['pending', 'waiting', 'owner'].includes(r.status)));
     if (!all.length) console.log(has('--all') ? 'No requests.' : 'No request waiting for an answer.');
@@ -361,7 +361,7 @@ async function requestCommand() {
     console.log(`  Asked (by the owner, ${formatDateTime(r.at)}): ${r.asked}
   Plan (${r.memberName ?? r.member ?? 'the agent in charge'}): ${r.plan}`);
     for (const h of r.history ?? []) console.log(`  ${formatDateTime(h.at)} ${h.by}: ${h.action}${h.note ? ` (${h.note})` : ''}`);
-    if (!second && first !== 'show') console.log(`Answer with node src/cli.mjs request ${r.id} approve|hold|ask-owner|reject --note "<why>".`);
+    if (!second && first !== 'show') console.log(`Answer with node src/cli.mjs request ${r.id} approve|hold|ask-owner|reject --note "<why>" --level 1|2|3.`);
     return;
   }
   // Only the manager (or the owner) answers: a step of a run never does.

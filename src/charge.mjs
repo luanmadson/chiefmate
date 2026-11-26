@@ -16,7 +16,7 @@ import { formatDateTime, t } from './i18n.mjs';
 import { LEAD, readMemory, taskTakers } from './leads.mjs';
 import { reportEvent } from './news.mjs';
 import { readRun } from './store.mjs';
-import { clip, DATA, ensureDir, languageName, now, readJson, WORKSPACES, writeJson } from './util.mjs';
+import { clip, DATA, ensureDir, languageName, now, parseLevel, readJson, WORKSPACES, writeJson } from './util.mjs';
 
 /** The profile id of a project's conversation with its agent in charge. */
 export const chargeProfileId = projectId => `project-${projectId}-charge`;
@@ -119,7 +119,7 @@ export function addRequest({ project, session = null, asked, plan, size, risk, u
   };
   saveRequests([...list, r]);
   const owner = config.owner || 'the owner';
-  reportEvent('owner_request', `${r.memberName ?? 'The agent in charge'}, in charge of ${config.projects[project].name ?? project}, sends you request #${r.id} from its conversation with ${owner}. ${owner} asked: "${clip(r.asked, 300)}". It intends to: ${clip(r.plan, 500)}. Size ${sizeWords[r.size]}, risk ${r.risk}${r.urgency ? `; ${owner} said it can be done now` : ''}. Answer it with node src/cli.mjs request ${r.id} approve|hold|ask-owner|reject --note "<why, one line>".`, { config });
+  reportEvent('owner_request', `${r.memberName ?? 'The agent in charge'}, in charge of ${config.projects[project].name ?? project}, sends you request #${r.id} from its conversation with ${owner}. ${owner} asked: "${clip(r.asked, 300)}". It intends to: ${clip(r.plan, 500)}. Size ${sizeWords[r.size]}, risk ${r.risk}${r.urgency ? `; ${owner} said it can be done now` : ''}. Answer it with node src/cli.mjs request ${r.id} approve|hold|ask-owner|reject --note "<why, one line>" --level 1|2|3.`, { config });
   return r;
 }
 
@@ -137,9 +137,10 @@ const describe = r => `request #${r.id} of ${r.project} ("${clip(r.plan, 120)}")
 /**
  * The manager's answer (or the owner's, from the card of an "ask-owner"): approve | hold | ask-owner | reject, with a
  * note (required to hold or reject). approve queues the work, linked to the request (the caller nudges the queue); ask-owner adds a question card.
+ * The level (1 to 3) is the approval level its decision card shows; kept on the request, so the owner's "Authorize" passes it on.
  * The answer goes back to the conversation with the agent in charge. Returns { request, run, question }.
  */
-export async function answerRequest(id, action, { note = '', by = 'manager', recommend = null, title = null, summary = null } = {}, config = loadConfig()) {
+export async function answerRequest(id, action, { note = '', by = 'manager', recommend = null, title = null, summary = null, level = null } = {}, config = loadConfig()) {
   const status = ACTIONS[action];
   if (!status) throw new Error(t('Answer with approve, hold, ask-owner or reject.'));
   const list = readRequests();
@@ -149,6 +150,7 @@ export async function answerRequest(id, action, { note = '', by = 'manager', rec
   // Taken to the owner: their card decides it, not another answer of the manager's.
   if (r.status === 'owner' && by !== 'owner') throw new Error(t('Request {id} waits for the owner in Decisions.', { id: r.id }));
   const why = clip(note, 600);
+  const approval = level == null || level === '' ? r.level ?? null : parseLevel(level);
   if (!why && by === 'manager' && ['hold', 'reject', 'ask-owner'].includes(action)) throw new Error(t('Say why, with --note "<one line>".'));
   const owner = config.owner || 'the owner';
   let run = null;
@@ -163,8 +165,8 @@ export async function answerRequest(id, action, { note = '', by = 'manager', rec
     ].join('\n\n');
     const { createRun } = await import('./runs.mjs');
     run = createRun(who.lead
-      ? { kind: 'ask', projectId: r.project, instruction, origin: 'owner-request', request: r.id, title, summary }
-      : { kind: 'task', projectId: r.project, agent: who.member.id, instruction, review: true, origin: 'owner-request', request: r.id, title, summary });
+      ? { kind: 'ask', projectId: r.project, instruction, origin: 'owner-request', request: r.id, title, summary, level: approval }
+      : { kind: 'task', projectId: r.project, agent: who.member.id, instruction, review: true, origin: 'owner-request', request: r.id, title, summary, level: approval });
     r.run = run.id;
   } else if (action === 'ask-owner') {
     const { addQuestion } = await import('./decisions.mjs');
@@ -176,11 +178,11 @@ export async function answerRequest(id, action, { note = '', by = 'manager', rec
         `${sizeText()[r.size]}, ${riskText()[r.risk].toLowerCase()}.`,
         ...(why ? [t("The manager's note: {note}", { note: why })] : []),
       ].join('\n'),
-      options: [t('Authorize'), t('Wait'), t('Refuse')], recommend: choice, project: r.project, request: r.id,
+      options: [t('Authorize'), t('Wait'), t('Refuse')], recommend: choice, project: r.project, level: approval, request: r.id,
     }, config);
     r.question = question.id;
   }
-  Object.assign(r, { status, note: why, answered_at: now(), by });
+  Object.assign(r, { status, note: why, answered_at: now(), by, level: approval });
   r.history = [...(r.history ?? []), { at: now(), action, by, note: why }];
   saveRequests(list);
   if (r.session) {
@@ -216,7 +218,7 @@ export function requestsLine(config = loadConfig()) {
   const open = readRequests().filter(r => ['pending', 'waiting'].includes(r.status));
   if (!open.length) return '';
   const line = r => `#${r.id} (${r.project}, ${r.status === 'pending' ? 'waiting for you' : `on hold: ${clip(r.note, 80)}`}, ${sizeWords[r.size]}, risk ${r.risk}${r.urgency ? ', the owner said "now"' : ''}): ${clip(r.plan, 140)}`;
-  return `Requests from the agents in charge of the projects, sent from their conversations with ${config.owner || 'the owner'} (answer with node src/cli.mjs request <id> approve|hold|ask-owner|reject --note "..."; node src/cli.mjs request show <id> for the whole request): ${open.slice(0, 8).map(line).join('; ')}.`;
+  return `Requests from the agents in charge of the projects, sent from their conversations with ${config.owner || 'the owner'} (answer with node src/cli.mjs request <id> approve|hold|ask-owner|reject --note "..." --level 1|2|3; node src/cli.mjs request show <id> for the whole request): ${open.slice(0, 8).map(line).join('; ')}.`;
 }
 
 // ---------- The conversation's turns ----------
