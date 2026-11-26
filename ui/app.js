@@ -3197,7 +3197,7 @@ async function openBuilder(project, { reload = false } = {}) {
     const data = await api(`/api/prompt-builder?project=${encodeURIComponent(project)}`);
     if (builderTarget() !== project) return;
     const keep = reload && builder.project === project;
-    // "Work live" on the project's page asks for its usual blocks, not the last choice.
+    // "Prompt builder, then a live session" on the project's page asks for its usual blocks, not the last choice.
     const usual = builder.usual === project;
     builder.usual = null;
     Object.assign(builder, { project, data, result: null, edited: false, editing: false });
@@ -3262,7 +3262,7 @@ function workChoice(runs) {
   return new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue), { once: true }));
 }
 
-/** "Work live": the project's prompt builder with its usual blocks (its block, the environment and its modules). */
+/** "Prompt builder, then a live session" (the project's More): its prompt builder with its usual blocks (its block, the environment and its modules). */
 async function workLive(id) {
   const hash = `#project/${encodeURIComponent(id)}/builder`;
   if (builder.project === id && builder.data?.document) {

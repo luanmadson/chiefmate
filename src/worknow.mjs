@@ -145,7 +145,7 @@ Folder: ${docs.dir}${docs.copy ? " (Chiefmate's read-only copy of the library: a
   if (memory) parts.push(`## The project's memory (kept by its team lead)\n${clip(memory, 6000)}`);
   // The board, the deliveries waiting, the week's runs and the live sessions: the same summary as the agent in charge's.
   const all = listRuns();
-  parts.push(mattersText(openMatters(config, projectId, { runs: all, sessions }), owner, { when: "as this session opens" }));
+  parts.push(mattersText(openMatters(config, projectId, { runs: all, sessions }), owner, { when: 'as this session opens' }));
   const runs = all.filter(r => r.project === projectId);
   const open = [];
   for (const r of readRequests().filter(x => x.project === projectId && ['pending', 'waiting', 'owner'].includes(x.status)).slice(-6)) {
