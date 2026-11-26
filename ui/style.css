@@ -186,6 +186,20 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .model { display: inline-block; font: 11px/1.6 var(--mono); color: var(--accent); border: 1px solid var(--line-strong); padding: 0 6px; white-space: nowrap; }
 /* The tool a member runs on: Claude Code in the quiet line color, Codex and Grok outlined in brass. */
+/* Each agent's effort: a square mark whose color climbs with the level, and a thin picker beside it. */
+.effort-mark { display: inline-block; font: 11px/1.6 var(--mono); color: var(--muted); border: 1px dashed var(--line-strong); padding: 0 6px; white-space: nowrap; text-transform: uppercase; letter-spacing: .04em; }
+.effort-mark[data-effort="low"] { color: var(--faint); border: 1px solid var(--line-strong); }
+.effort-mark[data-effort="medium"] { color: var(--info); border: 1px solid var(--info); }
+.effort-mark[data-effort="high"] { color: var(--ok); border: 1px solid var(--ok); }
+.effort-mark[data-effort="xhigh"] { color: var(--accent); border: 1px solid var(--accent); }
+.effort-mark[data-effort="max"] { color: var(--on-accent); background: var(--accent); border: 1px solid var(--accent); }
+.effort-pick { display: inline-flex; align-items: center; gap: 6px; }
+.effort-select { width: auto; min-width: 0; margin: 0; padding: 1px 4px; font: 11px/1.4 var(--mono); background: var(--panel); color: var(--muted); border: 1px solid var(--line); }
+.team-side { display: inline-flex; align-items: center; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+.team-member .name .model { margin-left: 6px; vertical-align: 1px; }
+.effort-history { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 10px; }
+.effort-history summary { cursor: pointer; color: var(--muted); }
+.effort-change { padding: 4px 0; border-top: 1px solid var(--line); font-size: 13px; }
 .marks { display: inline-flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
 .tool-mark { display: inline-block; font: 11px/1.6 var(--mono); color: var(--muted); border: 1px solid var(--line); padding: 0 6px; white-space: nowrap; text-transform: uppercase; letter-spacing: .04em; }
 .tool-mark[data-tool="codex"], .tool-mark[data-tool="grok"] { color: var(--accent); border-color: var(--accent); }
@@ -1174,7 +1188,7 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   .action-big { padding: 8px 12px; min-height: 44px; justify-content: center; }
 
   /* Fields in the app's own look (Safari draws a gray bubble otherwise); tabs scroll without a bar */
-  select, select.inline-select { appearance: none; -webkit-appearance: none; padding-right: 30px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238a93a0'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; text-overflow: ellipsis; }
+  select, select.inline-select, select.effort-select { appearance: none; -webkit-appearance: none; padding-right: 30px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238a93a0'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; text-overflow: ellipsis; }
   select.inline-select { min-width: 0; font-size: 14px; }
   .tabs { scrollbar-width: none; }
   .tabs::-webkit-scrollbar { display: none; }

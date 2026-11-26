@@ -1,6 +1,6 @@
 // Unit tests with no dependency (node:test): the file viewer's checks of paths, its choice among a project's copies and
 // its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation;
-// the emergency lockdown and its detection.
+// the emergency lockdown and its detection; each agent's effort.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -9,6 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE, projectColor, shouldClose, themeManifest, windowName } from '../src/browsers.mjs';
+import { loadAgents, projectCrew } from '../src/config.mjs';
+import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
 import { riskyCommand } from '../src/guard.mjs';
 import { checkSignals, engage, isLocked, readLockdown, recordSignal, refuseWhileLocked, release, RULES, weigh, WINDOW_MINUTES } from '../src/lockdown.mjs';
@@ -17,7 +19,7 @@ import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
 import { askedTool, stepTool } from '../src/runs.mjs';
 import {
   agentTool, availableTools, chooseTool, codexEnvironment, codexEvents, codexGuard, codexStepArgs, correctionLine, GROK_DENY, grokEvents, grokStepArgs, parseTool,
-  qualityRecords, qualitySummary, runTools, toolAvailable, toolModel,
+  qualityRecords, qualitySummary, runTools, toolAvailable, toolEffort, toolModel,
 } from '../src/tools.mjs';
 import { parseLevel } from '../src/util.mjs';
 import { behindOrigin, fastForward, projectLibraries, sameRepository } from '../src/workspace.mjs';
@@ -759,4 +761,55 @@ test("The lockdown's detection in a shell command: protected folders and deletio
     assert.deepEqual(kinds(`rm -rf ${bash(path.join(home, 'Documents'))}`), ['wide_delete']);
     assert.deepEqual(kinds(`rm -rf ${bash(path.join(tmp, 'scratch'))}`), []);
   }
+});
+
+test('effort: each level from its place, the project only, the history and the run report', () => {
+  const config = {
+    owner: 'Someone', crew: { writer: { effort: 'medium' } },
+    projects: { demo: { name: 'Demo', effort: { generalist: 'low', manager: 'xhigh' } }, own: { name: 'Own', crew: { editor: { agent: 'writer', effort: 'high' } }, lead: { name: 'Lead' } } },
+  };
+  const agents = loadAgents(config);
+  assert.equal(agents.writer.effort, 'medium');
+  assert.equal(effortSource(config, null, agents.writer), 'installation');
+  assert.equal(effortSource(config, null, agents.generalist), 'agent');
+  const demo = projectCrew(config, 'demo', agents);
+  assert.equal(demo.generalist.effort, 'low');
+  assert.equal(demo.manager.effort, 'xhigh', "the manager's reviews of the project's runs");
+  assert.equal(effortSource(config, 'demo', demo.generalist), 'project');
+  assert.equal(projectCrew(config, 'own', agents).editor.effort, 'high');
+  assert.equal(effortSource(config, 'own', projectCrew(config, 'own', agents).editor), 'member');
+  assert.equal(agents.generalist.effort, loadAgents({ owner: 'x' }).generalist.effort, 'a project never changes the general crew');
+  assert.equal(parseEffort('MAX'), 'max');
+  assert.equal(parseEffort('padrão'), 'default');
+  assert.equal(parseEffort('huge'), null);
+
+  const file = path.join(temp, 'effort-history.jsonl');
+  let saved = null;
+  const save = c => { saved = c; };
+  const one = setEffort({ member: 'generalist', level: 'max', project: 'demo', config, save, file, by: 'manager' });
+  assert.deepEqual([one.from, one.to, one.changed, one.by], ['low', 'max', true, 'manager']);
+  assert.equal(saved.projects.demo.effort.generalist, 'max');
+  assert.equal(config.projects.demo.effort.generalist, 'low', 'the settings given are not changed in place');
+  const same = setEffort({ member: 'writer', level: 'medium', config, save: () => assert.fail('saved with no change'), file });
+  assert.equal(same.changed, false);
+  const back = setEffort({ member: 'writer', level: 'default', config, save, file });
+  assert.equal(back.to, loadAgents({ owner: 'x' }).writer.effort ?? null, "back to the agent's own");
+  assert.equal(saved.crew.writer, undefined, 'an empty crew setting is removed');
+  const chat = setEffort({ member: 'manager', level: 'low', chat: true, config, save, file });
+  assert.equal(saved.crew.manager.chat_effort, 'low');
+  assert.ok(chat.changed);
+  assert.throws(() => setEffort({ member: 'writer', level: 'low', chat: true, config, save, file }), /conversation/);
+  assert.throws(() => setEffort({ member: 'nobody', level: 'low', config, save, file }), /Unknown agent/);
+  assert.throws(() => setEffort({ member: 'writer', level: 'huge', config, save, file }), /Unknown effort/);
+  assert.throws(() => setEffort({ member: 'writer', level: 'low', project: 'nope', config, save, file }), /Unknown project/);
+
+  const all = effortHistory({ file });
+  assert.equal(all.length, 3);
+  assert.equal(effortHistory({ project: 'own', file }).length, 2, "another project's change is not this project's");
+  assert.equal(runEffortChanges({ project: 'demo', started: '2000-01-01T00:00:00Z' }, file).length, 3);
+  assert.equal(runEffortChanges({ project: 'demo', started: '2000-01-01T00:00:00Z', ended: '2000-01-02T00:00:00Z' }, file).length, 0);
+  assert.match(effortChangeLine(one), /manager: generalist in demo, low → max$/);
+
+  // A step records the level its tool was given: Codex has no max and runs at its own default.
+  assert.deepEqual([toolEffort('claude', 'max'), toolEffort('claude', undefined), toolEffort('codex', 'max'), toolEffort('codex', 'xhigh'), toolEffort('grok', 'max')], ['max', null, null, 'xhigh', 'max']);
 });

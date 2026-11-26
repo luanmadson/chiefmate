@@ -8,7 +8,8 @@ import { attentionArchive, attentionItems, attentionSummary, markSeen } from './
 import { autopilotStatus, changeAutopilot } from './autopilot.mjs';
 import { answerRequest, chargeProfileId, inCharge, projectRequests } from './charge.mjs';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
-import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
+import { loadAgents, loadConfig, projectCrew, projectEfforts, projectLead, saveConfig } from './config.mjs';
+import { effortHistory, effortSource, runEffortChanges, setEffort } from './effort.mjs';
 import { agentTool, runTools, toolModel } from './tools.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
 import { addQuestion, decide, decisionCards, openPushes, openQuestions, openRepoRequests } from './decisions.mjs';
@@ -152,10 +153,14 @@ function teams(config, agents, general, runs, going, queue, conversation) {
     const lead = leader
       ? { ...crew({ [LEAD]: leader }, config, runs.filter(mine), going.filter(mine), queue.filter(mine), [])[0], base: leader.base, extra: !!p.lead?.extra_instructions, memory: memoryInfo(id) }
       : null;
-    if (!p.crew) return { project: id, name: p.name ?? id, own: false, lead, members: general.filter(a => a.id !== 'manager') };
+    // The project's own effort (projects.<id>.effort) over the general crew's.
+    const own = projectEfforts(config, id);
+    const effortOf = a => (own[a.id] ? { ...a, effort: own[a.id], effortFrom: 'project' } : a);
+    if (lead) lead.effortFrom = effortSource(config, id, leader);
+    if (!p.crew) return { project: id, name: p.name ?? id, own: false, lead, members: general.filter(a => a.id !== 'manager').map(effortOf) };
     const team = Object.fromEntries(Object.entries(projectCrew(config, id, agents)).filter(([key]) => key !== 'manager' && key !== LEAD));
     const members = crew(team, config, runs.filter(mine), going.filter(mine), queue.filter(mine), []).map(m => ({
-      ...m, base: team[m.id].base, extra: !!p.crew?.[m.id]?.extra_instructions, mcp: team[m.id].mcp ?? [],
+      ...m, base: team[m.id].base, extra: !!p.crew?.[m.id]?.extra_instructions, mcp: team[m.id].mcp ?? [], effortFrom: effortSource(config, id, team[m.id]),
     }));
     return { project: id, name: p.name ?? id, own: true, lead, members };
   });
@@ -312,7 +317,8 @@ function crew(agents, config, runs, going, queue, conversation) {
       id: agent.id, name: agent.name, title: agent.title, role: agent.role,
       model: choice.tool === 'claude' ? agent.model ?? config.default_model : toolModel(choice.tool, agent.model),
       tool: choice.tool, toolAsked: choice.asked, toolUntil: choice.until, toolReason: choice.reason,
-      effort: agent.effort ?? null, maxMinutes: agent.max_minutes ?? null,
+      effort: agent.effort ?? null, effortFrom: effortSource(config, agent.project ?? null, agent), maxMinutes: agent.max_minutes ?? null,
+      ...(agent.id === 'manager' ? { chatEffort: agent.chat_effort ?? agent.effort ?? null } : {}),
       color: agent.color ?? null, face: agent.face ?? null, status, run, last, week, waitingFor,
       // The runs this member is at work on now: a click on it opens its panel.
       runs: working.map(r => r.id),
@@ -384,6 +390,7 @@ function buildState() {
       late: (r => (r ? { run: r.id, due: r.due, status: r.status } : null))(runs.find(r => r.mission === id && r.due && ['queued', 'waiting', 'running'].includes(r.status))),
     })),
     crew: (general = crew(agents, config, runs, going.map(x => x.run), queue, conversation)),
+    effortHistory: effortHistory().slice(-12).reverse(),
     teams: teams(config, agents, general, runs, going.map(x => x.run), queue, conversation),
     needs,
     prompts: { ...builderStatus(config), syncing: isSyncing(), cdp: !!config.browser_cdp },
@@ -546,7 +553,8 @@ export function startServer() {
           // Opened in the app: what an older run is missing (title, summary, final summary) is generated now.
           describeLater(run.id, run);
           outcomeLater(run.id);
-          return reply(res, 200, run);
+          // The effort changes made while it went on (src/effort.mjs), for its report.
+          return reply(res, 200, { ...run, efforts: runEffortChanges(run) });
         }
         if (!url.pathname.startsWith('/api/')) return serveFile(res, url.pathname);
         return reply(res, 404, { error: 'not found' });
@@ -671,6 +679,11 @@ export function startServer() {
           return reply(res, 200, await syncPrompts());
         case '/api/cancel':
           return reply(res, 200, { status: cancel(body.id) });
+        case '/api/effort': {
+          // An agent's effort, for the installation or one project (src/effort.mjs); it counts from the next step.
+          const change = setEffort({ member: body.member, level: body.level, project: body.project || null, chat: !!body.chat, by: 'owner' });
+          return reply(res, 200, change);
+        }
         case '/api/level': {
           // The manager's approval level for a run (cli.mjs level), shown on the owner's decision card.
           const run = setRunLevel(body.run, body.level);
