@@ -20,7 +20,8 @@ import { radarLine } from './radar.mjs';
 import { focus, maxParallel, queued } from './queue.mjs';
 import { activeRun, ALWAYS_DISALLOWED, crewGuard, doingNow, liveRuns, prepareLibraries } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
-import { sessionsLine } from './sessions.mjs';
+import { listSessions, sessionsLine } from './sessions.mjs';
+import { workLine } from './worknow.mjs';
 import { talkSituation } from './talk.mjs';
 import { addMessage, listRuns, readPending, readState, readUsage, savePending, saveState, stepsOf } from './store.mjs';
 import { isLocked } from './lockdown.mjs';
@@ -149,6 +150,8 @@ export function situation(libraries = []) {
   lines.push(planLine(config, usage));
   lines.push(computerLine(config));
   lines.push(sessionsLine(config));
+  const working = workLine(listSessions(), config);
+  if (working) lines.push(working);
   lines.push(planningLine(config.owner || 'the owner'));
   const stale = staleLine(runs, config.owner || 'the owner', config);
   if (stale) lines.push(stale);

@@ -263,8 +263,11 @@ export function openMatters(config, projectId, { runs = listRuns(), items = plan
   return { plan, recent, deliveries, sessions: live };
 }
 
-/** The open matters, in text for the instructions of the agent in charge (capped at MATTERS_MAX characters). */
-export function mattersText(m, owner = 'the owner') {
+/**
+ * The open matters, in text for the instructions of the agent in charge and the first message of "Work now"
+ * (src/worknow.mjs), capped at MATTERS_MAX characters. when: what the heading says of their date.
+ */
+export function mattersText(m, owner = 'the owner', { when = 'current at every message' } = {}) {
   const none = 'None.';
   const hours = ms => `${Math.floor(ms / 3600_000)} h`;
   const sections = [
@@ -273,7 +276,7 @@ export function mattersText(m, owner = 'the owner') {
     ['### Runs of the last 7 days, newest first, with their final summary', m.recent.map(r => `- ${formatDateTime(r.ended)}, ${r.title} [run ${r.run}]: ${r.merged ? 'merged' : r.discarded ? 'discarded' : r.status}.${r.outcome ? ` ${r.outcome}` : ''}`)],
     [`### Live sessions open on this project (${owner} working with an agent)`, m.sessions.map(s => `- ${s.name} (${s.tool === 'codex' ? 'Codex' : 'Claude Code'}, ${s.mode === 'app' ? 'in the app' : 'in a window'}), open since ${formatDateTime(s.started)}.`)],
   ];
-  const text = `## The project's open matters, current at every message
+  const text = `## The project's open matters, ${when}
 
 Work already done or under way may not be on the main branch of the current folder yet: a delivery waiting for ${owner} lives on its own branch or pull request. When ${owner} asks to carry on with a subject, look for it here first, and say where it stands.
 
