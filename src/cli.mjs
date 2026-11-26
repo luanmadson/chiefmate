@@ -95,6 +95,13 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs tools [--json]               how Codex and Grok did on the crew's steps (data/manager/tools-quality.jsonl):
                                                 by tool and kind of task, how many, % approved with no correction, mean time
   node src/cli.mjs level <run id> <1|2|3|none>  sets (or clears) the approval level of a run
+  node src/cli.mjs effort [<agent>] [low|medium|high|xhigh|max|default] [--project <id>] [--chat]
+                                                each agent's effort (docs/effort.md), or changes one: for the
+                                                installation, or that project only with --project; --chat: the
+                                                manager's conversation; default: back to the level before it.
+                                                Counts from the next step and is recorded (effort history)
+  node src/cli.mjs effort history [--project <id>]
+                                                the recorded effort changes: who, when, from and to
   node src/cli.mjs plan [list] [--project <id>] [--status <s>] [--priority <p>] [--all]
                                                 the planning board: open items by priority (--all: done and archived too)
   node src/cli.mjs plan add <project> "<title>" [--priority high|medium|low] [--status <s>] [--description "<text>"]
@@ -651,6 +658,37 @@ function powerLine(p) {
   return `${what}: ${stage}.${p.stage !== 'closing' ? ' To cancel: node src/cli.mjs power cancel' : ''}`;
 }
 
+/** "effort": each agent's effort, its changes and their history (src/effort.mjs). A step only reads it. */
+async function effortCommand() {
+  const { effortChangeLine, effortHistory, effortSource, parseEffort, setEffort } = await import('./effort.mjs');
+  const { loadAgents, projectCrew } = await import('./config.mjs');
+  const project = option('--project') ?? null;
+  const [who, level] = words();
+  const config = loadConfig();
+  if (who === 'history') {
+    const list = effortHistory(project ? { project } : {}).slice(-30);
+    console.log(list.length ? list.map(effortChangeLine).join('\n') : 'No effort change recorded.');
+    return;
+  }
+  if (project && !config.projects?.[project]) throw new Error(`Unknown project: ${project}`);
+  if (level !== undefined) {
+    if (!parseEffort(level)) throw new Error('Use: node src/cli.mjs effort <agent> low|medium|high|xhigh|max|default [--project <id>] [--chat]');
+    if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error("A step doesn't change the crew's effort: propose it for the planning board.");
+    const by = process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner';
+    const e = setEffort({ member: who, level, project, chat: has('--chat'), by, config });
+    console.log(e.changed ? `${effortChangeLine(e)}. Counts from the next step.` : `No change: ${who} is already at ${e.to ?? 'default'}.`);
+    return;
+  }
+  const team = project ? projectCrew(config, project) : loadAgents(config);
+  const members = Object.values(team).filter(a => !who || a.id === who);
+  if (!members.length) throw new Error(`Unknown agent: ${who}`);
+  const from = { project: `this project (projects.${project}.effort)`, member: "this project's crew setting", installation: 'this installation (crew)', agent: 'the agent file', none: "Claude Code's default for the model" };
+  for (const a of members) {
+    const chat = a.id === 'manager' ? `; conversation ${a.chat_effort ?? a.effort ?? 'default'}` : '';
+    console.log(`${a.id.padEnd(12)} ${String(a.name ?? '').padEnd(16)} ${String(a.model ?? config.default_model ?? '').padEnd(18)} effort ${String(a.effort ?? 'default').padEnd(7)} from ${from[effortSource(config, project, a)]}${chat}`);
+  }
+}
+
 /** "power": the power modes (src/power.mjs). Only the owner's: refused inside a step and the manager's answer. */
 async function powerCommand() {
   const action = rest.find(x => !x.startsWith('--')) ?? 'status';
@@ -939,8 +977,11 @@ async function main() {
       if (!run) throw new Error('Run not found.');
       console.log(`# ${run.title} (${run.status})\n${run.summary ? `${run.summary}\n` : ''}${run.result ?? ''}${run.pullRequest ? `\nPull request: ${run.pullRequest}` : ''}\n`);
       if (run.outcome) console.log(`${outcomeMarkdown(run.outcome, run.outcome.lang)}\n`);
+      const { effortChangeLine, runEffortChanges } = await import('./effort.mjs');
+      const changes = runEffortChanges(run).map(e => `- ${effortChangeLine(e)}`);
+      if (changes.length) console.log(`Effort changed during the run:\n${changes.join('\n')}\n`);
       for (const step of stepsOf(run)) {
-        console.log(`## ${step.agent} (${step.status}, ${formatDuration(step.durationMs)}, ${step.model ?? ''})\n${fullReport(step) || step.error || '(no report)'}\n`);
+        console.log(`## ${step.agent} (${step.status}, ${formatDuration(step.durationMs)}, ${step.model ?? ''}${step.started && 'effort' in step ? `, effort ${step.effort ?? 'default'}` : ''})\n${fullReport(step) || step.error || '(no report)'}\n`);
       }
       return;
     }
@@ -1120,6 +1161,9 @@ async function main() {
       await powerCommand();
       return;
     }
+    case 'effort':
+      await effortCommand();
+      return;
     case 'update-check': {
       const u = await api('/api/update-check', {});
       if (!u.waiting) console.log(`Chiefmate ${(await api('/api/health')).version} is up to date.`);

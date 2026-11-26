@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { runClaude } from './claude.mjs';
-import { loadAgents, loadConfig, projectCrew, projectLead } from './config.mjs';
+import { loadAgents, loadConfig, projectCrew, projectEfforts, projectLead } from './config.mjs';
+import { effortChangeLine, effortHistory } from './effort.mjs';
 import { formatDateTime, formatDuration, formatNumber, formatPercent, t } from './i18n.mjs';
 import { LEAD, leadSituation } from './leads.mjs';
 import { processes } from './machine.mjs';
@@ -164,7 +165,11 @@ export function situation(libraries = []) {
     + (noTrace(p) ? ', no trace: others work on it, so its branch names (from the run titles), commits and files never name Chiefmate' : '');
   lines.push(`Projects: ${Object.entries(config.projects ?? {}).map(([id, p]) => `${id} (${p.name}, ${p.repository}${delivery(p)}${p.docs ? `, personal docs in ${p.docs}` : ''})`).join('; ') || 'none'}.`);
   for (const l of libraries) lines.push(`Reference library ${l.id} (${l.name}), read only, a copy refreshed from GitHub: ${l.dir}. ${l.about}`.trim());
-  lines.push(`Crew: ${Object.values(agents).map(a => `${a.id} (${a.name}, ${a.model ?? config.default_model})`).join(', ')}.`);
+  lines.push(`Crew: ${Object.values(agents).map(a => `${a.id} (${a.name}, ${a.model ?? config.default_model}, effort ${a.effort ?? 'default'}${a.id === 'manager' ? `, conversation ${a.chat_effort ?? a.effort ?? 'default'}` : ''})`).join(', ')}.`);
+  const efforts = Object.entries(config.projects ?? {}).filter(([id]) => Object.keys(projectEfforts(config, id)).length);
+  if (efforts.length) lines.push(`Effort set for one project only: ${efforts.map(([id]) => `${id} (${Object.entries(projectEfforts(config, id)).map(([m, e]) => `${m} ${e}`).join(', ')})`).join('; ')}.`);
+  const lastEfforts = effortHistory().slice(-3);
+  if (lastEfforts.length) lines.push(`Latest effort changes: ${lastEfforts.map(effortChangeLine).join('; ')}.`);
   // Missions and tasks of a project with a crew of its own take only its members (you, the manager, stay global).
   for (const [id, p] of Object.entries(config.projects ?? {}).filter(([, p]) => p.crew)) {
     const team = Object.values(projectCrew(config, id, agents)).filter(a => a.id !== 'manager' && a.id !== LEAD);

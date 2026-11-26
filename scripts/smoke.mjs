@@ -322,6 +322,15 @@ try {
     expect((await post('/api/run/talk', { run: 'smoke-feed', text: 'Hello' })).status === 400, 'a message to a run not going on was not refused');
     expect((await post('/api/run/talk', { run: 'smoke-feed', text: ' ' })).status === 400, 'an empty message to an agent was not refused');
     expect(state.crew.every(a => Array.isArray(a.runs) && 'waitingFor' in a), "the crew has no runs to open a panel on, or no \"waiting for\"");
+    // Each agent's effort: shown with where it comes from; an unknown level or agent refused, the same level saves nothing.
+    const chief = state.crew.find(a => a.id === 'manager');
+    expect(state.crew.every(a => 'effort' in a && a.effortFrom) && 'chatEffort' in chief && Array.isArray(state.effortHistory), '/api/state has no effort for each member, or no effort history');
+    expect((await post('/api/effort', { member: 'manager', level: 'huge' })).status === 400, 'an unknown effort was not refused');
+    expect((await post('/api/effort', { member: 'nobody', level: 'low' })).status === 400, 'an effort for an unknown agent was not refused');
+    if (chief.effort) {
+      const same = await (await post('/api/effort', { member: 'manager', level: chief.effort })).json();
+      expect(same.changed === false, `the same effort was taken as a change: ${JSON.stringify(same)}`);
+    }
     // A request for a team lead: refused for a project that does not exist, and with no request.
     expect(state.teams.every(x => 'lead' in x), '/api/state has no team lead (or null) for each project');
     expect((await post('/api/ask', { project: 'none', request: 'Do something' })).status === 400, 'a request for a project that does not exist was not refused');
