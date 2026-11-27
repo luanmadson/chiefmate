@@ -1085,6 +1085,11 @@ try {
     `  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ args, prompt }) + '\\n');`,
     "  const say = e => process.stdout.write(JSON.stringify(e) + '\\n');",
     "  say({ type: 'system', subtype: 'init', session_id: id, model: 'm' });",
+    "  if (prompt.includes('What did Claude Code say?')) {",
+    "    const quote = \"It said: You've hit your session limit - resets 11:20am\";",
+    "    say({ type: 'assistant', message: { model: 'm', content: [{ type: 'text', text: quote }] } });",
+    "    return say({ type: 'result', subtype: 'success', is_error: false, result: quote, session_id: id, num_turns: 1 });",
+    '  }',
     "  if (prompt.includes('Your previous answer was cut off')) {",
     "    say({ type: 'assistant', message: { content: [{ type: 'text', text: 'Cut off by the limit before: the queue is empty.' }] } });",
     "    return say({ type: 'result', subtype: 'success', is_error: false, result: 'Cut off by the limit before: the queue is empty.', session_id: id, num_turns: 1 });",
@@ -1140,6 +1145,13 @@ try {
     expect(after.filter(m => m.text === 'How is the queue?').length === 1 && after.filter(m => m.text === 'And the board?').length === 1
       && after.at(-1).who === 'manager' && after.at(-1).text.startsWith('Cut off by the limit before') && !store.readState().manager.cut && !store.readPending().length && !manager.limitWait(),
     `after the renewal, a message showed twice, the answer did not come or the wait stayed: ${JSON.stringify(after.slice(-4))}`);
+
+    // The manager's own answer that quotes the warning, with the usage reader still showing the window out: an answer.
+    manager.sendToManager('What did Claude Code say?');
+    await settled();
+    const quoted = store.readConversation().at(-1);
+    expect(!store.readState().manager.cut && quoted.who === 'manager' && quoted.text.startsWith('It said:') && !quoted.cut,
+      `the manager's own answer quoting Claude Code's warning was taken for a cut: ${JSON.stringify(quoted)}`);
   } finally {
     process.env.CHIEFMATE_CLAUDE = kept.claude;
     store.saveState({ ...store.readState(), manager: kept.manager ?? {} });

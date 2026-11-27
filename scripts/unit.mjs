@@ -1792,9 +1792,16 @@ test("the manager's answer cut off: Claude Code's warning, or no final text afte
   assert.equal(limitCut({ ok: false, text: 'API Error: Request rejected (429) · this may be a temporary capacity issue' }, { usage: usageLeft, at: cutAt }), null);
 
   // The warning with no reading to go by: its own time, else the fullest window's reset, else in an hour.
-  assert.equal(limitCut({ ok: false, text: `Claude AI usage limit reached|${Math.floor((cutAt + 600_000) / 1000)}` }, { usage: {}, at: cutAt }).until, cutIso(10));
-  assert.deepEqual(limitCut({ ok: true, text: "You've hit your session limit" }, { usage: usageLeft, at: cutAt }), { until: cutIso(5), window: 'five_hour' });
-  assert.deepEqual(limitCut({ ok: true, text: "You've hit your session limit" }, { usage: {}, at: cutAt }), { until: cutIso(60), window: null });
+  const warned = text => ({ ok: false, text, limit: { text, rejected: false } });
+  assert.equal(limitCut(warned(`Claude AI usage limit reached|${Math.floor((cutAt + 600_000) / 1000)}`), { usage: {}, at: cutAt }).until, cutIso(10));
+  assert.deepEqual(limitCut(warned("You've hit your session limit"), { usage: usageLeft, at: cutAt }), { until: cutIso(5), window: 'five_hour' });
+  assert.deepEqual(limitCut(warned("You've hit your session limit"), { usage: {}, at: cutAt }), { until: cutIso(60), window: null });
+  assert.ok(limitWarning('You’ve hit your session limit · resets 3pm'), 'the warning with a typographic apostrophe was missed');
+
+  // The manager's own answer that quotes the warning (runClaude gives it no "limit") is an answer, never a cut.
+  for (const ok of [true, false]) {
+    assert.equal(limitCut({ ok, text: "O aviso foi: You've hit your session limit · resets 3pm", limit: null }, { actions: 2, usage: usageOut, at: cutAt }), null);
+  }
 });
 
 test("the manager's answer cut off: it waits for the renewal, says when it comes back and is told it was cut off", () => {
@@ -1807,6 +1814,9 @@ test("the manager's answer cut off: it waits for the renewal, says when it comes
   assert.equal(cutDue(cut, { ...usageLeft, updated: cutIso(1) }, cutAt + 2 * 60_000), true, 'a reading that shows the usage back did not end the wait');
   assert.equal(cutDue(cut, { ...usageLeft, updated: cutIso(-1) }, cutAt + 2 * 60_000), false, 'a reading from before the cut ended the wait');
   assert.equal(cutDue(cut, { ...usageOut, updated: cutIso(1) }, cutAt + 2 * 60_000), false);
+  // Cut off again as it went on: only the renewal ends the wait, so readings that seem back can't loop it.
+  assert.equal(cutDue({ ...cut, again: true }, { ...usageLeft, updated: cutIso(1) }, cutAt + 2 * 60_000), false, 'an answer cut off again went on before the renewal');
+  assert.equal(cutDue({ ...cut, again: true }, usageOut, cutAt + 6 * 60_000), true);
 
   // For the app, while it lasts.
   assert.deepEqual(limitWait({ manager: { cut } }, usageOut, cutAt), { at: cutIso(0), until: cutIso(5), window: 'five_hour', items: 1 });

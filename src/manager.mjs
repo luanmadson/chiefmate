@@ -354,16 +354,17 @@ export function outOfUsage(usage = {}, at = Date.now()) {
 }
 
 /**
- * Whether an answer stopped because the plan's usage ran out: Claude Code's warning, or an answer that ended with no
- * final text after actions (or after a call the account refused) while the usage reader shows a window out. Never an
- * answer stopped on purpose (interrupted, over its time limit). Returns { until, window }: when the usage renews, by
- * the usage reader; with the warning but no reading to go by, the warning's own time, else the next reset of the
- * fullest window, else in an hour (a new cut then brings it up to date). actions: how many the answer took.
+ * Whether an answer stopped because the plan's usage ran out: Claude Code's warning (the result's "limit", from
+ * runClaude: never the manager's own answer that quotes it), or an answer that ended with no final text after actions
+ * (or after a call the account refused) while the usage reader shows a window out. Never an answer stopped on purpose
+ * (interrupted, over its time limit). Returns { until, window }: when the usage renews, by the usage reader; with the
+ * warning but no reading to go by, the warning's own time, else the next reset of the fullest window, else in an hour
+ * (a new cut then brings it up to date). actions: how many the answer took.
  */
 export function limitCut(r, { actions = 0, usage = readUsage(), at = Date.now() } = {}) {
   if (!r || r.canceled) return null;
   const text = String(r.text ?? '').trim();
-  const warned = !!r.limit?.text || limitWarning(text);
+  const warned = !!r.limit?.text;
   const silent = !text && (actions > 0 || !!r.limit?.rejected);
   if (!warned && !silent) return null;
   const out = outOfUsage(usage, at);
@@ -375,11 +376,15 @@ export function limitCut(r, { actions = 0, usage = readUsage(), at = Date.now() 
   return next ? { until: usage[next].resets, window: next } : { until: new Date(at + 3600_000).toISOString(), window: null };
 }
 
-/** Whether the conversation cut off by the limit goes on: past the renewal, or a reading since the cut shows the usage back. */
+/**
+ * Whether the conversation cut off by the limit goes on: past the renewal, or a reading since the cut shows the usage
+ * back. That reading counts once: an answer cut off again as it went on (again) waits for the renewal, so a reading
+ * that only seems back (another model's calls going through, say) can't start one attempt after another.
+ */
 export function cutDue(cut, usage = readUsage(), at = Date.now()) {
   if (!cut) return false;
   if (!(Date.parse(cut.until) + RESUME_SLACK_MS > at)) return true;
-  return Date.parse(usage.updated ?? '') > Date.parse(cut.at) && usage.status !== 'rejected' && !outOfUsage(usage, at);
+  return !cut.again && Date.parse(usage.updated ?? '') > Date.parse(cut.at) && usage.status !== 'rejected' && !outOfUsage(usage, at);
 }
 
 /** The conversation cut off by the limit, while it waits for the renewal: { at, until, window, items }, else null. */
@@ -589,7 +594,7 @@ async function answer(items, resuming = null) {
       // messages, the agents' and the news) is kept to go again, by itself, once the usage renews (deliverPending).
       if (chat.partial) addMessage('manager', chat.partial, { model, cut: true, ...news });
       addMessage('system', cutNotice(items, cut.until), { cut: { until: cut.until } });
-      state.manager.cut = { at: now(), until: cut.until, window: cut.window, items: items.map(m => ({ ...m, cut: true })) };
+      state.manager.cut = { at: now(), until: cut.until, window: cut.window, items: items.map(m => ({ ...m, cut: true })), ...(resuming ? { again: true } : {}) };
       delete state.manager.interrupted; // this answer told it
     } else {
       addMessage('manager', r.text || t("I couldn't answer: {error}", { error: r.error }), { model, ...news, ...(r.ok ? {} : { error: r.error }) });
