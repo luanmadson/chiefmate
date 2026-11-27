@@ -1757,7 +1757,7 @@
   "Pausing at a safe point: Chiefmate is shutting down, and the agent carries on by itself at the next start.": "Pausando num ponto seguro: o Chiefmate vai desligar, e o agente continua sozinho na próxima abertura.",
   "The spending mode is save, normal or all.": "O modo de gasto é save, normal ou all.",
   "The week's pace is a share such as 0.9, 1 or 1.2, or all (no pace).": "O ritmo da semana é uma fração como 0,9, 1 ou 1,2, ou all (sem ritmo).",
-  "Waiting: Chiefmate is in emergency lockdown.": "Aguardando: o Chiefmate está em bloqueio de emergência.",
+  "Waiting: Chiefmate is in emergency lockdown.": "Aguardando: o Chiefmate está em modo emergência.",
   "Waiting: Chiefmate is installing an update.": "Aguardando: o Chiefmate está instalando uma atualização.",
   "Runs going on: {count}.": "Execuções em andamento: {count}.",
   "Now: working ({count} run(s) going on).": "Agora: trabalhando ({count} execução(ões) em andamento).",
@@ -2047,7 +2047,7 @@
   "A live session's turn is going on: the computer does not restart in the middle of it. Try again once it ends.": "Há um turno de sessão ao vivo em andamento: o computador não reinicia no meio dele. Tente de novo quando terminar.",
   "Pausing at a safe point: the computer is restarting": "Pausando num ponto seguro: o computador vai reiniciar",
   "Paused at a safe point because the computer is restarting. It resumes by itself, first in the queue, once Chiefmate is back.": "Pausada num ponto seguro porque o computador vai reiniciar. Retoma sozinha, em primeiro lugar na fila, quando o Chiefmate voltar.",
-  "The emergency lockdown is on: only the owner may restart the computer now.": "O bloqueio de emergência está ligado: agora só o dono pode reiniciar o computador.",
+  "The emergency lockdown is on: only the owner may restart the computer now.": "O modo emergência está ativo: agora só o dono pode reiniciar o computador.",
   "Pausing at a safe point: the computer is restarting, and the agent carries on by itself once Chiefmate is back.": "Pausando num ponto seguro: o computador vai reiniciar, e o agente continua sozinho quando o Chiefmate voltar.",
   "Restarting": "Reiniciando",
   "Restarting…": "Reiniciando…"

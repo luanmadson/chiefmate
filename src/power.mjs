@@ -8,8 +8,8 @@
 //   Back after the restart, the paused runs resume first and the live sessions' windows open again.
 // A computer that went down without a stop (a power cut, a crash) is found at the next start (startPower): the runs it
 // cut off go back to the front of the queue, never counted as failed.
-// The first start since the computer started (the sign-in after a restart, a shutdown or a power cut) opens the app's
-// window once; the scheduled task that starts Chiefmate at sign-in starts only the server.
+// The first start since the computer started (the sign-in after a restart, a power cut or a full shutdown) opens the
+// app's window once; the scheduled task that starts Chiefmate at sign-in starts only the server.
 // Standby and "off" are kept in data/state.json ("power"); the stop going on lives in memory.
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -262,7 +262,10 @@ export const powerLog = () => readState().power_log ?? [];
 
 const aliveFile = () => path.join(DATA, 'alive.json');
 
-/** When this computer started (ms). */
+/**
+ * When this computer started (ms). Windows' fast startup keeps it across a shutdown from the Start menu (or the power
+ * button), which resumes the saved system: only a restart, a power cut or a full shutdown ("shutdown /s") moves it.
+ */
 export const bootTime = () => Date.now() - os.uptime() * 1000;
 
 /** Notes that Chiefmate is alive now (data/alive.json): the next start compares it with when the computer started. */
@@ -280,8 +283,8 @@ export const offOnPurpose = (power, boot = bootTime(), at = Date.now()) => power
   && !(power.target === 'reboot' && (Date.parse(power.since) < boot || at - Date.parse(power.since) > REBOOT_GRACE_MS));
 
 /**
- * Whether this is Chiefmate's first start since the computer started (at sign-in, after a restart, a shutdown or a
- * power cut): its last note of being alive is older than the computer's start. With no note at all (the first start of
+ * Whether this is Chiefmate's first start since the computer started (at sign-in, after a restart, a power cut or a
+ * full shutdown: see bootTime): its last note of being alive is older than the computer's start. With no note at all (the first start of
  * a version that keeps them) it is not, so an update's restart never counts.
  */
 export const firstSinceBoot = ({ last = lastBeat(), boot = bootTime() } = {}) => !!last && Date.parse(last) < boot;

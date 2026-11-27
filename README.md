@@ -451,7 +451,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 
 The installer:
 - creates your settings, `config/chiefmate.json`, from `config/example.json` the first time;
-- starts Chiefmate in the background when you sign in to Windows; on its first start since the computer started, Chiefmate opens the app's window (not when it restarts for an update: the window already open reloads by itself);
+- starts Chiefmate in the background when you sign in to Windows; on its first start since the computer started (after a restart, a power cut or Chiefmate's own shutdown), Chiefmate opens the app's window (not when it restarts for an update: the window already open reloads by itself). A shutdown from the Start menu doesn't count while Windows' fast startup is on (the default: Windows then resumes the system it saved instead of starting anew): open the app from its shortcut, or turn fast startup off in Control Panel > Power Options > Choose what the power buttons do;
 - creates the task that wakes the computer before scheduled missions;
 - creates the **Chiefmate** shortcuts on the desktop and in the Start menu;
 - registers the `chiefmate:` address that the notifications use;
