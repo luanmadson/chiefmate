@@ -50,6 +50,9 @@ export function checkClaude() {
 }
 
 /** One line saying what the agent did, for the logbook. */
+/** The file a file tool writes (Write, Edit, MultiEdit, NotebookEdit), or null. */
+export const writtenFile = (name, input = {}) => (/^(Write|Edit|MultiEdit|NotebookEdit)$/.test(name) ? input?.file_path ?? input?.notebook_path ?? null : null);
+
 export function describeAction(name, input = {}, dir) {
   const file = p => (p ? path.relative(dir, p) || p : '');
   switch (name) {
@@ -252,7 +255,7 @@ export function runClaude(options) {
         if (block.type === 'text' && block.text.trim()) onEvent({ type: 'say', text: block.text });
         if (block.type === 'tool_use') {
           inFlight.add(block.id);
-          onEvent({ type: 'action', tool: block.name, text: describeAction(block.name, block.input, dir), doing: describeDoing(block.name, block.input, dir) });
+          onEvent({ type: 'action', tool: block.name, text: describeAction(block.name, block.input, dir), doing: describeDoing(block.name, block.input, dir), file: writtenFile(block.name, block.input) });
         }
       }
       // A subagent's turns fill its own context, not this one.

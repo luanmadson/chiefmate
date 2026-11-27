@@ -15,7 +15,7 @@
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
 import { formatDateTime, formatDuration } from './i18n.mjs';
-import { readState, saveState } from './store.mjs';
+import { listRuns, readState, runEnded, saveState } from './store.mjs';
 import { DATA, ensureDir, now, readJson, writeJson } from './util.mjs';
 
 /** The events Chiefmate tells the manager about, by name (as in "manager_updates"). */
@@ -23,7 +23,7 @@ export const NEWS_EVENTS = [
   'run_finished', 'run_failed', 'run_paused', 'pr_ready', 'merged', 'merge_failed', 'needs_you',
   'update_installed', 'update_blocked', 'memory_alert', 'usage_alert', 'session_ended', 'plan_proposed',
   'idle', 'autopilot_report', 'watchdog', 'away', 'back', 'owner_decided', 'push_allowed', 'repo_allowed', 'owner_request',
-  'lockdown', 'security_warning', 'power', 'owner_working', 'defect', 'focus',
+  'lockdown', 'security_warning', 'power', 'owner_working', 'defect', 'focus', 'run_parked', 'quarantine',
 ];
 
 // The owner's own switches (away mode, the power modes of src/power.mjs, the focus of src/steer.mjs), a push the owner
@@ -37,7 +37,7 @@ const OWNER_EVENTS = ['away', 'back', 'push_allowed', 'repo_allowed', 'lockdown'
  */
 export const HELD_WHILE_AWAY = [
   'run_finished', 'run_failed', 'run_paused', 'pr_ready', 'merged', 'update_installed', 'update_blocked',
-  'memory_alert', 'usage_alert', 'session_ended', 'autopilot_report', 'defect',
+  'memory_alert', 'usage_alert', 'session_ended', 'autopilot_report', 'defect', 'run_parked',
 ];
 
 // Events within a minute of the first one go to the manager together.
@@ -134,6 +134,17 @@ export function awayLine(owner = 'the owner', away = awayInfo()) {
 }
 
 /**
+ * What still waits for the owner, for the summary when they are back: the open calls of the runs not ended (each run
+ * parked or still waiting). One line, or '' when nothing waits.
+ */
+export function waitingLine(runs = listRuns()) {
+  const calls = runs.filter(r => !runEnded(r)).flatMap(r => (r.requests ?? []).filter(q => q.status === 'open').map(q => ({ r, q })));
+  if (!calls.length) return '';
+  const list = calls.map(({ r, q }) => `run ${r.id} "${r.title}" (project ${r.project}, ${r.parked?.request === q.id && r.status === 'paused' ? 'parked: it resumes first once answered' : 'still waiting'}): ${q.what}`);
+  return ` Still waiting for the owner (${calls.length}): ${list.join('; ')}. List them in the summary.`;
+}
+
+/**
  * Turns the away mode on or off (the app's button) and tells the manager at once. Turning it off hands the manager
  * the events held meanwhile, with "back", for its summary. Returns awayInfo().
  */
@@ -151,7 +162,7 @@ export function setAway(on, config = loadConfig()) {
     // The held events go first, then "back", all in one message: the summary.
     if (held.length && !process.env.CHIEFMATE_SMOKE) writeJson(newsFile(), [...readNews(), ...held].slice(-MAX_EVENTS));
     const gone = formatDuration(Date.now() - Date.parse(away.since));
-    reportEvent('back', `${owner} is back: away mode off, after ${gone} away (since ${formatDateTime(away.since)}), ${held.length} event(s) held meanwhile.`, { config });
+    reportEvent('back', `${owner} is back: away mode off, after ${gone} away (since ${formatDateTime(away.since)}), ${held.length} event(s) held meanwhile.${waitingLine()}`, { config });
   }
   // The smoke test's server never wakes the manager.
   if (!process.env.CHIEFMATE_SMOKE) flushNews().catch(error => console.error('News:', error.message));

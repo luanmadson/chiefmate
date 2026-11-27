@@ -8,7 +8,7 @@ import { appendFileSync, createWriteStream, existsSync, readFileSync, writeFileS
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
-import { describeAction, describeDoing, environment, executable as claudeExecutable } from './claude.mjs';
+import { describeAction, describeDoing, environment, executable as claudeExecutable, writtenFile } from './claude.mjs';
 import { t } from './i18n.mjs';
 import { clip, DATA, ensureDir, now, ROOT } from './util.mjs';
 
@@ -530,7 +530,7 @@ export function runTool(tool, options) {
           break;
         }
         write({ type: 'assistant', message: { content: [{ type: 'tool_use', id: e.id ?? `a${Date.now()}`, name: e.tool, input: e.input }] } });
-        onEvent({ type: 'action', tool: e.tool, text: describeAction(e.tool, e.input, dir), doing: describeDoing(e.tool, e.input, dir) });
+        onEvent({ type: 'action', tool: e.tool, text: describeAction(e.tool, e.input, dir), doing: describeDoing(e.tool, e.input, dir), file: writtenFile(e.tool, e.input) });
         break;
       case 'done':
         // Grok's deny rules refused a command: noted as the guard notes its refusals.

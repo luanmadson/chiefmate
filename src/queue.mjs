@@ -6,6 +6,8 @@ import { activeRun, cancelLive, doingNow, execute, limitWaitCleared, live, liveR
 import { held } from './power.mjs';
 import { listRuns, readRun, readUsage, saveRun, stepsOf } from './store.mjs';
 import { isLocked } from './lockdown.mjs';
+import { parkWaitingWhileAway } from './needs.mjs';
+import { checkQuarantine, quarantineHold } from './quarantine.mjs';
 import { holdReason, readSteer } from './steer.mjs';
 import { updating } from './update.mjs';
 import { now } from './util.mjs';
@@ -80,7 +82,7 @@ export function focus(config = loadConfig()) {
   if (running.length) return { ...running[0], others: running.slice(1) };
   // a run of a project the owner's focus holds (src/steer.mjs) is never next: it waits for the focus to end
   const steer = readSteer();
-  const queue = queued().filter(r => !holdReason(r.project, steer));
+  const queue = queued().filter(r => !holdReason(r.project, steer) && !quarantineHold(r.project));
   const next = queue.find(r => ready(r)) ?? [...queue].sort((a, b) => a.notBefore.localeCompare(b.notBefore))[0];
   if (!next) return null;
   const agent = stepsOf(next).find(s => s.status === 'pending')?.agent ?? null;
@@ -91,6 +93,10 @@ function tick() {
   // While an update of Chiefmate is being installed, on standby or while Chiefmate stops, nothing starts: the queue
   // goes on after it. Nor in an emergency lockdown (src/lockdown.mjs), until the owner releases it.
   if (updating() || held() || isLocked()) return;
+  // In away mode, a run left waiting for the owner too long is parked: its project's next run takes the turn.
+  parkWaitingWhileAway();
+  // A project waiting for a file the antivirus probably took goes on once the file can be read (checked every few minutes).
+  checkQuarantine();
   const config = loadConfig();
   const queue = queued().filter(r => !live.has(r.id) && !starting.has(r.id));
   const waiting = queue.filter(run => run.status === 'waiting' && !ready(run));
@@ -106,8 +112,9 @@ function tick() {
   const free = maxParallel(config) - live.size - starting.size;
   if (free <= 0) return;
   // The owner's focus (src/steer.mjs): a paused project, or one out of the focus, starts nothing; its runs wait in order.
+  // Nor a project waiting for a quarantined file (src/quarantine.mjs): its runs wait instead of failing.
   const steer = readSteer();
-  for (const next of pickNext(queue.filter(r => !holdReason(r.project, steer)), busyProjects(), free)) {
+  for (const next of pickNext(queue.filter(r => !holdReason(r.project, steer) && !quarantineHold(r.project)), busyProjects(), free)) {
     starting.add(next.id);
     // Each run goes on by itself; the queue looks again as soon as one ends.
     Promise.resolve()
