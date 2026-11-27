@@ -300,9 +300,10 @@ export function toolEffort(tool, effort) {
  * never asking (no one is there to answer), with Chiefmate's guard as a hook (trusted for this run only, as Claude
  * Code's hooks are given in --settings).
  */
-export function codexStepArgs({ dir, model, effort, session, guardLog }) {
+export function codexStepArgs({ dir, model, effort, session, guardLog, readOnly = false }) {
   const common = [
-    '--json', '--skip-git-repo-check', '--ignore-user-config', '-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"',
+    // readOnly: the emergency watch's analyst (src/sentinel.mjs), which only reads what it is given and answers.
+    '--json', '--skip-git-repo-check', '--ignore-user-config', '-c', `sandbox_mode="${readOnly ? 'read-only' : 'workspace-write'}"`, '-c', 'approval_policy="never"',
     '-c', 'windows.sandbox="unelevated"', '-c', codexGuard(guardLog), '--dangerously-bypass-hook-trust',
     ...(toolModel('codex', model) ? ['-m', toolModel('codex', model)] : []),
     ...(CODEX_EFFORTS.includes(effort) ? ['-c', `model_reasoning_effort="${effort}"`] : []),
@@ -442,14 +443,14 @@ export function grokEvents(event) {
  * interrupt() waits for the actions under way, then stops the tool: the same session goes on with session.resume.
  */
 export function runTool(tool, options) {
-  const { dir, prompt, system, model, effort, env = {}, maxMinutes = 60, isHeld = () => false, log, onEvent = () => {}, spentMs = 0, session = {}, guardLog } = options;
+  const { dir, prompt, system, model, effort, env = {}, maxMinutes = 60, isHeld = () => false, log, onEvent = () => {}, spentMs = 0, session = {}, guardLog, readOnly = false } = options;
   const first = session.resume || !system ? prompt : `## Your role (the agent's instructions)\n\n${system}\n\n---\n\n${prompt}`;
   let promptFile = null;
   if (tool === 'grok') {
     promptFile = `${log}.prompt.md`;
     writeFileSync(promptFile, first);
   }
-  const args = tool === 'codex' ? codexStepArgs({ dir, model, effort, session, guardLog }) : grokStepArgs({ dir, model, effort, session, promptFile });
+  const args = tool === 'codex' ? codexStepArgs({ dir, model, effort, session, guardLog, readOnly }) : grokStepArgs({ dir, model, effort, session, promptFile });
   const childEnv = tool === 'codex' ? codexEnvironment(env) : environment({ ...GROK_NO_COMPAT, ...env });
   let program;
   try {

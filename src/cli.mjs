@@ -856,18 +856,22 @@ function lockdownText(v) {
     const warnings = v.warnings.map(w => `\nWarning ${formatDateTime(w.at)}: ${w.text}`).join('');
     return `Chiefmate is not locked down.${last}${warnings}`;
   }
-  const stopped = Object.entries(v.stopped).map(([k, n]) => `${k} ${n}`).join(', ') || 'nothing';
+  const stopped = Object.entries(v.stopped).filter(([, n]) => !Array.isArray(n)).map(([k, n]) => `${k} ${n}`).join(', ') || 'nothing';
+  const watch = v.sentinel?.status === 'reviewing' ? 'Emergency watch: reviewing it now.'
+    : v.sentinel?.status === 'escalated' ? `Emergency watch: kept it locked for you (${v.sentinel.decision?.reasons?.join(', ') ?? ''}).` : null;
   return [
     `EMERGENCY LOCKDOWN since ${formatDateTime(v.since)} (by ${v.by}, from ${v.from})`,
     `Reason: ${v.reason}`,
     `Stopped: ${stopped}`,
-    ...v.evidence.map(e => `Evidence ${formatDateTime(e.at)} [${e.what}${e.who ? `, ${e.who}` : ''}]: ${e.detail}`),
+    ...(watch ? [watch] : []),
+    ...v.evidence.map(e => `Evidence ${formatDateTime(e.at)} [${e.what}${e.who ? `, ${e.who}` : ''}${e.refused === false ? ', it ran' : ''}]: ${e.command ?? e.detail}${e.cwd ? `  (in ${e.cwd})` : ''}`),
+    ...(v.notes ?? []).map(n => `Your note ${formatDateTime(n.at)}: ${n.text}`),
   ].join('\n');
 }
 
 /** A command refused to a step of a run: noted for the emergency lockdown's detection (src/lockdown.mjs), then refused. */
 async function crewRefused(what, message) {
-  (await import('./lockdown.mjs')).recordSignal('publish_refused', `cli.mjs ${what}`, { who: 'step' });
+  (await import('./lockdown.mjs')).recordSignal('publish_refused', `cli.mjs ${what}`, { who: 'step', run: process.env.CHIEFMATE_RUN, step: process.env.CHIEFMATE_STEP, cwd: process.cwd(), command: `cli.mjs ${what}`, refused: true });
   throw new Error(message);
 }
 
@@ -893,7 +897,7 @@ async function main() {
         const { startSchedule } = await import('./schedule.mjs');
         const { startUpdates } = await import('./update.mjs');
         const { doingNow, live, pauseAll } = await import('./runs.mjs');
-        const { nudgeQueue } = await import('./queue.mjs');
+        const { nudgeQueue, resume } = await import('./queue.mjs');
         const { pauseSessionTurns, resumeSessions, sessionTurnsGoingOn, startSessions } = await import('./sessions.mjs');
         const { chat, deliverPending, interruptManager, managerBusy } = await import('./manager.mjs');
         const { startWatch } = await import('./plan.mjs');
@@ -952,12 +956,15 @@ async function main() {
         const { processes } = await import('./machine.mjs');
         const { reportEvent } = await import('./news.mjs');
         const { t } = await import('./i18n.mjs');
+        const sentinel = await import('./sentinel.mjs');
+        const { sendToManager } = await import('./manager.mjs');
         lockdown.setLockdownHooks({
           stopAll: async () => {
-            const runs = [...live.keys()].filter(id => {
+            const runIds = [...live.keys()].filter(id => {
               live.get(id)?.preparing?.abort();
               return cancelLive(id, t('stopped by the emergency lockdown'));
-            }).length;
+            });
+            const runs = runIds.length;
             const manager = interruptManager() ? 1 : 0;
             const sessions = stopSessionTurns();
             let browsers = 0;
@@ -970,7 +977,7 @@ async function main() {
             } catch {
               // listed on Windows only
             }
-            return { runs, manager, sessions, browsers };
+            return { runs, runIds, manager, sessions, browsers };
           },
           resume: () => {
             nudgeQueue();
@@ -981,7 +988,22 @@ async function main() {
             notify(title, text, 'chiefmate:operations', { urgent: true });
             reportEvent(kind, news ?? text, { urgent: true });
           },
+          // The emergency watch (src/sentinel.mjs) reviews an alarm the detection engaged.
+          review: state => sentinel.reviewIncident(state),
+          // The owner's note on the alarm: to the manager as the owner's own message, with the event.
+          ownerNote: (note, state) => {
+            const head = `[About the emergency lockdown since ${state.since}: ${state.reason}${state.sentinel?.status === 'escalated' ? '; the emergency watch kept it locked' : ''}]`;
+            sendToManager(`${head}\n${note}`);
+          },
         });
+        sentinel.setSentinelHooks({
+          resumeRun: id => resume(id),
+          tell: ({ kind, title, text, news, release }) => {
+            notify(title, text, 'chiefmate:operations', { urgent: !release });
+            reportEvent(kind, news ?? text, { urgent: true });
+          },
+        });
+        sentinel.startSentinel();
         lockdown.startLockdownWatch();
         // A change of the owner's focus (src/steer.mjs), its automatic return included: the projects now free start
         // their queue and their approved board items.

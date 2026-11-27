@@ -43,6 +43,16 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
   for (const w of lockdown?.warnings ?? []) {
     add({ id: `security:${w.id}`, level: 'urgent', kind: 'security', title: t('Security warning'), text: w.text, view: 'operations', at: w.at });
   }
+  // Important, for a day: a false alarm the emergency watch (src/sentinel.mjs) released by itself.
+  const last = lockdown?.last;
+  if (!lockdown?.active && last?.releasedBy === 'sentinel' && Date.now() - Date.parse(last.until) < 24 * 3600_000) {
+    const kept = last.sentinel?.actions?.kept ?? [];
+    add({
+      id: `sentinel:${last.since}`, level: 'important', kind: 'sentinel', title: t('False alarm released by the emergency watch'),
+      text: t('{reason}. Both analysts said false alarm and every check passed. The other work went on; the task that caused it stays canceled ({runs}).', { reason: last.reason ?? '', runs: kept.join(', ') || '—' }),
+      view: 'operations', at: last.until, run: kept[0] ?? null,
+    });
+  }
   // Someone else reviews the project's work ("merge_by_owner": false): its pull requests only inform, until merged or closed.
   const byOther = project => config?.projects?.[project]?.merge_by_owner === false;
   const prNotice = (project, title) => (byOther(project)

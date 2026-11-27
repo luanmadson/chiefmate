@@ -17,7 +17,8 @@ import { addQuestion, decide, decisionCards, openPushes, openQuestions, openRepo
 import { listFolder, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
-import { engage, isLocked, lockdownView, recordSignal, release } from './lockdown.mjs';
+import { addNote, engage, isLocked, lockdownView, recordSignal, release } from './lockdown.mjs';
+import { watchView } from './sentinel.mjs';
 import { closeBrowser, focusBrowser, openBrowsers } from './browsers.mjs';
 import { computer, latestProcesses, processes, stoppable, stopProject } from './machine.mjs';
 import { agentSender, chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
@@ -439,6 +440,8 @@ function buildState() {
     },
     // The emergency lockdown (src/lockdown.mjs): whether it is on, why, its evidence and the security warnings of the day.
     lockdown: security,
+    // The emergency watch (src/sentinel.mjs), its own team in the org chart.
+    watch: watchView(config),
     // The away mode (src/news.mjs): { since, held } while the owner is away, else null.
     away: awayInfo(),
     // The power mode (src/power.mjs): on, standby or stopping, shown at the top of the app.
@@ -522,8 +525,9 @@ export function startServer() {
           recordSignal(refused === 'not allowed in' ? 'login_failed' : 'unknown_origin', `${req.method} ${clip(String(req.url), 120)} (${refused})`, { who: 'remote' });
           return reply(res, 403, { error: refused });
         }
-        // In an emergency lockdown, the remote access is off: only engaging it again is taken.
-        if (isLocked() && !(req.method === 'POST' && req.url === '/api/lockdown')) return reply(res, 423, { error: t('Chiefmate is in emergency lockdown: the remote access is off until the owner releases it on the computer.') });
+        // In an emergency lockdown, the remote access is off: only the lockdown's own screen is taken (reading it,
+        // engaging it again, the owner's note).
+        if (isLocked() && !(['GET', 'POST'].includes(req.method) && req.url === '/api/lockdown')) return reply(res, 423, { error: t('Chiefmate is in emergency lockdown: the remote access is off until the owner releases it on the computer.') });
       } else if (!allowed.has(req.headers.host)) {
         recordSignal('unknown_origin', `${req.method} ${clip(String(req.url), 120)} (host ${clip(String(req.headers.host ?? ''), 80)})`, { who: 'app' });
         return reply(res, 403, { error: 'address not allowed' });
@@ -532,6 +536,8 @@ export function startServer() {
       if (req.method === 'GET') {
         if (url.pathname === '/api/health') return reply(res, 200, { ok: true, version: VERSION });
         if (url.pathname === '/api/state') return replyState(req, res);
+        // The emergency lockdown alone, for the phone's screen while the rest of the remote access is off.
+        if (url.pathname === '/api/lockdown') return reply(res, 200, { lockdown: lockdownView(), language: loadConfig().language || 'en' });
         // The notices that no longer need the owner, most recent first (the app's "Archived").
         if (url.pathname === '/api/attention/archived') return reply(res, 200, { items: attentionArchive() });
         if (url.pathname === '/api/computer') {
@@ -764,7 +770,11 @@ export function startServer() {
           if (body.action === 'release') {
             if (remote) return reply(res, 403, { error: t('The lockdown is released only on the computer where Chiefmate runs, not through the remote access.') });
             if (body.confirm !== true) return reply(res, 400, { error: t('Confirm that you reviewed what triggered the lockdown.') });
-            return reply(res, 200, { lockdown: lockdownView(release({ by: 'owner', from: body.origin === 'cli' ? 'cli' : 'app' })) });
+            return reply(res, 200, { lockdown: lockdownView(release({ by: 'owner', from: body.origin === 'cli' ? 'cli' : 'app', note: String(body.note ?? '') })) });
+          }
+          if (body.action === 'note') {
+            // The owner's note on the alarm going on, from this computer or the phone: in its record and to the manager.
+            return reply(res, 200, { lockdown: lockdownView(addNote(String(body.note ?? ''), { from: remote ? 'remote' : 'app' })) });
           }
           return reply(res, 400, { error: 'unknown action' });
         }

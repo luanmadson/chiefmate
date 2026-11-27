@@ -6,11 +6,11 @@
 // Run as a hook: node src/guard.mjs --log <file> [--allow <rule>]... [--grants <file>]  (the tool call comes as JSON on
 // standard input).
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isLocked, protectedFolders, recordSignal } from './lockdown.mjs';
+import { isLocked, protectedFolders, recordCreated, recordSignal } from './lockdown.mjs';
 import { ROOT } from './util.mjs';
 
 // The rules a finding is filed under: the same as Claude Code's, so allowing one releases both.
@@ -258,7 +258,7 @@ function asPath(word, cwd, home) {
 export function riskyCommand(command, { cwd = process.cwd(), protect = [], home = os.homedir(), root = null, temp = os.tmpdir() } = {}, depth = 0) {
   const found = [];
   if (depth > 4) return found;
-  const add = (kind, detail) => found.push({ kind, detail: clip(detail) });
+  const add = (kind, detail, target = null) => found.push({ kind, detail: clip(detail), ...(target ? { target } : {}) });
   // A protected folder's full path anywhere in the text, whatever its slashes: PowerShell keeps backslashes that the
   // shell's words below take as escapes.
   const flat = s => String(s).replace(/\\+/g, '/').replace(/\/+$/, '').toLowerCase();
@@ -299,14 +299,61 @@ export function riskyCommand(command, { cwd = process.cwd(), protect = [], home 
         || (inside(cwd, p) && !samePath(cwd, p)) // a folder above the agent's own
         || (root && inside(root, p)) // Chiefmate itself
         || protect.some(dir => inside(p, dir) || inside(dir, p));
-      if (wide) add('wide_delete', words.join(' '));
-      else if ((samePath(p, cwd) || !inside(p, cwd)) && !inside(p, temp)) add('mass_delete', words.join(' '));
+      if (wide) add('wide_delete', words.join(' '), p);
+      else if ((samePath(p, cwd) || !inside(p, cwd)) && !inside(p, temp)) add('mass_delete', words.join(' '), p);
     }
   }
   // One finding per deletion, and one for the protected folders however many times they are named.
   const seen = new Set();
-  const key = f => (f.kind === 'protected_access' ? f.kind : `${f.kind} ${f.detail}`);
+  const key = f => (f.kind === 'protected_access' ? f.kind : `${f.kind} ${f.detail} ${f.target ?? ''}`);
   return found.filter(f => !seen.has(key(f)) && seen.add(key(f)));
+}
+
+const MAKERS = new Set(['mkdir', 'md', 'new-item', 'ni']);
+
+/**
+ * The folders a shell command would create outside "cwd" (the agent's own folder), not existing yet: mkdir, md and
+ * New-Item (-ItemType Directory), git clone's and git worktree add's destination. Noted by the hook (recordCreated in
+ * src/lockdown.mjs), so the emergency watch knows a folder deleted later was the same agent's. exists: for the tests.
+ */
+export function createdPaths(command, { cwd = process.cwd(), home = os.homedir(), exists = existsSync } = {}) {
+  const out = [];
+  const all = tokens(command);
+  const commands = [];
+  for (let i = 0, start = 0; i <= all.length; i++) {
+    if (i === all.length || all[i] === '|') {
+      if (i > start) commands.push(all.slice(start, i));
+      start = i + 1;
+    }
+  }
+  for (const words of commands) {
+    let i = 0;
+    while (i < words.length && (/^[A-Za-z_][\w]*=/.test(words[i]) || WRAPPERS.has(programName(words[i])))) i++;
+    const program = programName(words[i] ?? '');
+    const args = words.slice(i + 1);
+    let targets = [];
+    if (MAKERS.has(program)) {
+      // New-Item makes a folder only with -ItemType Directory (or its short forms).
+      const type = args.findIndex(a => /^-(itemtype|type|it)$/i.test(a));
+      if (['new-item', 'ni'].includes(program) && !(type >= 0 && /^dir/i.test(args[type + 1] ?? ''))) continue;
+      targets = args.filter((a, k) => !a.startsWith('-') && !(k > 0 && /^-(itemtype|type|it|name)$/i.test(args[k - 1])));
+    } else if (program === 'git' && args[0] === 'clone') {
+      const plain = args.slice(1).filter(a => !a.startsWith('-'));
+      if (plain.length >= 2) targets = [plain.at(-1)];
+    } else if (program === 'git' && args[0] === 'worktree' && args[1] === 'add') {
+      const plain = args.slice(2).filter(a => !a.startsWith('-'));
+      if (plain.length) targets = [plain[0]];
+    }
+    for (const target of targets) {
+      const p = asPath(target, cwd, home);
+      if (!p || inside(p, cwd) || exists(p)) continue;
+      // The topmost folder that will be new: "mkdir -p ~/a/b" creates ~/a when it is missing.
+      let top = p;
+      while (path.dirname(top) !== top && !exists(path.dirname(top)) && !inside(path.dirname(top), cwd)) top = path.dirname(top);
+      out.push(top);
+    }
+  }
+  return [...new Set(out)];
 }
 
 const clip = s => (s.length > 300 ? `${s.slice(0, 299)}…` : s);
@@ -455,12 +502,20 @@ async function hook(argv) {
   } catch {
     // the detection never blocks a command by failing
   }
-  for (const r of risky) recordSignal(r.kind, r.detail, { who });
-  if (risky.some(r => r.kind !== 'mass_delete')) {
+  // Who ran it, where and what, for the emergency watch (src/sentinel.mjs): the run and step, or the live session.
+  const cwd = call.cwd || process.cwd();
+  const facts = { who, run: process.env.CHIEFMATE_RUN, step: process.env.CHIEFMATE_STEP, session: process.env.CHIEFMATE_SESSION, cwd, command };
+  const grave = risky.some(r => r.kind !== 'mass_delete');
+  for (const r of risky) recordSignal(r.kind, r.detail, { ...facts, refused: grave, ...(r.target ? { target: r.target, existed: existsSync(r.target) } : {}) });
+  if (grave) {
     return deny("Refused by Chiefmate: this reaches into Chiefmate's protected folders, or deletes a whole drive, a personal folder or Chiefmate. The owner was warned. Don't try it another way: say why you wanted it, and stop.");
   }
+  try {
+    recordCreated(createdPaths(command, { cwd }), facts);
+  } catch {
+    // noting never blocks a command
+  }
   const found = publishing(command);
-  const cwd = call.cwd || process.cwd();
   // A "Work now" session (src/worknow.mjs): only a plain push of one branch other than the main one may ever go, once
   // the owner allows pushing; any other push is refused at once, so it never becomes a permission request. HEAD is
   // the branch checked out, and "heads/<name>" that branch.
@@ -491,7 +546,7 @@ async function hook(argv) {
           ? `Refused by Chiefmate: this push needs the owner's permission. If it is a plain push of one branch, the owner now gets a card to allow it once (this repository and branch, for ${GRANT_MINUTES} minutes); you are told when they do, and may run the same command again. Only "git -C <folder> push [-u] <remote> <branch>" (or "cd <folder> && git push [-u] <remote> <branch>", with "2>&1" at most) can be allowed, alone and with no other option; the grant serves any of these forms of the same push. Say what you want to send and why, and stop.`
           : `Refused by Chiefmate: this publishes (${rules}), and the manager never does. Say what you wanted to run and why.`;
   // A live session's refusal becomes a permission request for the owner, present; the crew's and the manager's count.
-  if (who !== 'session') recordSignal('publish_refused', refused.map(f => f.part).join('; '), { who });
+  if (who !== 'session') recordSignal('publish_refused', refused.map(f => f.part).join('; '), { ...facts, refused: true });
   deny(reason);
 }
 
