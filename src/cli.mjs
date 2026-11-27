@@ -1331,10 +1331,10 @@ async function main() {
       return;
     }
     case 'claude-login': {
-      const { openLogin, PROFILE_DIR } = await import('./usagepage.mjs');
+      const { LOGIN_MINUTES, openLogin, PROFILE_DIR } = await import('./usagepage.mjs');
       openLogin();
       console.log(`A browser window opened with Chiefmate's own profile (${PROFILE_DIR}).
-Sign in to claude.ai there, then close the window.
+Sign in to claude.ai there, then close the window. With Chiefmate running, it closes by itself after ${LOGIN_MINUTES} minutes.
 The reading is off until you turn it on: node src/cli.mjs usage-reader on`);
       return;
     }

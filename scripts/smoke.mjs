@@ -1984,6 +1984,92 @@ try {
   failures.push(`attention levels: ${error.message}`);
 }
 
+// The reading of claude.ai: a notice marked as seen stays seen while its cause lasts (once a day it reminds), and the
+// sign-in window closes by itself, leaving one "Sign in" card. Made-up records only: stand-ins for the browser and
+// Windows, a made-up empty profile folder in this test's data, and nothing opened or read.
+try {
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const { attentionItems, markSeen } = await import(src('attention.mjs'));
+  const { checkLogin, failed, LOGIN_MINUTES, loginState, openLogin, PROFILE_DIR, readingDue, signInNeeded } = await import(src('usagepage.mjs'));
+  const { readState, saveState } = await import(src('store.mjs'));
+  const { DATA } = await import(src('util.mjs'));
+  const statusFile = path.join(DATA, 'usage-page.json');
+  const setStatus = s => writeFileSync(statusFile, JSON.stringify(s));
+  mkdirSync(PROFILE_DIR, { recursive: true });
+  const config = { usage_reader: { enabled: true, browser: 'C:/made-up/msedge.exe' } };
+  const readerNotices = () => attentionItems({ config }).filter(i => i.id.startsWith('reader:'));
+  const minutes = m => new Date(Date.now() - m * 60_000).toISOString();
+  const open = Object.assign(new Error('The browser with the reading profile is open.'), { readerCause: 'profile_open' });
+
+  // The same cause, tried again and again (even with another wording): one notice, seen once.
+  let status = { attempted: minutes(300), ...failed({}, open, minutes(300)) };
+  setStatus(status);
+  const first = readerNotices();
+  expect(first.length === 1 && first[0].id === 'reader:profile_open' && !first[0].seen, `a failed reading is not one notice of its cause: ${JSON.stringify(first)}`);
+  markSeen(['reader:profile_open']);
+  for (const m of [240, 60]) {
+    status = { ...status, attempted: minutes(m), ...failed(status, m === 60 ? Object.assign(new Error('Still open.'), { readerCause: 'profile_open' }) : open, minutes(m)) };
+    setStatus(status);
+    const again = readerNotices();
+    expect(again.length === 1 && again[0].seen, `the same failure tried again came back as a new notice: ${JSON.stringify(again)}`);
+  }
+  expect(status.failing_since === first[0].at, 'the failure did not keep the time it started');
+  // A day after it was marked, it reminds once; marked again, it stays seen.
+  const state = readState();
+  saveState({ ...state, attention_seen: { ...state.attention_seen, 'reader:profile_open': new Date(Date.now() - 25 * 3600_000).toISOString() } });
+  expect(!readerNotices()[0].seen, 'a failure lasting for over a day did not remind the owner');
+  markSeen(['reader:profile_open']);
+  expect(readerNotices()[0].seen, 'a reminder marked as seen did not fade');
+  // Read again, then failing again: a new situation, a new notice.
+  setStatus({ ok: true, error: null, cause: null, failing_since: null, attempted: minutes(30), read_at: minutes(30) });
+  expect(!readerNotices().length, 'a reading that worked still shows a failure');
+  setStatus({ attempted: minutes(1), ...failed({ ok: true }, open, minutes(1)) });
+  expect(readerNotices()[0]?.seen === false, 'a failure back after a good reading did not come back as new');
+
+  // The sign-in window: opened once, noted, closed after LOGIN_MINUTES, and then a single card to open it again.
+  const started = [];
+  const start = (browser, args) => (started.push(args), 4242);
+  const opened = openLogin(config, { start, alive: () => false });
+  expect(opened.pid === 4242 && opened.image === 'msedge.exe' && loginState().pid === 4242 && started[0].includes('https://claude.ai/login'), `the sign-in window was not noted: ${JSON.stringify(loginState())}`);
+  expect(openLogin(config, { start: () => 5555, alive: () => true }).pid === 4242 && loginState().pid === 4242, 'a second sign-in window replaced the one open');
+  setStatus({ attempted: minutes(1), ...failed({}, Object.assign(new Error('Signed out.'), { readerCause: 'signed_out' }), minutes(1)) });
+  expect(!signInNeeded() && !readerNotices().some(i => i.kind === 'reader-login'), 'the sign-in card shows while its window is open');
+  const closedPids = [];
+  const close = async login => closedPids.push(login.pid);
+  const opening = Date.parse(loginState().opened);
+  expect(await checkLogin({ at: opening + (LOGIN_MINUTES - 1) * 60_000, alive: () => true, close }) === 'open' && !closedPids.length, 'the sign-in window closed before its time');
+  const atLimit = opening + LOGIN_MINUTES * 60_000;
+  expect(await checkLogin({ at: atLimit, alive: () => true, close }) === 'timed_out' && closedPids.join() === '4242' && loginState().timed_out, 'the sign-in window was left open past its time');
+  expect(await checkLogin({ at: atLimit + 60_000, alive: () => true, close }) === null && closedPids.length === 1, 'a closed sign-in window was closed again');
+  const cards = readerNotices();
+  expect(cards.length === 1 && cards[0].id === 'reader:login' && cards[0].kind === 'reader-login' && signInNeeded(), `there is not one "Sign in" card: ${JSON.stringify(cards)}`);
+  // Tried once a minute after it closed, away or not (it tells whether the owner signed in); after that, a failure only
+  // the owner can fix waits for their return.
+  const login = loginState();
+  const beforeClose = { attempted: new Date(atLimit - 60_000).toISOString(), ok: false, cause: 'signed_out' };
+  expect(!readingDue({ status: beforeClose, login, everyHours: 4, at: atLimit + 30_000 }) && readingDue({ status: beforeClose, login, everyHours: 4, at: atLimit + 61_000 }),
+    'the reading was not tried again a minute after the sign-in window closed');
+  expect(readingDue({ status: beforeClose, login, everyHours: 4, away: true, at: atLimit + 61_000 }), 'with the owner away, no reading told whether they signed in before the window closed');
+  const signedOut = { attempted: new Date(atLimit + 61_000).toISOString(), ok: false, cause: 'signed_out' };
+  const later = atLimit + 5 * 3600_000;
+  expect(!readingDue({ status: signedOut, login, everyHours: 4, away: true, at: later }) && readingDue({ status: signedOut, login, everyHours: 4, at: later }),
+    'a failure only the owner can fix was retried while away, or not once they were back');
+  expect(readingDue({ status: { ...signedOut, cause: 'other' }, login, everyHours: 4, away: true, at: later }), 'a passing failure was not retried while the owner was away');
+  // Closed by the owner: noted, with no forced close.
+  openLogin(config, { start: () => 6060, alive: () => false });
+  expect(await checkLogin({ alive: () => false, close }) === 'closed' && closedPids.length === 1 && loginState().timed_out === false, 'a sign-in window closed by the owner was not noted');
+  // A browser that never started is an error, never a window noted as open.
+  let refused = null;
+  try {
+    openLogin(config, { start: () => null, alive: () => false });
+  } catch (error) {
+    refused = error;
+  }
+  expect(refused?.readerCause === 'no_start' && loginState().pid === 6060, 'a sign-in window that never started was noted as open');
+} catch (error) {
+  failures.push(`usage reading notices and sign-in window: ${error.message}`);
+}
+
 // The owner's decision cards, in this process with made-up records (no gh, no git, nothing told to the manager): what
 // each card says, the project beside the number, a project someone else reviews (no Approve), "not now", the answers
 // to the manager's questions and the discards.

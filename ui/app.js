@@ -1053,7 +1053,7 @@ function attnNotice(i, brief = false) {
     : r && brief && r.options?.length ? `<a class="button small" href="#${esc(i.view)}">${esc(t('Answer'))}</a>`
     : r ? needsButtons({ ...r, project: i.project }, ' small')
     : decide ? `<a class="button small" href="#decisions">${esc(t('Decide'))}</a>`
-    : `${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
+    : `${i.kind === 'reader-login' ? `<button type="button" class="button small" data-reader="login">${esc(t('Open the sign-in window'))}</button>` : ''}${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
   return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
       <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
       <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}${brief ? '' : requestWhy(r)}${brief || !r?.run ? '' : requestReply(r.run, r, ' small')}${where || links.length ? `<span class="hint">${[esc(where), ...links].filter(Boolean).join(' · ')}</span>` : ''}${brief ? '' : permissionFacts(r?.explain, r?.id)}</div>
@@ -3706,7 +3706,9 @@ function paceText(p) {
 function readerPanel(reader) {
   const status = reader.status ?? {};
   let line = reader.enabled ? t('On, every {hours} h.', { hours: reader.everyHours }) : t('Off.');
-  if (!reader.signedIn) line += ` ${t('Not signed in yet: run node src/cli.mjs claude-login.')}`;
+  const login = reader.login ?? {};
+  if (login.pid && !login.closed) line += ` ${t('The sign-in window is open: it closes by itself in a few minutes.')}`;
+  else if (!reader.signedIn) line += ` ${t('Not signed in yet: open the sign-in window.')}`;
   if (reader.reading) line += ` ${t('Reading now…')}`;
   const read = [];
   if (status.read_at) read.push(t('Last read {when}: session {session}, week {week}.', { when: shortDate(status.read_at), session: percent(status.five_hour), week: percent(status.seven_day) }));
@@ -3721,6 +3723,7 @@ function readerPanel(reader) {
       <div class="actions left">
         <button type="button" class="button secondary small" data-reader="${reader.enabled ? 'off' : 'on'}">${esc(reader.enabled ? t('Turn off') : t('Turn on'))}</button>
         ${reader.signedIn ? `<button type="button" class="button secondary small" data-reader="now"${reader.reading ? ' disabled' : ''}>${esc(t('Read now'))}</button>` : ''}
+        ${reader.signIn || !reader.signedIn ? `<button type="button" class="button secondary small" data-reader="login">${esc(t('Open the sign-in window'))}</button>` : ''}
       </div>
     </div>`;
 }
@@ -4929,8 +4932,8 @@ document.addEventListener('click', async event => {
       await setAutopilotMode(target.dataset.autopilotMode);
     } else if (target.dataset.reader) {
       const action = target.dataset.reader;
-      await api('/api/usage-reader', action === 'now' ? { read: true } : { enabled: action === 'on' });
-      toast(action === 'now' ? t('Reading claude.ai…') : action === 'on' ? t('Reading of claude.ai turned on.') : t('Reading of claude.ai turned off.'));
+      await api('/api/usage-reader', action === 'now' ? { read: true } : action === 'login' ? { login: true } : { enabled: action === 'on' });
+      toast(action === 'now' ? t('Reading claude.ai…') : action === 'login' ? t('A window opened on this computer for you to sign in to claude.ai.') : action === 'on' ? t('Reading of claude.ai turned on.') : t('Reading of claude.ai turned off.'));
     }
     refresh();
   } catch (error) {

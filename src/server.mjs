@@ -42,7 +42,7 @@ import {
 import { talkTo } from './talk.mjs';
 import { listRuns, readConversation, readNotifications, readPending, readRun, readUsage, runDir, stepsOf } from './store.mjs';
 import { checkNow, updateInfo, updateMode, updateNow } from './update.mjs';
-import { isReading, readerSettings, readerStatus, readUsagePage, signedIn } from './usagepage.mjs';
+import { isReading, loginState, openLogin, readerSettings, readerStatus, readUsagePage, signedIn, signInNeeded } from './usagepage.mjs';
 import { clip, now, ROOT, VERSION } from './util.mjs';
 import { projectDir } from './workspace.mjs';
 
@@ -417,7 +417,7 @@ function buildState() {
     plan: {
       resets: planResets(config),
       pace: weekPace(usage),
-      reader: { ...readerSettings(config), signedIn: signedIn(), reading: isReading(), status: readerStatus() },
+      reader: { ...readerSettings(config), signedIn: signedIn(), reading: isReading(), status: readerStatus(), signIn: signInNeeded(), login: loginState() },
     },
     // The autopilot (src/autopilot.mjs): its settings, whether it may act now and what it did today.
     autopilot: autopilotStatus(config, usage, new Date(), runs),
@@ -832,6 +832,8 @@ export function startServer() {
             config.usage_reader = { ...config.usage_reader, enabled: !!body.enabled };
             saveConfig(config);
           }
+          // The sign-in window, from the app's card (it closes by itself after a few minutes).
+          if (body.login) openLogin();
           if (body.read) {
             if (!signedIn()) return reply(res, 400, { error: t('Not signed in yet. Run: node src/cli.mjs claude-login') });
             readUsagePage().catch(() => {});
