@@ -159,7 +159,17 @@ try {
     // The owner's commands carry the owner's key, as the app and the owner's terminal do (src/owner.mjs).
     const { ownerKey, OWNER_HEADER } = await import('../src/owner.mjs');
     const ownerHeader = { [OWNER_HEADER]: ownerKey(path.join(data, 'security')) };
-    const keyless = (route, body, more = {}) => fetch(base + route, { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1', ...more }, body: JSON.stringify(body) });
+    const keyless = async (route, body, more = {}) => {
+      const send = () => fetch(base + route, { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1', ...more }, body: JSON.stringify(body) });
+      try {
+        return await send();
+      } catch (error) {
+        // The command line's runs (execFileSync) block this process: past the server's keep-alive (5 s), fetch reuses a
+        // connection the server already closed, and the request fails before reaching it. Once more, on a new one.
+        if (!['ECONNRESET', 'UND_ERR_SOCKET'].includes(error.cause?.code)) throw error;
+        return send();
+      }
+    };
     const post = (route, body) => keyless(route, body, ownerHeader);
     // Without the key (any other program of this computer), what is the owner's is refused and changes nothing; what an
     // agent may do goes on; a pairing code must be one the server gave; and the app's window opens nothing here.
@@ -612,25 +622,34 @@ try {
     };
     const ownerRefused = /owner's key|chave do dono/;
     const idOf = out => Number(/#(\d+)/.exec(out ?? '')?.[1]);
-    const fromStep = refusal(['plan', 'propose', 'Sample', 'Smoke keyless proposal', '--summary', 'From a step.', '--agent', 'generalist', '--priority', 'low'], as.step);
-    const keylessId = idOf(fromStep.out);
-    expect(keylessId > 0, `a step could not propose an item without the owner's key: ${fromStep.error}`);
-    for (const args of [['plan', 'triage', `${keylessId}`, '--recommend', 'now', '--priority', 'high', '--note', 'Keyless.'], ['plan', 'order', `${keylessId}`],
-      ['plan', 'set', `${keylessId}`, '--status', 'triaged'], ['plan', 'discard', `${keylessId}`, '--reason', 'Smoke.'], ['plan', 'restore', `${keylessId}`],
-      ['plan', 'add', 'Sample', 'Smoke manager item', '--status', 'proposed']]) {
-      const r = refusal(args, as.manager);
-      expect(r.out && !r.error, `the manager's "${args.slice(0, 2).join(' ')}" was refused without the owner's key: ${r.error}`);
+    // The agents' own commands are no signal for the emergency lockdown (src/lockdown.mjs): only the refusals below are.
+    const signalCount = () => (existsSync(path.join(data, 'security', 'signals.jsonl')) ? readFileSync(path.join(data, 'security', 'signals.jsonl'), 'utf8').split('\n').filter(Boolean).length : 0);
+    const signalsBefore = signalCount();
+    try {
+      const fromStep = refusal(['plan', 'propose', 'Sample', 'Smoke keyless proposal', '--summary', 'From a step.', '--agent', 'generalist', '--priority', 'low'], as.step);
+      const keylessId = idOf(fromStep.out);
+      expect(keylessId > 0, `a step could not propose an item without the owner's key: ${fromStep.error}`);
+      for (const args of [['plan', 'triage', `${keylessId}`, '--recommend', 'now', '--priority', 'high', '--note', 'Keyless.'], ['plan', 'order', `${keylessId}`],
+        ['plan', 'set', `${keylessId}`, '--status', 'triaged'], ['plan', 'discard', `${keylessId}`, '--reason', 'Smoke.'], ['plan', 'restore', `${keylessId}`],
+        ['plan', 'add', 'Sample', 'Smoke manager item', '--status', 'proposed']]) {
+        const r = refusal(args, as.manager);
+        expect(r.out && !r.error, `the manager's "${args.slice(0, 2).join(' ')}" was refused without the owner's key: ${r.error}`);
+      }
+      expect(refusal(['plan', 'propose', 'Sample', 'Smoke session proposal', '--summary', 'From a session.'], as.session).out, "a live session could not propose an item without the owner's key");
+      // A step's line for its bubble: not refused as the owner's (this run is over, so the server says only that).
+      const said = refusal(['say', 'Comecei o teste'], as.step);
+      expect(said.error && !ownerRefused.test(said.error), `a step's line for its bubble was refused as the owner's: ${said.out ?? said.error}`);
+      const signals = signalCount() - signalsBefore;
+      expect(signals === 0, `the manager's, a step's or a session's own commands left ${signals} signal(s) for the emergency lockdown`);
+      for (const who of ['step', 'session']) {
+        const r = refusal(['plan', 'triage', `${keylessId}`, '--recommend', 'later'], as[who]);
+        expect(!r.out && (who === 'step' ? /only proposes/ : ownerRefused).test(r.error), `a ${who} triaged an item of the planning board: ${r.out ?? r.error}`);
+      }
+      expect((await keyless('/api/say', { text: 'As the owner' })).status === 403, "a line for a bubble without a run went without the owner's key");
+    } finally {
+      // Whatever failed above, the items it made leave the board, so the checks of the board further on stay true.
+      for (const id of (await import('../src/planning.mjs')).planItems().filter(i => /^Smoke (keyless|session|manager) /.test(i.title) && i.status !== 'discarded').map(i => i.id)) refusal(['plan', 'discard', `${id}`, '--reason', 'Smoke.'], as.manager);
     }
-    for (const who of ['step', 'session']) {
-      const r = refusal(['plan', 'triage', `${keylessId}`, '--recommend', 'later'], as[who]);
-      expect(!r.out && (who === 'step' ? /only proposes/ : ownerRefused).test(r.error), `a ${who} triaged an item of the planning board: ${r.out ?? r.error}`);
-    }
-    expect(refusal(['plan', 'propose', 'Sample', 'Smoke session proposal', '--summary', 'From a session.'], as.session).out, "a live session could not propose an item without the owner's key");
-    // A step's line for its bubble: not refused as the owner's (this run is over, so the server says only that).
-    const said = refusal(['say', 'Comecei o teste'], as.step);
-    expect(said.error && !ownerRefused.test(said.error), `a step's line for its bubble was refused as the owner's: ${said.out ?? said.error}`);
-    expect((await keyless('/api/say', { text: 'As the owner' })).status === 403, "a line for a bubble without a run went without the owner's key");
-    for (const id of (await import('../src/planning.mjs')).planItems().filter(i => /^Smoke (keyless|session|manager) /.test(i.title)).map(i => i.id)) cli(['plan', 'discard', `${id}`, '--reason', 'Smoke.'], as.manager);
 
     // The CLI sends the destination options to the running API. The queue is held while the approval is tested, and
     // the run it queues (in a real project) is canceled: a later part of this test wakes the queue up.
