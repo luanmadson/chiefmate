@@ -590,6 +590,14 @@ The mark at the top of every screen, next to the away button, always says how Ch
 
 Before stopping or shutting down, the confirmation lists what would be affected: the runs that pause, the live sessions open (a session in its own window ends with the computer), the folders of those sessions with changes not committed, and text not sent in the app. Until Chiefmate starts closing, **Cancel** at the top stops it and the paused work goes on. From another device (the remote access), only standby: a Chiefmate stopped there could not be started again from it. The manager hears of each change (the `power` news, always told). On the command line: `node src/cli.mjs power standby|on|stop|shutdown|cancel`, which only shows what would happen until you add `--yes`.
 
+### Focus: which projects may work
+
+The **Focus** panel, at the top of **Operations** (on a phone too), shows every project at a glance and lets you choose with one click which ones may start new work. Each project has a card: its state in words and color (**Working now** in green, **In the queue: N** in blue, **Stopped**, **Paused by you** in amber, **Waiting for the focus to end** with a dashed edge), who is working there (the agent's name and role, a click opens its panel), its memory and whether your live session there is open. Under it, three large buttons: **Active**, **Paused** and **Focus**.
+
+Above the cards, the general modes: **No restriction** (the default), **Focus on…** (tick one or more projects: only they start new work, the others wait) and **Pause all**. **Until when** makes the next change last 1, 2 or 4 hours or until tomorrow at 8:00, then the state before it comes back by itself. One line says how it is now and since when, by whom ("Focus: only Webshop since 11:30, at the owner's request, until 13:30"), and **Latest changes** lists the changes, the automatic return included. While a project is held, the top bar shows a mark ("Only Webshop", "Everything paused", "1 paused") that opens the panel.
+
+A held project starts no run: its queued runs, its missions (a mission missed meanwhile runs once after, marked late), its approved board items and the autopilot wait. When a change would hold a project with work going on, you choose: **Let it finish** (the run goes to the end, then the project waits) or **Pause it now** (it stops at a safe point and resumes by itself when the project is free). Your live sessions, the agents in charge and the conversation with the manager are never held. The manager sees the mode in its situation and hears of each change of yours (the `focus` news); it changes the focus only at your request, with `node src/cli.mjs focus <project...>`, `focus off`, `focus pause-all`, `project-pause <id>` and `project-resume <id>` (`--for 2h` or `--until 08:00` for a timed change, `--pause-running` to pause the work going on). Kept in `data/state.json` (`steer`).
+
 ### The conversation's context
 
 Every turn of Claude Code reports how much of the model's context window it filled. Chiefmate shows it as a bar, in tokens and as a share, for the conversation with the manager and for the agent at work, with the number of times Claude Code compacted each one on its own.
@@ -790,6 +798,14 @@ node src/cli.mjs power standby|on|stop|shutdown|cancel [--yes]
                                               computer down (see "Standby and shutting down"); without --yes, only
                                               shows what would happen. Yours only: refused inside a step and the
                                               manager's answer
+node src/cli.mjs focus [status]               which projects may start new work (see "Focus: which projects may work")
+node src/cli.mjs focus <project...>|off|pause-all [--for 2h | --until 08:00] [--pause-running]
+                                              only these projects work; no restriction; nothing new starts. --for and
+                                              --until: back to the state before by itself; --pause-running: the work
+                                              going on of the projects held pauses at a safe point (else it finishes).
+                                              Refused inside a step
+node src/cli.mjs project-pause <project> [--for 2h | --until 08:00] [--pause-running]
+node src/cli.mjs project-resume <project>     pauses one project (no new run starts there), or frees it
 node src/cli.mjs history                      the latest runs
 node src/cli.mjs report <id>                  the reports of a run
 node src/cli.mjs context <id> [step]          what each step received: prompt, model, tools, folders, MCP servers

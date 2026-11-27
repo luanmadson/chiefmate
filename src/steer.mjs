@@ -161,7 +161,7 @@ function when(iso, at = new Date()) {
 
 const whoText = by => (by === 'time' ? t('back automatically') : by === 'manager' ? t('by the manager') : by === 'cli' ? t('from the command line') : t("at the owner's request"));
 
-/** The state in a few words, in the app's language: "Focus: only ATLAS", "Everything paused", "No restriction". */
+/** The state in a few words, in the app's language: "Focus: only Webshop", "Everything paused", "No restriction". */
 export function headText(c, name = id => id) {
   c = core(c);
   if (c.mode === 'paused-all') return t('Everything paused');
@@ -169,7 +169,7 @@ export function headText(c, name = id => id) {
   return c.paused.length ? t('Paused: {list}', { list: list(c.paused.map(name)) }) : t('No restriction');
 }
 
-/** One line: "Focus: only ATLAS since 11:30, at the owner's request, until 13:30". */
+/** One line: "Focus: only Webshop since 11:30, at the owner's request, until 13:30". */
 export function steerLine(s, config = loadConfig(), at = new Date()) {
   const name = id => config.projects?.[id]?.name ?? id;
   const parts = [headText(s, name)];

@@ -2725,44 +2725,44 @@ try {
   const steer = await import(pathToFileURL(path.join(root, 'src', 'steer.mjs')).href);
   const { idleProjects } = await import(pathToFileURL(path.join(root, 'src', 'autopilot.mjs')).href);
   const { t } = await import(pathToFileURL(path.join(root, 'src', 'i18n.mjs')).href); // the app's lines are in the installation's language
-  const config = { owner: 'Owner', projects: { atlas: { name: 'ATLAS' }, guitar: { name: 'Guitarra' }, book: { name: 'Book' } } };
+  const config = { owner: 'Owner', projects: { shop: { name: 'Webshop' }, music: { name: 'Music' }, book: { name: 'Book' } } };
   const fresh = steer.readSteer();
-  expect(fresh.mode === 'free' && ['atlas', 'guitar', 'book'].every(id => !steer.holdReason(id, fresh)), `the focus does not start free: ${JSON.stringify(fresh)}`);
+  expect(fresh.mode === 'free' && ['shop', 'music', 'book'].every(id => !steer.holdReason(id, fresh)), `the focus does not start free: ${JSON.stringify(fresh)}`);
   const at = new Date();
   // the preview saves nothing and lists the work going on the change would hold
-  const live = [{ run: 'r-atlas', project: 'atlas' }, { run: 'r-guitar', project: 'guitar' }];
-  const preview = steer.changeSteer({ action: 'focus', projects: ['atlas'], preview: true }, { config, at, live });
-  expect(preview.held.map(h => h.run).join() === 'r-guitar' && steer.readSteer().mode === 'free', `the preview of a focus is wrong, or saved: ${JSON.stringify(preview)}`);
-  // focus on ATLAS, the work going on elsewhere paused on the owner's choice
+  const live = [{ run: 'r-shop', project: 'shop' }, { run: 'r-music', project: 'music' }];
+  const preview = steer.changeSteer({ action: 'focus', projects: ['shop'], preview: true }, { config, at, live });
+  expect(preview.held.map(h => h.run).join() === 'r-music' && steer.readSteer().mode === 'free', `the preview of a focus is wrong, or saved: ${JSON.stringify(preview)}`);
+  // focus on Webshop, the work going on elsewhere paused on the owner's choice
   const asked = [];
-  const focused = steer.changeSteer({ action: 'focus', projects: ['atlas'], running: 'pause' }, { config, at, live, pause: id => asked.push(id) > 0 });
+  const focused = steer.changeSteer({ action: 'focus', projects: ['shop'], running: 'pause' }, { config, at, live, pause: id => asked.push(id) > 0 });
   const s1 = steer.readSteer();
-  expect(asked.join() === 'r-guitar' && focused.paused.join() === 'r-guitar', `the focus did not pause only the other project's work: ${asked}`);
-  expect(!steer.holdReason('atlas', s1) && steer.holdReason('guitar', s1) === 'focus' && steer.holdReason('book', s1) === 'focus', `the focus holds the wrong projects: ${JSON.stringify(s1)}`);
+  expect(asked.join() === 'r-music' && focused.paused.join() === 'r-music', `the focus did not pause only the other project's work: ${asked}`);
+  expect(!steer.holdReason('shop', s1) && steer.holdReason('music', s1) === 'focus' && steer.holdReason('book', s1) === 'focus', `the focus holds the wrong projects: ${JSON.stringify(s1)}`);
   const focusLine = steer.steerLine(s1, config, at);
-  expect(focusLine.startsWith(`${t('Focus: only {list}', { list: 'ATLAS' })} ${t('since {time}', { time: '' })}`) && focusLine.endsWith(t("at the owner's request")), `the focus's line is wrong: ${focusLine}`);
+  expect(focusLine.startsWith(`${t('Focus: only {list}', { list: 'Webshop' })} ${t('since {time}', { time: '' })}`) && focusLine.endsWith(t("at the owner's request")), `the focus's line is wrong: ${focusLine}`);
   // "finish" (the default) leaves the work going on alone
   const none = [];
-  steer.changeSteer({ action: 'project', project: 'guitar', to: 'paused' }, { config, at, live, pause: id => none.push(id) > 0 });
+  steer.changeSteer({ action: 'project', project: 'music', to: 'paused' }, { config, at, live, pause: id => none.push(id) > 0 });
   const s2 = steer.readSteer();
-  expect(!none.length && steer.holdReason('guitar', s2) === 'paused' && steer.controlOf('guitar', s2) === 'paused' && steer.controlOf('atlas', s2) === 'focus', `a project paused alone is wrong: ${JSON.stringify(s2)}`);
+  expect(!none.length && steer.holdReason('music', s2) === 'paused' && steer.controlOf('music', s2) === 'paused' && steer.controlOf('shop', s2) === 'focus', `a project paused alone is wrong: ${JSON.stringify(s2)}`);
   // what the queue, the autopilot and the manager see: a held project's queued run is never next
   const { focus } = await import(pathToFileURL(path.join(root, 'src', 'queue.mjs')).href);
   const { saveRun } = await import(pathToFileURL(path.join(root, 'src', 'store.mjs')).href);
-  saveRun({ id: 'smoke-held', kind: 'task', project: 'guitar', title: 'Held', status: 'queued', created: new Date().toISOString(), steps: [{ agent: 'writer', status: 'pending' }] });
+  saveRun({ id: 'smoke-held', kind: 'task', project: 'music', title: 'Held', status: 'queued', created: new Date().toISOString(), steps: [{ agent: 'writer', status: 'pending' }] });
   const next = focus(config);
   expect(next?.run !== 'smoke-held', `a held project's run is next in the queue: ${JSON.stringify(next)}`);
-  saveRun({ id: 'smoke-held', kind: 'task', project: 'guitar', title: 'Held', status: 'canceled', created: new Date().toISOString(), steps: [{ agent: 'writer', status: 'pending' }] });
+  saveRun({ id: 'smoke-held', kind: 'task', project: 'music', title: 'Held', status: 'canceled', created: new Date().toISOString(), steps: [{ agent: 'writer', status: 'pending' }] });
   const idle = idleProjects(config, []);
-  expect(idle.has('atlas') && !idle.has('guitar') && !idle.has('book'), `the autopilot sees held projects as free: ${[...idle]}`);
+  expect(idle.has('shop') && !idle.has('music') && !idle.has('book'), `the autopilot sees held projects as free: ${[...idle]}`);
   const line = steer.steerManagerLine(config, s2);
-  expect(line.startsWith("Owner's focus: focus on atlas (ATLAS)") && line.includes('paused alone: guitar (Guitarra)') && line.includes('focus off'), `the manager's line about the focus is wrong: ${line}`);
+  expect(line.startsWith("Owner's focus: focus on shop (Webshop)") && line.includes('paused alone: music (Music)') && line.includes('focus off'), `the manager's line about the focus is wrong: ${line}`);
   // pause all, then no restriction: every pause ends
   steer.changeSteer({ action: 'pause-all' }, { config, at, by: 'manager' });
-  expect(steer.holdReason('atlas') === 'all' && steer.readSteer().by === 'manager', 'pause all did not hold every project, or lost who changed it');
+  expect(steer.holdReason('shop') === 'all' && steer.readSteer().by === 'manager', 'pause all did not hold every project, or lost who changed it');
   steer.changeSteer({ action: 'free' }, { config, at });
   const s3 = steer.readSteer();
-  expect(s3.mode === 'free' && !s3.paused.length && ['atlas', 'guitar', 'book'].every(id => !steer.holdReason(id, s3)), `no restriction left a project held: ${JSON.stringify(s3)}`);
+  expect(s3.mode === 'free' && !s3.paused.length && ['shop', 'music', 'book'].every(id => !steer.holdReason(id, s3)), `no restriction left a project held: ${JSON.stringify(s3)}`);
   // a timed change comes back by itself to the state before it, recorded as the automatic return
   const until = new Date(at.getTime() + 2 * 3600_000).toISOString();
   steer.changeSteer({ action: 'project', project: 'book', to: 'paused', until }, { config, at });
@@ -2772,7 +2772,7 @@ try {
   expect(back.mode === 'free' && !back.paused.length && !back.until && back.by === 'time' && back.changes.at(-1).by === 'time', `a timed change did not come back: ${JSON.stringify(back)}`);
   expect(steer.steerView(config).changes[0].who === t('back automatically'), 'the automatic return is not in the latest changes');
   // invalid changes are refused, and change nothing
-  for (const body of [{ action: 'focus', projects: [] }, { action: 'focus', projects: ['nope'] }, { action: 'project', project: 'atlas', to: 'gone' }, { action: 'free', until: at.toISOString() }]) {
+  for (const body of [{ action: 'focus', projects: [] }, { action: 'focus', projects: ['nope'] }, { action: 'project', project: 'shop', to: 'gone' }, { action: 'free', until: at.toISOString() }]) {
     let refused = false;
     try {
       steer.changeSteer(body, { config, at });

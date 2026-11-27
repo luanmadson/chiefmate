@@ -1323,3 +1323,5 @@ html.chat-focus #view-manager .chat-column { width: min(100%, 1000px); margin: 0
   .steer-until select { flex: 1; min-width: 0; }
   .steer-pick-item { min-height: 44px; }
 }
+/* On a phone the top bar is narrow: with the focus' mark, it takes the place of the run's line (the panel has it all) */
+@media (max-width: 600px) { .focus:has(.steer-chip) > :not(.label, .steer-chip) { display: none; } }
