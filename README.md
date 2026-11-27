@@ -643,7 +643,7 @@ Before stopping or shutting down, the confirmation lists what would be affected:
 
 ### Restarting the computer
 
-Some problems only go away with a restart of Windows: a file of a working copy held by the antivirus, say, stops the queue until then. The manager can restart the computer when it is needed, and the work comes back by itself:
+Some problems only go away with a restart of Windows: a file of a working copy that stays locked (unreadable), say, keeps its project's queue waiting until then. A file the antivirus removed comes back through Windows Security instead, not with a restart (see "When a step needs you"). The manager can restart the computer when it is needed, and the work comes back by itself:
 
 1. **What would stop.** `node src/cli.mjs reboot --reason "<why>"` lists the runs that pause, the live sessions open and the folders with changes not committed. Nothing is done without `--yes`.
 2. **Who decides.** The reason is always required. A restart is refused while a live session's turn is going on (your work is never cut off in the middle), and the manager's is refused during an emergency lockdown. While you are in away mode, the manager's restart goes ahead; otherwise it becomes a question card in **Decisions** ("The manager asks to restart the computer"), with the reason and what pauses, and starts only when you answer **Restart now**, within 30 minutes (**Don't restart** refuses it; asked again after that, a fresh card replaces the old one). Your own `reboot --yes`, in a terminal, needs no card. Each request, your answer and how it went are recorded (`node src/cli.mjs reboot history`; `power_log` in `data/state.json`).
