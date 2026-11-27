@@ -17,6 +17,7 @@ import { addQuestion, decide, decisionCards, openPushes, openQuestions, openRepo
 import { listFolder, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
+import { changeEscalation, escalationView } from './escalation.mjs';
 import { addNote, engage, isLocked, lockdownView, recordSignal, release } from './lockdown.mjs';
 import { watchView } from './sentinel.mjs';
 import { closeBrowser, focusBrowser, openBrowsers } from './browsers.mjs';
@@ -442,6 +443,8 @@ function buildState() {
     lockdown: security,
     // The emergency watch (src/sentinel.mjs), its own team in the org chart.
     watch: watchView(config),
+    // Calling the owner outside the app (src/escalation.mjs): Telegram, the PIN and the e-mail, never their secrets.
+    escalation: escalationView(),
     // The away mode (src/news.mjs): { since, held } while the owner is away, else null.
     away: awayInfo(),
     // The power mode (src/power.mjs): on, standby or stopping, shown at the top of the app.
@@ -779,6 +782,10 @@ export function startServer() {
           }
           return reply(res, 400, { error: 'unknown action' });
         }
+        case '/api/escalation':
+          // Calling the owner outside the app (src/escalation.mjs): set up and tested on this computer only.
+          if (remote) return reply(res, 403, { error: t('Telegram, the PIN and the e-mail are set up on the computer where Chiefmate runs.') });
+          return reply(res, 200, await changeEscalation(body));
         case '/api/away':
           // The owner stepped out or is back: the manager is told at once (src/news.mjs).
           return reply(res, 200, { away: setAway(!!body.on) });

@@ -57,11 +57,12 @@ export function refuseWhileLocked(what, dir) {
 
 /**
  * The folders no agent may reach: the owner's browser profile (data/browser-profile), the crew's browser profiles
- * (data/browsers) and those listed in "security.protected_folders" of the settings.
+ * (data/browsers), Chiefmate's secrets (data/secrets: the Telegram bot's token, the PIN's hash, src/escalation.mjs) and
+ * those listed in "security.protected_folders" of the settings.
  */
 export function protectedFolders(config = loadConfig(), data = DATA) {
   const extra = [config?.security?.protected_folders ?? []].flat().map(x => String(x ?? '').trim()).filter(Boolean);
-  return [path.join(data, 'browser-profile'), path.join(data, 'browsers'), ...extra.map(p => path.resolve(p))];
+  return [path.join(data, 'browser-profile'), path.join(data, 'browsers'), path.join(data, 'secrets'), ...extra.map(p => path.resolve(p))];
 }
 
 /**
@@ -232,6 +233,7 @@ function incidentEntry(state, { until, releasedBy, releasedFrom }) {
   return {
     since: state.since, until, by: state.by, from: state.from, reason: state.reason,
     evidence: state.evidence ?? [], stopped: state.stopped ?? {}, notes: state.notes ?? [], sentinel: state.sentinel ?? null,
+    escalation: state.escalation ?? null,
     ...(state.engagedAgain ? { engagedAgain: state.engagedAgain } : {}),
     releasedBy, releasedFrom,
   };
@@ -268,8 +270,9 @@ export function addNote(text, { from = 'app' } = {}, { dir, h = hooks } = {}) {
 }
 
 /**
- * Releases the lockdown: only the owner, on this computer (from: 'app' or 'cli'; never 'remote'). The summary of what
- * triggered it goes to the history. Returns the state.
+ * Releases the lockdown: only the owner, on this computer (from: 'app' or 'cli'; never 'remote'), or from their own
+ * Telegram chat with their PIN (from: 'telegram', only through src/escalation.mjs, once the PIN matched). The summary of
+ * what triggered it goes to the history. Returns the state.
  */
 export function release({ by = 'owner', from = 'app', note = '' } = {}, { dir, h = hooks } = {}) {
   if (from === 'remote') throw new Error(t('The lockdown is released only on the computer where Chiefmate runs, not through the remote access.'));
@@ -281,7 +284,7 @@ export function release({ by = 'owner', from = 'app', note = '' } = {}, { dir, h
   const at = new Date().toISOString();
   const entry = incidentEntry(state, { until: at, releasedBy: 'owner', releasedFrom: from });
   recordIncident(entry, dir);
-  const next = { ...state, active: false, released: at, evidence: [], stopped: {}, notes: [], sentinel: null, engagedAgain: null, history: [...(state.history ?? []), historyEntry(entry)].slice(-KEEP_HISTORY) };
+  const next = { ...state, active: false, released: at, evidence: [], stopped: {}, notes: [], sentinel: null, escalation: null, engagedAgain: null, history: [...(state.history ?? []), historyEntry(entry)].slice(-KEEP_HISTORY) };
   saveLockdown(next, dir);
   try {
     h.resume();
@@ -310,6 +313,18 @@ export function saveReview(since, review, dir) {
 }
 
 /**
+ * Keeps the call to the owner outside the app (src/escalation.mjs) in the alarm's state, for the app and the record:
+ * { at, channels, errors, decisions }. Only for that alarm (since). Returns the state, or null when it is over.
+ */
+export function saveEscalation(since, patch, dir) {
+  const state = readLockdown(dir);
+  if (state.active !== true || state.since !== since) return null;
+  const next = { ...state, escalation: { ...state.escalation, ...patch } };
+  saveLockdown(next, dir);
+  return next;
+}
+
+/**
  * The emergency watch's release (src/sentinel.mjs), the one exception to the owner's: only the alarm it reviewed
  * (since), engaged by the detection, and only when its review decided so. The app, the command line and the remote
  * access never reach it. The incident is recorded with the review; the queue, the manager and the sessions go on
@@ -322,7 +337,7 @@ export function sentinelRelease(since, review, { dir, h = hooks } = {}) {
   const reviewed = { ...state, sentinel: { ...review, status: 'released', at } };
   const entry = incidentEntry(reviewed, { until: at, releasedBy: 'sentinel', releasedFrom: 'sentinel' });
   recordIncident(entry, dir);
-  const next = { ...reviewed, active: false, released: at, evidence: [], stopped: {}, notes: [], sentinel: null, engagedAgain: null, history: [...(state.history ?? []), historyEntry(entry)].slice(-KEEP_HISTORY) };
+  const next = { ...reviewed, active: false, released: at, evidence: [], stopped: {}, notes: [], sentinel: null, escalation: null, engagedAgain: null, history: [...(state.history ?? []), historyEntry(entry)].slice(-KEEP_HISTORY) };
   saveLockdown(next, dir);
   try {
     h.resume();
@@ -396,6 +411,8 @@ export function lockdownView(state = readLockdown()) {
     notes: state.notes ?? [],
     // The emergency watch's review of this alarm (src/sentinel.mjs): reviewing, or escalated to the owner with why.
     sentinel: state.sentinel ?? null,
+    // The call to the owner outside the app (src/escalation.mjs): where it went, and what they chose there.
+    escalation: state.escalation ?? null,
     warnings: (state.warnings ?? []).filter(w => Date.parse(w.at) > day),
     last: lastView(state.history?.at(-1)),
   };
@@ -404,6 +421,6 @@ export function lockdownView(state = readLockdown()) {
 /** The last alarm, as the app shows it: who released it, and the watch's report when it did. */
 function lastView(entry) {
   if (!entry) return null;
-  const { evidence, stopped, notes, sentinel, ...rest } = entry;
+  const { evidence, stopped, notes, sentinel, escalation, ...rest } = entry;
   return { ...rest, evidence: Array.isArray(evidence) ? evidence.length : evidence ?? 0, notes: notes ?? [], sentinel: sentinel ?? null };
 }
