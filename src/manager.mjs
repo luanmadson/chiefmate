@@ -19,7 +19,7 @@ import { requestsLine } from './charge.mjs';
 import { defectsLine, senderLabel } from './defects.mjs';
 import { planningLine } from './planning.mjs';
 import { radarLine } from './radar.mjs';
-import { focus, maxParallel, queueInTurn } from './queue.mjs';
+import { focus, maxParallel, queueManagerLines } from './queue.mjs';
 import { activeRun, ALWAYS_DISALLOWED, crewGuard, doingNow, liveRuns, prepareLibraries } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { listSessions, readSession, sessionsLine } from './sessions.mjs';
@@ -144,12 +144,9 @@ export function situation(libraries = []) {
       ? `Running (${going.length} of at most ${maxParallel(config)} at once, one per project): ${going.map(l => `${l.title} (project ${l.project}, step ${l.step ?? '-'}: ${l.agent ?? 'preparing'}${doingNow(l) ? `, ${doingNow(l)}` : ''}), run ${l.run}`).join('; ')}.`
       : `Running: nothing (up to ${maxParallel(config)} runs of different projects go on at once).`,
   );
-  // In the order the turns go (src/queue.mjs: one project at a time when there is less room than projects);
-  // "queue move|hold|release" changes it.
-  const queue = queueInTurn();
-  const queueEntry = (r, i) => `${i + 1}. ${r.title} [${r.id}] (project ${r.project}${r.onHold ? ', ON HOLD until you release it' : ''}${r.notBefore ? `, not before ${formatDateTime(r.notBefore)}` : ''})`;
-  lines.push(queue.length ? `Queue, in the order the turns go: ${queue.map(queueEntry).join('; ')}.` : 'Queue: empty.');
   const runs = listRuns();
+  // In the order it runs, with what holds each run and why, the owner's "Do now" and the latest changes (src/queue.mjs).
+  lines.push(...queueManagerLines(config, runs));
   const latest = runs.filter(r => !['queued', 'waiting'].includes(r.status)).slice(0, 5);
   lines.push('Latest runs:');
   for (const r of latest) {
