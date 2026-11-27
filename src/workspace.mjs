@@ -111,21 +111,75 @@ export async function prepareWorkspace(id, project, base, onStep = () => {}, { s
   await step('checkout', '-f', base);
   await step('reset', '--hard', `origin/${base}`);
   await step('clean', '-fd');
-  if (project.setup) {
-    const locks = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock'].map(f => path.join(dir, f)).filter(existsSync);
-    // Changes when the dependency lock file or the setup command itself changes.
-    const signature = createHash('sha1').update(project.setup + locks.map(f => readFileSync(f)).join('')).digest('hex');
-    const marker = path.join(dir, 'node_modules', '.chiefmate-setup');
-    const ready = existsSync(marker) && readFileSync(marker, 'utf8') === signature;
-    if (!ready) {
-      onStep(t('Installing dependencies ({command})', { command: project.setup }));
-      const r = await run(project.setup, [], dir, { shell: true, maxMinutes: 20, signal });
-      signal?.throwIfAborted();
-      if (r.code !== 0) throw new Error(t('"{command}" failed: {output}', { command: project.setup, output: clip(r.output, 500) }));
-      if (existsSync(path.join(dir, 'node_modules'))) writeFileSync(marker, signature);
-    }
-  }
+  await installSetup(dir, project, onStep, { signal });
   return dir;
+}
+
+/** Runs the project's "setup" (such as "npm ci") when the dependency lock file or the command itself changed. */
+export async function installSetup(dir, project, onStep = () => {}, { signal } = {}) {
+  if (!project.setup) return;
+  const locks = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock'].map(f => path.join(dir, f)).filter(existsSync);
+  const signature = createHash('sha1').update(project.setup + locks.map(f => readFileSync(f)).join('')).digest('hex');
+  const marker = path.join(dir, 'node_modules', '.chiefmate-setup');
+  if (existsSync(marker) && readFileSync(marker, 'utf8') === signature) return;
+  onStep(t('Installing dependencies ({command})', { command: project.setup }));
+  const r = await run(project.setup, [], dir, { shell: true, maxMinutes: 20, signal });
+  signal?.throwIfAborted();
+  if (r.code !== 0) throw new Error(t('"{command}" failed: {output}', { command: project.setup, output: clip(r.output, 500) }));
+  if (existsSync(path.join(dir, 'node_modules'))) writeFileSync(marker, signature);
+}
+
+// ---------- A paused run's work, kept while it waits ----------
+
+/** The ref that keeps a paused run's stash, so it survives even if the stash list is cleared. */
+export const shelfRef = id => `refs/chiefmate/shelf/${id}`;
+
+/**
+ * Puts a paused run's uncommitted work (new files included) aside: a stash named after the run, also kept under
+ * shelfRef. The working copy is left clean. Returns the stash commit, or null when there was nothing to keep.
+ */
+export async function shelveWork(dir, id) {
+  if (!(await git(dir, 'status', '--porcelain'))) return null;
+  await git(dir, 'stash', 'push', '--include-untracked', '-m', `chiefmate: paused run ${id}`);
+  const commit = await git(dir, 'rev-parse', 'stash@{0}');
+  await git(dir, 'update-ref', shelfRef(id), commit);
+  return commit;
+}
+
+/**
+ * Puts a paused run's work back (see shelveWork) on the working copy, which must be clean, then drops its stash and
+ * ref. When it doesn't apply cleanly, the copy is cleaned again, the stash kept, and it throws. A copy with changes
+ * already (the work put back just before a crash, say) is left as it is: it throws without applying or cleaning.
+ */
+export async function restoreShelf(dir, id, commit) {
+  if (await git(dir, 'status', '--porcelain')) throw new Error(t('The working copy has changes not committed yet: the work put aside was not put back over them.'));
+  const r = await run('git', ['stash', 'apply', commit], dir);
+  if (r.code !== 0) {
+    await git(dir, 'reset', '--hard', '-q');
+    await git(dir, 'clean', '-fdq');
+    throw new Error(t('git stash apply failed: {output}', { output: clip(r.output, 500) }));
+  }
+  // The stash list may have moved on: its entry is found by its commit.
+  const list = (await git(dir, 'stash', 'list', '--format=%H')).split('\n');
+  const at = list.indexOf(commit);
+  if (at >= 0) await git(dir, 'stash', 'drop', '-q', `stash@{${at}}`);
+  await run('git', ['update-ref', '-d', shelfRef(id)], dir);
+}
+
+/**
+ * A resumed run whose branch has no commits of its own starts again from its base as it is on origin now, so it
+ * doesn't go on from an old copy of the project. Only on a clean working copy. Returns { from, to, behind } when the
+ * branch was moved, else null.
+ */
+export async function freshenBranch(dir, base, { signal } = {}) {
+  await gitRun(dir, ['fetch', 'origin', '--prune'], { signal });
+  const from = await headCommit(dir);
+  const to = await git(dir, 'rev-parse', `origin/${base}`);
+  if (from === to || (await git(dir, 'rev-list', '--count', `origin/${base}..HEAD`)) !== '0') return null;
+  if (await git(dir, 'status', '--porcelain')) return null;
+  const behind = Number(await git(dir, 'rev-list', '--count', `HEAD..origin/${base}`));
+  await git(dir, 'reset', '--hard', '-q', to);
+  return { from, to, behind };
 }
 
 /**
@@ -186,7 +240,37 @@ export async function libraryFileCommit(dir, file, branch = 'main') {
 }
 
 export const createBranch = (dir, branch) => git(dir, 'checkout', '-B', branch);
-export const checkoutBranch = (dir, branch) => git(dir, 'checkout', branch);
+
+/** Returns a working copy to its run branch, recovering any Git operation left by an interrupted step. */
+export async function checkoutBranch(dir, branch, onRecovery = () => {}) {
+  if (!existsSync(path.join(dir, '.git'))) throw new Error(t('No Git working copy found at "{path}".', { path: dir }));
+  const gitDir = await git(dir, 'rev-parse', '--absolute-git-dir');
+  const operation = [
+    ['rebase', ['rebase-merge', 'rebase-apply']],
+    ['merge', ['MERGE_HEAD']],
+    ['cherry-pick', ['CHERRY_PICK_HEAD']],
+    ['revert', ['REVERT_HEAD']],
+  ].find(([, markers]) => markers.some(marker => existsSync(path.join(gitDir, marker))))?.[0];
+  if (operation) {
+    try {
+      const sequenceHead = path.join(gitDir, 'sequencer', 'head');
+      // A sequence's --abort would roll back its completed commits too. Clear the conflict at the current HEAD, then
+      // drop the picks left in the sequence (--quit), which a reset keeps when the conflict was not the last one.
+      const keepCommits = ['cherry-pick', 'revert'].includes(operation) && existsSync(sequenceHead)
+        && readFileSync(sequenceHead, 'utf8').trim() !== await headCommit(dir);
+      if (keepCommits) {
+        await git(dir, 'reset', '--merge', 'HEAD');
+        await git(dir, operation, '--quit');
+      } else await git(dir, operation, '--abort');
+    } catch (error) {
+      throw new Error(t('Could not abort the Git {operation}. In "{path}", run "git status", finish or abort the operation, then resume the run. {error}', {
+        operation, path: dir, error: error.message,
+      }), { cause: error });
+    }
+    onRecovery(operation);
+  }
+  return git(dir, 'checkout', branch);
+}
 
 /** If the agent left changes without committing, Chiefmate commits them on its behalf. */
 export async function commitPending(dir, message) {

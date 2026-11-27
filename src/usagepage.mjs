@@ -3,19 +3,31 @@
 // from then on the server, never an agent, opens that one page at most once every few hours, with no window, and only reads
 // it: it never clicks anything on the account and never applies a reset. It drives Microsoft Edge or Google Chrome
 // through their DevTools protocol (what Playwright does underneath), so Chiefmate keeps having no dependencies.
+// The sign-in window never stays open for good: past LOGIN_MINUTES the server closes it (data/usage-login.json keeps
+// which one it is), reads once more, and the app keeps a single "Sign in to claude.ai" card with a button to reopen it.
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { loadConfig, saveConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { isLocked } from './lockdown.mjs';
+import { readState } from './store.mjs';
 import { DATA, ensureDir, now, readJson, writeJson } from './util.mjs';
 
 export const PROFILE_DIR = path.join(DATA, 'browser-profile');
 const STATUS_FILE = path.join(DATA, 'usage-page.json');
+const LOGIN_FILE = path.join(DATA, 'usage-login.json');
 const USAGE_PAGE = 'https://claude.ai/settings/usage';
 const LOGIN_PAGE = 'https://claude.ai/login';
+export const LOGIN_MINUTES = 10;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Why a reading failed ("cause" in the status): the app's notice keeps one id per cause, so a seen notice stays seen.
+const CAUSES = ['no_browser', 'not_signed_in', 'profile_open', 'no_start', 'signed_out', 'other'];
+const SIGN_IN_CAUSES = ['not_signed_in', 'signed_out'];
+// What only the owner can fix: while they are away, the reading waits for their return to try again.
+const OWNER_CAUSES = ['no_browser', 'not_signed_in', 'signed_out', 'profile_open'];
+const failure = (cause, message) => Object.assign(new Error(message), { readerCause: cause });
 
 /** "usage_reader": { "enabled": false, "every_hours": 4, "browser": "<path to msedge.exe or chrome.exe>" } */
 export const readerSettings = (config = loadConfig()) => ({
@@ -40,15 +52,95 @@ export function browserPath(config) {
 
 function needBrowser(config) {
   const browser = browserPath(config);
-  if (!browser) throw new Error(t('No Microsoft Edge or Google Chrome found. Set "usage_reader": { "browser": "<path>" } in the settings.'));
+  if (!browser) throw failure('no_browser', t('No Microsoft Edge or Google Chrome found. Set "usage_reader": { "browser": "<path>" } in the settings.'));
   return browser;
 }
 
-/** Opens a visible browser window with Chiefmate's own profile, for you to sign in to claude.ai. */
-export function openLogin(config = loadConfig()) {
+// ---------- The sign-in window ----------
+
+/** The sign-in window opened last: { pid, image, opened, closed, timed_out }. */
+export const loginState = () => readJson(LOGIN_FILE, {});
+const loginOpen = (login = loginState()) => !!login.pid && !login.closed;
+
+function startWindow(browser, args) {
+  const child = spawn(browser, args, { detached: true, stdio: 'ignore' });
+  child.on('error', () => {});
+  child.unref();
+  return child.pid ?? null;
+}
+
+/** The window's process still runs, under the browser's own name (a number Windows gave to another program is not it). */
+function windowAlive({ pid, image }) {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  if (process.platform !== 'win32') return true;
+  const r = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { encoding: 'utf8', windowsHide: true });
+  return String(r.stdout ?? '').toLowerCase().includes(`"${image}"`);
+}
+
+/**
+ * Closes the window as its close button does, and forces it only when it doesn't close within a few seconds. Only while
+ * the reading profile is in use: once it isn't, the window is gone and its number may already be the owner's own browser.
+ */
+async function closeWindow(login) {
+  if (!profileInUse()) return;
+  spawnSync('taskkill', ['/PID', String(login.pid), '/T'], { windowsHide: true });
+  for (let i = 0; i < 20 && windowAlive(login); i++) await sleep(250);
+  if (windowAlive(login) && profileInUse()) spawnSync('taskkill', ['/PID', String(login.pid), '/T', '/F'], { windowsHide: true });
+}
+
+/**
+ * Opens a visible browser window with Chiefmate's own profile, for you to sign in to claude.ai, and notes it so the
+ * server closes it after LOGIN_MINUTES. Opened again while it is still open, it only brings it forward.
+ * "start" stands in for the browser in the tests.
+ */
+export function openLogin(config = loadConfig(), { start = startWindow, alive = windowAlive } = {}) {
   const browser = needBrowser(config);
   ensureDir(PROFILE_DIR);
-  spawn(browser, [`--user-data-dir=${PROFILE_DIR}`, '--no-first-run', '--no-default-browser-check', LOGIN_PAGE], { detached: true, stdio: 'ignore' }).unref();
+  const login = loginState();
+  const already = loginOpen(login) && alive(login);
+  const pid = start(browser, [`--user-data-dir=${PROFILE_DIR}`, '--no-first-run', '--no-default-browser-check', LOGIN_PAGE]);
+  if (already) return login;
+  if (!pid) throw failure('no_start', t("The browser didn't start."));
+  const opened = { pid, image: path.basename(browser).toLowerCase(), opened: now() };
+  writeJson(LOGIN_FILE, opened);
+  return opened;
+}
+
+let checkingLogin = null;
+
+/**
+ * Called by the watch: notes the sign-in window closed by you, and closes it past LOGIN_MINUTES. Returns "open",
+ * "closed" or "timed_out", or null with no window open. "alive" and "close" stand in for Windows in the tests.
+ */
+export function checkLogin({ at = Date.now(), alive = windowAlive, close = closeWindow } = {}) {
+  const login = loginState();
+  if (!loginOpen(login)) return Promise.resolve(null);
+  checkingLogin ??= (async () => {
+    if (!alive(login)) {
+      writeJson(LOGIN_FILE, { ...login, closed: new Date(at).toISOString(), timed_out: false });
+      return 'closed';
+    }
+    if (at - Date.parse(login.opened) < LOGIN_MINUTES * 60_000) return 'open';
+    await close(login);
+    writeJson(LOGIN_FILE, { ...login, closed: new Date(at).toISOString(), timed_out: true });
+    return 'timed_out';
+  })().finally(() => (checkingLogin = null));
+  return checkingLogin;
+}
+
+/**
+ * The reading needs you to sign in: never signed in, signed out, or the sign-in window closed by its time limit with
+ * no reading since. Not while the window is open: it is there for that.
+ */
+export function signInNeeded(status = readerStatus(), login = loginState()) {
+  if (loginOpen(login)) return false;
+  if (!signedIn()) return true;
+  if (status.ok === false && SIGN_IN_CAUSES.includes(status.cause)) return true;
+  return !!login.timed_out && (Date.parse(login.closed) || 0) > (Date.parse(status.attempted ?? '') || 0);
 }
 
 /** While the browser runs on the profile (the sign-in window, say), Windows keeps its lockfile from being removed. */
@@ -106,8 +198,8 @@ async function waitFor(check, ms) {
 async function browse(config) {
   if (typeof WebSocket !== 'function') throw new Error(t('This version of Node.js has no WebSocket. Update to Node.js 22 or newer.'));
   const browser = needBrowser(config);
-  if (!signedIn()) throw new Error(t('Not signed in yet. Run: node src/cli.mjs claude-login'));
-  if (profileInUse()) throw new Error(t('The browser with the reading profile is open (the sign-in window?). Close it and try again.'));
+  if (!signedIn()) throw failure('not_signed_in', t('Not signed in yet. Run: node src/cli.mjs claude-login'));
+  if (profileInUse()) throw failure('profile_open', t('The browser with the reading profile is open (the sign-in window?). Close it and try again.'));
   const portFile = path.join(PROFILE_DIR, 'DevToolsActivePort');
   rmSync(portFile, { force: true });
   const child = spawn(
@@ -121,11 +213,11 @@ async function browse(config) {
       const lines = existsSync(portFile) ? readFileSync(portFile, 'utf8').split(/\r?\n/) : [];
       return Number(lines[0]) && lines[1] ? lines : null;
     }, 20_000);
-    if (!active) throw new Error(t("The browser didn't start."));
+    if (!active) throw failure('no_start', t("The browser didn't start."));
     const [port, browserSocket] = active;
     const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     const target = targets.find(x => x.type === 'page');
-    if (!target) throw new Error(t("The browser didn't start."));
+    if (!target) throw failure('no_start', t("The browser didn't start."));
     const page = await devtools(target.webSocketDebuggerUrl);
     let seen = { url: '', text: '' };
     try {
@@ -212,14 +304,14 @@ export function readUsagePage(config = loadConfig()) {
     try {
       const page = await browse(config);
       if (/\/(login|signin|logout)\b/.test(new URL(page.url || USAGE_PAGE).pathname)) {
-        throw new Error(t('The reading profile is signed out of claude.ai. Run: node src/cli.mjs claude-login'));
+        throw failure('signed_out', t('The reading profile is signed out of claude.ai. Run: node src/cli.mjs claude-login'));
       }
       const found = parseUsagePage(page.text);
-      Object.assign(status, { ok: true, error: null, read_at: now(), ...found });
+      Object.assign(status, { ok: true, error: null, cause: null, failing_since: null, read_at: now(), ...found });
       status.warning = found.five_hour === null && found.seven_day === null ? t("The page didn't show the account's limits.") : !found.grants ? t("The page didn't show free resets: the record you keep by hand stays.") : null;
       if (found.grants) applyGrants(found.grants, status.read_at);
     } catch (error) {
-      Object.assign(status, { ok: false, error: error.message });
+      Object.assign(status, failed(before, error, status.attempted));
     }
     writeJson(STATUS_FILE, status);
     return status;
@@ -227,12 +319,34 @@ export function readUsagePage(config = loadConfig()) {
   return reading;
 }
 
+/** A failed reading: its message, its cause and since when that cause lasts (kept while the cause stays the same). */
+export function failed(before, error, at) {
+  const cause = CAUSES.includes(error.readerCause) ? error.readerCause : 'other';
+  const same = before.ok === false && before.cause === cause && before.failing_since;
+  return { ok: false, error: error.message, cause, failing_since: same ? before.failing_since : at };
+}
+
 export const isReading = () => !!reading;
 
-/** Called by the watch every minute or so: reads when the reading is on and its time has come. */
+/**
+ * Whether a reading is due: every "everyHours"; once, a minute after the sign-in window closed, away or not (it tells
+ * whether you signed in); and, while you are away, never after a failure only you can fix (it waits for your return).
+ */
+export function readingDue({ status = {}, login = {}, everyHours, away = false, at = Date.now() }) {
+  const last = Date.parse(status.attempted ?? '') || 0;
+  const closed = Date.parse(login.closed ?? '') || 0;
+  if (closed > last) return at - closed >= 60_000;
+  if (away && status.ok === false && OWNER_CAUSES.includes(status.cause)) return false;
+  return at - last >= everyHours * 3600_000;
+}
+
+/** Called by the watch every minute or so: minds the sign-in window, and reads when the reading is on and its time has come. */
 export function readWhenDue(config) {
+  if (loginOpen()) {
+    checkLogin().catch(error => console.error('Sign-in window:', error.message));
+    return;
+  }
   const { enabled, everyHours } = readerSettings(config);
   if (!enabled || reading || !signedIn()) return;
-  const last = Date.parse(readerStatus().attempted ?? '') || 0;
-  if (Date.now() - last >= everyHours * 3600_000) readUsagePage(config).catch(() => {});
+  if (readingDue({ status: readerStatus(), login: loginState(), everyHours, away: !!readState().away })) readUsagePage(config).catch(() => {});
 }

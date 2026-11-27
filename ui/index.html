@@ -13,10 +13,28 @@
 </head>
 <body>
   <div class="app">
-    <header class="titlebar">
-      <div class="brand"><img src="/icon-32.png" alt="" width="18" height="18"><span>CHIEFMATE</span></div>
-      <div id="focus" class="focus" aria-live="polite"></div>
-      <div class="titlebar-right"><select id="project-jump" class="project-jump" aria-label="Go to a project's page" data-t-label="Go to a project's page"></select><span id="power" class="power" hidden></span><button type="button" id="lockdown" class="lockdown-button" hidden></button><button type="button" id="away" class="away" aria-pressed="false" hidden></button><div id="presence" class="presence"></div><span id="clock" class="clock"></span></div>
+    <header class="app-header">
+      <div class="titlebar">
+        <div class="brand"><img src="/icon-32.png" alt="" width="18" height="18"><span>CHIEFMATE</span></div>
+        <div id="focus" class="focus" aria-live="polite"></div>
+        <div class="titlebar-right">
+          <select id="project-jump" class="project-jump" aria-label="Go to a project's page" data-t-label="Go to a project's page"></select>
+          <span id="power" class="power" hidden></span>
+          <button type="button" id="lockdown" class="lockdown-button" hidden></button>
+          <button type="button" id="away" class="away" aria-pressed="false" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 4.6V8l2.3 1.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="away-label" data-t="Away mode">Away mode</span><span id="away-since" aria-hidden="true" hidden></span></button>
+          <div id="presence" class="presence"></div>
+          <span id="clock" class="clock"></span>
+        </div>
+      </div>
+      <div id="away-notice" class="away-notice" hidden>
+        <label id="away-pace-label" for="away-pace"></label>
+        <select id="away-pace">
+          <option value="save" data-t="Save usage">Save usage</option>
+          <option value="normal" data-t="Normal">Normal</option>
+          <option value="all" data-t="Spend all">Spend all</option>
+          <option id="away-custom-pace" value="custom" disabled hidden></option>
+        </select>
+      </div>
     </header>
 
     <nav class="nav" aria-label="Sections" data-t-label="Sections">
@@ -85,6 +103,8 @@
             <p data-t="What the crew is doing right now, step by step, and what is in the queue.">What the crew is doing right now, step by step, and what is in the queue.</p>
           </div>
         </div>
+        <!-- The owner's focus (src/steer.mjs): which projects may work, each project's state and control -->
+        <section id="steer" class="panel steer" aria-live="polite"></section>
         <div class="operations-layout">
           <div id="operations"></div>
           <aside class="side">
@@ -181,7 +201,7 @@
         <div class="project-head">
           <div class="project-head-top">
             <div id="project-title"></div>
-            <div id="project-more"></div>
+            <div class="compose-buttons"><div id="project-system"></div><div id="project-more"></div></div>
           </div>
           <div id="project-status" class="project-status"></div>
           <div id="project-actions" class="project-main-actions"></div>
@@ -190,6 +210,7 @@
         <div id="project-tabs" class="tabs"></div>
         <div id="project-overview" class="project-tab">
           <div id="project-summary"></div>
+          <div id="project-open"></div>
           <div id="project-facts"></div>
           <div id="project-computer"></div>
         </div>
@@ -218,6 +239,10 @@
         <div id="project-builder" class="project-tab" hidden></div>
         <div id="project-charge" class="project-tab" hidden>
           <div id="project-charge-top"></div>
+        </div>
+        <!-- The conversation with the manager, brought here from the Conversation (placeChat in app.js) -->
+        <div id="project-manager" class="project-tab" hidden>
+          <p class="hint" data-t="Your conversation with the manager, without leaving the project. What you send from here says which project it is about.">Your conversation with the manager, without leaving the project. What you send from here says which project it is about.</p>
         </div>
         <div id="project-live" class="project-tab" hidden>
           <div id="project-live-list"></div>
@@ -367,6 +392,30 @@
       <div class="actions">
         <button value="no" class="button secondary" data-t="Cancel">Cancel</button>
         <button value="yes" class="button" id="confirm-yes"></button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="steer-dialog" class="confirm">
+    <form method="dialog">
+      <div class="label" data-t="Work going on">Work going on</div>
+      <p id="steer-dialog-text"></p>
+      <p class="hint" data-t="Finish: the run goes to the end, then the project waits. Pause: it stops at a safe point and resumes by itself when the project is free.">Finish: the run goes to the end, then the project waits. Pause: it stops at a safe point and resumes by itself when the project is free.</p>
+      <div class="actions">
+        <button value="no" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="pause" class="button secondary" data-t="Pause it now">Pause it now</button>
+        <button value="finish" class="button" data-t="Let it finish">Let it finish</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="work-dialog" class="confirm">
+    <form method="dialog">
+      <div class="label" data-t="The crew is working on this project">The crew is working on this project</div>
+      <p id="work-dialog-text"></p>
+      <ul id="work-dialog-runs" class="work-runs"></ul>
+      <div class="actions">
+        <button value="" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="copy" class="button secondary" data-t="Work in a separate copy">Work in a separate copy</button>
+        <button value="pause" class="button" data-t="Pause the crew's task">Pause the crew's task</button>
       </div>
     </form>
   </dialog>

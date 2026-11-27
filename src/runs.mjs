@@ -7,6 +7,7 @@ import { instructionFiles, stepAccess, stepMcp } from './access.mjs';
 import { browserServers, closeAfterRun } from './browsers.mjs';
 import { contextWindow, runClaude } from './claude.mjs';
 import { loadConfig, projectCrew } from './config.mjs';
+import { currentEffort, effortChangeLine, runEffortChanges } from './effort.mjs';
 import { guardHooks } from './guard.mjs';
 import { askOwner, finishRequest, needsSettings } from './needs.mjs';
 import {
@@ -20,13 +21,14 @@ import {
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { builderSettings, projectInstructions, writtenInstructions } from './prompts.mjs';
-import { readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
+import { listRuns, readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
-import { chooseTool, GROK_DENY, LOGIN_COMMAND, parseTool, qualityRecords, recordQuality, runTool, signedIn, TOOL_NAMES, toolModel } from './tools.mjs';
+import { chooseTool, GROK_DENY, LOGIN_COMMAND, parseTool, qualityRecords, recordQuality, runTool, signedIn, TOOL_NAMES, toolEffort, toolModel } from './tools.mjs';
 import { clip, languageName, now, parseLevel, ROOT, slug, stamp } from './util.mjs';
 import {
-  advanceClone, baseBranch, changedFiles, checkoutBranch, commitPending, commitSubjects, createBranch, deliverToClone, discardSince, freeBranch, headCommit, newCommits, noTrace,
-  openPullRequest, prepareLibrary, prepareWorkspace, projectDir, runBranch, runChecks, traces,
+  advanceClone, baseBranch, changedFiles, checkoutBranch, commitPending, commitSubjects, createBranch, deliverToClone, discardSince, freeBranch, freshenBranch, headCommit,
+  installSetup, newCommits, noTrace, openPullRequest, prepareLibrary, prepareWorkspace, projectDir, restoreShelf, runBranch, runChecks, shelfRef,
+  shelveWork, traces,
 } from './workspace.mjs';
 
 /**
@@ -81,6 +83,7 @@ function crewRules(config, project, projectId, reportLang = config.language || '
 - If you find work worth doing outside your part, don't do it: propose it for ${config.owner || 'the owner'}'s planning board, during the step or at its end, with \`${cliCommand()} plan propose ${projectId} "<short title, at most ${TITLE_MAX} characters: what will be done>" --summary "<1-2 sentences: what and why>" --agent <member who should do it> --priority high|medium|low\`. Propose only what has a clear gain, one item per idea, and check \`${cliCommand()} plan list --project ${projectId} --all\` first so you don't repeat an item. The manager triages the proposals and ${config.owner || 'the owner'} decides. Don't propose fixes within your own task or the next run of a mission already approved: those you just do.
 - Never read, list or copy Chiefmate's \`data/\` folder (including \`data/browser-profile\`, the browser profile Chiefmate uses for the owner), other projects' working copies or other projects' personal documentation. You only get the folders this step needs.
 - When you need ${config.owner || 'the owner'} to act (sign in somewhere, confirm something, do what only a person can do), don't stop and don't work around it: run \`${cliCommand()} needs-you "<what to do, in ${owner}>" [--url <address>] [--wait] [--check "<command that succeeds once it is done>"]\` with the Bash tool's timeout at 600000 ms. Chiefmate shows the request to the owner and opens the address in their browser. With --wait the command returns once the owner clicks "I did it" (or the check succeeds); if it says it is still waiting, run the command it prints. If it gives up waiting, finish what you can and say in your report what is left for the owner. Never type passwords or codes yourself.
+- When you notice an error or failure of Chiefmate or of the communication between agents (a notice that never came, outdated information on the board or in your opening context, a Chiefmate command or tool that failed, a missing instruction), report it on your own at once, without waiting for ${config.owner || 'the owner'} to ask: \`${cliCommand()} defect report "<what happened>. Expected: <what should have happened>."\`. One report per defect, then go on with your work, and mention it in your report. It reaches the manager marked as your step's, never as ${config.owner || 'the owner'}'s message, and writes nothing in the project's folder.
 - ${config.owner || 'The owner'} may write to you directly from the app while you work: the message arrives as your next turn, with your work kept as it was. Answer it in one short message, then go on. To ask ${config.owner || 'the owner'} to choose ("Resend or SES?"), run \`${cliCommand()} needs-you "<the question, in ${owner}>" --options "<option>|<option>" --recommend <option> --why "<one short sentence: why you recommend it>"\` (2 to 6 short options, in ${owner}): they get one button per option and a field to write, and the command waits and prints the answer: the option, their own words, or both. Keep needs-you without options for what they must do outside the app. For an open question, use needs-you with --wait: they can answer from the app, and the answer comes back as the command's output.
 - Your last message is the step's report, in ${languageName(reportLang)}: short markdown with what you did (and the files), the sources you used, what you left out and why, and what the reviewer should check. ${config.owner || 'The owner'} must understand it in seconds, so it starts with this final summary, in plain words and with these headings exactly, the full report under the last one ("Needs you?" says whether ${config.owner || 'the owner'} must do something besides reviewing the work, and what):
 ${fenced(outcomeTemplate(reportLang), 'markdown')}`;
@@ -103,8 +106,7 @@ function workOf(run, config = loadConfig()) {
 export function createRun({
   kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [], plan = null, prompt = null,
   title: givenTitle = null, summary: givenSummary = null, level = null, request = null, tool: givenTool = null, due = null,
-}) {
-  const config = loadConfig();
+}, config = loadConfig()) {
   // The tool chosen for the run's crew steps (--tool); none: each member's own (src/tools.mjs).
   const tool = parseTool(givenTool);
   let title, steps, finalReview, project;
@@ -340,13 +342,17 @@ export function cancelLive(id, reason) {
  * when it resumes; one running its checks or opening its pull request pauses only at its next step, or ends first.
  * Returns false when it is not going on, or was already asked.
  */
-export function pauseLive(id, why = 'update') {
+export function pauseLive(id, why = 'update', { holdWhile = null } = {}) {
   const l = live.get(id);
   if (!l || l.cancelRequest || l.pauseRequest) return false;
   l.pauseRequest = why;
+  // "owner": paused for the owner's "Work now" session (src/worknow.mjs), held while holdWhile() says so.
+  l.holdWhile = holdWhile;
   l.process?.interrupt?.();
   l.preparing?.abort();
-  const text = why === 'standby' ? t('Pausing at a safe point: Chiefmate is going on standby')
+  const text = why === 'owner' ? t('Pausing at a safe point: you are working on this project now')
+    : why === 'standby' ? t('Pausing at a safe point: Chiefmate is going on standby')
+    : why === 'focus' ? t('Pausing at a safe point: you paused this project, or put another in focus')
     : why === 'stop' ? t('Pausing at a safe point: Chiefmate is shutting down')
       : t('Pausing at a safe point for an update of Chiefmate');
   logAction(l, { type: 'action', text });
@@ -355,38 +361,101 @@ export function pauseLive(id, why = 'update') {
 
 /**
  * Asks every run going on to pause (see pauseLive). why: "update" (the default), "standby" or "stop" (the power modes,
- * src/power.mjs). Returns the ids it asked.
+ * src/power.mjs); "focus" pauses one run alone (src/steer.mjs). Returns the ids it asked.
  */
 export const pauseAll = (why = 'update') => [...live.keys()].filter(id => pauseLive(id, why));
 
 /** The note of a run paused for an update or a power mode, until it resumes. */
 function pausedNote(why) {
+  if (why === 'owner') return t('Paused at a safe point while you work on this project. It resumes by itself when your session ends.');
   if (why === 'standby') return t('Paused at a safe point for standby. It resumes by itself when Chiefmate is turned back on.');
+  if (why === 'focus') return t('Paused at a safe point by your focus. It resumes by itself when its project is free again.');
   if (why === 'stop') return t('Paused at a safe point because Chiefmate was shut down. It resumes by itself at the next start.');
   return t('Paused for an update of Chiefmate. It resumes by itself as soon as the update is over.');
 }
 
+/**
+ * Whether a run keeps its project's working copy while it is not going on: paused (or back in the queue) in the middle
+ * of its work, or with its uncommitted work put aside (run.shelf). No other run of the project prepares the copy then.
+ */
+export const holdsCopy = run => !!run?.prepared && ['queued', 'waiting', 'paused'].includes(run.status) && !!(run.resumeFirst || run.shelf);
+
+/** The other run of the same project that keeps the working copy (see holdsCopy), or null. */
+export const copyHolder = (run, runs = listRuns()) => runs.find(r => r.id !== run.id && r.project === run.project && holdsCopy(r)) ?? null;
+
+/** What the step is told when its branch was brought up to date as the run resumed (step.freshBase), or ''. */
+export function branchNote(fresh, base) {
+  if (!fresh) return '';
+  if (fresh.kept) {
+    return `While this run was paused, ${base} moved on by ${fresh.behind} commit(s). Your uncommitted work did not apply on top of it, so the run's branch stays where it was, with your work back in place. Check what changed (git log HEAD..origin/${base}) before you go on.`;
+  }
+  return `While this run was paused, ${base} moved on by ${fresh.behind} commit(s). The run's branch had no commits of its own, so Chiefmate moved it to the current ${base} before resuming${fresh.restored ? ' and put your uncommitted work back on top of it' : ''}: the files now include the work merged meanwhile. Check what changed (git log ${fresh.from.slice(0, 7)}..HEAD) before you go on.`;
+}
+
 /** The next turn of a step resumed after an update of Chiefmate, with the owner's messages sent meanwhile. */
-export function updatedTurn(messages, config = loadConfig(), why = 'update') {
+export function updatedTurn(messages, config = loadConfig(), why = 'update', gitRecovery = '') {
   const lines = [
     why === 'update' ? 'Chiefmate was updated while you were working: your work was paused at a safe point so the new version could be installed, and this session now resumes.'
+      : why === 'owner' ? `${config.owner || 'The owner'} paused your work at a safe point to work on this project themselves, and this session now resumes. They may have changed the project meanwhile: check what changed on the main branch before you go on.`
+      : why === 'focus' ? 'Your project was paused by its owner (or another project was put in focus) while you were working: your work was paused at a safe point, and this session now resumes.'
       : `Chiefmate was ${why === 'standby' ? 'put on standby' : 'shut down'} by its owner while you were working: your work was paused at a safe point, and this session now resumes.`,
-    'Continue from where you left off. The branch, the files and this session are as you left them. A command that was still running when you were paused may have been cut off: check its result before you go on.',
+    gitRecovery || 'Continue from where you left off. The branch, the files and this session are as you left them. A command that was still running when you were paused may have been cut off: check its result before you go on.',
     "When you finish, your last message is still the step's full report.",
   ];
   return messages.length ? `${lines.join('\n')}\n\n${ownerTurn(messages, config)}` : lines.join('\n');
 }
 
-/** Before every step: your account's usage, in the plan's 5-hour window and week. */
-function checkLimits(config, run) {
+const usageLimits = { five_hour: 'pause_at_5h_window', seven_day: 'pause_at_plan_week' };
+
+/** The usage window at or over its limit with a reset ahead (the 5-hour one first), or undefined. */
+function blockingWindow(limits, usage, at = Date.now()) {
+  return Object.keys(usageLimits).find(window => {
+    const ceiling = limits[usageLimits[window]];
+    const w = usage[window];
+    return w && ceiling && w.used >= ceiling && w.resets && new Date(w.resets).getTime() > at;
+  });
+}
+
+function limitNote(window, percent, lang) {
+  const name = window === 'five_hour' ? t('the 5-hour window', {}, lang) : t("the plan's week", {}, lang);
+  return t('{window} of your account is at {percent}', { window: name, percent }, lang);
+}
+
+/**
+ * Before every step: the account's usage against the latest limits in the settings, so a change in Usage counts at
+ * once. If the settings can't be read now (a file being edited), the limits the run started with.
+ */
+function checkLimits(run, config) {
   if (run.ignoreLimits) return null;
-  const limits = config.limits ?? {};
+  let limits;
+  try {
+    limits = loadConfig().limits ?? {};
+  } catch {
+    limits = config.limits ?? {};
+  }
   const usage = readUsage();
-  const window = (w, ceiling, name) =>
-    w && ceiling && w.used >= ceiling && w.resets && new Date(w.resets).getTime() > Date.now()
-      ? { note: t('{window} of your account is at {percent}', { window: name, percent: formatPercent(w.used) }), waitUntil: w.resets }
-      : null;
-  return window(usage.five_hour, limits.pause_at_5h_window, t('the 5-hour window')) ?? window(usage.seven_day, limits.pause_at_plan_week, t("the plan's week"));
+  const window = blockingWindow(limits, usage);
+  if (!window) return null;
+  const w = usage[window];
+  const note = limitNote(window, formatPercent(w.used));
+  return { note, waitUntil: w.resets, limitWait: { window, ceiling: limits[usageLimits[window]] } };
+}
+
+/**
+ * Whether a run waiting for a configured limit goes back to the queue before the reset: its limit was raised (or taken
+ * out) above the current usage and no window blocks it. A wait for the account running out is never cleared here.
+ */
+export function limitWaitCleared(run, limits, usage) {
+  // Older runs only recorded the reason in the translated note.
+  const percent = run.limitWait ? null : run.note?.match(/-?\d+%/)?.[0];
+  const window = run.limitWait?.window ?? (percent && Object.keys(usageLimits).find(window =>
+    ['en', 'pt-BR'].some(lang => run.note === limitNote(window, percent, lang))));
+  if (!window) return false;
+  // No limit in the settings pauses nothing, as in checkLimits.
+  const ceiling = limits[usageLimits[window]] || Infinity;
+  const used = usage[window]?.used;
+  return ceiling > (run.limitWait?.ceiling ?? 0) && Number.isFinite(used) && used < ceiling
+    && !blockingWindow(limits, usage);
 }
 
 /** If the account ran out in the middle of a step, the step starts over once the limit resets. */
@@ -435,6 +504,8 @@ function libraryLines(project, libraries, access) {
   }
   return lines;
 }
+
+const stepFileName = (index, step) => `${String(index + 1).padStart(2, '0')}-${step.agent}`;
 
 function logAction(l, event) {
   if (event.type !== 'action' && event.type !== 'say') return;
@@ -522,7 +593,7 @@ export function promptParts({ run, step, project, previous, finalReview, changes
   const reports = finalReview && lead ? previous.filter(p => p.agent !== LEAD) : previous;
   if (reports.length) {
     const lines = ['', finalReview ? '## Crew reports' : '## What the previous steps did'];
-    for (const p of reports) lines.push('', `### ${p.agent}${p.role ? `, ${p.role === 'plan' ? 'planning' : 'first review'}` : ''} (${p.status})`, fullReport(p) || p.error || '(no report)');
+    for (const p of reports) lines.push('', `### ${p.agent}${p.role ? `, ${p.role === 'plan' ? 'planning' : 'first review'}` : ''} (${p.status}${p.effort ? `, effort ${p.effort}` : ''})`, fullReport(p) || p.error || '(no report)');
     add('reports', 'The reports of the steps before', lines);
   }
   add('rules', 'Chiefmate (src/runs.mjs, crewRules)', ['', crewRules(config, project, run.project, finalReview ? prLanguage : config.language || 'en')]);
@@ -548,7 +619,9 @@ function toolLines(tool) {
       '',
       '## Working on Codex',
       "- You run on the Codex CLI, in its sandbox: you may write only inside the working copy, its `.git` folder is read-only and there is no network. So leave your changes uncommitted: Chiefmate commits them when your step ends. Don't install packages from the network; if the work truly needs it, say so in your report.",
-      "- Chiefmate's command line above (needs-you, plan) talks to Chiefmate on this computer and works from the sandbox.",
+      "- Chiefmate's command line above (needs-you, plan, defect) talks to Chiefmate on this computer and works from the sandbox.",
+      // Codex's unelevated sandbox on Windows: libuv's named pipes are refused (EPERM), the process itself is not.
+      ...(process.platform === 'win32' ? ["- On Windows, the sandbox refuses the pipes a program opens to read the output of another one it starts: Node.js's child_process with its default stdio fails with EPERM, so do most test runners (`node --test`, `npm test`) and scripts that call git that way. That is the sandbox, not your change: don't spend time on it, nor change the project to get around it. Chiefmate runs the project's checks itself after the crew's steps, outside the sandbox; say in your report which ones you couldn't run."] : []),
     ];
   }
   if (tool === 'grok') {
@@ -611,10 +684,12 @@ function contextReport({ run, step, index, agent, dir, model, prompt, tools, dis
       ...built.adaptations.map(a => `- Adapted in "${a.block}" (Chiefmate's rules prevail): ${a.line}`),
     ].join('\n')
     : "- Not used (no file, or no block for the project): the project's notes went instead.";
+  // The level the tool was given, as in the step's record: none for a level it lacks (Codex has no max).
+  const effort = toolEffort(tool, agent.effort);
   return [
     `# Context received: ${step.agent} (step ${index + 1}), run ${run.id}`,
     '',
-    `- Tool: ${TOOL_NAMES[tool]}. Model: \`${model ?? `${TOOL_NAMES[tool]}'s default`}\`${agent.effort ? `, effort \`${agent.effort}\`` : ''}, time limit ${agent.max_minutes ?? 60} min`,
+    `- Tool: ${TOOL_NAMES[tool]}. Model: \`${model ?? `${TOOL_NAMES[tool]}'s default`}\`${effort ? `, effort \`${effort}\`` : ''}, time limit ${agent.max_minutes ?? 60} min`,
     `- Agent: \`${agent.id}\`${agent.base ? ` (based on \`${agent.base}\`, crew of ${agent.project})` : ''}, instructions from \`${agent.file}\``,
     TOOL_CONTEXT[tool],
     '',
@@ -698,8 +773,9 @@ async function signInFirst(l, run, index, tool) {
 }
 
 async function runStep({ l, run, step, index, dir, project, config, agents, libraries, base, finalReview = false }) {
-  const agent = agents[step.agent];
-  if (!agent) throw new Error(t('Unknown agent: {id}', { id: step.agent }));
+  if (!agents[step.agent]) throw new Error(t('Unknown agent: {id}', { id: step.agent }));
+  // The effort is read again at each step: a change made from the app or the command line counts from the next step.
+  const agent = { ...agents[step.agent], effort: currentEffort(run.project, step.agent, agents[step.agent].effort ?? null) ?? undefined };
   const previous = run.steps.filter(s => s !== step && s.status !== 'pending' && s.status !== 'skipped');
   const changes = finalReview ? await changedFiles(dir, base).catch(() => '') : '';
   const found = finalReview && noTrace(project) ? await traces(dir, base).catch(() => []) : [];
@@ -719,9 +795,12 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     logAction(l, { type: 'action', text: t("Couldn't read the prompt builder: {error}", { error: error.message }) });
   }
   for (const a of built?.adaptations ?? []) logAction(l, { type: 'action', text: t('Prompt builder: a line of "{block}" was adapted to the crew\'s rules', { block: a.block }) });
-  const prompt = stepPrompt({ run, step, project, previous, finalReview, changes, traces: found, config, libraries, base, access, built, agents, tool });
+  const op = step.gitRecovery;
+  const gitRecovery = op ? `Chiefmate found an unfinished git ${op} in the working copy and aborted it before checking out the run branch: the commits are as they were, but what that ${op} had not committed yet is gone. Check the working copy (git status, git log) and redo the ${op} if it is still needed.` : '';
+  const freshNote = branchNote(step.freshBase, base);
+  const prompt = [stepPrompt({ run, step, project, previous, finalReview, changes, traces: found, config, libraries, base, access, built, agents, tool }), gitRecovery, freshNote].filter(Boolean).join('\n\n');
   const { tools, disallowed } = tool === 'claude' ? stepTools(agent, mcp, access) : { tools: [], disallowed: tool === 'grok' ? GROK_DENY : [] };
-  const name = `${String(index + 1).padStart(2, '0')}-${step.agent}`;
+  const name = stepFileName(index, step);
   const contextFile = path.join(runDir(run.id), `${name}.context.md`);
 
   // A team lead reads and judges: whatever it changes in the working copy (through the shell) is dropped after its step.
@@ -731,7 +810,10 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   // A step paused for an update of Chiefmate resumes its own Claude Code session, with its clock and its counts.
   const paused = step.paused ?? null;
   delete step.paused;
-  Object.assign(step, { status: 'running', started: paused ? step.started ?? now() : now(), error: null, model, tool, promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
+  // Told once: a later resume finds, and tells, an operation of its own.
+  delete step.gitRecovery;
+  delete step.freshBase;
+  Object.assign(step, { status: 'running', started: paused ? step.started ?? now() : now(), error: null, model, tool, effort: toolEffort(tool, agent.effort), promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
   Object.assign(l, {
     step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0, talking: false, reply: null, session: null,
     doing: finalReview ? t('reviewing the work') : step.role === 'plan' ? t('planning the request') : t('getting started'),
@@ -796,7 +878,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     const messages = pendingTalk(run, index + 1);
     for (const m of messages) Object.assign(m, { status: 'delivered', delivered: now(), via: 'resume' });
     if (messages.length) l.reply = messages.at(-1).id;
-    turn = updatedTurn(messages, config, paused.why ?? 'update');
+    turn = updatedTurn(messages, config, paused.why ?? 'update', [gitRecovery, freshNote].filter(Boolean).join(' '));
     logAction(l, { type: 'action', text: (paused.why ?? 'update') === 'update' ? t('Chiefmate was updated: the agent goes on in the same session') : t('Back from the pause: the agent goes on in the same session') });
   }
   let r;
@@ -898,13 +980,15 @@ function pullRequestBody(run, checks, agents, lang) {
   const main = run.review?.report || run.steps.map(s => `## ${name(s.agent)}\n\n${fullReport(s) || s.error || t('(no report)', {}, lang)}`).join('\n\n');
   // The same final summary the app shows opens the text; the review's report follows (without its own copy of it).
   const summary = run.prOutcome ? outcomeMarkdown(run.prOutcome, run.prOutcome.lang ?? lang) : '';
-  const table = stepsOf(run).map(s => `| ${name(s.agent)} | ${labels[s.status] ?? s.status} | ${formatDuration(s.durationMs)} | ${s.turns ?? ''} |`);
+  const table = stepsOf(run).map(s => `| ${name(s.agent)} | ${labels[s.status] ?? s.status} | ${formatDuration(s.durationMs)} | ${s.turns ?? ''} | ${'effort' in s ? s.effort ?? t('default', {}, lang) : ''} |`);
+  const efforts = runEffortChanges(run).map(e => `- ${effortChangeLine(e)}`);
   const checkList = checks.map(c => `- ${c.ok ? '✅' : '❌'} \`${c.command}\``);
   return [
     ...(summary ? [summary, '', `### ${t('Full report', {}, lang)}`, ''] : []),
     main, '', '---', '',
     `### ${t('Done by Chiefmate', {}, lang)}`, '',
-    `| ${t('Step', {}, lang)} | ${t('Status', {}, lang)} | ${t('Time', {}, lang)} | ${t('Turns', {}, lang)} |`, '|---|---|---|---|', ...table, '',
+    `| ${t('Step', {}, lang)} | ${t('Status', {}, lang)} | ${t('Time', {}, lang)} | ${t('Turns', {}, lang)} | ${t('Effort', {}, lang)} |`, '|---|---|---|---|---|', ...table, '',
+    ...(efforts.length ? [`**${t('Effort changed during the run:', {}, lang)}**`, ...efforts, ''] : []),
     `**${t('Checks after the review:', {}, lang)}**`, ...(checkList.length ? checkList : [`- ${t('(none)', {}, lang)}`]), '',
     t('Run `{id}`.', { id: run.id }, lang),
   ].join('\n');
@@ -996,6 +1080,14 @@ export async function execute(run) {
   const project = config.projects?.[run.project];
   const prLang = project?.language || config.language || 'en';
   if (live.has(run.id)) throw new Error(`Run ${run.id} is already going on.`);
+  // A run paused in the middle of its work keeps the working copy: this one waits in the queue (the queue's own check
+  // in pickNext, repeated here).
+  const holder = run.prepared ? null : copyHolder(run);
+  if (holder) {
+    run.note = t('Waits for the paused run {id}, which keeps the working copy.', { id: holder.id });
+    saveRun(run);
+    return;
+  }
   Object.assign(run, described.get(run.id) ?? {});
   const l = {
     run: run.id, title: run.title, summary: run.summary ?? null, doing: t('preparing the working copy'), project: run.project, step: null, agent: null, started: now(), since: now(), pid: null, context: null, actions: [],
@@ -1006,16 +1098,35 @@ export async function execute(run) {
   const firstTime = !run.started;
   Object.assign(run, { status: 'running', started: run.started ?? now(), notBefore: null, note: null });
   delete run.resumeFirst;
+  delete run.limitWait;
   saveRun(run);
 
-  // Paused for an update of Chiefmate: back to the front of the queue, to resume as soon as the update is over.
-  const pauseForUpdate = () => {
-    Object.assign(run, { status: 'queued', resumeFirst: true, note: pausedNote(l.pauseRequest) });
+  // Paused for an update of Chiefmate: back to the front of the queue, to resume as soon as the update is over. Always
+  // "return await": the run stays in `live` (busy for the update, the power modes and the queue) until its work is put
+  // aside and its record saved; a plain "return" would let the finally below drop it from `live` first.
+  const pauseForUpdate = async () => {
+    // What the agent had not committed yet is put aside (a stash named after the run), so nothing done in the copy
+    // meanwhile can lose it; it goes back when the run resumes.
+    if (run.prepared && !run.shelf) {
+      try {
+        const commit = await shelveWork(projectDir(run.project), run.id);
+        if (commit) {
+          run.shelf = { commit, at: now() };
+          log(t('The work not committed yet was put aside until the run resumes.'));
+        }
+      } catch (error) {
+        log(t("Couldn't put aside the work not committed yet: {error}", { error: error.message }));
+      }
+    }
+    // Paused for the owner's session: held (not in the queue) while it is open; it goes back to the queue when it ends.
+    const held = l.pauseRequest === 'owner' && l.holdWhile?.() !== false;
+    Object.assign(run, { status: held ? 'paused' : 'queued', resumeFirst: true, note: pausedNote(l.pauseRequest) });
     saveRun(run);
   };
 
-  const wait = (waitUntil, note) => {
+  const wait = (waitUntil, note, limitWait) => {
     Object.assign(run, { status: waitUntil ? 'waiting' : 'paused', notBefore: waitUntil ?? null, note });
+    if (limitWait) run.limitWait = limitWait;
     saveRun(run);
     notify(
       t('Chiefmate paused the run'),
@@ -1029,15 +1140,15 @@ export async function execute(run) {
   try {
     if (!project) throw new Error(t('Unknown project: {id}', { id: run.project }));
     // Over the limits already: wait before touching the working copy.
-    const early = checkLimits(config, run);
-    if (early) return wait(early.waitUntil, early.note);
+    const early = checkLimits(run, config);
+    if (early) return wait(early.waitUntil, early.note, early.limitWait);
     if (firstTime) {
       // The title and summary from the quick model take a few seconds: the notice waits for them, briefly.
       const pending = describing.get(run.id);
       if (pending) await Promise.race([pending, new Promise(resolve => setTimeout(resolve, 20_000))]);
       notify(t('Chiefmate started'), run.summary ? clip(`${run.title}. ${run.summary}`, 250) : run.title);
     }
-    if (l.pauseRequest) return pauseForUpdate();
+    if (l.pauseRequest) return await pauseForUpdate();
     let dir;
     if (!run.prepared) {
       // A pause for an update stops the preparation at once (see pauseLive): it starts over when the run resumes.
@@ -1058,7 +1169,65 @@ export async function execute(run) {
     } else {
       // Resuming: every finished step already left its work in commits on the run's branch.
       dir = projectDir(run.project);
-      await checkoutBranch(dir, run.branch);
+      const steps = stepsOf(run);
+      const index = steps.findIndex(step => step.status === 'pending' || step.status === 'running');
+      const step = steps[index];
+      try {
+        await checkoutBranch(dir, run.branch, operation => {
+          const text = t('The unfinished Git {operation} was aborted before resuming: the commits are kept.', { operation });
+          log(text);
+          const logIndex = index < 0 ? steps.length - 1 : index;
+          if (steps[logIndex]) {
+            const file = path.join(runDir(run.id), `${stepFileName(logIndex, steps[logIndex])}.jsonl`);
+            appendFileSync(file, `\n${JSON.stringify({ type: 'chiefmate_action', text })}\n`);
+          }
+          if (step) {
+            step.gitRecovery = operation;
+            saveRun(run);
+          }
+        });
+      } catch (error) {
+        if (step) Object.assign(step, { status: 'failed', ended: now(), error: error.message });
+        throw error;
+      }
+      // A branch with no commits of its own starts again from its base as it is now; the work put aside at the pause
+      // goes back on top of it or, when it doesn't fit there, on the branch where it was.
+      let fresh = null;
+      try {
+        fresh = await freshenBranch(dir, run.base ?? project.main_branch);
+      } catch (error) {
+        log(t("Couldn't bring the run's branch up to date: {error}", { error: error.message }));
+      }
+      if (run.shelf) {
+        try {
+          try {
+            await restoreShelf(dir, run.id, run.shelf.commit);
+          } catch (error) {
+            if (!fresh) throw error;
+            await discardSince(dir, fresh.from);
+            fresh = { ...fresh, kept: true };
+            await restoreShelf(dir, run.id, run.shelf.commit);
+          }
+        } catch (error) {
+          const text = t('The work put aside at the pause could not be put back. It is kept in the stash "chiefmate: paused run {id}" ({ref}) of {path}. {error}', {
+            id: run.id, ref: shelfRef(run.id), path: dir, error: error.message,
+          });
+          if (step) Object.assign(step, { status: 'failed', ended: now(), error: text });
+          throw new Error(text, { cause: error });
+        }
+        delete run.shelf;
+        if (fresh) fresh.restored = true;
+        log(t('The work not committed yet was put back.'));
+      }
+      if (fresh) {
+        if (!fresh.kept) {
+          run.baseCommit = fresh.to;
+          log(t('The branch had no commits of its own: it now starts from the current {base}.', { base: run.base ?? project.main_branch }));
+          await installSetup(dir, project, log);
+        } else log(t("The work not committed yet didn't apply on the current {base}: the branch stays where it was.", { base: run.base ?? project.main_branch }));
+        if (step) step.freshBase = fresh;
+      }
+      saveRun(run);
     }
     const base = run.base ?? project.main_branch;
     const libraries = await prepareLibraries(config, libraryIds(project), log);
@@ -1075,15 +1244,15 @@ export async function execute(run) {
       const order = [...run.steps.map(step => ({ step, finalReview: false })), ...(run.review ? [{ step: run.review, finalReview: true }] : [])];
       const index = order.findIndex(x => x.step.status === 'pending' || x.step.status === 'running');
       if (index < 0 || l.cancelRequest) break;
-      if (l.pauseRequest) return pauseForUpdate();
+      if (l.pauseRequest) return await pauseForUpdate();
       const { step, finalReview } = order[index];
-      const limit = checkLimits(config, run);
-      if (limit) return wait(limit.waitUntil, limit.note);
+      const limit = checkLimits(run, config);
+      if (limit) return wait(limit.waitUntil, limit.note, limit.limitWait);
       // What the final review commits tells whether it had to correct the crew's work (the tools' quality, src/tools.mjs).
       const reviewFrom = finalReview ? await headCommit(dir).catch(() => null) : null;
       const { waitUntil, paused } = await runStep({ l, run, step, index, dir, project, config, agents, libraries, base, finalReview });
       if (reviewFrom && step.status === 'done') step.commits = await commitSubjects(dir, reviewFrom).catch(() => []);
-      if (paused && !l.cancelRequest) return pauseForUpdate();
+      if (paused && !l.cancelRequest) return await pauseForUpdate();
       if (waitUntil) return wait(waitUntil, t('Your account reached its limit in the middle of a step'));
       if (step.agent === LEAD) afterLead(run, step, agents, log);
     }
@@ -1173,7 +1342,7 @@ export async function execute(run) {
   } catch (error) {
     if (error?.name === 'AbortError' && l.pauseRequest && !l.cancelRequest) {
       log(t('Preparation stopped for the update: it starts over when the run resumes'));
-      return pauseForUpdate();
+      return await pauseForUpdate();
     }
     Object.assign(run, { status: 'failed', ended: now(), result: error.message });
     saveRun(run);

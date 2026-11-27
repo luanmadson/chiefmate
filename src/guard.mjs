@@ -69,10 +69,66 @@ function tokens(text) {
 /** A program's plain name: "C:\Program Files\Git\cmd\git.exe" -> "git". */
 const programName = word => path.basename(String(word).replace(/\\/g, '/')).replace(/\.(exe|cmd|bat|ps1)$/i, '').toLowerCase();
 
+// Words that change the folder the next commands run in.
+const CD = new Set(['cd', 'pushd']);
+
+/** A folder as the shell writes it, as a path: Git Bash's /c/Users -> C:/Users, ~ -> the home folder. */
+function shellPath(word) {
+  const w = String(word).replace(/^~(?=$|[\\/])/, os.homedir());
+  return process.platform === 'win32' ? w.replace(/^\/([a-z])(\/|$)/i, (_, d) => `${d.toUpperCase()}:/`) : w;
+}
+
+/** "next" seen from "base": itself when absolute or with no base. */
+const within = (base, next) => {
+  const p = shellPath(next);
+  return !base || path.isAbsolute(p) ? p : path.join(base, p);
+};
+
+// Chiefmate's own commands whose words are only text (a message, an instruction for the crew, a note, a question): none
+// runs what it is given. needs-you only without --check, which a shell runs.
+const CLI_TEXT = new Set(['chat', 'defect', 'task', 'ask', 'mission', 'plan', 'request', 'ask-owner', 'gap', 'edit', 'guide', 'radar', 'session', 'needs-you']);
+// git's commands whose quoted words are only text (a message): with no option before them but -C <folder>, as a -c
+// could set an alias or an editor that runs a command.
+const GIT_TEXT = new Set(['commit', 'tag', 'notes', 'stash', 'merge']);
+// gh's commands whose quoted words are only text (a title, a body, a search, a query): not alias, config, extension or
+// codespace, which may keep or run a command.
+const GH_TEXT = new Set(['issue', 'pr', 'repo', 'api', 'search', 'run', 'workflow', 'release', 'label', 'status']);
+
+// A command that bash, PowerShell (Codex's shell on Windows) and tokens() all read as the same words, with nothing run
+// but its program: plain characters and spaces, or quoted text with nothing inside that one of them expands or reads
+// as the quote's end ($, a backquote, an escaped quote, curly quotes). No separator, comment or line break outside
+// quotes, no $'...'.
+const PLAIN_WORDS = /^(?:[\w./:=@,+ \t-]|'[^'\u2018-\u201f]*'|"(?:[^"\\$`\u2018-\u201f]|\\[^"\\$`\s\u2018-\u201f])*")*\s*$/;
+
+/**
+ * Whether the quoted words of the whole command are only text for its program, never run: one command in plain words
+ * (PLAIN_WORDS), with nothing before its program, of Chiefmate's command line (CLI_TEXT: node .../cli.mjs task ...
+ * "<instruction>"), of git (GIT_TEXT: git commit -m "...") or of gh (GH_TEXT: gh issue create --body "...").
+ */
+function onlyText(command) {
+  const words = tokens(command);
+  if (words.includes('|') || !PLAIN_WORDS.test(String(command))) return false;
+  const { program, args, at } = programOf(words);
+  if (at !== 0) return false;
+  if (program === 'node') return programName(args[0] ?? '') === 'cli.mjs' && CLI_TEXT.has(args[1]) && !args.includes('--check');
+  let i = 0;
+  if (program === 'git') {
+    while (args[i] === '-C' && i + 1 < args.length) i += 2;
+    return GIT_TEXT.has(args[i]);
+  }
+  if (program === 'gh') {
+    while ((args[i] === '-R' || args[i] === '--repo') && i + 1 < args.length) i += 2;
+    return GH_TEXT.has(args[i]);
+  }
+  return false;
+}
+
 /**
  * What a shell command would publish: [{ rule, part, dir }], one per finding. part: the command found, written plainly
  * ("git push origin main", with git's options before "push" taken out); dir: the folder it would run in, when the
- * command says (git -C), relative to the folder of the session.
+ * command says (git -C, or a cd before it), relative to the folder of the session. The quoted text of a command that
+ * only reads it as text (onlyText: a message or an instruction for Chiefmate's command line, a commit message, an
+ * issue's body), when that is the whole command, in plain words, is not run, so it is not looked at as a command.
  */
 export function publishing(command, depth = 0) {
   const found = [];
@@ -85,24 +141,24 @@ export function publishing(command, depth = 0) {
       start = i + 1;
     }
   }
-  // A line that hands text to a shell through a pipe (echo "..." | sh, ... | iex): every quoted word may run.
-  const feedsShell = commands.slice(1).some(words => words.some(w => SHELLS.has(programName(w)) || STDIN_RUNNERS.has(programName(w))));
+  const text = depth === 0 && onlyText(command);
+  let cd = null;
+  const at = f => (cd ? { ...f, dir: within(cd, f.dir ?? '.') } : f);
   for (const words of commands) {
-    // A quoted word with a command in it (bash -c "...", cmd /c "...", eval "..."): looked at as a command too. Not
-    // the text given to a program that only reads it (a commit message, an instruction for Chiefmate's command line).
-    if (feedsShell || !onlyText(words)) for (const w of words) if (/\s/.test(w)) found.push(...publishing(w, depth + 1));
-    found.push(...inCommand(words, depth));
+    // A quoted word with a command in it (bash -c "...", cmd /c "...", eval "..."): looked at as a command too.
+    if (!text) for (const w of words) if (/\s/.test(w)) found.push(...publishing(w, depth + 1).map(at));
+    if (CD.has(programName(words[0]))) {
+      const to = words.slice(1).find(w => !w.startsWith('-'));
+      if (to) cd = within(cd, to);
+      continue;
+    }
+    found.push(...inCommand(words, depth).map(at));
   }
   const seen = new Set();
   return found.filter(f => !seen.has(`${f.rule} ${f.part}`) && seen.add(`${f.rule} ${f.part}`));
 }
 
-// What runs the text it reads from a pipe, besides the shells.
-const STDIN_RUNNERS = new Set(['iex', 'invoke-expression', 'eval', 'source', '.']);
-// Interpreters: running a script file, their quoted words are that script's arguments, never run as commands.
-const SCRIPT_RUNNERS = new Set(['node', 'python', 'python3', 'py', 'deno', 'bun', 'ruby', 'perl', 'php']);
-
-/** A command's program and its arguments: { program, args }, with variables (A=1) and wrappers (env, sudo...) taken off. */
+/** A command's program and its arguments: { program, args, at }, with variables (A=1) and wrappers (env, sudo...) taken off; at: where the program is. */
 function programOf(words) {
   let i = 0;
   // Variables set for the command (A=1 git push) and wrappers (env, sudo, xargs...), with their options.
@@ -117,21 +173,6 @@ function programOf(words) {
     break;
   }
   return i >= words.length ? { program: null, args: [], at: i } : { program: programName(words[i]), args: words.slice(i + 1), at: i };
-}
-
-/**
- * Whether a command's quoted words are only text for it: git and gh (messages, bodies, queries; not "gh alias", which
- * can define a shell command), and an interpreter running a script file (node src/cli.mjs task ... "<instruction>"),
- * with no inline code (-e, -c, --eval, eval...) before the script.
- */
-function onlyText(words) {
-  const { program, args } = programOf(words);
-  if (program === 'git') return true;
-  if (program === 'gh') return !args.includes('alias');
-  if (!SCRIPT_RUNNERS.has(program)) return false;
-  const script = args.findIndex(a => !a.startsWith('-'));
-  if (script < 0 || /^(eval|exec|run|x)$/i.test(args[script])) return false;
-  return !args.slice(0, script).some(a => /^(-[a-z]*[ecpr][a-z]*|--(eval|print|command|exec|require|import|loader)(=.*)?)$/i.test(a));
 }
 
 function inCommand(words, depth) {
@@ -161,16 +202,20 @@ function inGit(args) {
     }
   }
   const [sub, ...rest] = args.slice(i);
-  const dir = dirs.length ? path.join(...dirs) : null;
+  const dir = dirs.length ? dirs.reduce(within, null) : null;
   const finding = (rule, words) => [{ rule, part: ['git', ...words].join(' '), dir }];
   if (sub === 'push' || sub === 'send-pack') return finding(PUSH, ['push', ...rest]);
   if (sub === 'subtree' && rest.includes('push')) return finding(PUSH, [sub, ...rest]);
-  if (sub === 'remote') return finding(REMOTE, [sub, ...rest]);
+  if (sub === 'remote') {
+    // Only looking: "git remote", "git remote -v", "git remote show" and "git remote get-url".
+    const action = rest.find(a => !/^(-v|--verbose)$/.test(a));
+    return action === undefined || action === 'show' || action === 'get-url' ? [] : finding(REMOTE, [sub, ...rest]);
+  }
   return [];
 }
 
-// The actions of "gh pr" and "gh repo" that only read: they publish nothing.
-export const GH_READS = { pr: new Set(['view', 'list', 'diff', 'checks', 'status']), repo: new Set(['view', 'list']) };
+// What gh does that only looks: nothing is published.
+const GH_READ = { pr: new Set(['view', 'list', 'status', 'diff', 'checks']), repo: new Set(['view', 'list']) };
 
 function inGh(args) {
   let at = 0;
@@ -179,14 +224,8 @@ function inGh(args) {
   if (!sub) return [];
   const part = ['gh', sub, ...rest].join(' ');
   if (sub === 'pr' || sub === 'repo') {
-    let action = null;
-    for (let j = 0; j < rest.length && !action; j++) {
-      if (rest[j] === '-R' || rest[j] === '--repo') j++;
-      else if (!rest[j].startsWith('-')) action = rest[j];
-    }
-    // Any other action publishes, or is not known: refused.
-    if (GH_READS[sub].has(action)) return [];
-    return [{ rule: sub === 'pr' ? PR : REPO, part, dir: null }];
+    const action = rest.find((a, i) => !a.startsWith('-') && rest[i - 1] !== '-R' && rest[i - 1] !== '--repo');
+    return GH_READ[sub].has(action) ? [] : [{ rule: sub === 'pr' ? PR : REPO, part, dir: null }];
   }
   if (sub !== 'api') return [];
   // gh api: a GET unless -X/--method says otherwise, or a POST when it sends fields or a body.
@@ -311,21 +350,31 @@ export const MAIN_BRANCHES = new Set(['main', 'master']);
 // The only options a push may carry to be allowed.
 const PLAIN_OPTIONS = new Set(['-u', '--set-upstream', '-q', '--quiet', '-v', '--verbose']);
 
+// Where a push's messages go, written unquoted at its end ("2>&1", ">/dev/null", "2> $null"): nothing it sends changes.
+// Taken off the text itself, so a quoted "2>&1", which git would get as one more branch, is not taken for one.
+const TO_STREAMS = /(?:\s+[12]?>(?:&[12]|>?\s*(?:\/dev\/null|\$null|nul)))+\s*$/i;
+
 /**
  * A push the owner may allow the manager: { dir, remote, src, branch } for exactly
- * "git [-C <folder>]... push [-u|-q|-v] <remote> <branch>|<source>:<branch>", alone; otherwise { refused }:
- * "forced" (--force, --force-with-lease, +refspec, --mirror, --delete, a deletion), "main" (main or master) or "shape"
- * (anything else). cwd: the folder the command runs in.
+ * "[cd <folder> &&] git [-C <folder>]... push [-u|-q|-v] <remote> <branch>|<source>:<branch>", alone, with its messages
+ * sent to the other stream or nowhere at most ("2>&1"); otherwise { refused }: "forced" (--force, --force-with-lease,
+ * +refspec, --mirror, --delete, a deletion), "main" (main or master) or "shape" (anything else). The same push written
+ * either way is the same push: one grant serves them all. cwd: the folder the command runs in.
  */
 export function plainPush(command, cwd = process.cwd()) {
-  const words = tokens(command);
   const shape = { refused: 'shape' };
+  // "cd <folder> && git push ...": the push runs there, and only if the cd worked.
+  const into = /^\s*cd\s+("[^"]*"|'[^']*'|[^\s"';&|<>()`]+)\s*&&([\s\S]*)$/.exec(String(command ?? ''));
+  const moved = into ? tokens(into[1]) : [];
+  if (into && (moved.length !== 1 || /^-|[$%*?[\]~<>`]/.test(moved[0]))) return shape;
+  const words = tokens((into ? into[2] : String(command ?? '')).replace(TO_STREAMS, ''));
   if (!words.length || words.includes('|') || programName(words[0]) !== 'git') return shape;
-  // Nothing the shell would turn into other words: variables, patterns, the home folder, redirections.
-  if (words.some(w => /[$%*?[\]~<>]/.test(w))) return shape;
+  // Nothing the shell would turn into other words: variables, commands in backquotes, patterns, the home folder,
+  // other redirections.
+  if (words.some(w => /[$%*?[\]~<>`]/.test(w))) return shape;
   let i = 1;
-  const dirs = [];
-  for (; words[i] === '-C' && i + 1 < words.length; i += 2) dirs.push(words[i + 1]);
+  const dirs = into ? [shellPath(moved[0])] : [];
+  for (; words[i] === '-C' && i + 1 < words.length; i += 2) dirs.push(shellPath(words[i + 1]));
   if (words[i] !== 'push') return shape;
   const rest = words.slice(i + 1);
   if (rest.some(w => /^(--(force|mirror|delete|prune)|-[a-zA-Z]*[fd][a-zA-Z]*$)/.test(w) || /^[+:]/.test(w))) return { refused: 'forced' };
@@ -400,12 +449,12 @@ export function takeGrant(file, target, facts = target?.branch ? pushFacts(targe
  * The settings that make Claude Code run this file before each command, refusing what is not in "allowed". grants:
  * the manager's push requests and grants (see takeGrant).
  */
-export function guardHooks({ log, allowed = [], grants = null, who = grants ? 'manager' : 'step' }) {
+export function guardHooks({ log, allowed = [], grants = null, who = grants ? 'manager' : 'step', noMain = false }) {
   const q = s => `"${String(s).replace(/\\/g, '/')}"`;
   // Only the guard's own rules: any other text would go into a shell command line.
   const rules = [PUSH, REMOTE, PR, REPO, API].filter(r => allowed.includes(r));
   const by = ['step', 'manager', 'session'].includes(who) ? who : 'step';
-  const command = [q(process.execPath), q(fileURLToPath(import.meta.url)), '--log', q(log), '--who', by, ...rules.flatMap(r => ['--allow', q(r)]), ...(grants ? ['--grants', q(grants)] : [])].join(' ');
+  const command = [q(process.execPath), q(fileURLToPath(import.meta.url)), '--log', q(log), '--who', by, ...rules.flatMap(r => ['--allow', q(r)]), ...(grants ? ['--grants', q(grants)] : []), ...(noMain ? ['--no-main'] : [])].join(' ');
   return { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command, timeout: 30 }] }] };
 }
 
@@ -438,9 +487,21 @@ async function hook(argv) {
   if (risky.some(r => r.kind !== 'mass_delete')) {
     return deny("Refused by Chiefmate: this reaches into Chiefmate's protected folders, or deletes a whole drive, a personal folder or Chiefmate. The owner was warned. Don't try it another way: say why you wanted it, and stop.");
   }
-  const refused = publishing(command).filter(f => !allowed.has(f.rule));
-  if (!refused.length) return;
+  const found = publishing(command);
   const cwd = call.cwd || process.cwd();
+  // A "Work now" session (src/worknow.mjs): only a plain push of one branch other than the main one may ever go, once
+  // the owner allows pushing; any other push is refused at once, so it never becomes a permission request. HEAD is
+  // the branch checked out, and "heads/<name>" that branch.
+  if (argv.includes('--no-main') && found.some(f => f.rule === PUSH)) {
+    const target = plainPush(command, cwd);
+    const named = /^head$/i.test(target.branch ?? '') ? git(target.dir, 'symbolic-ref', '--short', 'HEAD') : target.branch;
+    const branch = named?.replace(/^(refs\/)?heads\//i, '');
+    if (!branch || pushFacts({ ...target, branch }).main) {
+      return deny('Refused by Chiefmate, always: nothing goes straight to the main branch (main, master or the default one), and no push is forced. Only "git push [-u] <remote> <branch>" of a branch of the work goes (alone, or after "cd <folder> &&", with "2>&1" at most), once the owner allowed pushing. Say what you wanted to send and why, and stop.');
+    }
+  }
+  const refused = found.filter(f => !allowed.has(f.rule));
+  if (!refused.length) return;
   // The manager's push the owner allowed on its card: it goes, once.
   const target = grants && refused.every(f => f.rule === PUSH) ? plainPush(command, cwd) : null;
   if (target?.branch && takeGrant(grants, target)) return;
@@ -455,7 +516,7 @@ async function hook(argv) {
       : target?.refused === 'main' || target?.refused === 'forced'
         ? 'Refused by Chiefmate, always: the manager never pushes to the main branch (main, master or the default one) nor forces a push (--force, --force-with-lease, +refspec, --mirror, --delete). Tell the owner what you wanted to send and why.'
         : target
-          ? `Refused by Chiefmate: this push needs the owner's permission. If it is a plain push of one branch, the owner now gets a card to allow it once (this repository and branch, for ${GRANT_MINUTES} minutes); you are told when they do, and may run the same command again. Only "git -C <folder> push <remote> <branch>" can be allowed, alone and with no other option. Say what you want to send and why, and stop.`
+          ? `Refused by Chiefmate: this push needs the owner's permission. If it is a plain push of one branch, the owner now gets a card to allow it once (this repository and branch, for ${GRANT_MINUTES} minutes); you are told when they do, and may run the same command again. Only "git -C <folder> push [-u] <remote> <branch>" (or "cd <folder> && git push [-u] <remote> <branch>", with "2>&1" at most) can be allowed, alone and with no other option; the grant serves any of these forms of the same push. Say what you want to send and why, and stop.`
           : `Refused by Chiefmate: this publishes (${rules}), and the manager never does. Say what you wanted to run and why.`;
   // A live session's refusal becomes a permission request for the owner, present; the crew's and the manager's count.
   if (who !== 'session') recordSignal('publish_refused', refused.map(f => f.part).join('; '), { who });

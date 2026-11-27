@@ -1,28 +1,34 @@
 // Unit tests with no dependency (node:test): the file viewer's checks of paths, its choice among a project's copies and
 // its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation;
-// the emergency lockdown and its detection.
+// the emergency lockdown and its detection; each agent's effort; the redacted backup of the settings.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE, projectColor, shouldClose, themeManifest, windowName } from '../src/browsers.mjs';
+import { readFeed } from '../src/claude.mjs';
+import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
+import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
-import { riskyCommand } from '../src/guard.mjs';
+import { plainPush, publishing, riskyCommand } from '../src/guard.mjs';
 import { checkSignals, engage, isLocked, readLockdown, recordSignal, refuseWhileLocked, release, RULES, weigh, WINDOW_MINUTES } from '../src/lockdown.mjs';
 import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
-import { askedTool, stepTool } from '../src/runs.mjs';
+import { copyHolders, pickNext } from '../src/queue.mjs';
+import { askedTool, copyHolder, holdsCopy, limitWaitCleared, stepTool } from '../src/runs.mjs';
 import {
   agentTool, availableTools, chooseTool, codexEnvironment, codexEvents, codexGuard, codexStepArgs, correctionLine, GROK_DENY, grokEvents, grokStepArgs, parseTool,
-  qualityRecords, qualitySummary, runTools, toolAvailable, toolModel,
+  qualityRecords, qualitySummary, runTools, toolAvailable, toolEffort, toolModel,
 } from '../src/tools.mjs';
 import { parseLevel } from '../src/util.mjs';
-import { behindOrigin, fastForward, projectLibraries, sameRepository } from '../src/workspace.mjs';
+import { behindOrigin, checkoutBranch, fastForward, freshenBranch, projectLibraries, restoreShelf, sameRepository, shelfRef, shelveWork } from '../src/workspace.mjs';
+import { syntaxProblem } from './check.mjs';
 import { SAMPLE_CSV, sampleXlsx, zip } from './fixtures.mjs';
 import { compose, Dictation, nextState, recognizer, transcript } from '../ui/voice.js';
+import './away-ui.test.mjs';
 
 const windows = process.platform === 'win32';
 const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-unit-'));
@@ -431,6 +437,219 @@ test("your clone moves forward only by a fast forward, with nothing of yours in 
   assert.deepEqual(await behindOrigin(behindClone, 'main'), { branch: 'main', behind: 0 });
 });
 
+function conflictingRun() {
+  const dir = mkdtempSync(path.join(temp, 'git-recovery-'));
+  const git = (...args) => gitIn(dir, ...args);
+  const file = path.join(dir, 'doc.md');
+  const commit = (name, contents) => {
+    write(name, contents);
+    git('add', '--', name);
+    git('commit', '-qm', contents.trim());
+  };
+  git('init', '-q', '-b', 'main');
+  commit(file, 'Base\n');
+  git('branch', 'run');
+  git('branch', 'side');
+  commit(file, 'Main\n');
+  commit(path.join(dir, 'extra.md'), 'Extra\n');
+  // A commit a sequence can still have to pick after its conflict.
+  git('checkout', '-q', 'side');
+  commit(path.join(dir, 'side.md'), 'Side\n');
+  git('checkout', '-q', 'run');
+  commit(file, 'Run\n');
+  return { dir, git };
+}
+
+for (const { operation, args, marker, sequence } of [
+  { operation: 'merge', args: ['main'], marker: 'MERGE_HEAD' },
+  { operation: 'cherry-pick', args: ['main~'], marker: 'CHERRY_PICK_HEAD' },
+  { operation: 'revert', args: ['--no-edit', 'main~'], marker: 'REVERT_HEAD' },
+  { operation: 'rebase', args: ['--merge', 'main'], marker: 'rebase-merge' },
+  { operation: 'rebase', args: ['--apply', 'main'], marker: 'rebase-apply' },
+  { operation: 'cherry-pick', args: ['main', 'main~'], marker: 'CHERRY_PICK_HEAD', sequence: true },
+  { operation: 'revert', args: ['--no-edit', 'main', 'main~'], marker: 'REVERT_HEAD', sequence: true },
+  { operation: 'cherry-pick', args: ['main', 'main~', 'side'], marker: 'CHERRY_PICK_HEAD', sequence: true },
+  { operation: 'revert', args: ['--no-edit', 'main', 'main~', 'side'], marker: 'REVERT_HEAD', sequence: true },
+]) {
+  test(`resuming aborts git ${operation} ${args.join(' ')} and keeps the run's commits`, async () => {
+    const { dir, git } = conflictingRun();
+    if (operation === 'revert' && sequence) git('cherry-pick', 'main');
+    const before = git('rev-parse', 'run');
+    assert.throws(() => git(operation, ...args));
+    const state = path.join(dir, '.git', marker);
+    assert.ok(existsSync(state));
+    const interrupted = git('rev-parse', 'run');
+    assert.equal(sequence ? git('rev-parse', 'run~') : interrupted, before);
+    const recovered = [];
+    await checkoutBranch(dir, 'run', name => recovered.push(name));
+    assert.deepEqual(recovered, [operation]);
+    assert.equal(git('branch', '--show-current'), 'run');
+    assert.equal(git('rev-parse', 'HEAD'), interrupted);
+    assert.equal(git('status', '--porcelain'), '');
+    assert.equal(existsSync(state), false);
+    assert.equal(existsSync(path.join(dir, '.git', 'sequencer')), false);
+  });
+}
+
+test('a failed Git abort leaves the branch and conflict in place and tells the owner how to resume', async () => {
+  const { dir, git } = conflictingRun();
+  const before = git('rev-parse', 'run');
+  assert.throws(() => git('merge', 'main'));
+  write(path.join(dir, '.git', 'index.lock'));
+  await assert.rejects(checkoutBranch(dir, 'run', () => assert.fail('The abort failed')), error => {
+    assert.ok(error.message.includes(dir));
+    assert.match(error.message, /git status/);
+    assert.match(error.message, /git merge --abort/);
+    return true;
+  });
+  assert.equal(git('rev-parse', 'run'), before);
+  assert.ok(existsSync(path.join(dir, '.git', 'MERGE_HEAD')));
+});
+
+test('the step feed shows a recovery action written after an interrupted log line', () => {
+  const log = path.join(temp, 'git-recovery.jsonl');
+  write(log, '{"type":\n{"type":"chiefmate_action","text":"The unfinished Git merge was aborted before resuming: the commits are kept."}\n');
+  assert.deepEqual(readFeed(log, temp).items, [{ type: 'action', text: 'The unfinished Git merge was aborted before resuming: the commits are kept.' }]);
+});
+
+test('a run waiting for a usage limit goes back to the queue once the limit is raised above the usage or taken out', () => {
+  const resets = new Date(Date.now() + 3_600_000).toISOString();
+  const usage = { five_hour: { used: 0.11, resets }, seven_day: { used: 0.2, resets } };
+  const run = { status: 'waiting', notBefore: resets, limitWait: { window: 'five_hour', ceiling: 0.05 } };
+  const cleared = (window, week = 0.9) => limitWaitCleared(run, { pause_at_5h_window: window, pause_at_plan_week: week }, usage);
+  assert.equal(cleared(0.05), false);
+  assert.equal(cleared(0.11), false);
+  assert.equal(cleared(0.7, 0.1), false);
+  assert.equal(cleared(0.7), true);
+  assert.equal(cleared(undefined), true);
+  assert.equal(limitWaitCleared({ status: 'waiting', note: 'Your account reached its limit in the middle of a step' }, {}, usage), false);
+});
+
+// ---------- A paused run's working copy: its work put aside, the copy kept, the branch up to date ----------
+
+/** A text file as LF, whatever core.autocrlf did to it. */
+const lf = file => readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+
+/** origin with a main branch, and the crew's copy of it on the run's branch "run-a". */
+function pausedCopy() {
+  const top = mkdtempSync(path.join(temp, 'paused-'));
+  const origin = path.join(top, 'origin');
+  const dir = path.join(top, 'copy');
+  mkdirSync(origin);
+  gitIn(origin, 'init', '-q', '-b', 'main');
+  write(path.join(origin, 'app.md'), 'App\n');
+  gitIn(origin, 'add', '-A');
+  gitIn(origin, 'commit', '-qm', 'start');
+  gitIn(top, 'clone', '-q', origin, dir);
+  gitIn(dir, 'checkout', '-q', '-b', 'run-a');
+  // A stash is a commit: Chiefmate's own git calls need an identity.
+  gitIn(dir, 'config', 'user.name', 'Test');
+  gitIn(dir, 'config', 'user.email', 'test@example.com');
+  /** A pull request merged on origin's main meanwhile. */
+  const merged = (name, text) => {
+    write(path.join(origin, name), text);
+    gitIn(origin, 'add', '-A');
+    gitIn(origin, 'commit', '-qm', `merged ${name}`);
+  };
+  return { dir, origin, merged, git: (...args) => gitIn(dir, ...args) };
+}
+
+test('a paused run keeps its work: another run preparing the copy loses nothing, and it comes back on the current main', async () => {
+  const { dir, merged, git } = pausedCopy();
+  // Run A's step paused with a new file and a changed one, not committed.
+  write(path.join(dir, 'new.md'), 'New\n');
+  write(path.join(dir, 'app.md'), 'App by A\n');
+  const commit = await shelveWork(dir, 'run-a');
+  assert.match(commit, /^[0-9a-f]{40}$/);
+  assert.equal(git('status', '--porcelain'), '');
+  assert.equal(git('rev-parse', shelfRef('run-a')), commit);
+  assert.match(git('stash', 'list'), /chiefmate: paused run run-a/);
+  // Run B of the same project prepares the copy as prepareWorkspace does, and leaves work of its own in the stash list.
+  git('checkout', '-q', '-f', 'main');
+  git('reset', '--hard', '-q', 'origin/main');
+  git('clean', '-fdq');
+  write(path.join(dir, 'b.md'), 'B\n');
+  git('stash', 'push', '-q', '--include-untracked', '-m', 'other');
+  // Seven pull requests merged while A waited.
+  for (let n = 1; n <= 7; n++) merged(`pr${n}.md`, `PR ${n}\n`);
+  await checkoutBranch(dir, 'run-a');
+  const fresh = await freshenBranch(dir, 'main');
+  assert.equal(fresh.behind, 7);
+  assert.equal(git('rev-parse', 'HEAD'), git('rev-parse', 'origin/main'));
+  assert.equal(git('branch', '--show-current'), 'run-a');
+  await restoreShelf(dir, 'run-a', commit);
+  assert.equal(lf(path.join(dir, 'new.md')), 'New\n');
+  assert.equal(lf(path.join(dir, 'app.md')), 'App by A\n');
+  assert.ok(existsSync(path.join(dir, 'pr7.md')));
+  // Its stash and ref are gone; the other stash stays.
+  assert.equal(git('stash', 'list').split('\n').length, 1);
+  assert.match(git('stash', 'list'), /other/);
+  assert.throws(() => git('rev-parse', '--verify', '-q', shelfRef('run-a')));
+  assert.equal(await shelveWork(dir, 'run-a').then(() => shelveWork(dir, 'run-a')), null);
+});
+
+test("a branch with commits of its own, or a copy with changes, isn't moved; work that doesn't fit keeps its stash", async () => {
+  const { dir, merged, git } = pausedCopy();
+  write(path.join(dir, 'own.md'), 'Own\n');
+  git('add', '-A');
+  git('commit', '-qm', 'own');
+  merged('pr1.md', 'PR 1\n');
+  const head = git('rev-parse', 'HEAD');
+  assert.equal(await freshenBranch(dir, 'main'), null);
+  assert.equal(git('rev-parse', 'HEAD'), head);
+
+  const second = pausedCopy();
+  second.merged('pr1.md', 'PR 1\n');
+  write(path.join(second.dir, 'dirty.md'), 'Dirty\n');
+  const start = second.git('rev-parse', 'HEAD');
+  assert.equal(await freshenBranch(second.dir, 'main'), null);
+  assert.equal(second.git('rev-parse', 'HEAD'), start);
+
+  // The work changes a file main changed too: it doesn't apply there, the copy is left clean and the stash kept.
+  const third = pausedCopy();
+  write(path.join(third.dir, 'app.md'), 'App by A\n');
+  const commit = await shelveWork(third.dir, 'run-a');
+  third.merged('app.md', 'App on main\n');
+  const fresh = await freshenBranch(third.dir, 'main');
+  await assert.rejects(restoreShelf(third.dir, 'run-a', commit), /stash apply/);
+  assert.equal(third.git('status', '--porcelain'), '');
+  assert.equal(third.git('rev-parse', shelfRef('run-a')), commit);
+  // Back on the branch where it was, it applies; over changes already in the copy, it applies and cleans nothing.
+  third.git('reset', '--hard', '-q', fresh.from);
+  write(path.join(third.dir, 'mine.md'), 'Mine\n');
+  await assert.rejects(restoreShelf(third.dir, 'run-a', commit), /changes not committed/);
+  assert.equal(lf(path.join(third.dir, 'mine.md')), 'Mine\n');
+  assert.equal(third.git('rev-parse', shelfRef('run-a')), commit);
+  rmSync(path.join(third.dir, 'mine.md'));
+  await restoreShelf(third.dir, 'run-a', commit);
+  assert.equal(lf(path.join(third.dir, 'app.md')), 'App by A\n');
+});
+
+test('a run paused in the middle of its work keeps the copy: no other run of the project starts until it resumes', () => {
+  const at = '2026-11-26T12:00:00.000Z';
+  const runA = { id: 'a', project: 'demo', created: at, status: 'paused', prepared: true, resumeFirst: true };
+  const runB = { id: 'b', project: 'demo', created: at, status: 'queued' };
+  const runC = { id: 'c', project: 'other', created: at, status: 'queued' };
+  assert.equal(holdsCopy(runA), true);
+  assert.equal(holdsCopy({ ...runA, resumeFirst: false }), false);
+  assert.equal(holdsCopy({ ...runA, resumeFirst: false, shelf: { commit: 'x' } }), true);
+  assert.equal(holdsCopy({ ...runA, prepared: false }), false);
+  assert.equal(holdsCopy({ ...runA, status: 'done' }), false);
+  assert.equal(copyHolder(runB, [runA, runB, runC])?.id, 'a');
+  assert.equal(copyHolder(runC, [runA, runB, runC]), null);
+  // Paused (held for the owner): B waits, the other project's run goes on.
+  const holders = copyHolders([runA, runB, runC]);
+  assert.deepEqual(pickNext([runB, runC], [], 3, Date.now(), holders).map(r => r.id), ['c']);
+  // Back in the queue (first, as resumeFirst puts it): A starts, never B beside it.
+  const back = { ...runA, status: 'queued' };
+  assert.deepEqual(pickNext([back, runB, runC], [], 3, Date.now(), copyHolders([back, runB, runC])).map(r => r.id), ['a', 'c']);
+  // Waiting for a time ahead: nothing of the project starts.
+  const later = { ...runA, status: 'waiting', notBefore: new Date(Date.now() + 3_600_000).toISOString() };
+  assert.deepEqual(pickNext([later, runB], [], 3, Date.now(), copyHolders([later, runB])).map(r => r.id), []);
+  // Once it resumed and ended, B goes.
+  assert.deepEqual(pickNext([runB], [], 3, Date.now(), copyHolders([{ ...runA, status: 'done' }, runB])).map(r => r.id), ['b']);
+});
+
 // ---------- The crew's tools (src/tools.mjs): which one a member runs on, until when, and how each is started ----------
 
 test('a member runs on Claude Code unless it asks for Codex or Grok, and the manager and leads always do', () => {
@@ -759,4 +978,141 @@ test("The lockdown's detection in a shell command: protected folders and deletio
     assert.deepEqual(kinds(`rm -rf ${bash(path.join(home, 'Documents'))}`), ['wide_delete']);
     assert.deepEqual(kinds(`rm -rf ${bash(path.join(tmp, 'scratch'))}`), []);
   }
+});
+
+test("A push's folder is the command's own (a cd before it, git -C), so its card names the right repository", () => {
+  const dirOf = command => publishing(command)[0]?.dir ?? null;
+  const other = path.join(temp, 'acervo');
+  assert.equal(path.resolve(dirOf(`cd "${other}" && git push origin main`)), other);
+  assert.equal(path.resolve(temp, dirOf('cd sub && git -C inner push origin x')), path.join(temp, 'sub', 'inner'));
+  assert.equal(dirOf('git push origin x'), null);
+  if (process.platform === 'win32') assert.equal(path.resolve(dirOf('cd /c/Users/x && git push origin y')), path.resolve('C:/Users/x'));
+  // The same push however it is written, the same folder; never the main branch, never forced.
+  const target = plainPush('git push origin feature', temp);
+  assert.deepEqual(plainPush('git push -u origin feature 2>&1', temp), target);
+  assert.deepEqual(plainPush(`cd "${temp}" && git push --set-upstream origin feature >/dev/null 2>&1`, os.tmpdir()), target);
+  assert.equal(plainPush('git push -u origin main 2>&1', temp).refused, 'main');
+  assert.equal(plainPush('git push --force-with-lease origin feature 2>&1', temp).refused, 'forced');
+});
+
+test('effort: each level from its place, the project only, the history and the run report', () => {
+  const config = {
+    owner: 'Someone', crew: { writer: { effort: 'medium' } },
+    projects: { demo: { name: 'Demo', effort: { generalist: 'low', manager: 'xhigh' } }, own: { name: 'Own', crew: { editor: { agent: 'writer', effort: 'high' } }, lead: { name: 'Lead' } } },
+  };
+  const agents = loadAgents(config);
+  assert.equal(agents.writer.effort, 'medium');
+  assert.equal(effortSource(config, null, agents.writer), 'installation');
+  assert.equal(effortSource(config, null, agents.generalist), 'agent');
+  const demo = projectCrew(config, 'demo', agents);
+  assert.equal(demo.generalist.effort, 'low');
+  assert.equal(demo.manager.effort, 'xhigh', "the manager's reviews of the project's runs");
+  assert.equal(effortSource(config, 'demo', demo.generalist), 'project');
+  assert.equal(projectCrew(config, 'own', agents).editor.effort, 'high');
+  assert.equal(effortSource(config, 'own', projectCrew(config, 'own', agents).editor), 'member');
+  assert.equal(agents.generalist.effort, loadAgents({ owner: 'x' }).generalist.effort, 'a project never changes the general crew');
+  assert.equal(parseEffort('MAX'), 'max');
+  assert.equal(parseEffort('padrão'), 'default');
+  assert.equal(parseEffort('huge'), null);
+
+  const file = path.join(temp, 'effort-history.jsonl');
+  let saved = null;
+  const save = c => { saved = c; };
+  const one = setEffort({ member: 'generalist', level: 'max', project: 'demo', config, save, file, by: 'manager' });
+  assert.deepEqual([one.from, one.to, one.changed, one.by], ['low', 'max', true, 'manager']);
+  assert.equal(saved.projects.demo.effort.generalist, 'max');
+  assert.equal(config.projects.demo.effort.generalist, 'low', 'the settings given are not changed in place');
+  const same = setEffort({ member: 'writer', level: 'medium', config, save: () => assert.fail('saved with no change'), file });
+  assert.equal(same.changed, false);
+  const back = setEffort({ member: 'writer', level: 'default', config, save, file });
+  assert.equal(back.to, loadAgents({ owner: 'x' }).writer.effort ?? null, "back to the agent's own");
+  assert.equal(saved.crew.writer, undefined, 'an empty crew setting is removed');
+  const chat = setEffort({ member: 'manager', level: 'low', chat: true, config, save, file });
+  assert.equal(saved.crew.manager.chat_effort, 'low');
+  assert.ok(chat.changed);
+  assert.throws(() => setEffort({ member: 'writer', level: 'low', chat: true, config, save, file }), /conversation/);
+  assert.throws(() => setEffort({ member: 'nobody', level: 'low', config, save, file }), /Unknown agent/);
+  assert.throws(() => setEffort({ member: 'writer', level: 'huge', config, save, file }), /Unknown effort/);
+  assert.throws(() => setEffort({ member: 'writer', level: 'low', project: 'nope', config, save, file }), /Unknown project/);
+
+  const all = effortHistory({ file });
+  assert.equal(all.length, 3);
+  assert.equal(effortHistory({ project: 'own', file }).length, 2, "another project's change is not this project's");
+  assert.equal(runEffortChanges({ project: 'demo', started: '2000-01-01T00:00:00Z' }, file).length, 3);
+  assert.equal(runEffortChanges({ project: 'demo', started: '2000-01-01T00:00:00Z', ended: '2000-01-02T00:00:00Z' }, file).length, 0);
+  assert.match(effortChangeLine(one), /manager: generalist in demo, low → max$/);
+
+  // A step records the level its tool was given: Codex has no max and runs at its own default.
+  assert.deepEqual([toolEffort('claude', 'max'), toolEffort('claude', undefined), toolEffort('codex', 'max'), toolEffort('codex', 'xhigh'), toolEffort('grok', 'max')], ['max', null, null, 'xhigh', 'max']);
+});
+
+test("the settings' backup: a redacted copy in backup_dir, the full one only on this computer", () => {
+  const config = {
+    owner: 'Someone', port: 4747, default_model: 'claude-opus-5-5',
+    backup_dir: path.join(temp, 'backup', 'repo'),
+    projects: {
+      demo: {
+        name: 'Demo', repository: 'https://github.com/someone/demo.git', main_branch: 'main', checks: ['npm test'], sensitive: true,
+        about: 'Family budget kept by Jane Roe', notes: 'Pays R$ 1.234,56 a month; write to jane.roe@example.com',
+        agent_notes: { writer: 'Call Jane at (51) 99876-5432' },
+        crew: { editor: { agent: 'writer', name: 'Editor', extra_instructions: 'Jane Roe owes 300 reais' } },
+        lead: { name: 'Lead', extra_instructions: 'Private' },
+      },
+    },
+    missions: { weekly: { name: 'Weekly', project: 'demo', description: 'Text', steps: [{ agent: 'writer', part: 'Text' }], review: { agent: 'manager', part: 'Text' }, schedule: { days: ['mon'], time: '09:00' } } },
+    crew: { manager: { max_minutes: 60, extra_instructions: 'Private' } },
+    library: { acervo: { name: 'Acervo', repository: 'git@github.com:someone/acervo.git', about: 'Private' } },
+    mcp_servers: {
+      api: { command: 'npx', args: ['tool@1.2.3', '--access-token', 'sbp_0123456789abcdef0123', '--api-key=sk_live_0123456789abcdef'], env: { SERVICE_KEY: 'abc123' }, headers: { 'X-Any': 'xyz' } },
+      web: { type: 'http', url: 'https://me:pa55word@mcp.example.net/mcp?api_key=s3cr3t&lang=en' },
+    },
+    remote_access: { enabled: true, logins: ['owner@example.com'], api_token: 'tk-9f8e', pin: 4321 },
+    prompt_builder: { doc_id: '1AbCdEfGh', environment: 'Home' },
+    plan_resets: [{ kind: 'full', expires: '2026-12-10T19:00:00-03:00', used: false, note: 'Free reset' }],
+    sessions: { live: { name: 'Live', tool: 'claude', setup: 'Budget of US$ 300; CPF 123.456.789-09; write to ana@example.com' } },
+  };
+  const before = JSON.stringify(config);
+  const red = redactConfig(config);
+  assert.equal(JSON.stringify(config), before, 'the settings given are not changed');
+  const text = JSON.stringify(red);
+  for (const word of ['Jane', 'example.com', '1.234,56', '99876', '300', 'abc123', 'xyz', 'tk-9f8e', '4321', '1AbCdEfGh', '123.456.789', 'Private', 'Free reset', 'sbp_0123', 'sk_live', 'pa55word', 's3cr3t']) {
+    assert.ok(!text.includes(word), `${word} left in the redacted copy`);
+  }
+  const demo = red.projects.demo;
+  assert.deepEqual([demo.about, demo.notes, demo.agent_notes, demo.crew.editor.extra_instructions], ['[removed from this copy]', '[removed from this copy]', { writer: '[removed from this copy]' }, '[removed from this copy]']);
+  assert.deepEqual([demo.name, demo.repository, demo.main_branch, demo.checks, demo.sensitive, demo.crew.editor.agent], ['Demo', 'https://github.com/someone/demo.git', 'main', ['npm test'], true, 'writer'], 'the structure stays');
+  assert.deepEqual(red.missions.weekly.schedule, { days: ['mon'], time: '09:00' });
+  assert.equal(red.missions.weekly.steps[0].agent, 'writer');
+  assert.deepEqual([red.mcp_servers.api.command, red.mcp_servers.api.env.SERVICE_KEY, red.mcp_servers.api.headers['X-Any']], ['npx', '[secret]', '[secret]']);
+  // A secret after a flag or in an address goes; a pinned package and a git remote over SSH are not e-mails.
+  assert.deepEqual(red.mcp_servers.api.args, ['tool@1.2.3', '--access-token', '[secret]', '--api-key=[secret]']);
+  assert.equal(red.mcp_servers.web.url, 'https://[secret]@mcp.example.net/mcp?api_key=[secret]&lang=en');
+  assert.equal(red.library.acervo.repository, 'git@github.com:someone/acervo.git');
+  assert.deepEqual([red.remote_access.logins, red.remote_access.api_token, red.remote_access.pin, red.prompt_builder.doc_id], [['[login]'], '[secret]', '[secret]', '[id]']);
+  assert.equal(red.plan_resets[0].expires, '2026-12-10T19:00:00-03:00', 'dates are not amounts or phones');
+  assert.equal(red.sessions.live.setup, 'Budget of [amount]; CPF [document]; write to [email]');
+  assert.deepEqual([red.owner, red.port, red.backup_dir], ['Someone', 4747, config.backup_dir]);
+  assert.match(red.backup_note, /Redacted copy/);
+
+  const fullDir = path.join(temp, 'backup', 'local');
+  backupConfig(config, { fullDir });
+  assert.deepEqual(JSON.parse(readFileSync(path.join(config.backup_dir, 'chiefmate.json'), 'utf8')), red);
+  assert.deepEqual(JSON.parse(readFileSync(path.join(fullDir, 'chiefmate.json'), 'utf8')), config, 'the full copy, on this computer');
+  const other = path.join(temp, 'backup', 'none');
+  backupConfig({ owner: 'x' }, { fullDir: other });
+  assert.ok(!existsSync(other), 'no backup without backup_dir');
+});
+
+test('npm run check says why a script was not checked, with no pipe a sandbox could refuse', () => {
+  const calls = [];
+  const fake = result => (command, args, options) => (calls.push(options), result);
+  const denied = Object.assign(new Error('spawnSync C:\\Program Files\\nodejs\\node.exe EPERM'), { code: 'EPERM' });
+  assert.equal(syntaxProblem('src/a.mjs', fake({ error: denied, status: null, stderr: undefined })),
+    "Couldn't check src/a.mjs: EPERM, spawnSync C:\\Program Files\\nodejs\\node.exe EPERM");
+  assert.match(syntaxProblem('src/b.mjs', fake({ status: 1, signal: null })), /^Syntax error in src\/b\.mjs \(exit code 1\)/);
+  assert.equal(syntaxProblem('src/c.mjs', fake({ status: 0 })), null);
+  // An stdio left out (whole or in part) is a pipe too.
+  const stdio = o => typeof o?.stdio === 'string' ? [o.stdio, o.stdio, o.stdio] : [0, 1, 2].map(i => o?.stdio?.[i]);
+  assert.ok(calls.length === 3 && calls.every(o => stdio(o).every(s => s != null && s !== 'pipe' && s !== 'overlapped')), 'node --check got a pipe');
+  assert.equal(syntaxProblem(path.join('scripts', 'fixtures.mjs')), null, 'a real script failed the check');
 });

@@ -1,11 +1,13 @@
 // The schedule: starts missions on their days and times, sends the eve reminder and catches up on a missed run.
-// A mission whose time came while Chiefmate was off or on standby (src/power.mjs) runs once at the next chance, however
-// many of its times went by: the run is marked late ("due") and starts at once.
+// A mission whose time came while Chiefmate was off or on standby (src/power.mjs), or while the owner's focus held its
+// project (src/steer.mjs), runs once at the next chance, however many of its times went by: the run is marked late
+// ("due") and starts at once.
 import { loadConfig } from './config.mjs';
 import { formatDateTime, locale, t } from './i18n.mjs';
 import { notify } from './notify.mjs';
 import { held } from './power.mjs';
 import { nudgeQueue } from './queue.mjs';
+import { holdReason, readSteer } from './steer.mjs';
 import { createRun } from './runs.mjs';
 import { readState, saveState } from './store.mjs';
 import { now } from './util.mjs';
@@ -67,7 +69,7 @@ function startScheduledRun(id, mission, last) {
     if (late) {
       notify(
         t('Late mission'),
-        t('"{name}" was due at {when}, while Chiefmate was off or on standby. It runs now; to cancel, open Chiefmate.', { name: mission.name, when: formatDateTime(last) }),
+        t('"{name}" was due at {when}, while Chiefmate was off, on standby or its project was held by your focus. It runs now; to cancel, open Chiefmate.', { name: mission.name, when: formatDateTime(last) }),
         'chiefmate:operations',
       );
     }
@@ -83,6 +85,7 @@ function check() {
   state.schedule ??= {};
   state.reminders_sent ??= {};
   let changed = false;
+  const steer = readSteer();
   for (const [id, mission] of Object.entries(config.missions ?? {})) {
     if (!daysOf(mission.schedule).length) continue;
     const last = lastRun(mission.schedule);
@@ -91,8 +94,9 @@ function check() {
       // The first time Chiefmate sees this mission: start counting from here, without catching up on the past.
       state.schedule[id] = (last ?? new Date()).toISOString();
       changed = true;
-    } else if (last && new Date(recorded) < last && !held()) {
-      // Only the last time missed counts: one run, never one per time missed. On standby it waits, and runs once after.
+    } else if (last && new Date(recorded) < last && !held() && !holdReason(mission.project, steer)) {
+      // Only the last time missed counts: one run, never one per time missed. On standby, or while the owner's focus
+      // holds its project (src/steer.mjs), it waits, and runs once after.
       state.schedule[id] = last.toISOString();
       changed = true;
       startScheduledRun(id, mission, last);
