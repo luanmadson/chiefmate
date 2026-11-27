@@ -777,8 +777,21 @@ function lockdownSummaryHtml(l) {
     <p><strong>${esc(t('What was stopped'))}:</strong> ${esc(stopped)}</p>
     ${evidence ? `<div class="label">${esc(t('Evidence'))}</div><ul class="lockdown-evidence">${evidence}</ul>` : ''}
     ${watchReportHtml(l.sentinel)}
+    ${escalationSummaryHtml(l.escalation)}
     ${notes ? `<div class="label">${esc(t('Your notes'))}</div><ul class="lockdown-evidence">${notes}</ul>` : ''}
     <p class="muted">${esc(t('After the release, the queue goes on. The runs it stopped stay canceled until you resume them.'))}</p>`;
+}
+
+/** Whether the owner was called outside the app (src/escalation.mjs), and what they chose on Telegram. */
+function escalationSummaryHtml(x) {
+  if (!x) return '';
+  const where = (x.channels ?? []).map(c => (c === 'telegram' ? 'Telegram' : t('e-mail'))).join(', ');
+  const errors = (x.errors ?? []).map(e => e.error).join('; ');
+  const lines = [where ? t('Called you on {where} at {time}.', { where, time: shortDate(x.at) })
+    : errors ? t("Couldn't reach you outside the app: {errors}", { errors }) : t('Not called outside the app: Telegram and the e-mail are not set up.')];
+  const names = { keep: t('Keep stopped'), release: t('Release'), pin_blocked: t('blocked after wrong PINs') };
+  for (const d of x.decisions ?? []) lines.push(t('On Telegram, {time}: {choice}.', { time: shortDate(d.at), choice: names[d.action] ?? d.action }));
+  return `<p class="muted">${lines.map(esc).join('<br>')}</p>`;
 }
 
 /** Sends the owner's note on the alarm: kept in its record, and told to the manager as the owner's message. */
@@ -2331,6 +2344,7 @@ function drawCrew() {
     <details class="effort-history" data-keep-open="effort-history"><summary>${esc(t('Effort changes ({count})', { count: changes.length }))}</summary>${changes.map(effortChangeHtml).join('') || `<div class="hint">${esc(t('No effort change recorded.'))}</div>`}<p class="hint">${esc(t('A change counts from the next step and shows in the report of the runs going on. Guide: docs/effort.md.'))}</p></details>`;
   if (!pickingEffort('#crew')) draw('#crew', html, html);
   drawTeams();
+  drawEscalation();
   drawPromptBuilder();
   if (!$('#task-project').options.length) {
     $('#task-project').innerHTML = state.projects.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
@@ -2385,6 +2399,129 @@ function watchTeamHtml(w) {
       ${members}
     </div>`;
 }
+
+// ---------- Calling you outside the app (src/escalation.mjs): Telegram, the PIN and the e-mail ----------
+
+let escalationLink = null; // the last link to the bot, while its code is good
+
+/** Where each part of the setup stands, in words. */
+function escalationStatus(e, key) {
+  if (key === 'telegram') return e.telegram ? t('Bot @{bot} checked.', { bot: e.telegram.bot }) : t('Not set up.');
+  if (key === 'link') return !e.telegram ? t('Save the token first.') : e.telegram.linking ? t('Waiting for your Start in Telegram…') : t('{count} chat(s) linked.', { count: e.telegram.chats });
+  if (key === 'pin') return e.pin.blocked ? t('Blocked after wrong PINs: set it again to use Telegram again.') : e.pin.set ? t('Set: only its salted hash is kept.') : t('Not set: releasing by Telegram needs it.');
+  if (key === 'email') return e.email ? t('To {to}, through {host}.', { to: e.email.to, host: e.email.host }) : t('Not set up (optional).');
+  return '';
+}
+
+function drawEscalation() {
+  const e = state.escalation;
+  if (!e) return draw('#escalation', '', '');
+  const facts = [['Telegram', 'telegram'], [t('Linked chat'), 'link'], ['PIN', 'pin'], [t('E-mail'), 'email']]
+    .map(([k, key]) => `<dt>${esc(k)}</dt><dd data-esc-status="${key}">${esc(escalationStatus(e, key))}</dd>`).join('');
+  const html = `<div class="panel">
+      <div class="label">${esc(t('Calling you outside the app'))}</div>
+      <p class="hint">${esc(t('When an emergency lockdown waits for you, Chiefmate writes to your own Telegram bot (Release with your PIN, Keep stopped, Details), or sends an e-mail when Telegram fails. Nothing else is sent: a false alarm the watch released stays here.'))}</p>
+      <dl class="facts">${facts}</dl>
+      ${e.ready ? '' : `<p>${stateHtml([t('Not set up: an escalation reaches you only in the app.'), 'warn'])}</p>`}
+      <div class="actions left"><button type="button" class="button small" data-escalation-open>${esc(e.ready ? t('Change') : t('Set up'))}</button></div>
+    </div>`;
+  draw('#escalation', JSON.stringify(e), html);
+  // The setup open: its statuses follow (a chat just linked), without touching what is being typed.
+  if ($('#escalation-dialog').open) for (const box of $('#escalation-steps').querySelectorAll('[data-esc-status]')) box.textContent = escalationStatus(e, box.dataset.escStatus);
+}
+
+/** The setup, step by step: the bot from BotFather, the chat linked with /start, the PIN, the e-mail and a test. */
+function fillEscalationDialog() {
+  const e = state.escalation;
+  const box = $('#escalation-steps');
+  // What was typed in the fields that are not secret stays.
+  const kept = Object.fromEntries([...box.querySelectorAll('input:not([type="password"]), select')].map(x => [x.id, x.value]));
+  const m = e.email ?? {};
+  const field = (id, label, value = '', type = 'text', extra = '') => `<label>${esc(label)}<input id="esc-${id}" type="${type}" value="${esc(value)}" autocomplete="off" ${extra}></label>`;
+  const link = escalationLink && Date.parse(escalationLink.until) > Date.now() && e.telegram?.linking
+    ? `<p><a href="${esc(escalationLink.link)}" target="_blank" rel="noopener noreferrer">${esc(escalationLink.link)}</a><br><span class="hint">${esc(t('Or send "{command}" to @{bot}.', { command: escalationLink.command, bot: escalationLink.bot }))}</span></p>` : '';
+  box.innerHTML = `
+    <div class="escalation-step">
+      <div class="label">${esc(t('1. Your bot'))}</div>
+      <p class="hint">${esc(t('In Telegram, open @BotFather, send /newbot, choose a name and a username ending in "bot", and paste the token it gives here. It stays on this computer, out of git.'))}</p>
+      <p data-esc-status="telegram">${esc(escalationStatus(e, 'telegram'))}</p>
+      ${field('token', t('Token'), '', 'password')}
+      <div class="actions left"><button type="button" class="button small" data-esc="token">${esc(t('Save the token'))}</button>${e.telegram ? `<button type="button" class="button secondary small" data-esc="remove-telegram">${esc(t('Remove Telegram'))}</button>` : ''}</div>
+    </div>
+    <div class="escalation-step">
+      <div class="label">${esc(t('2. Your chat'))}</div>
+      <p class="hint">${esc(t('Open the link on your phone and press Start: only the chats linked this way get the calls, and nobody else gets an answer.'))}</p>
+      <p data-esc-status="link">${esc(escalationStatus(e, 'link'))}</p>
+      ${link}
+      <div class="actions left"><button type="button" class="button small" data-esc="link" ${e.telegram ? '' : 'disabled'}>${esc(t('Get the link'))}</button></div>
+    </div>
+    <div class="escalation-step">
+      <div class="label">${esc(t('3. Your PIN'))}</div>
+      <p class="hint">${esc(t('Release on Telegram asks for it. 6 to 12 digits; only its salted hash is kept; each alarm has a single-use code that expires in 30 minutes; 3 wrong PINs block the release by Telegram.'))}</p>
+      <p data-esc-status="pin">${esc(escalationStatus(e, 'pin'))}</p>
+      <div class="fields">${field('pin', t('PIN'), '', 'password', 'inputmode="numeric"')}${field('pin2', t('The same PIN again'), '', 'password', 'inputmode="numeric"')}</div>
+      <div class="actions left"><button type="button" class="button small" data-esc="pin">${esc(t('Save the PIN'))}</button></div>
+    </div>
+    <div class="escalation-step">
+      <div class="label">${esc(t('4. E-mail, when Telegram fails (optional)'))}</div>
+      <p class="hint">${esc(t("It only warns you: the actions stay on Telegram and in the app. Use your provider's SMTP, with an app password where it asks for one."))}</p>
+      <p data-esc-status="email">${esc(escalationStatus(e, 'email'))}</p>
+      <div class="fields">
+        ${field('host', t('SMTP server'), m.host ?? '')}
+        <label>${esc(t('Security'))}<select id="esc-security">${['starttls', 'tls'].map(s => `<option value="${s}"${(m.security ?? 'starttls') === s ? ' selected' : ''}>${s === 'tls' ? 'TLS (465)' : 'STARTTLS (587)'}</option>`).join('')}</select></label>
+        ${field('port', t('Port'), m.port ?? '', 'text', 'inputmode="numeric"')}
+        ${field('user', t('Login'), m.user ?? '')}
+        ${field('pass', t('Password'), '', 'password', `placeholder="${esc(m.host ? t('Kept; type to change') : '')}"`)}
+        ${field('from', t('Sender'), m.from ?? '', 'email')}
+        ${field('to', t('Your address'), m.to ?? '', 'email')}
+      </div>
+      <div class="actions left"><button type="button" class="button small" data-esc="email">${esc(t('Save the e-mail'))}</button>${e.email ? `<button type="button" class="button secondary small" data-esc="remove-email">${esc(t('Remove the e-mail'))}</button>` : ''}</div>
+    </div>
+    <div class="escalation-step">
+      <div class="label">${esc(t('5. Test'))}</div>
+      <div class="actions left"><button type="button" class="button small" data-esc="test-telegram" ${e.telegram?.chats ? '' : 'disabled'}>${esc(t('Send a test to Telegram'))}</button><button type="button" class="button secondary small" data-esc="test-email" ${e.email ? '' : 'disabled'}>${esc(t('Send a test e-mail'))}</button></div>
+    </div>`;
+  for (const [id, value] of Object.entries(kept)) if (box.querySelector(`#${id}`)) box.querySelector(`#${id}`).value = value;
+}
+
+document.addEventListener('click', event => {
+  if (!event.target.closest('[data-escalation-open]') || !state?.escalation) return;
+  $('#escalation-steps').innerHTML = '';
+  fillEscalationDialog();
+  $('#escalation-dialog').showModal();
+});
+
+$('#escalation-dialog').addEventListener('click', async event => {
+  const button = event.target.closest('[data-esc]');
+  if (!button) return;
+  const action = button.dataset.esc;
+  const value = id => $(`#esc-${id}`)?.value.trim() ?? '';
+  let body;
+  if (action === 'token') body = { action: 'token', token: value('token') };
+  else if (action === 'link') body = { action: 'link' };
+  else if (action === 'pin') {
+    if (value('pin') !== value('pin2')) return toast(t('The two PINs differ.'));
+    body = { action: 'pin', pin: value('pin') };
+  } else if (action === 'email') body = { action: 'email', host: value('host'), security: value('security'), port: value('port'), user: value('user'), pass: $('#esc-pass').value, from: value('from'), to: value('to') };
+  else if (action.startsWith('test-')) body = { action: 'test', channel: action.slice(5) };
+  else if (action.startsWith('remove-')) {
+    const channel = action.slice(7);
+    if (!(await confirmDialog(t('Remove'), channel === 'telegram' ? t('Chiefmate forgets the token and the linked chats.') : t('Chiefmate forgets the e-mail settings and the password.'), t('Remove')))) return;
+    body = { action: 'remove', channel };
+  } else return;
+  button.disabled = true;
+  try {
+    const r = await api('/api/escalation', body);
+    state.escalation = r.escalation;
+    if (r.link) escalationLink = r.link;
+    toast(action.startsWith('test-') ? t('Test sent: check that it arrived.') : t('Saved.'));
+    fillEscalationDialog();
+    drawEscalation();
+  } catch (error) {
+    toast(error.message);
+    button.disabled = false;
+  }
+});
 
 function drawPromptBuilder() {
   const p = state.prompts ?? {};

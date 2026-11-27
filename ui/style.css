@@ -80,6 +80,13 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .lockdown-dialog textarea, .lockdown-screen textarea { width: 100%; box-sizing: border-box; resize: vertical; }
 .lockdown-watch { margin: 10px 0; padding: 8px 10px; border-left: 2px solid var(--urgent); }
 .lockdown-watch .facts { margin: 6px 0; }
+/* Calling the owner outside the app (Telegram, the PIN, the e-mail): the Crew page's panel and its setup */
+.escalation-dialog { width: min(640px, calc(100vw - 32px)); }
+.escalation-step { border-top: 1px solid var(--line); padding: 12px 0 4px; }
+.escalation-step:first-child { border-top: 0; }
+.escalation-step .actions { margin-top: 6px; }
+.escalation-step a { color: var(--accent); word-break: break-all; }
+.escalation-step label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
 /* The phone's screen during a lockdown (the remote access shows only this) */
 .lockdown-screen { position: fixed; inset: 0; z-index: 60; overflow-y: auto; background: var(--bg, #0d0f12); }
 .lockdown-screen-body { padding: 14px 16px 24px; max-width: 720px; }
