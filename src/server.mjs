@@ -537,6 +537,8 @@ const output = (command, args) => new Promise(resolve =>
  * Whether the connection to the remote listener was opened by Tailscale Serve itself, and not by another program of
  * this computer sending Serve's headers. Serve runs inside Tailscale's Windows service (session 0, where a user's
  * programs can't run); a stand-in's PID replaces it in the smoke test. Elsewhere than Windows, nothing is taken.
+ * A raw TCP forward that Serve's own settings point here (tailscale serve --tcp) is opened by the service too, with
+ * whatever headers its sender writes: changing Tailscale's settings is beyond this check.
  */
 export async function fromServe(socket, remote) {
   if (process.platform !== 'win32' || socket.remoteAddress !== '127.0.0.1') return false;
@@ -658,7 +660,9 @@ export function startServer() {
         const refused = remoteRefusal(req, remote) || (!(await servePeer(req.socket, remote)) && 'not through Tailscale Serve');
         if (refused) {
           recordSignal(refused === 'not allowed in' ? 'login_failed' : 'unknown_origin', `${req.method} ${clip(String(req.url), 120)} (${refused})`, { who: 'remote' });
-          return reply(res, 403, { error: refused });
+          // A connection refused stays refused (servePeer), so it is closed: a lookup that failed once must not keep
+          // refusing the connection Serve reuses for the app's reads, each refusal a signal toward the lockdown.
+          return reply(res, 403, { error: refused }, refused === 'not through Tailscale Serve' ? { connection: 'close' } : {});
         }
         // In an emergency lockdown, the remote access is off: only engaging it again is taken. The app's own files
         // still load, and the refusal carries the reason, so the device shows the lockdown instead of a lost connection.

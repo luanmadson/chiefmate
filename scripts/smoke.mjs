@@ -444,8 +444,9 @@ try {
     expect(remoteStop.status === 403 && JSON.parse(remoteStop.text).error?.includes('computer'), `stopping Chiefmate from another device was not refused: ${remoteStop.status}`);
     expect((await ask(port, '/api/state', tailnet)).status === 403, "the app's own port answered the tailnet name");
     // Serve's headers sent by another program of this computer, or a request from this computer's own node: refused.
-    const forged = spawnSync(process.execPath, ['-e', `require('node:http').get({ host: '127.0.0.1', port: ${remote.port}, path: '/api/state', headers: ${JSON.stringify(tailnet)} }, r => console.log(r.statusCode)).on('error', e => console.log(e.message))`], { encoding: 'utf8', windowsHide: true, timeout: 20_000 });
-    expect(forged.stdout.trim() === '403', `a program of this computer sending Tailscale Serve's headers was not refused: ${forged.stdout.trim()}`);
+    const forged = spawnSync(process.execPath, ['-e', `require('node:http').get({ host: '127.0.0.1', port: ${remote.port}, path: '/api/state', headers: ${JSON.stringify(tailnet)} }, r => console.log(r.statusCode, r.headers.connection)).on('error', e => console.log(e.message))`], { encoding: 'utf8', windowsHide: true, timeout: 20_000 });
+    // Refused, and its connection closed, so a refusal never sticks to a connection that is kept open.
+    expect(forged.stdout.trim() === '403 close', `a program of this computer sending Tailscale Serve's headers was not refused, or kept its connection: ${forged.stdout.trim()}`);
     const { 'x-forwarded-for': _from, ...noSource } = tailnet;
     expect((await ask(remote.port, '/api/state', noSource)).status === 403, 'the remote access answered without the tailnet address of the device');
     expect((await ask(remote.port, '/api/state', { ...tailnet, 'x-forwarded-for': '127.0.0.1' })).status === 403, 'the remote access answered a request from this computer');
