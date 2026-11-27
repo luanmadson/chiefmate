@@ -311,7 +311,7 @@
   "The browser with the reading profile is open (the sign-in window?). Close it and try again.": "O navegador com o perfil de leitura está aberto (a janela de login?). Feche-o e tente de novo.",
   "The reading profile is signed out of claude.ai. Run: node src/cli.mjs claude-login": "O perfil de leitura saiu da conta do claude.ai. Rode: node src/cli.mjs claude-login",
   "The browser didn't start.": "O navegador não abriu.",
-  "The usage page ({address}) opened but showed no limit: no percentage and no reset. It may have changed or not finished loading; the usage shown may be out of date.": "A página de uso ({address}) abriu, mas não mostrou nenhum limite: nem percentual nem renovação. Ela pode ter mudado ou não ter terminado de carregar; o uso mostrado pode estar desatualizado.",
+  "The usage page ({address}) opened, but no limit could be read on it (no usage percentage found). It may have changed or not finished loading; the usage shown may be out of date.": "A página de uso ({address}) abriu, mas nenhum limite pôde ser lido nela (nenhum percentual de uso encontrado). Ela pode ter mudado ou não ter terminado de carregar; o uso mostrado pode estar desatualizado.",
   "The claude.ai sign-in window closes soon": "A janela de login do claude.ai vai fechar",
   "The window opened for a step's request closes soon": "A janela aberta para o pedido de uma etapa vai fechar",
   "It closes in {minutes} minutes, so the usage reading can use the browser's reading profile. While you are using it, it stays open.": "Ela fecha em {minutes} minutos, para a leitura de uso poder usar o perfil de leitura do navegador. Enquanto você a estiver usando, ela continua aberta.",

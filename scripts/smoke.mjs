@@ -2188,8 +2188,9 @@ try {
   }
   expect(refused?.readerCause === 'no_start' && loginState().pid === 6060, 'a sign-in window that never started was noted as open');
 
-  // A request's page (needs-you) on the reading profile: noted, the full time again with each new page, a warning before
-  // closing (late, if the server was off at the time), and no "Sign in" card once it closes by its time limit.
+  // A request's page (needs-you) on the reading profile: noted, the full time again with each new page (even one arriving
+  // while it is checked), no time limit with the reading off, a warning before closing (late, if the server was off at
+  // the time), and no "Sign in" card once it closes by its time limit.
   const pages = [];
   const owner = openOwnerPage('https://example.com/first', config, { start: (browser, args) => (pages.push(args.at(-1)), 7070), alive: () => false });
   expect(owner.pid === 7070 && ownerWindowState().pid === 7070 && pages.join() === 'https://example.com/first', `the request's page window was not noted: ${JSON.stringify(ownerWindowState())}`);
@@ -2199,15 +2200,25 @@ try {
   const again = openOwnerPage('https://example.com/second', config, { start: (browser, args) => (pages.push(args.at(-1)), 8080), alive: () => true });
   expect(again.pid === 7070 && !again.warned && Date.parse(again.opened) >= ownerOpened && pages.at(-1) === 'https://example.com/second', `a new page did not give the window its full time again: ${JSON.stringify(again)}`);
   const ownerLimit = Date.parse(again.opened) + LOGIN_MINUTES * 60_000;
+  // With the reading off, nothing needs the profile: the page stays open past its time, with no warning.
+  const warnedBefore = warnings.length;
+  expect(await checkOwnerWindow(stand(ownerLimit + 5 * 60_000, { timed: false })) === 'open' && warnings.length === warnedBefore && !closedPids.includes(7070),
+    "a request's page was warned or closed with the reading off");
   expect(await checkOwnerWindow(stand(ownerLimit + 5 * 60_000)) === 'warned', 'a window found past its time was closed with no warning');
   expect(await checkOwnerWindow(stand(ownerLimit + 6 * 60_000)) === 'open', "the request's page window closed right after its warning");
   const closedBefore = closedPids.length;
-  expect(await checkOwnerWindow(stand(ownerLimit + 7 * 60_000)) === 'timed_out' && closedPids.at(-1) === 7070 && closedPids.length === closedBefore + 1 && ownerWindowState().timed_out,
+  // A new page while the owner's input is looked up: the window stays, with its full time again.
+  const third = { inUse: async () => (openOwnerPage('https://example.com/third', config, { start: () => 9090, alive: () => true }), false) };
+  expect(await checkOwnerWindow(stand(ownerLimit + 7 * 60_000, third)) === 'open' && closedPids.length === closedBefore && !ownerWindowState().warned && !ownerWindowState().closed,
+    'a new page while the window was being checked was closed with it');
+  expect(await checkOwnerWindow(stand(ownerLimit + 7 * 60_000)) === 'warned', "the request's page window did not warn again after a new page");
+  expect(await checkOwnerWindow(stand(ownerLimit + 9 * 60_000)) === 'timed_out' && closedPids.at(-1) === 7070 && closedPids.length === closedBefore + 1 && ownerWindowState().timed_out,
     "the request's page window was left open past its time");
 
   // The page opened, signed in, but showed no limit: a failure with a cause of its own, and a notice; the latest values stay.
   const good = { ok: true, error: null, cause: null, failing_since: null, attempted: minutes(300), read_at: minutes(300), five_hour: 0.4, seven_day: 0.2 };
   setStatus(good);
+  expect(!readerNotices().length, `a request's page closed by its time limit asked to sign in: ${JSON.stringify(readerNotices())}`);
   const empty = await readUsagePage(config, { open: async () => ({ url: 'https://claude.ai/settings/usage', text: 'Settings\nUsage\nLoading' }) });
   expect(empty.ok === false && empty.cause === 'no_data' && empty.error.includes('/settings/usage') && empty.five_hour === 0.4 && empty.read_at === good.read_at,
     `a page with no limit was not a failure of its own: ${JSON.stringify(empty)}`);

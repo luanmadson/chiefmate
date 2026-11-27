@@ -6,7 +6,7 @@
 // The sign-in window never stays open for good: past LOGIN_MINUTES the server closes it (data/usage-login.json keeps
 // which one it is), reads once more, and the app keeps a single "Sign in to claude.ai" card with a button to reopen it.
 // A page a step asks the owner to see (needs-you, src/needs.mjs) opens in a window on the same profile, with the same
-// time limit: both warn WARN_MINUTES before closing, and wait while the owner is using them.
+// time limit while the reading is on: both warn WARN_MINUTES before closing, and wait while the owner is using them.
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
@@ -88,12 +88,24 @@ function windowAlive({ pid, image }) {
   return String(r.stdout ?? '').toLowerCase().includes(`"${image}"`);
 }
 
+/** The process was started on the reading profile (its command line names it), not another program given its number. */
+function onProfile(pid) {
+  if (process.platform !== 'win32') return Promise.resolve(true);
+  const script = `(Get-CimInstance Win32_Process -Filter 'ProcessId=${Number(pid)}').CommandLine`;
+  return new Promise(resolve =>
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 15_000 }, (error, stdout) =>
+      resolve(!error && String(stdout).toLowerCase().includes(PROFILE_DIR.toLowerCase())),
+    ),
+  );
+}
+
 /**
  * Closes the window as its close button does, and forces it only when it doesn't close within a few seconds. Only while
- * the reading profile is in use: once it isn't, the window is gone and its number may already be the owner's own browser.
+ * the reading profile is in use, and only a process on that profile: once the window is gone, its number may already be
+ * the owner's own browser.
  */
 async function closeWindow(login) {
-  if (!profileInUse()) return;
+  if (!profileInUse() || !(await onProfile(login.pid))) return;
   spawnSync('taskkill', ['/PID', String(login.pid), '/T'], { windowsHide: true });
   for (let i = 0; i < 20 && windowAlive(login); i++) await sleep(250);
   if (windowAlive(login) && profileInUse()) spawnSync('taskkill', ['/PID', String(login.pid), '/T', '/F'], { windowsHide: true });
@@ -164,10 +176,11 @@ const minding = new Map();
 /**
  * Called by the watch: notes a window closed by you; WARN_MINUTES before its time limit, tells you it will close; past
  * the limit, and at least WARN_MINUTES after that warning, closes it, unless you are using it right now (then it waits
- * for the next check). Returns "open", "warned", "closed" or "timed_out", or null with no window open.
+ * for the next check). Not "timed" (a request's page while the reading is off), it only notes the window closed.
+ * Returns "open", "warned", "closed" or "timed_out", or null with no window open.
  * "alive", "close", "inUse" and "warn" stand in for Windows and its notifications in the tests.
  */
-function mindWindow(kind, { at = Date.now(), alive = windowAlive, close = closeWindow, inUse = windowInUse, warn = warnOwner(kind) } = {}) {
+function mindWindow(kind, { at = Date.now(), timed = true, alive = windowAlive, close = closeWindow, inUse = windowInUse, warn = warnOwner(kind) } = {}) {
   const { file } = WINDOWS[kind];
   const win = readJson(file, {});
   if (!loginOpen(win)) return Promise.resolve(null);
@@ -178,6 +191,7 @@ function mindWindow(kind, { at = Date.now(), alive = windowAlive, close = closeW
       writeJson(file, { ...win, closed: when, timed_out: false });
       return 'closed';
     }
+    if (!timed) return 'open';
     const limit = Date.parse(win.opened) + LOGIN_MINUTES * 60_000;
     const warned = Date.parse(win.warned ?? '') || 0;
     if (!warned) {
@@ -188,6 +202,8 @@ function mindWindow(kind, { at = Date.now(), alive = windowAlive, close = closeW
     }
     if (at < Math.max(limit, warned + WARN_MINUTES * 60_000)) return 'open';
     if (await (async () => inUse(win))().catch(() => false)) return 'open';
+    const fresh = readJson(file, {}); // a new page meanwhile gave it the full time again
+    if (fresh.opened !== win.opened || fresh.warned !== win.warned) return 'open';
     await close(win);
     writeJson(file, { ...win, closed: when, timed_out: true });
     return 'timed_out';
@@ -379,7 +395,7 @@ export function readUsagePage(config = loadConfig(), { open = browse } = {}) {
       const found = parseUsagePage(page.text);
       if (found.five_hour === null && found.seven_day === null) {
         const address = new URL(page.url || USAGE_PAGE).pathname;
-        throw failure('no_data', t("The usage page ({address}) opened but showed no limit: no percentage and no reset. It may have changed or not finished loading; the usage shown may be out of date.", { address }));
+        throw failure('no_data', t('The usage page ({address}) opened, but no limit could be read on it (no usage percentage found). It may have changed or not finished loading; the usage shown may be out of date.', { address }));
       }
       Object.assign(status, { ok: true, error: null, cause: null, failing_since: null, read_at: now(), ...found });
       status.warning = !found.grants ? t("The page didn't show free resets: the record you keep by hand stays.") : null;
@@ -419,10 +435,11 @@ export function readingDue({ status = {}, login = {}, everyHours, away = false, 
  * can't use the profile), and reads when the reading is on and its time has come.
  */
 export function readWhenDue(config) {
-  const open = [loginOpen() && checkLogin(), loginOpen(ownerWindowState()) && checkOwnerWindow()].filter(Boolean);
+  const { enabled, everyHours } = readerSettings(config);
+  // A request's page only gives way to the reading: with the reading off, it stays open until you close it.
+  const open = [loginOpen() && checkLogin(), loginOpen(ownerWindowState()) && checkOwnerWindow({ timed: enabled })].filter(Boolean);
   for (const check of open) check.catch(error => console.error('Browser window:', error.message));
   if (open.length) return;
-  const { enabled, everyHours } = readerSettings(config);
   if (!enabled || reading || !signedIn()) return;
   if (readingDue({ status: readerStatus(), login: loginState(), everyHours, away: !!readState().away })) readUsagePage(config).catch(() => {});
 }

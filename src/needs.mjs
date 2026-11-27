@@ -28,8 +28,8 @@ const runFor = id => activeRun(id) ?? readRun(id);
 /**
  * Opens an address for the owner, without touching the tabs already open:
  * with "browser_cdp" (your own browser, signed in, with remote debugging on), in a new tab of it;
- * without it, in a visible Edge or Chrome on the browser's reading profile (which the crew can't read). That window
- * has the sign-in window's time limit (src/usagepage.mjs), so it never keeps the usage reading from the profile for long.
+ * without it, in a visible Edge or Chrome on the browser's reading profile (which the crew can't read). With the usage
+ * reading on, that window has the sign-in window's time limit (src/usagepage.mjs), so it never keeps the reading out for long.
  */
 export async function openForOwner(url, config = loadConfig()) {
   if (config.browser_cdp) {
