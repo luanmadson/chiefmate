@@ -7,7 +7,8 @@
 // notices shown last time ("attention_shown") and the archive ("attention_archive").
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
 import { loginWarning } from './claude.mjs';
-import { RAM_LOW, availableResets, current, loginText } from './plan.mjs';
+import { backupProblems } from './config.mjs';
+import { RAM_LOW, availableResets, backupText, current, loginText } from './plan.mjs';
 import { restoreSteps } from './quarantine.mjs';
 import { readState, saveState, settleRunOutside } from './store.mjs';
 import { LOGIN_MINUTES, readerSettings, readerStatus, signInNeeded } from './usagepage.mjs';
@@ -46,7 +47,7 @@ export const mainPushNotice = (p, config) => ({
  * The notices now, most urgent first: { id, level, kind, title, text, view, project, run, at, seen, seenable }.
  * "view" is the app's place that deals with it; a request of a step carries what its buttons need ("I did it", or a question's options).
  */
-export function attentionItems({ config, runs = [], needs = [], usage = {}, machine, items = [], update = {}, questions = [], pushes = [], repos = [], lockdown = null, login = loginWarning(), quarantine = [] }) {
+export function attentionItems({ config, runs = [], needs = [], usage = {}, machine, items = [], update = {}, questions = [], pushes = [], repos = [], lockdown = null, login = loginWarning(), quarantine = [], backups = backupProblems() }) {
   const list = [];
   const add = item => list.push({ project: null, run: null, at: null, seenable: true, ...item });
   // Urgent: the emergency lockdown (src/lockdown.mjs), until the owner releases it, and the security warnings of the day.
@@ -193,6 +194,11 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
   // Important: a question the manager asked the owner (cli.mjs ask-owner), answered with one click on its card.
   for (const q of questions) {
     add({ id: `question:${q.id}`, level: 'important', kind: 'question', title: t('Question from the manager'), text: q.question, view: 'manager', project: q.project ?? null, at: q.at });
+  }
+  // Important: a copy of the settings refused or failing (src/config.mjs), one notice per place and cause while it
+  // lasts; seen, it stays seen until that cause ends.
+  for (const p of backups) {
+    add({ id: `backup:${p.target}:${p.cause}`, level: 'important', kind: 'backup', ...backupText(p), view: 'operations', at: p.since });
   }
   // Important: an approved update that could not be installed.
   if (update.waiting && update.blocked) {
