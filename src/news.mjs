@@ -8,7 +8,7 @@
 // WINDOW_MS) go as one message; while the manager answers, they wait in the conversation's queue. The setting
 // "manager_updates" turns this off or picks the events.
 //
-// Away mode: the owner tells the manager from the app that they stepped out or went to sleep ("away"). The work goes on
+// Away mode: the owner tells the manager from the app that they are away ("away"). The work goes on
 // alone; the events that only inform (HELD_WHILE_AWAY) wait in data/state.json ("away") and go together when the owner
 // is back ("back"), for the manager's summary. The others still wake the manager, which does its own part and asks
 // nothing that can wait. The Windows notifications that aren't urgent wait too (src/notify.mjs).
@@ -129,7 +129,7 @@ export function awayInfo(state = readState()) {
 /** The manager's line while the owner is away, or null. */
 export function awayLine(owner = 'the owner', away = awayInfo()) {
   if (!away) return null;
-  return `Away mode: on since ${formatDateTime(away.since)}: ${owner} stepped out or is asleep. The work goes on alone; the news that only informs waits for your summary when ${owner} is back (${away.held} event(s) so far). Do your own part (the triage, the autopilot) and ask ${owner} nothing that can wait. If ${owner} writes to you meanwhile, answer as usual.`;
+  return `Away mode: ${owner} has been away since ${formatDateTime(away.since)}. The work goes on alone; the news that only informs waits for your summary when ${owner} is back (${away.held} event(s) so far). Do your own part (the triage, the autopilot) and ask ${owner} nothing that can wait. If ${owner} writes to you meanwhile, answer as usual.`;
 }
 
 /**
@@ -142,7 +142,7 @@ export function setAway(on, config = loadConfig()) {
   const owner = config.owner || 'the owner';
   if (on) {
     saveState({ ...state, away: { since: now(), held: [] } });
-    reportEvent('away', `${owner} turned on away mode in the app: they stepped out or went to sleep.`, { config });
+    reportEvent('away', `${owner} turned on away mode in the app.`, { config });
   } else {
     const { away, ...rest } = state;
     saveState(rest);

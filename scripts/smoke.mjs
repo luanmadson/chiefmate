@@ -143,7 +143,7 @@ try {
     // an urgent tab pulses, and stands still (lit) with reduced motion.
     expect(['view-decisions', 'decisions', 'focus-mode', 'focus-bar'].every(id => html.includes(`id="${id}"`)) && html.includes('href="#decisions"')
       && !/id="chat"[^]*?<\/section>/.exec(html)?.[0].includes('id="decisions"'), 'the app lacks the Decisions tab or the focus mode, or the decisions are still in the conversation');
-    expect(/html\.chat-focus \.titlebar, html\.chat-focus \.nav, html\.chat-focus \.alerts, html\.chat-focus \.statusbar/.test(styles)
+    expect(/html\.chat-focus \.app-header, html\.chat-focus \.nav, html\.chat-focus \.alerts, html\.chat-focus \.statusbar/.test(styles)
       && /prefers-reduced-motion: reduce\) \{ \.nav a\[data-level="urgent"\][^}]*animation: none/.test(styles), 'the focus mode leaves a bar or band on screen, or an urgent tab pulses with reduced motion');
     expect(['project-status', 'project-actions', 'project-more', 'project-needs', 'project-overview', 'project-crew', 'project-tasks', 'project-planning', 'project-context', 'project-builder', 'builder-body', 'builder-view', 'builder-edit']
       .every(id => html.includes(`id="${id}"`)), "the app's page lacks a part of the project's page or of the prompt builder");

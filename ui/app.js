@@ -584,24 +584,75 @@ function drawPresence() {
   draw('#presence', html, html);
 }
 
-// A crescent moon in line art.
-const MOON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 10.2A6 6 0 0 1 5.8 2.5a6 6 0 1 0 7.7 7.7z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>';
+// ---------- Away mode (src/news.mjs) ----------
 
-/** The away mode's button (src/news.mjs): tells the manager the owner stepped out or is back. */
+let pendingAwayPace = null; // the mode being saved from the notice's selector
+
+/** The away button and, while away, the notice with the autopilot's pace and a selector to change it. */
 function drawAway() {
   const button = $('#away');
+  const notice = $('#away-notice');
+  const away = state?.away;
+  const autopilot = state?.autopilot;
   button.hidden = !online;
+  notice.hidden = !online || !away || !autopilot;
   if (!online) return;
-  const away = state.away;
-  const label = away ? t('Away since {time}', { time: clockTime(away.since) }) : t('Away mode');
+  const since = $('#away-since');
+  const sinceText = away ? t('Since {time}', { time: clockTime(away.since) }) : '';
   const help = away
-    ? t('Away mode is on: notices that can wait are kept for you ({count} so far). Click when you are back: the manager writes you a summary.', { count: away.held })
-    : t('Stepping out or going to sleep? The manager is told, the work goes on alone, and notices that can wait come as a summary when you are back.');
+    ? t('Away since {time}. Notices that can wait are held ({count} so far). Click when you are back to get a summary from the manager.', { time: clockTime(away.since), count: away.held })
+    : t('Stepping away? The team keeps working as configured, and the manager summarizes notices that can wait when you return.');
   button.setAttribute('aria-pressed', String(!!away));
+  // the name stays when narrow screens show the icon only
+  button.setAttribute('aria-label', away ? `${t('Away mode')} · ${sinceText}` : t('Away mode'));
   button.title = help;
-  button.setAttribute('aria-label', `${label}. ${help}`);
-  draw('#away', label, `${MOON}<span class="away-label">${esc(label)}</span>`);
+  since.hidden = !away;
+  since.textContent = sinceText;
+  if (notice.hidden) return;
+  $('#away-pace-label').textContent = autopilot.enabled ? t('Autopilot pace') : t('Autopilot pace (off)');
+  const custom = $('#away-custom-pace');
+  custom.hidden = autopilot.mode !== 'custom';
+  if (!custom.hidden) custom.textContent = t('Custom target {target}', { target: percent(autopilot.week_pace) });
+  const pace = pendingAwayPace ?? autopilot.mode;
+  const select = $('#away-pace');
+  if (select.value !== pace) select.value = pace;
 }
+
+$('#away').addEventListener('click', async () => {
+  const on = !state?.away;
+  const button = $('#away');
+  button.disabled = true;
+  try {
+    await api('/api/away', { on });
+    if (on) toast(t('You are away. The team keeps working as configured, and the manager holds notices for your return.'));
+    else {
+      toast(t('Welcome back: the manager is writing the summary of the time away.'));
+      location.hash = '#manager';
+    }
+    await refresh();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$('#away-pace').addEventListener('change', async event => {
+  if (pendingAwayPace) {
+    event.target.value = pendingAwayPace;
+    return;
+  }
+  pendingAwayPace = event.target.value;
+  try {
+    await setAutopilotMode(pendingAwayPace);
+    await refresh();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    pendingAwayPace = null;
+    drawAway();
+  }
+});
 
 // ---------- Emergency lockdown (src/lockdown.mjs) ----------
 
@@ -687,25 +738,6 @@ document.addEventListener('click', event => {
 });
 $('#lockdown-reviewed').addEventListener('change', event => {
   $('#lockdown-release').disabled = !event.target.checked;
-});
-
-$('#away').addEventListener('click', async () => {
-  const on = !state?.away;
-  const button = $('#away');
-  button.disabled = true;
-  try {
-    await api('/api/away', { on });
-    if (on) toast(t('Away mode on: the manager knows, and notices that can wait are kept for a summary.'));
-    else {
-      toast(t('Welcome back: the manager is writing the summary of the time away.'));
-      location.hash = '#manager';
-    }
-    refresh();
-  } catch (error) {
-    toast(error.message);
-  } finally {
-    button.disabled = false;
-  }
 });
 
 // ---------- Power modes (src/power.mjs): standby, stop Chiefmate, shut the computer down ----------
@@ -2194,6 +2226,11 @@ const AUTOPILOT_MODES = () => [
   ['normal', t('Normal'), t('Paces the week to end it at 100% of the plan.')],
   ['all', t('Spend all'), t("No week's pace: only the 5-hour window and a used-up week stop it.")],
 ];
+
+async function setAutopilotMode(mode) {
+  await api('/api/autopilot', { mode });
+  toast(t('Spending mode: {mode}.', { mode: AUTOPILOT_MODES().find(m => m[0] === mode)?.[1] ?? mode }));
+}
 
 /** Who changed the autopilot ("by" in src/autopilot.mjs, recordChange). */
 function autopilotWho(by) {
@@ -4878,9 +4915,7 @@ document.addEventListener('click', async event => {
       await api('/api/autopilot', { enabled: on });
       toast(on ? t('Autopilot turned on.') : t('Autopilot turned off.'));
     } else if (target.dataset.autopilotMode) {
-      const mode = target.dataset.autopilotMode;
-      await api('/api/autopilot', { mode });
-      toast(t('Spending mode: {mode}.', { mode: AUTOPILOT_MODES().find(m => m[0] === mode)?.[1] ?? mode }));
+      await setAutopilotMode(target.dataset.autopilotMode);
     } else if (target.dataset.reader) {
       const action = target.dataset.reader;
       await api('/api/usage-reader', action === 'now' ? { read: true } : { enabled: action === 'on' });
