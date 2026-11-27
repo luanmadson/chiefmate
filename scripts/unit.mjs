@@ -1339,12 +1339,15 @@ test('speech bubbles: the lines kept, who asked, the line shown now and its stat
   addSpeech(run, { step: 1, agent: 'generalist', text: 'Tests pass now', at: at(15) });
   assert.equal(run.speech.length, 3, 'a line more than a minute later is a new line');
 
-  // Waiting for the owner: the request's line stays while the step waits, and is passed over once it goes on.
-  addSpeech(run, { step: 1, agent: 'generalist', by: 'auto', state: 'waiting', text: 'I need you: sign in to the site', at: at(16) });
-  const waiting = speechNow(run, { ...live, held: true, lastAt: at(16) }, Date.parse(at(40)), 'en');
-  assert.deepEqual([waiting.state, waiting.text, waiting.auto], ['waiting', 'I need you: sign in to the site', true]);
+  // Calling the owner: the request's line stays while the step waits for them, and is passed over once it goes on.
+  addSpeech(run, { step: 1, agent: 'generalist', by: 'auto', state: 'calling', text: 'I need you: sign in to the site', at: at(16) });
+  const calling = speechNow(run, { ...live, held: true, lastAt: at(16) }, Date.parse(at(40)), 'en');
+  assert.deepEqual([calling.state, calling.text, calling.auto], ['calling', 'I need you: sign in to the site', true]);
   const goingOn = speechNow(run, { ...live, doing: 'changing app.js', lastAt: at(41) }, Date.parse(at(41.5)), 'en');
   assert.deepEqual([goingOn.state, goingOn.text], ['working', "I'm changing app.js."]);
+  // Held with no call of its own (a request from before): the line from what it is doing, still calling.
+  const heldAuto = speechNow({ speech: [] }, { ...live, doing: 'waiting for you', held: true }, Date.parse(at(42)), 'en');
+  assert.deepEqual([heldAuto.state, heldAuto.text], ['calling', "I'm waiting for you."]);
   // No action for twenty minutes: stuck.
   assert.equal(speechNow(run, { ...live, lastAt: at(41) }, Date.parse(at(62)), 'en').state, 'stuck');
 

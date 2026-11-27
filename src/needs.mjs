@@ -78,9 +78,9 @@ export async function askOwner({ run: runId, step, what, url, wait = false, chec
   (run.requests ??= []).push(request);
   // The request is also part of the direct conversation: the owner can answer it from the agent's panel.
   agentSays(run, { step: n, agent: request.agent, text: request.what, kind: 'request', request: request.id });
-  // And the agent's speech bubble says it waits for the owner (src/speech.mjs).
+  // And the agent's speech bubble calls the owner while the step waits for them (src/speech.mjs).
   addSpeech(run, request.wait
-    ? { step: n, agent: request.agent, by: 'auto', state: 'waiting', text: t('I need you: {what}', { what: request.what }) }
+    ? { step: n, agent: request.agent, by: 'auto', state: 'calling', text: t('I need you: {what}', { what: request.what }) }
     : { step: n, agent: request.agent, by: 'auto', text: t("I left you a request and I'm going on meanwhile: {what}", { what: request.what }) });
   saveRun(run);
   notify(t('Needs you: {title}', { title: run.title }), request.what, 'chiefmate:operations', { urgent: true });

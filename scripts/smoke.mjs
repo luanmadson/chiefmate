@@ -219,8 +219,8 @@ try {
     const request = await (await post('/api/needs-you', { run: waitingRun.id, what: 'Which?', options: 'A|B' })).json();
     const answered = await (await post('/api/needs-you', { run: waitingRun.id, what: 'Which?', options: 'A|B' })).json();
     await post('/api/needs-you/done', { run: waitingRun.id, id: answered.id, answer: 'B', note: 'My reason' });
-    // A question also goes in the agent's speech bubble, as a line of waiting written by Chiefmate.
-    expect((JSON.parse(readFileSync(waitingFile, 'utf8')).speech ?? []).some(x => x.by === 'auto' && x.state === 'waiting' && x.text.includes('Which?')), "a question for the owner left no line in the speech bubble");
+    // A question also goes in the agent's speech bubble, as a call for the owner written by Chiefmate.
+    expect((JSON.parse(readFileSync(waitingFile, 'utf8')).speech ?? []).some(x => x.by === 'auto' && x.state === 'calling' && x.text.includes('Which?')), "a question for the owner left no call in the speech bubble");
     const noticeId = `needs:${waitingRun.id}:${request.id}`;
     const beforeCancel = await (await fetch(`${base}/api/state`)).json();
     expect(beforeCancel.attention.items.some(n => n.id === noticeId && n.level === 'urgent'), 'a paused run lost its open request');

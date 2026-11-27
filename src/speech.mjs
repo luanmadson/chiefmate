@@ -4,7 +4,7 @@
 // - "manager", "lead", "owner": who asked the agent for its task, or wrote to it during its step;
 // - "auto": written by Chiefmate at the moments it knows (needs you, paused, finished, stopped).
 // When the agent has said nothing lately, the bubble shows a line made from what it is doing (doingNow), marked as
-// automatic and never recorded.
+// automatic and never recorded. While a step waits for the owner (needs-you --wait), its state is "calling".
 import { randomUUID } from 'node:crypto';
 import { t } from './i18n.mjs';
 import { clip, now } from './util.mjs';
@@ -23,7 +23,9 @@ export const SPEECH_FRESH_MINUTES = 10;
 export const STUCK_MINUTES = 20;
 
 const BY = ['agent', 'auto', 'manager', 'lead', 'owner'];
-const STATES = ['working', 'waiting', 'stuck', 'done'];
+const STATES = ['working', 'calling', 'waiting', 'stuck', 'done'];
+/** The states of a line that only hold while the step waits (for the owner, a pause, the plan's limit). */
+const WAITS = ['calling', 'waiting'];
 
 /** One line of plain text: spaces and line breaks collapsed, at most SPEECH_MAX characters. */
 export const speechLine = text => clip(String(text ?? '').replace(/\s+/g, ' ').trim(), SPEECH_MAX);
@@ -71,10 +73,10 @@ export function speechNow(run, live, nowMs = Date.now(), lang) {
   const { step = null, agent = null, doing = null, held = false } = live ?? {};
   const latest = (run?.speech ?? []).filter(x => x.step === step && x.agent === agent).at(-1) ?? null;
   const quietSince = Date.parse(live?.lastAt ?? live?.since ?? '') || nowMs;
-  const state = held ? 'waiting' : step && nowMs - quietSince > STUCK_MINUTES * 60_000 ? 'stuck' : 'working';
+  const state = held ? 'calling' : step && nowMs - quietSince > STUCK_MINUTES * 60_000 ? 'stuck' : 'working';
   const fresh = latest && nowMs - Date.parse(latest.at) < SPEECH_FRESH_MINUTES * 60_000;
-  // A line about waiting stays while the step waits; while it works, a line older than the waiting is passed over.
-  if (latest && (held ? latest.state === 'waiting' : fresh && latest.state !== 'waiting')) {
+  // The call for the owner stays while the step waits for them; once it goes on, a line about waiting is passed over.
+  if (latest && (held ? latest.state === 'calling' : fresh && !WAITS.includes(latest.state))) {
     return { step, agent, text: latest.text, by: latest.by, at: latest.at, auto: latest.by === 'auto', state };
   }
   return { step, agent, text: autoLine(doing, lang), by: 'auto', at: live?.lastAt ?? live?.since ?? null, auto: true, state };

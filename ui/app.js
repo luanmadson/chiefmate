@@ -389,9 +389,10 @@ function agentDetail(agent) {
 
 // ---------- Speech bubbles (src/speech.mjs) ----------
 
-/** A bubble's state in words and level: working, waiting, stuck or done. */
+/** A bubble's state in words and level: working, calling you (the step waits for you), waiting, stuck or done. */
 function speechState(s) {
   switch (s) {
+    case 'calling': return [t('Calling you'), 'urgent'];
     case 'waiting': return [t('Waiting'), 'warn'];
     case 'stuck': return [t('Stuck'), 'error'];
     case 'done': return [t('Part done'), 'ok'];
@@ -421,9 +422,13 @@ function speechFor(agentId, project = null) {
   const mine = r => !project || r.project === project;
   const live = going().find(r => mine(r) && r.agent === agentId && r.speech?.now);
   if (live) return { run: live, line: live.speech.now, quiet: false };
+  const goingIds = new Set(going().map(r => r.id));
   for (const r of [...going(), ...(state.queue ?? [])].filter(mine)) {
     const line = (r.speech?.lines ?? []).filter(x => x.agent === agentId).at(-1);
-    if (line) return { run: r, line, quiet: line.state === 'done' };
+    if (!line) continue;
+    // A run in the queue is not at work: a line of it that says nothing of its state shows as waiting.
+    const still = !goingIds.has(r.id) && (!line.state || line.state === 'working');
+    return { run: r, line: still ? { ...line, state: 'waiting' } : line, quiet: line.state === 'done' };
   }
   return null;
 }
@@ -467,7 +472,8 @@ function drawSpeechDialog() {
       + `<div class="speech-said">${esc(speechText(x, run.project))}</div></div></li>`;
   };
   $('#speech-run').textContent = run ? `${run.title} · ${projectName(run.project)}` : t('This run has ended: its reports are in the Log.');
-  draw('#speech-list', JSON.stringify([speechRun, lines.map(x => [x.id, x.at, x.text, x.state])]), lines.map(item).join('') || `<li class="hint">${esc(t('Nothing said yet.'))}</li>`);
+  const empty = run ? `<li class="hint">${esc(t('Nothing said yet.'))}</li>` : '';
+  draw('#speech-list', JSON.stringify([speechRun, !!run, lines.map(x => [x.id, x.at, x.text, x.state])]), lines.map(item).join('') || empty);
 }
 
 const nextMission = () => state.missions.filter(m => m.next).sort((x, y) => x.next.localeCompare(y.next))[0];

@@ -10,4 +10,4 @@ Made-up data: three projects with a run going on in each. Webshop: the generalis
 | A project's tasks | [webshop tasks](project-tasks-desktop.png) | | The run going on shows the bubble in place of the old "Agora: …" line. |
 | History | [history](history-desktop.png) | [history](history-phone.png) | A click on a bubble: "Falas da equipe", the run and its project, the lines newest first, each with the member's name and role, the time and, when it says something new, its state; "Chiefmate (Gerente) pediu: …" for the task the manager queued. |
 
-Not captured: a line the owner wrote from the agent's panel ("Você pediu: …"), drawn like the manager's.
+Not captured: a line the owner wrote from the agent's panel ("Você pediu: …"), drawn like the manager's; and **Chamando você**, the state of a step that waits for the owner (added in the manager's review: the urgent red, a tinted bubble and its mark pulsing as the urgent notices do).
