@@ -22,6 +22,9 @@ import { clip, DATA, readJson, writeJson } from './util.mjs';
 export const SECRETS_DIR = path.join(DATA, 'secrets');
 export const CODE_MINUTES = 30;
 export const MAX_TRIES = 3;
+// While nothing reached the owner (the network down, say): called again after 5, 10, 20... minutes, MAX_CALLS in all.
+const RETRY_MINUTES = 5;
+const MAX_CALLS = 7;
 const PIN_WAIT_MINUTES = 5;
 const LINK_MINUTES = 15;
 const POLL_SECONDS = 25;
@@ -198,20 +201,23 @@ const emailReady = s => !!(s.email?.host && s.email.to && s.email.from);
 
 /**
  * Calls the owner about the alarm going on, once per alarm: Telegram first, to every linked chat, with its buttons and a
- * new single-use code; the e-mail when Telegram fails or isn't set up. Kept in the alarm's state (saveEscalation) and
- * in data/security/escalation.json. Returns the call, or null when there is nothing to call about.
+ * new single-use code; the e-mail when Telegram fails or isn't set up. When nothing reached them, called again later
+ * (RETRY_MINUTES, doubling, MAX_CALLS in all), with a new code. Kept in the alarm's state (saveEscalation) and in
+ * data/security/escalation.json. Returns the call, or null when there is nothing to call about.
  */
 export async function escalate(lock = null, options = {}) {
   const o = io(options);
   lock ??= readLockdown(o.dir);
   if (!wantsOwner(lock)) return null;
   const state = readState(o);
-  if (state.incidents?.[lock.since]) return state.incidents[lock.since];
+  const before = state.incidents?.[lock.since];
+  const attempt = before?.attempt ?? (before ? 1 : 0);
+  if (before && (before.channels?.length || attempt >= MAX_CALLS || Date.now() < Date.parse(before.at) + RETRY_MINUTES * 2 ** (attempt - 1) * 60_000)) return before;
   const secrets = readSecrets(o);
   const now = Date.now();
   const code = randomBytes(12).toString('base64url');
-  const call = { at: iso(now), expires: iso(now + CODE_MINUTES * 60_000), code: sha(code), used: null, messages: [], decisions: [], channels: [], errors: [] };
-  // Written before sending: a second call for the same alarm (a restart meanwhile) never sends twice.
+  const call = { at: iso(now), expires: iso(now + CODE_MINUTES * 60_000), code: sha(code), used: null, messages: [], decisions: [], channels: [], errors: [], attempt: attempt + 1 };
+  // Written before sending: a second call for the same alarm (a restart meanwhile) waits for the retry's time.
   const kept = Object.entries({ ...state.incidents, [lock.since]: call }).sort(([, a], [, b]) => Date.parse(a.at) - Date.parse(b.at)).slice(-KEEP_INCIDENTS);
   saveState({ ...state, incidents: Object.fromEntries(kept) }, o);
   if (telegramReady(secrets)) {
@@ -235,13 +241,14 @@ export async function escalate(lock = null, options = {}) {
   }
   updateCall(lock.since, () => call, o);
   saveEscalation(lock.since, { at: call.at, channels: call.channels, errors: call.errors, decisions: [] }, o.dir);
-  if (!call.channels.length && (secrets.telegram?.token || secrets.email?.host)) {
+  // Told once, at the first failure: the retries say nothing more.
+  if (!before && !call.channels.length && (secrets.telegram?.token || secrets.email?.host)) {
     const errors = call.errors.map(e => `${e.channel}: ${e.error}`).join('; ') || t('no chat linked');
     try {
       o.tell({
         kind: 'lockdown', title: t('Could not reach you outside the app'),
-        text: t('The emergency lockdown needs you, but Telegram and the e-mail failed: {errors}', { errors }),
-        news: `The emergency lockdown since ${lock.since} needs the owner, but calling them outside the app failed (${errors}). Tell them in one line, if they talk to you.`,
+        text: t('The emergency lockdown needs you, but Telegram and the e-mail failed: {errors}. Chiefmate tries again a few more times.', { errors }),
+        news: `The emergency lockdown since ${lock.since} needs the owner, but calling them outside the app failed (${errors}); Chiefmate tries again a few more times. Tell them in one line, if they talk to you.`,
       });
     } catch {
       // telling never gets in the way
@@ -328,10 +335,13 @@ async function pinGiven(text, m, o) {
     saveState({ ...readState(o), awaiting: null }, o);
     return say(m.chat.id, reply, o);
   };
-  if (Date.now() > Date.parse(until)) return done(t('Too late: tap Release again.'));
   if (lock.active !== true || lock.since !== since) return done(t('This alarm is over: nothing to do.'));
+  if (Date.now() > Date.parse(until)) return done(t('Too late: tap Release again.'));
   if (!call || call.used || Date.now() > Date.parse(call.expires) || state.pin?.blocked) return done(t('This release code is no longer valid: release it in the app on the computer.'));
-  if (pinMatches(text, readSecrets(o).pin)) {
+  // A message that can't be a PIN (a word, a sticker) is not a wrong PIN: it is asked again, with no try counted.
+  const pin = text.replace(/\s+/g, '');
+  if (!/^\d{6,12}$/.test(pin)) return say(m.chat.id, t('Send only your PIN: 6 to 12 digits.'), o, { reply_markup: { force_reply: true, input_field_placeholder: 'PIN' } });
+  if (pinMatches(pin, readSecrets(o).pin)) {
     updateCall(since, c => ({ ...c, used: new Date().toISOString() }), o);
     saveState({ ...readState(o), awaiting: null, pin: { tries: 0 } }, o);
     // Recorded before the release, so the alarm's record keeps it.
@@ -404,6 +414,8 @@ function listening(o) {
   if (!readSecrets(o).telegram?.token) return false;
   const state = readState(o);
   if (state.linking && Date.now() < Date.parse(state.linking.until)) return true;
+  // A PIN asked for: its message is read (and deleted) even when the alarm ended meanwhile.
+  if (state.awaiting && Date.now() < Date.parse(state.awaiting.until) + PIN_WAIT_MINUTES * 60_000) return true;
   const lock = readLockdown(o.dir);
   return lock.active === true && !!state.incidents?.[lock.since]?.messages?.length;
 }

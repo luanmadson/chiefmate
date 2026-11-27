@@ -72,12 +72,20 @@ function replies(socket) {
   };
 }
 
-function connect({ host, port, security }) {
+function connect({ host, port, security }, timeoutMs) {
   return new Promise((resolve, reject) => {
     const options = { host, port, servername: net.isIP(host) ? undefined : host };
     const socket = security === 'tls' ? tls.connect(options) : net.connect(options);
-    socket.once(security === 'tls' ? 'secureConnect' : 'connect', () => resolve(socket));
-    socket.once('error', reject);
+    // A server that never answers, or never ends the TLS handshake, doesn't hold the caller (the escalation's loop).
+    const timer = setTimeout(() => socket.destroy(new Error('the SMTP server took too long')), timeoutMs);
+    socket.once(security === 'tls' ? 'secureConnect' : 'connect', () => {
+      clearTimeout(timer);
+      resolve(socket);
+    });
+    socket.once('error', error => {
+      clearTimeout(timer);
+      reject(error);
+    });
   });
 }
 
@@ -89,7 +97,7 @@ export async function sendMail({ host, port, security = 'starttls', user = '', p
   if (!SECURITY.includes(security)) throw new Error(`Unknown SMTP security "${security}".`);
   if (security === 'none' && !isLocalHost(host)) throw new Error('SMTP without TLS goes only to this computer.');
   if (!validAddress(from) || !validAddress(to)) throw new Error('The sender and the recipient must be plain e-mail addresses.');
-  let socket = await connect({ host, port: Number(port) || (security === 'tls' ? 465 : 587), security });
+  let socket = await connect({ host, port: Number(port) || (security === 'tls' ? 465 : 587), security }, timeoutMs);
   const timer = setTimeout(() => socket.destroy(new Error('the SMTP server took too long')), timeoutMs);
   let talk = replies(socket);
   const expect = async (codes, line) => {

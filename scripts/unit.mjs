@@ -1462,6 +1462,12 @@ test('Escalation: Keep stopped only records; Details sends the report; Release a
   await handleUpdate(tap(`r:${code}`), o);
   assert.equal(tg.sent().at(-1).body.reply_markup.force_reply, true);
   tg.calls.length = 0;
+  // A message that can't be a PIN is deleted and asked again, with no try counted.
+  await handleUpdate(chatMessage('ok, one moment'), o);
+  assert.equal(tg.calls[0].method, 'deleteMessage');
+  assert.equal(tg.sent().at(-1).body.reply_markup.force_reply, true);
+  assert.equal(escalationView(o).pin.tries, 0);
+  tg.calls.length = 0;
   await handleUpdate(chatMessage('000999'), o);
   assert.equal(tg.calls[0].method, 'deleteMessage');
   assert.equal(isLocked(dir), true, 'a wrong PIN releases nothing');
@@ -1533,6 +1539,32 @@ test('Escalation: the e-mail warns when Telegram fails or is not set up; nothing
   const agent = lockDir();
   await engage({ reason: 'agent', by: 'step', from: 'cli' }, { dir: agent, h: fakeHooks().h });
   assert.equal(wantsOwner(readLockdown(agent)), true);
+});
+
+test('Escalation: called again later while nothing reached the owner (the network down), with a new code; told once', async () => {
+  const { dir, o, told } = await escalatedAlarm({ telegram: { down: true } });
+  const first = await escalate(null, o);
+  assert.deepEqual(first.channels, []);
+  assert.equal(told.length, 1);
+  // Too soon: nothing is sent again.
+  const up = fakeTelegram();
+  assert.equal((await escalate(null, { ...o, fetch: up.fetch })).attempt, 1);
+  assert.equal(up.sent().length, 0);
+  // Past the wait: called again, and this time it arrives; the owner was told only once.
+  const file = path.join(dir, 'escalation.json');
+  const state = JSON.parse(readFileSync(file, 'utf8'));
+  for (const c of Object.values(state.incidents)) c.at = minutesAgo(6);
+  writeFileSync(file, JSON.stringify(state));
+  const second = await escalate(null, { ...o, fetch: up.fetch });
+  assert.deepEqual(second.channels, ['telegram']);
+  assert.equal(second.attempt, 2);
+  assert.notEqual(second.code, first.code);
+  assert.equal(up.sent().length, 1);
+  assert.equal(told.length, 1);
+  assert.deepEqual(readLockdown(dir).escalation.channels, ['telegram']);
+  // Reached: never again for this alarm.
+  await escalate(null, { ...o, fetch: up.fetch });
+  assert.equal(up.sent().length, 1);
 });
 
 test('Escalation setup: the token checked, a chat linked only with its code, the updates read once', async () => {
@@ -1620,4 +1652,12 @@ test('The e-mail goes through SMTP: login, sender, recipient and the text, and n
   const text = Buffer.from(body.split('\n\n')[1].replace(/\s/g, ''), 'base64').toString('utf8');
   assert.equal(text, 'Linha 1\r\n.\r\nLinha 3');
   await assert.rejects(sendMail({ host: 'smtp.example.com', security: 'none', from: 'a@example.com', to: 'b@example.com', subject: 's', text: 't' }), /only to this computer/);
+  // A server that takes the connection but never ends the TLS handshake: given up in time, not waited on forever.
+  const mute = net.createServer(socket => socket.on('error', () => {}));
+  await new Promise(resolve => mute.listen(0, '127.0.0.1', resolve));
+  try {
+    await assert.rejects(sendMail({ host: '127.0.0.1', port: mute.address().port, security: 'tls', from: 'a@example.com', to: 'b@example.com', subject: 's', text: 't', timeoutMs: 300 }), /took too long/);
+  } finally {
+    mute.close();
+  }
 });
