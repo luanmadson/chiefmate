@@ -1104,13 +1104,13 @@ async function main() {
       if (r.dryRun && !stop) console.log(`Would run, in a window of its own:\n  ${r.command}\nin ${r.cwd}`);
       else if (r.dryRun) console.log(r.pids.length ? `Would stop the window process(es) ${r.pids.join(', ')} and everything under them.` : 'Nothing running.');
       else if (stop) console.log(r.stopped ? 'Development environment stopped.' : 'Nothing running.');
-      else console.log(`Development environment started (${r.window === 'terminal' ? 'Windows Terminal' : 'PowerShell'}): ${r.command}, in ${r.cwd}`);
+      else console.log(`Development environment starting (${r.window === 'terminal' ? 'Windows Terminal' : 'PowerShell'}): ${r.command}, in ${r.cwd}`);
       return;
     }
     case 'dev-run': {
       // Inside the development environment's window (see src/projects.mjs).
       const { runDev } = await import('./projects.mjs');
-      await runDev(rest[0]);
+      await runDev(rest[0], rest[1]);
       return;
     }
     case 'prompts-sync': {

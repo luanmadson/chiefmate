@@ -1796,6 +1796,8 @@ function liveFeedHtml(x) {
     } else if (e.kind === 'permission') {
       const said = { open: t('The agent asked your permission: {what}', { what: e.text }), done: t('You allowed: {what}', { what: e.text }), refused: t('You refused: {what}', { what: e.text }) }[e.status] ?? e.text;
       html += `<div class="msg system ask">${esc(said)}</div>`;
+    } else if (e.by === 'system') {
+      html += `<div class="msg system${e.error ? ' error' : ''}">${esc(t('Chiefmate system notice'))} · ${esc(e.text)}</div>`;
     } else {
       html += `<div class="msg system${e.error ? ' error' : ''}">${esc(e.text)}</div>`;
     }
@@ -1821,7 +1823,9 @@ function drawLive() {
   const x = { ...(d?.session ?? {}), ...(allSessions().find(s => s.id === liveChat.id) ?? {}), ...(d?.session ? { phase: d.session.phase, turn: d.session.turn } : {}) };
   if (!x.id) return;
   const ended = x.status === 'ended';
+  const system = openSystem(state?.projects?.find(p => p.id === x.project)?.devUrl);
   const actions = [
+    system,
     ended && x.resumable ? `<button type="button" class="button small" data-live-resume="${esc(x.id)}">${esc(t('Resume'))}</button>` : '',
     !ended ? `<button type="button" class="button danger small" data-session-end="${esc(x.id)}">${esc(x.work ? t('End and summarize') : t('End'))}</button>` : '',
   ].join('');
@@ -1831,7 +1835,7 @@ function drawLive() {
   const head = `<div class="live-title"><span class="primary">${esc(x.name)}${work}</span><span class="secondary">${esc([toolName(x.tool), sessionWhere(x), x.cwd ?? '', x.model ?? ''].filter(Boolean).join(' · '))}</span></div>
     <div class="live-facts">${stateHtml(sessionState(x))}<span>${esc(t('Memory'))} <span class="num">${x.ram ? bytes(x.ram) : '—'}</span></span><span>${esc(t('Open for'))} ${ended ? '—' : ticking(x.started)}</span><span>${esc(t('{count} turn(s)', { count: x.turns ?? 0 }))}</span><span class="compose-buttons">${actions}</span></div>
     <div class="live-phase${['permission', 'login'].includes(x.phase) || x.status === 'login' ? ' warn' : ''}">${esc(livePhaseLine(x))}</div>${paused}`;
-  draw('#live-head', JSON.stringify([x.id, x.status, x.phase, x.ram, x.turns, x.resumable, x.work, x.copy, x.held, language()]), head);
+  draw('#live-head', JSON.stringify([x.id, x.status, x.phase, x.ram, x.turns, x.resumable, x.work, x.copy, x.held, system, language()]), head);
 
   const box = $('#live-feed');
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
@@ -1852,9 +1856,9 @@ function drawLive() {
   const queue = d?.queue ?? [];
   $('#live-queue').hidden = !queue.length;
   const queued = `<div class="chat-queue-head"><span class="label">${esc(t('In the queue'))}</span><span class="hint">${esc(t('They go together, in order, when the agent finishes this turn.'))}</span></div>${queue.map(m => `<div class="queued-msg">
-      <div class="msg-head"><span class="tag">${esc(m.first ? t('first message') : t('queued'))}</span><span class="msg-meta">${esc(clockTime(m.at))}</span>
-        ${m.first ? '' : `<span class="queued-actions"><button type="button" class="button danger small" data-live-unqueue="${esc(m.id)}">${esc(t('Remove'))}</button></span>`}</div>
-      <div class="msg-body">${m.first ? esc(t('{count} characters', { count: m.text.length })) : md(m.text)}</div></div>`).join('')}`;
+      <div class="msg-head"><span class="tag">${esc(m.first ? t('first message') : m.by === 'system' ? t('Chiefmate system notice') : t('queued'))}</span><span class="msg-meta">${esc(clockTime(m.at))}</span>
+        ${m.first || m.by === 'system' ? '' : `<span class="queued-actions"><button type="button" class="button danger small" data-live-unqueue="${esc(m.id)}">${esc(t('Remove'))}</button></span>`}</div>
+      <div class="msg-body">${m.first ? esc(t('{count} characters', { count: m.text.length })) : m.by === 'system' ? esc(m.text) : md(m.text)}</div></div>`).join('')}`;
   draw('#live-queue', JSON.stringify([x.id, queue, language()]), queue.length ? queued : '');
 
   const working = x.phase === 'working';
@@ -2410,13 +2414,17 @@ async function refreshProjectPage() {
   if (pageProject() === id && state) drawProjectPage();
 }
 
-const PAGE_PARTS = ['#project-title', '#project-more', '#project-status', '#project-actions', '#project-needs', '#project-tabs', '#project-summary', '#project-open', '#project-facts', '#project-team', '#project-runs', '#project-history', '#project-planning', '#project-computer', '#project-sessions', '#project-live-list', '#project-charge-top'];
+const PAGE_PARTS = ['#project-title', '#project-system', '#project-more', '#project-status', '#project-actions', '#project-needs', '#project-tabs', '#project-summary', '#project-open', '#project-facts', '#project-team', '#project-runs', '#project-history', '#project-planning', '#project-computer', '#project-sessions', '#project-live-list', '#project-charge-top'];
 // Each tab and the part of the page it shows.
 const TAB_PARTS = { overview: '#project-overview', charge: '#project-charge', live: '#project-live', manager: '#project-manager', crew: '#project-crew', tasks: '#project-tasks', planning: '#project-planning', files: '#project-files', context: '#project-context', builder: '#project-builder' };
 
 const projectHash = (id, tab = 'overview') => `#project/${encodeURIComponent(id)}${tab === 'overview' ? '' : `/${tab}`}`;
 const projectOpenItems = (id, p) => planItemsNow().filter(i => openItem(i) && (i.project === id || i.project === p?.name));
 const noCloneAttr = info => (info && !info.clone ? ` disabled title="${esc(t('No clone of yours on this computer: set "local_clone" in its settings.'))}"` : '');
+
+function openSystem(url) {
+  return url ? `<a class="button secondary small" href="${esc(url)}" target="_blank" rel="noopener">${esc(t('Open the system'))}</a>` : '';
+}
 
 function drawProjectPage() {
   const id = pageProject();
@@ -2432,6 +2440,8 @@ function drawProjectPage() {
   const info = projectPage.data?.id === id ? projectPage.data : null;
   const title = `<h1>${esc(p.name ?? id)}</h1><p>${esc(info?.error ?? (info ? info.about || t('No sentence about this project in its settings ("about").') : t('Loading…')))}</p>`;
   draw('#project-title', title, title);
+  const system = openSystem(info ? info.dev?.url : p.devUrl);
+  draw('#project-system', system, system);
   drawProjectStatus(id, info);
   drawProjectActions(id, info);
   drawProjectMore(id, info);
@@ -2609,7 +2619,8 @@ function drawProjectMore(id, info) {
   const dev = info?.dev;
   const devItem = !info?.devStart ? ''
     : dev?.status === 'running' ? item('data-project-dev="stop"', t('Stop environment ({size})', { size: bytes(dev.ram) }))
-      : dev?.status === 'starting' ? '' : item(`data-project-dev="start"${noClone}`, t('Start environment'));
+      : ['starting', 'failed'].includes(dev?.status) ? item('data-project-dev="stop"', t('Stop environment'))
+        : item(`data-project-dev="start"${noClone}`, t('Start environment'));
   const items = [
     state.charge?.[id] && !workSession(id) ? item(`data-work-now="codex"${noClone}`, t('Work now with Codex')) : '',
     state.prompts?.configured ? item('data-project-live', t('Prompt builder, then a live session')) : '',
@@ -2788,7 +2799,7 @@ function drawProjectComputer(id, info) {
   const canStop = c.processes.some(x => !x.crew && !x.guarded);
   const dev = info?.dev;
   const devLine = !info?.devStart ? ''
-    : `<div class="dev-line"><span class="label">${esc(t('Development environment'))}</span>${stateHtml(dev?.status === 'running' ? [t('Running'), 'ok'] : dev?.status === 'starting' ? [t('Starting…'), 'info'] : [t('Stopped'), 'neutral'])}${dev?.status === 'running' ? `<span class="num">${bytes(dev.ram)}</span><button type="button" class="button danger small" data-project-dev="stop">${esc(t('Stop'))}</button>` : dev?.status === 'starting' ? '' : `<button type="button" class="button secondary small" data-project-dev="start"${info.clone ? '' : ' disabled'}>${esc(t('Start'))}</button>`}</div>`;
+    : `<div class="dev-line"><span class="label">${esc(t('Development environment'))}</span>${stateHtml(dev?.status === 'running' ? [t('Running'), 'ok'] : dev?.status === 'starting' ? [t('Starting…'), 'info'] : dev?.status === 'failed' ? [t('Failed'), 'error'] : [t('Stopped'), 'neutral'])}${dev?.status === 'running' ? `<span class="num">${bytes(dev.ram)}</span>` : ''}${dev && dev.status !== 'stopped' ? `<button type="button" class="button danger small" data-project-dev="stop">${esc(t('Stop'))}</button>` : `<button type="button" class="button secondary small" data-project-dev="start"${info.clone ? '' : ' disabled'}>${esc(t('Start'))}</button>`}</div>`;
   const notes = [state.computer.supported ? '' : t("The projects' processes are read on Windows only."), state.computer.error ? t("Couldn't read the processes: {error}", { error: state.computer.error }) : ''].filter(Boolean);
   const html = `<h2 class="section-title">${esc(t('On this computer'))}</h2>
     <div class="panel">
