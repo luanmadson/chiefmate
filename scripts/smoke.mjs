@@ -196,6 +196,15 @@ try {
       const archived = await (await fetch(`${base}/api/attention/archived`)).json();
       expect(typeof after.archived === 'number' && Array.isArray(archived.items) && archived.items.length === after.archived, `the archive's count or list is missing: ${JSON.stringify([after.archived, archived])}`);
     }
+    // A copy of the settings failing (made up in this server's records, src/config.mjs): an important notice naming the
+    // setting, never its folder, gone once nothing fails.
+    const backupFile = path.join(data, 'backup-problems.json');
+    writeFileSync(backupFile, JSON.stringify([{ target: 'full_backup_dir', cause: 'in_git', code: null, since: new Date().toISOString(), told: null }]));
+    const backupNotice = (await (await fetch(`${base}/api/state`)).json()).attention.items.find(i => i.id === 'backup:full_backup_dir:in_git');
+    writeFileSync(backupFile, '[]');
+    const backupGone = !(await (await fetch(`${base}/api/state`)).json()).attention.items.some(i => i.kind === 'backup');
+    expect(backupNotice?.level === 'important' && backupNotice.view === 'operations' && backupNotice.text.includes('full_backup_dir') && backupGone,
+      `a copy of the settings failing is not an important notice, or it stays once fixed: ${JSON.stringify(backupNotice)}`);
     // Away mode from the app's button: on, in /api/state, then off (the smoke test's server tells no manager).
     const awayOn = await (await post('/api/away', { on: true })).json();
     const awayState = (await (await fetch(`${base}/api/state`)).json()).away;
