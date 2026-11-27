@@ -2,7 +2,7 @@
 // its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation;
 // the band of what a live session asks; the emergency lockdown, its detection, its emergency watch and the call to the
 // owner outside the app; the warning before Claude Code's sign-in expires; each agent's effort; the redacted backup of
-// the settings; the usage resets' countdowns.
+// the settings; the usage resets' countdowns; the session's spending modes, the queue's fair turn and the session's spare.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -30,7 +30,11 @@ import { sendMail } from '../src/smtp.mjs';
 import { analystPrompt, commandsInLog, decide, githubRead, parseVerdict, protectedChanges, reviewIncident, sendsOut } from '../src/sentinel.mjs';
 import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
-import { copyHolders, pickNext } from '../src/queue.mjs';
+import { copyHolders, lastRan, pickNext, turnOrder } from '../src/queue.mjs';
+import {
+  changeSession, checkSpending, effectiveLimits, forecast, readSpending, SAFETY, sessionMode, sessionNow, SPEND_TO, spendingStatus,
+} from '../src/spending.mjs';
+import { HELD_WHILE_AWAY, NEWS_EVENTS } from '../src/news.mjs';
 import { askedTool, copyHolder, endLine, holdsCopy, limitWaitCleared, pausedLine, stepTool } from '../src/runs.mjs';
 import { addSpeech, askedBy, SPEECH_KEEP, SPEECH_MAX, SPEECH_SHOWN, speechLine, speechNow, speechRule, speechView } from '../src/speech.mjs';
 import {
@@ -2446,4 +2450,145 @@ test("a local merge saves the clone's changed tracked files first, only when not
   }
   await assert.rejects(savePendingFirst({ dir: repo, branch: 'work' }), e => e.conflict && /under way/.test(e.message));
   git('merge', '--abort');
+});
+
+// ---------- The session's spending (src/spending.mjs) and the queue's fair turn (src/queue.mjs), on a fixed clock ----------
+
+test("the session's modes: shortcuts fill both settings, a value changed by hand shows as custom, the week's pause stays", () => {
+  assert.equal(sessionMode(1, null), 'save');
+  assert.equal(sessionMode(1, SAFETY), 'save'); // no early pause and one at the margin pause alike
+  assert.equal(sessionMode(3, SAFETY), 'normal');
+  assert.equal(sessionMode(4, SPEND_TO), 'all');
+  assert.equal(sessionMode(2, SAFETY), 'custom');
+  assert.equal(sessionMode(1, 0.7), 'custom');
+  // the settings' defaults are "normal"; what this installation holds today (1 at a time, 85%) is "save"
+  assert.deepEqual(sessionNow({}, {}).configured, { parallel: 3, pause: null, limit: SAFETY, mode: 'normal' });
+  assert.equal(sessionNow({ max_parallel: 1, limits: { pause_at_5h_window: 0.85 } }, {}).mode, 'save');
+  const file = path.join(temp, 'spending-modes.json');
+  const saved = [];
+  const notes = [];
+  const config = { max_parallel: 3, limits: { pause_at_5h_window: 0.85, pause_at_plan_week: 0.9 } };
+  const usage = { five_hour: { used: 0.2, resets: new Date(Date.now() + 3_600_000).toISOString() } };
+  const change = body => changeSession(body, { config, file, usage, by: 'app', save: c => saved.push(structuredClone(c)), note: (by, changes) => notes.push([by, changes]) });
+  assert.equal(change({ mode: 'save' }).mode, 'save');
+  assert.equal(config.max_parallel, 1);
+  assert.equal(config.limits.pause_at_5h_window, null);
+  assert.equal(config.limits.pause_at_plan_week, 0.9);
+  assert.equal(sessionNow(config, {}).limit, SAFETY);
+  assert.deepEqual(notes.at(-1), ['app', { max_parallel: [3, 1], pause_at_5h_window: [0.85, null] }]);
+  // by hand: custom
+  assert.equal(change({ parallel: 2 }).mode, 'custom');
+  assert.equal(change({ parallel: 1, pause: 0.6 }).mode, 'custom');
+  assert.equal(effectiveLimits(config, {}).pause_at_5h_window, 0.6);
+  assert.equal(change({ pause: 'off' }).mode, 'save');
+  assert.equal(change({ mode: 'all' }).mode, 'all');
+  assert.deepEqual([config.max_parallel, config.limits.pause_at_5h_window], [4, SPEND_TO]);
+  assert.equal(change({ mode: 'normal' }).mode, 'normal');
+  assert.deepEqual([config.max_parallel, config.limits.pause_at_5h_window, config.limits.pause_at_plan_week], [3, SAFETY, 0.9]);
+  assert.equal(saved.length, 6);
+  assert.throws(() => change({ mode: 'max' }), /save, normal or all/);
+  assert.throws(() => change({ parallel: 5 }), /1 to 4|1 a 4/);
+  assert.throws(() => change({ pause: 'much' }), /0.05 to 1|0.05 a 1/);
+});
+
+test("the queue's fair turn: the room goes to the project longest without running, in each project's order", () => {
+  const at = '2026-11-27T12:00:00.000Z';
+  const run = (id, project, created, extra = {}) => ({ id, project, created, status: 'queued', ...extra });
+  // a long queue of one project, and a newer run of another
+  const c1 = run('c1', 'chiefmate', '2026-11-27T08:00:00.000Z');
+  const c2 = run('c2', 'chiefmate', '2026-11-27T08:30:00.000Z');
+  const c3 = run('c3', 'chiefmate', '2026-11-27T09:00:00.000Z');
+  const r1 = run('r1', 'riffdex', '2026-11-27T11:50:00.000Z');
+  const queue = [c1, c2, c3, r1];
+  const ran = lastRan([
+    { project: 'chiefmate', started: '2026-11-27T10:00:00.000Z', ended: '2026-11-27T11:55:00.000Z' },
+    { project: 'riffdex', started: '2026-11-26T09:00:00.000Z', ended: '2026-11-26T09:40:00.000Z' },
+    { project: 'riffdex', created: at, status: 'canceled', ended: at }, // canceled before it ran: not a turn
+  ]);
+  assert.equal(ran.get('riffdex'), '2026-11-26T09:40:00.000Z');
+  assert.deepEqual(pickNext(queue, [], 1, Date.parse(at), new Map(), ran).map(r => r.id), ['r1']);
+  // riffdex ran last: chiefmate's oldest goes first, never its second one
+  const after = new Map([['chiefmate', '2026-11-27T09:00:00.000Z'], ['riffdex', '2026-11-27T11:59:00.000Z']]);
+  assert.deepEqual(pickNext(queue, [], 1, Date.parse(at), new Map(), after).map(r => r.id), ['c1']);
+  // a project never run goes first; a run marked to go first (resumeFirst) before all
+  const a1 = run('a1', 'acervo', '2026-11-27T11:58:00.000Z');
+  assert.deepEqual(pickNext([...queue, a1], [], 2, Date.parse(at), new Map(), ran).map(r => r.id), ['a1', 'r1']);
+  const back = { ...c2, resumeFirst: true };
+  assert.deepEqual(pickNext([back, c1, c3, r1, a1], [], 1, Date.parse(at), new Map(), ran).map(r => r.id), ['c2']);
+  // room for all: one per project, as before; a busy project waits
+  assert.deepEqual(pickNext(queue, [], 3, Date.parse(at), new Map(), ran).map(r => r.id).sort(), ['c1', 'r1']);
+  assert.deepEqual(pickNext(queue, ['riffdex'], 1, Date.parse(at), new Map(), ran).map(r => r.id), ['c1']);
+  // the order shown: round by round, one per project
+  assert.deepEqual(turnOrder([...queue, a1], ran).map(r => r.id), ['a1', 'r1', 'c1', 'c2', 'c3']);
+  assert.deepEqual(turnOrder([...queue, a1, run('a2', 'acervo', '2026-11-27T11:59:00.000Z')], ran).map(r => r.id), ['a1', 'r1', 'c1', 'a2', 'c2', 'c3']);
+});
+
+test("the session's spare near its renewal: spent alone while the owner is away, offered once when present, back after the renewal", () => {
+  assert.ok(NEWS_EVENTS.includes('session_spare') && HELD_WHILE_AWAY.includes('session_spare')); // told in the summary when back
+  const at = Date.parse('2026-11-27T17:10:00.000Z');
+  const resets = '2026-11-27T18:00:00.000Z'; // 50 minutes left
+  const usage = { updated: '2026-11-27T17:09:00.000Z', five_hour: { used: 0.4, resets }, seven_day: { used: 0.6, resets: '2026-11-30T08:00:00.000Z' } };
+  const samples = [{ at: '2026-11-27T16:00:00.000Z', used: 0.3, resets, running: 1 }];
+  const config = { owner: 'Luan', max_parallel: 1, limits: { pause_at_5h_window: 0.85, pause_at_plan_week: 0.95 } };
+  const runs = [{ id: 'x', project: 'chiefmate', status: 'running' }];
+  // the estimate: 10% an hour with one run; 3 projects with work could spend about 3 times as fast
+  const f = forecast({ usage, samples, session: sessionNow(config, {}), running: 1, capacity: 3, at });
+  assert.equal(Math.round(f.pace * 100), 10);
+  assert.equal(f.minutes, 50);
+  assert.equal(Math.round(f.left * 100), 52);
+  assert.equal(f.all.runs, 3);
+  assert.equal(Math.round(f.all.left * 100), 35);
+  assert.equal(f.worth, true);
+  // far from the renewal, the margin is the owner's; with little left, nothing to do
+  assert.equal(forecast({ usage: { ...usage, five_hour: { used: 0.4, resets: '2026-11-27T20:00:00.000Z' } }, samples: [], session: sessionNow(config, {}), running: 1, capacity: 3, at }).worth, false);
+  assert.equal(forecast({ usage: { ...usage, five_hour: { used: 0.9, resets } }, samples: [], session: sessionNow(config, {}), running: 1, capacity: 3, at }).worth, false);
+
+  const told = [];
+  const report = (kind, text) => told.push([kind, text]);
+  const notes = [];
+  const note = (by, changes) => notes.push([by, changes]);
+  const check = (file, extra = {}) => checkSpending({ config, usage, at, runs, capacity: 3, file, report, note, away: false, ...extra });
+  // the plan's week at its pause holds the crew: nothing to spend, so nothing is offered nor spent (its pause stays)
+  const weekFile = path.join(temp, 'spending-week.json');
+  writeFileSync(weekFile, JSON.stringify({ samples }));
+  const atPause = { ...usage, seven_day: { used: 0.95, resets: '2026-11-30T08:00:00.000Z' } };
+  assert.deepEqual([check(weekFile, { usage: atPause }).offered, check(weekFile, { usage: atPause, away: true }).boosted], [false, false]);
+  const heldStatus = spendingStatus(config, { usage: atPause, runs, items: [], data: readSpending(weekFile), at });
+  assert.deepEqual([heldStatus.week_holds, heldStatus.offer], [true, null]);
+  assert.equal(told.length, 0);
+  // present: offered once per window, with its button's time; "not now" until the renewal
+  const present = path.join(temp, 'spending-present.json');
+  writeFileSync(present, JSON.stringify({ samples }));
+  assert.equal(check(present).offered, true);
+  assert.equal(told.length, 1);
+  assert.match(told[0][1], /is here: the app offers "Spend all until/);
+  assert.equal(check(present).offered, false);
+  assert.equal(told.length, 1);
+  const offer = spendingStatus(config, { usage, runs, items: [], data: readSpending(present), at }).offer;
+  assert.equal(offer.until, resets);
+  changeSession({ dismiss: true }, { config, file: present, usage, at, save: () => {}, note });
+  assert.equal(spendingStatus(config, { usage, runs, items: [], data: readSpending(present), at }).offer, null);
+  assert.equal(check(present, { away: true }).boosted, false); // "not now" holds while away too
+  // its button: "all" until the renewal, then back by itself; a mode chosen meanwhile ends it
+  const button = path.join(temp, 'spending-button.json');
+  writeFileSync(button, JSON.stringify({ samples }));
+  const boosted = changeSession({ boost: true }, { config, file: button, usage, at, by: 'app', save: () => {}, note });
+  assert.deepEqual([boosted.mode, boosted.parallel, boosted.limit, boosted.configured.mode], ['all', 4, SPEND_TO, 'save']);
+  assert.equal(changeSession({ mode: 'save' }, { config, file: button, usage, at, save: () => {}, note }).boost, null);
+
+  // away: "all" until the renewal by itself, the safety margin included; the week's pause unchanged
+  const away = path.join(temp, 'spending-away.json');
+  writeFileSync(away, JSON.stringify({ samples }));
+  assert.equal(check(away, { away: true }).boosted, true);
+  assert.match(told.at(-1)[1], /is away, so Chiefmate put the session in "Spend all" until/);
+  assert.deepEqual(notes.at(-1), ['away', { session_boost: [null, resets] }]);
+  const data = readSpending(away);
+  assert.deepEqual([sessionNow(config, data, at).parallel, effectiveLimits(config, data, at).pause_at_5h_window, effectiveLimits(config, data, at).pause_at_plan_week], [4, SPEND_TO, 0.95]);
+  assert.equal(check(away, { away: true }).boosted, false); // once
+  // renewed: the boost ends and the mode before it holds again
+  const later = Date.parse(resets) + 60_000;
+  const renewed = { updated: new Date(later).toISOString(), five_hour: { used: 0.01, resets: '2026-11-27T23:01:00.000Z' } };
+  const end = checkSpending({ config, usage: renewed, at: later, runs, capacity: 3, file: away, report, note, away: true });
+  assert.equal(end.ended?.until, resets);
+  assert.deepEqual([sessionNow(config, readSpending(away), later).mode, effectiveLimits(config, readSpending(away), later).pause_at_5h_window], ['save', SAFETY]);
 });

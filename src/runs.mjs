@@ -23,6 +23,7 @@ import { notify } from './notify.mjs';
 import { holdForQuarantine, lostFile, quarantinedBy, writtenSuspects } from './quarantine.mjs';
 import { builderSettings, projectInstructions, writtenInstructions } from './prompts.mjs';
 import { addSpeech, askedBy, speechRule } from './speech.mjs';
+import { effectiveLimits } from './spending.mjs';
 import { listRuns, readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
 import { chooseTool, GROK_DENY, LOGIN_COMMAND, parseTool, qualityRecords, recordQuality, runTool, signedIn, TOOL_NAMES, toolEffort, toolModel } from './tools.mjs';
@@ -516,16 +517,17 @@ function limitNote(window, percent, lang) {
 }
 
 /**
- * Before every step: the account's usage against the latest limits in the settings, so a change in Usage counts at
- * once. If the settings can't be read now (a file being edited), the limits the run started with.
+ * Before every step: the account's usage against the latest limits in the settings, the 5-hour one being the session's
+ * pause now (src/spending.mjs: the safety margin when off, "all" during a boost), so a change in Usage counts at once.
+ * If the settings can't be read now (a file being edited), the limits the run started with.
  */
 function checkLimits(run, config) {
   if (run.ignoreLimits) return null;
   let limits;
   try {
-    limits = loadConfig().limits ?? {};
+    limits = effectiveLimits(loadConfig());
   } catch {
-    limits = config.limits ?? {};
+    limits = effectiveLimits(config);
   }
   const usage = readUsage();
   const window = blockingWindow(limits, usage);

@@ -209,7 +209,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .statusbar .group { display: flex; gap: 18px; align-items: center; overflow: hidden; }
 .statusbar .num { color: var(--text); }
 .statusbar .sb-short { display: none; }
-/* Little time left in the 5-hour window and much of it unused: a quiet brass mark with the way to the autopilot */
+/* Little time left in the 5-hour window and much of it unused: a quiet brass mark with the way to the session's settings */
 .statusbar .sb-spare { color: var(--accent); background: var(--accent-bg); border: 1px solid var(--accent); padding: 1px 7px; }
 .statusbar .sb-spare a { text-decoration: underline; text-underline-offset: 2px; }
 
