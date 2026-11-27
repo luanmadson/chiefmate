@@ -1,6 +1,6 @@
 // Starts a temporary Chiefmate on a spare port (only the app and the API: no queue, no schedule, no updates)
 // and checks that everything answers. Usage: npm run smoke
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -39,7 +39,8 @@ const feedLines = [
 const feedWhole = `${feedLines}\n`;
 writeFileSync(path.join(data, 'runs', 'smoke-feed', '01-generalist.jsonl'), `${feedWhole}{"type":"assistant","message":{"content":[{"type":"text","text":"half`);
 // The remote access through Tailscale Serve, made up: a second listener, with a tailnet name and a login of its own.
-const remote = { enabled: true, host: 'pc.smoke-tailnet.ts.net', logins: ['owner@example.com'], port: port + 1 };
+// This process stands in for Serve (serve_pid): the server takes the remote access only from the connections it opens.
+const remote = { enabled: true, host: 'pc.smoke-tailnet.ts.net', logins: ['owner@example.com'], port: port + 1, serve_pid: process.pid };
 // The file viewer's extra folder, made up: an image, a CSV, a workbook, and files it must never open.
 const files = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-files-'));
 mkdirSync(path.join(files, 'designs'));
@@ -414,7 +415,7 @@ try {
       r.on('error', reject);
       r.end(body ? JSON.stringify(body) : undefined);
     });
-    const tailnet = { host: remote.host, 'tailscale-user-login': 'Owner@example.com' };
+    const tailnet = { host: remote.host, 'tailscale-user-login': 'Owner@example.com', 'x-forwarded-for': '100.101.102.103' };
     const command = { ...tailnet, origin: `https://${remote.host}`, 'x-chiefmate': '1' };
     const page = await ask(remote.port, '/', tailnet);
     expect(page.status === 200 && page.headers['x-content-type-options'] === 'nosniff' && /frame-ancestors 'none'/.test(page.headers['content-security-policy'] ?? ''),
@@ -442,6 +443,12 @@ try {
     const remoteStop = await ask(remote.port, '/api/power', command, { action: 'stop' });
     expect(remoteStop.status === 403 && JSON.parse(remoteStop.text).error?.includes('computer'), `stopping Chiefmate from another device was not refused: ${remoteStop.status}`);
     expect((await ask(port, '/api/state', tailnet)).status === 403, "the app's own port answered the tailnet name");
+    // Serve's headers sent by another program of this computer, or a request from this computer's own node: refused.
+    const forged = spawnSync(process.execPath, ['-e', `require('node:http').get({ host: '127.0.0.1', port: ${remote.port}, path: '/api/state', headers: ${JSON.stringify(tailnet)} }, r => console.log(r.statusCode)).on('error', e => console.log(e.message))`], { encoding: 'utf8', windowsHide: true, timeout: 20_000 });
+    expect(forged.stdout.trim() === '403', `a program of this computer sending Tailscale Serve's headers was not refused: ${forged.stdout.trim()}`);
+    const { 'x-forwarded-for': _from, ...noSource } = tailnet;
+    expect((await ask(remote.port, '/api/state', noSource)).status === 403, 'the remote access answered without the tailnet address of the device');
+    expect((await ask(remote.port, '/api/state', { ...tailnet, 'x-forwarded-for': '127.0.0.1' })).status === 403, 'the remote access answered a request from this computer');
 
     // The emergency lockdown (src/lockdown.mjs), engaged and released through the API. This server stops nothing for
     // real (no queue, no runs, no hooks given), and the lockdown's state lives in the temporary data folder.

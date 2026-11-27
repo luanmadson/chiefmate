@@ -1,7 +1,9 @@
 // The app (http://localhost:4747) and the API it uses. It only answers this computer.
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { attentionArchive, attentionItems, attentionSummary, markSeen } from './attention.mjs';
@@ -477,7 +479,8 @@ export function remoteSettings(settings, mainPort) {
 /**
  * Why a request to the remote listener is refused, or '' when it may go on. Tailscale Serve sets
  * Tailscale-User-Login and removes one sent by the device; Funnel (the public internet) and tagged devices send none.
- * Host and Origin must be the tailnet name, so no other website can drive the app through the browser.
+ * Host and Origin must be the tailnet name, so no other website can drive the app through the browser. The device
+ * must be another one of the tailnet (tailnetSource); that the headers are Serve's is checked apart (fromServe).
  */
 export function remoteRefusal(req, remote) {
   const hostname = String(req.headers.host ?? '').toLowerCase().replace(/:443$/, '');
@@ -487,7 +490,60 @@ export function remoteRefusal(req, remote) {
   if (req.method !== 'GET' && origin === undefined) return 'request refused';
   const login = String(req.headers['tailscale-user-login'] ?? '').trim().toLowerCase();
   if (!login || !remote.logins.includes(login)) return 'not allowed in';
-  return '';
+  return tailnetSource(req.headers['x-forwarded-for'], ownAddresses());
+}
+
+// A Tailscale address: 100.64.0.0/10 or fd7a:115c:a1e0::/48.
+const TAILNET_ADDRESS = /^(100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}|fd7a:115c:a1e0:[0-9a-f:]*)$/i;
+
+/** This computer's own addresses, its node in the tailnet among them. */
+export function ownAddresses() {
+  return Object.values(os.networkInterfaces()).flat().map(a => String(a?.address ?? '').toLowerCase());
+}
+
+/**
+ * Why the device behind a request is refused, or '' when it may go on. Tailscale Serve puts the device's tailnet
+ * address in X-Forwarded-For, replacing one the device sent. A request from this computer's own node (its programs
+ * calling the tailnet name) carries the owner's login too, so it is refused: only another device comes in this way.
+ */
+export function tailnetSource(forwarded, own) {
+  const address = String(forwarded ?? '').trim().toLowerCase();
+  if (!TAILNET_ADDRESS.test(address)) return 'not through the tailnet';
+  return own.includes(address) ? 'from this computer' : '';
+}
+
+/**
+ * The process that opened a TCP connection from 127.0.0.1:<from> to 127.0.0.1:<to>, read from `netstat -ano -p TCP`:
+ * its PID, or 0. The connection's state is skipped, as Windows may translate it.
+ */
+export function connectionOwner(netstat, from, to) {
+  for (const line of String(netstat).split(/\r?\n/)) {
+    const cols = line.trim().split(/\s+/);
+    if (cols[0] === 'TCP' && cols[1] === `127.0.0.1:${from}` && cols[2] === `127.0.0.1:${to}`) return Number(cols.at(-1)) || 0;
+  }
+  return 0;
+}
+
+/** Whether a row of `tasklist /FO CSV /NH` is Tailscale's own service process: tailscaled.exe in session 0. */
+export function isTailscaleService(row) {
+  const [image, , , session] = (String(row).trim().match(/"[^"]*"/g) ?? []).map(x => x.slice(1, -1));
+  return image?.toLowerCase() === 'tailscaled.exe' && session === '0';
+}
+
+const output = (command, args) => new Promise(resolve =>
+  execFile(command, args, { windowsHide: true, timeout: 10_000 }, (error, stdout) => resolve(error ? '' : String(stdout))));
+
+/**
+ * Whether the connection to the remote listener was opened by Tailscale Serve itself, and not by another program of
+ * this computer sending Serve's headers. Serve runs inside Tailscale's Windows service (session 0, where a user's
+ * programs can't run); a stand-in's PID replaces it in the smoke test. Elsewhere than Windows, nothing is taken.
+ */
+export async function fromServe(socket, remote) {
+  if (process.platform !== 'win32' || socket.remoteAddress !== '127.0.0.1') return false;
+  const pid = connectionOwner(await output('netstat', ['-ano', '-p', 'TCP']), socket.remotePort, socket.localPort);
+  if (!pid) return false;
+  if (remote.servePid) return pid === remote.servePid;
+  return isTailscaleService(await output('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH']));
 }
 
 /**
@@ -587,12 +643,19 @@ export function startServer() {
       console.error(`Development environment notices: ${error.message}`);
     }
   }, 2000).unref();
+  // Whether each connection to the remote listener came from Tailscale Serve (fromServe), checked once.
+  const servePeers = new WeakMap();
+  const servePeer = (socket, remote) => {
+    if (!servePeers.has(socket)) servePeers.set(socket, fromServe(socket, remote).catch(() => false));
+    return servePeers.get(socket);
+  };
   const handle = async (req, res, remote = null) => {
     try {
       // Guards against another website open in the browser trying to send commands here.
       // Each refusal is a signal for the emergency lockdown's detection (src/lockdown.mjs).
       if (remote) {
-        const refused = remoteRefusal(req, remote);
+        // The headers first, then who opened the connection: once per connection, as Serve keeps them open.
+        const refused = remoteRefusal(req, remote) || (!(await servePeer(req.socket, remote)) && 'not through Tailscale Serve');
         if (refused) {
           recordSignal(refused === 'not allowed in' ? 'login_failed' : 'unknown_origin', `${req.method} ${clip(String(req.url), 120)} (${refused})`, { who: 'remote' });
           return reply(res, 403, { error: refused });
@@ -976,10 +1039,15 @@ export function startServer() {
   server.listen(port, '127.0.0.1');
   // The remote access: a second listener, also on this computer only, for Tailscale Serve alone. The smoke test's
   // temporary Chiefmate never opens the installation's: it takes its own from CHIEFMATE_REMOTE_ACCESS.
-  const remote = remoteSettings(process.env.CHIEFMATE_SMOKE ? JSON.parse(process.env.CHIEFMATE_REMOTE_ACCESS || 'null') : config.remote_access, port);
+  const smokeRemote = process.env.CHIEFMATE_SMOKE ? JSON.parse(process.env.CHIEFMATE_REMOTE_ACCESS || 'null') : null;
+  const remote = remoteSettings(process.env.CHIEFMATE_SMOKE ? smokeRemote : config.remote_access, port);
+  // The smoke test's process stands in for Tailscale Serve there.
+  if (remote && smokeRemote) remote.servePid = Number(smokeRemote.serve_pid) || 0;
   let remoteServer = null;
   if (remote) {
     remoteServer = http.createServer((req, res) => handle(req, res, remote));
+    // Serve's connections stay open between the app's reads, so each is checked once (fromServe).
+    remoteServer.keepAliveTimeout = 65_000;
     remoteServer.on('error', error => console.error(`Remote access is off: ${error.message}`));
     remoteServer.listen(remote.port, '127.0.0.1', () => console.log(`Remote access through Tailscale Serve at https://${remote.host} (127.0.0.1:${remote.port})`));
   }

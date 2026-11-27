@@ -35,7 +35,7 @@ import './away-ui.test.mjs';
 import { AFAR_VERSION, offered, ONLY_ON_PC } from '../ui/afar.js';
 import { asksHtml, asksLayout, GROUP_FROM, keepFolds, newFolds, toggleFold } from '../ui/asks.js';
 import { devLog, startDev } from '../src/projects.mjs';
-import { fromAfar, ownerOnly } from '../src/server.mjs';
+import { connectionOwner, fromAfar, fromServe, isTailscaleService, ownAddresses, ownerOnly, remoteRefusal, tailnetSource } from '../src/server.mjs';
 import { forAgent, isOwner, openAppWindow, OWNER_HEADER, ownerHeaders, ownerKey, pairingCode, redeemCode } from '../src/owner.mjs';
 
 const windows = process.platform === 'win32';
@@ -1325,6 +1325,65 @@ test('from afar, what opens on the computer is refused and not offered, and the 
   assert.deepEqual(fromAfar('/api/browser', { action: 'close', pid: 1 }), { body: { action: 'close', pid: 1 }, refused: false });
   assert.deepEqual(fromAfar('/api/project/dev', { action: 'stop' }).body, { action: 'stop' });
   assert.deepEqual(fromAfar('/api/task', { x: 1 }), { body: { x: 1 } });
+});
+
+test("the remote access takes only Tailscale Serve's connections, from another device of the tailnet", () => {
+  const remote = { host: 'pc.tailnet.ts.net', logins: ['owner@example.com'], port: 4748 };
+  const request = from => ({ method: 'GET', headers: { host: remote.host, 'tailscale-user-login': 'owner@example.com', ...(from === undefined ? {} : { 'x-forwarded-for': from }) } });
+  // The phone, by its tailnet address (IPv4 or IPv6), goes on.
+  assert.equal(tailnetSource('100.101.102.103', ['127.0.0.1']), '');
+  assert.equal(tailnetSource('fd7a:115c:a1e0::1234', []), '');
+  // This computer's own node calling its tailnet name carries the owner's login too: refused.
+  assert.equal(tailnetSource('100.94.1.2', ['127.0.0.1', '100.94.1.2']), 'from this computer');
+  // No address, one outside the tailnet, or a list of them: not what Serve sends.
+  for (const from of [undefined, '', '127.0.0.1', '192.168.0.5', '100.128.0.1', '100.101.102.103, 100.1.2.3']) {
+    assert.equal(tailnetSource(from, []), 'not through the tailnet', `${from} was taken as a tailnet device`);
+  }
+  assert.equal(remoteRefusal(request(undefined), remote), 'not through the tailnet');
+  assert.equal(remoteRefusal(request('127.0.0.1'), remote), 'not through the tailnet');
+  assert.ok(ownAddresses().includes('127.0.0.1'), "this computer's addresses were not read");
+  const ownNode = ownAddresses().find(a => tailnetSource(a, []) === '');
+  if (ownNode) assert.equal(remoteRefusal(request(ownNode), remote), 'from this computer');
+  assert.equal(remoteRefusal(request('100.101.102.103'), remote), '');
+
+  // Who opened the connection, read from netstat: the client's side of it, never the listener's.
+  const netstat = [
+    '  Proto  Local Address          Foreign Address        State           PID',
+    '  TCP    127.0.0.1:4748         0.0.0.0:0              LISTENING       9768',
+    '  TCP    127.0.0.1:4748         127.0.0.1:63518        ESTABLISHED     9768',
+    '  TCP    127.0.0.1:63518        127.0.0.1:4748         ESTABELECIDA    8376',
+    '  TCP    127.0.0.1:63520        127.0.0.1:4747         ESTABLISHED     5555',
+  ].join('\r\n');
+  assert.equal(connectionOwner(netstat, 63518, 4748), 8376);
+  assert.equal(connectionOwner(netstat, 63520, 4748), 0);
+  assert.equal(connectionOwner('', 63518, 4748), 0);
+  // Tailscale's service runs in session 0, where a user's programs can't; one named like it elsewhere is refused.
+  assert.equal(isTailscaleService('"tailscaled.exe","8376","Services","0","67,904 K"'), true);
+  assert.equal(isTailscaleService('"tailscaled.exe","9000","Console","1","10,000 K"'), false);
+  assert.equal(isTailscaleService('"svchost.exe","1200","Services","0","9,000 K"'), false);
+  assert.equal(isTailscaleService('INFO: No tasks are running which match the specified criteria.'), false);
+});
+
+test('a program of this computer sending Serve\'s headers to the remote listener is refused', { skip: process.platform !== 'win32' }, async () => {
+  const http = await import('node:http');
+  let stand = {};
+  const server = http.createServer((req, res) => fromServe(req.socket, stand).then(ok => res.end(String(ok))));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const ask = () => new Promise((resolve, reject) => http.get({ host: '127.0.0.1', port: server.address().port, agent: false }, res => {
+    let text = '';
+    res.on('data', d => (text += d)).on('end', () => resolve(text));
+  }).on('error', reject));
+  try {
+    // This test's own process is not Tailscale's service.
+    assert.equal(await ask(), 'false');
+    // The lookup finds the process that opened the connection: this one, when it stands in for Serve.
+    stand = { servePid: process.pid };
+    assert.equal(await ask(), 'true');
+    stand = { servePid: process.pid + 1 };
+    assert.equal(await ask(), 'false');
+  } finally {
+    server.close();
+  }
 });
 
 // ---------- The owner's local key ----------
