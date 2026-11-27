@@ -24,6 +24,7 @@ import {
 } from '../src/tools.mjs';
 import { parseLevel } from '../src/util.mjs';
 import { behindOrigin, checkoutBranch, fastForward, projectLibraries, sameRepository } from '../src/workspace.mjs';
+import { syntaxProblem } from './check.mjs';
 import { SAMPLE_CSV, sampleXlsx, zip } from './fixtures.mjs';
 import { compose, Dictation, nextState, recognizer, transcript } from '../ui/voice.js';
 import './away-ui.test.mjs';
@@ -959,4 +960,18 @@ test("the settings' backup: a redacted copy in backup_dir, the full one only on 
   const other = path.join(temp, 'backup', 'none');
   backupConfig({ owner: 'x' }, { fullDir: other });
   assert.ok(!existsSync(other), 'no backup without backup_dir');
+});
+
+test('npm run check says why a script was not checked, with no pipe a sandbox could refuse', () => {
+  const calls = [];
+  const fake = result => (command, args, options) => (calls.push(options), result);
+  const denied = Object.assign(new Error('spawnSync C:\\Program Files\\nodejs\\node.exe EPERM'), { code: 'EPERM' });
+  assert.equal(syntaxProblem('src/a.mjs', fake({ error: denied, status: null, stderr: undefined })),
+    "Couldn't check src/a.mjs: EPERM, spawnSync C:\\Program Files\\nodejs\\node.exe EPERM");
+  assert.match(syntaxProblem('src/b.mjs', fake({ status: 1, signal: null })), /^Syntax error in src\/b\.mjs \(exit code 1\)/);
+  assert.equal(syntaxProblem('src/c.mjs', fake({ status: 0 })), null);
+  // An stdio left out (whole or in part) is a pipe too.
+  const stdio = o => typeof o?.stdio === 'string' ? [o.stdio, o.stdio, o.stdio] : [0, 1, 2].map(i => o?.stdio?.[i]);
+  assert.ok(calls.length === 3 && calls.every(o => stdio(o).every(s => s != null && s !== 'pipe' && s !== 'overlapped')), 'node --check got a pipe');
+  assert.equal(syntaxProblem(path.join('scripts', 'fixtures.mjs')), null, 'a real script failed the check');
 });
