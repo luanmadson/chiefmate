@@ -1,7 +1,10 @@
 // The Chiefmate app: fetches the state every 2.5 seconds (once a minute with the tab hidden) and redraws only what changed.
+import { offered, onThisComputer } from './afar.js';
 import { face } from './faces.js';
 import { language, locale, setLanguage, t, translatePage } from './i18n.js';
+import { resetLabel, spare } from './countdown.js';
 import { Dictation, recognizer } from './voice.js';
+import { asksHtml, keepFolds, newFolds, toggleFold } from './asks.js';
 
 const $ = selector => document.querySelector(selector);
 let state = null;
@@ -20,7 +23,7 @@ async function api(route, body) {
       : { cache: 'no-store' },
   );
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || t('Error {code}', { code: r.status }));
+  if (!r.ok) throw Object.assign(new Error(data.error || t('Error {code}', { code: r.status })), { status: r.status, data });
   return data;
 }
 
@@ -46,15 +49,18 @@ function confirmDialog(title, text, yes) {
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
-// A file's path in a text, which opens the viewer: absolute (C:\… or C:/…), or relative with a folder and a known
-// extension, with an optional ":line"; inside `code`, a file's name alone too.
+// A file's path in a text, which opens the viewer: absolute (C:\… or C:/…, with spaces inside `code`), or relative with
+// a folder and a known extension (from the project, or from your user folder: Documents\…, ~\…), with "/" or "\", any
+// letter (accents too) and an optional ":line"; inside `code`, a file's name alone too.
 const FILE_EXT = 'png|jpe?g|gif|webp|svg|bmp|avif|ico|pdf|md|markdown|txt|log|csv|tsv|xlsx|xlsm|json|jsonl|ya?ml|xml|html?|css|m?js|cjs|tsx?|jsx|py|ps1|sh|toml|ini|sql|docx?|pptx?|zip';
 const LINE = '(?::\\d+(?:-\\d+)?)?';
-const ABS_PATH = /^[A-Za-z]:[\\/](?![\\/])[^\s<>"'`|*?]*$/;
-const REL_PATH = new RegExp(`^(?:\\.[\\\\/])?(?:[\\w@.-]+[\\\\/])+[\\w@.-]+\\.(?:${FILE_EXT})${LINE}$`, 'i');
-const NAME_PATH = new RegExp(`^[\\w@.-]+\\.(?:${FILE_EXT})${LINE}$`, 'i');
+const PART = '[\\p{L}\\p{N}_@.-]+';
+const REL = `(?:[.~][\\\\/])?(?:${PART}[\\\\/])+${PART}\\.(?:${FILE_EXT})${LINE}`;
+const ABS_PATH = /^[A-Za-z]:[\\/](?![\\/])(?:[^<>"'`|*?\n]*[^\s<>"'`|*?])?$/;
+const REL_PATH = new RegExp(`^${REL}$`, 'iu');
+const NAME_PATH = new RegExp(`^${PART}\\.(?:${FILE_EXT})${LINE}$`, 'iu');
 const ABS_IN_TEXT = /(^|[\s(“"'])([A-Za-z]:[\\/](?![\\/])[^\s<>"'`|*?]+)/g;
-const REL_IN_TEXT = new RegExp(`(^|[\\s(“"'])((?:\\.[\\\\/])?(?:[\\w@.-]+[\\\\/])+[\\w@.-]+\\.(?:${FILE_EXT})${LINE})(?=$|[\\s),.;:!?”"'])`, 'gi');
+const REL_IN_TEXT = new RegExp(`(^|[\\s(“"'])(${REL})(?=$|[\\s),.;:!?”"'])`, 'giu');
 const fileLink = (p, label) => `<a class="file-link" role="button" tabindex="0" data-file="${esc(p)}">${label}</a>`;
 
 function inline(s) {
@@ -568,7 +574,7 @@ $('#project-jump').addEventListener('change', event => {
 /** The manager's presence in words: [text, kind, the face's look]. */
 function presence() {
   let text, kind, look;
-  if (!online) [text, kind, look] = [t('No connection to Chiefmate'), 'error', 'offline'];
+  if (!online) [text, kind, look] = lockedAfar ? [t('Emergency lockdown'), 'error', 'offline'] : [t('No connection to Chiefmate'), 'error', 'offline'];
   else if (state.ai.claude.found === false) [text, kind, look] = [t('Claude Code not found'), 'error', 'offline'];
   else if (state.ai.account.status === 'rejected') [text, kind, look] = [t('Account limit reached'), 'warn', 'waiting'];
   else if (going().length > 1) [text, kind, look] = [t('On duty: {count} runs at once', { count: going().length }), 'info', 'working'];
@@ -656,8 +662,8 @@ $('#away-pace').addEventListener('change', async event => {
 
 // ---------- Emergency lockdown (src/lockdown.mjs) ----------
 
-/** Whether the app is open on this computer (not through the remote access): only here is the lockdown released. */
-const onThisComputer = () => ['localhost', '127.0.0.1'].includes(location.hostname);
+// The lockdown seen through the remote access, which then refuses the state: { active, since, reason }, or null.
+let lockedAfar = null;
 
 /** The red button in the title bar: engages the lockdown, after a confirmation. Hidden while it is on. */
 function drawLockdownButton() {
@@ -688,15 +694,15 @@ $('#lockdown').addEventListener('click', async () => {
 
 /** The red band at the top while the lockdown is on, on every page. */
 function lockdownBand() {
-  const l = state?.lockdown;
-  if (!online || !l?.active) return '';
+  const l = online ? state?.lockdown : lockedAfar;
+  if (!l?.active) return '';
   const action = onThisComputer()
     ? `<button type="button" class="button small lockdown-release" data-lockdown-review>${esc(t('Review and release'))}</button>`
     : `<span class="lockdown-note">${esc(t('Release it on the computer where Chiefmate runs.'))}</span>`;
   return `<div class="lockdown-band" role="alert">
       <strong>${esc(t('EMERGENCY LOCKDOWN'))}</strong>
       <span>${esc(t('Since {time}: {reason}', { time: shortDate(l.since), reason: l.reason ?? '' }))}</span>
-      <span class="lockdown-note">${esc(t('Everything is stopped. Pushes, merges, new repositories, external actions and the remote access are refused.'))}</span>
+      <span class="lockdown-note">${esc(online ? t('Everything is stopped. Pushes, merges, new repositories, external actions and the remote access are refused.') : t('Everything is stopped, and the remote access shows nothing else until you release it.'))}</span>
       ${action}
     </div>`;
 }
@@ -1364,9 +1370,10 @@ function drawNavAttention() {
 }
 
 function drawStatusbar() {
-  $('#statusbar').classList.toggle('offline', !online); // phones show the bar only then
+  $('#statusbar').classList.toggle('offline', !online); // a lost connection shows on phones even while typing
   if (!online) {
-    draw('#statusbar', 'off', `<div class="group">${stateHtml([t('No connection to Chiefmate. Trying again…'), 'error'])}</div>`);
+    const text = lockedAfar ? t('Emergency lockdown: release it on the computer where Chiefmate runs.') : t('No connection to Chiefmate. Trying again…');
+    draw('#statusbar', `off ${text}`, `<div class="group">${stateHtml([text, 'error'])}</div>`);
     return;
   }
   const runs = going();
@@ -1378,15 +1385,35 @@ function drawStatusbar() {
   else if (state.queue.length) left = stateHtml([t('{count} in the queue', { count: state.queue.length }), 'info']);
   else left = stateHtml([t('Idle'), 'ok']);
   const claude = state.ai.claude;
+  const now = Date.now() + skew;
+  // Each window: its share and when it renews (live, as the state is read every few seconds); a phone shows the short name.
+  const usage = (cls, name, short, w) => {
+    const renews = resetLabel(w?.resets, now, { t, locale: locale() });
+    const title = w?.resets ? ` title="${esc(t('Resets {when} ({relative}).', { when: shortDate(w.resets), relative: relative(w.resets) }))}"` : '';
+    return `<span class="${cls}"${title}><span class="sb-long">${esc(name)}</span><span class="sb-short">${esc(short)}</span> <span class="num">${percent(w?.used)}</span>${renews ? ` · ${esc(renews)}` : ''}</span>`;
+  };
+  const left5h = spare(account.five_hour, now, t);
   const right = [
-    claude.found ? `Claude Code <span class="num">${esc(claude.version ?? '')}</span>` : esc(claude.found === false ? t('Claude Code not found') : t('Checking Claude Code…')),
-    `${esc(t('5-hour window'))} <span class="num">${percent(account.five_hour?.used)}</span>`,
-    `${esc(t("Plan's week"))} <span class="num">${percent(account.seven_day?.used)}</span>`,
-    `${esc(t('Free memory'))} <span class="num">${percent(state.computer.memory.free / state.computer.memory.total)}</span>`,
-  ].map(s => `<span>${s}</span>`).join('');
-  const html = `<div class="group">${left}</div><div class="group">${right}</div>`;
+    `<span class="sb-desk">${claude.found ? `Claude Code <span class="num">${esc(claude.version ?? '')}</span>` : esc(claude.found === false ? t('Claude Code not found') : t('Checking Claude Code…'))}</span>`,
+    left5h ? `<span class="sb-spare">${esc(t('{free} spare, renews in {left}', { free: percent(left5h.free), left: left5h.left }))} · <a href="#usage" data-goto="autopilot-panel">${esc(t('Autopilot'))}</a></span>` : '',
+    usage('sb-five', t('5-hour window'), t('5 h'), account.five_hour),
+    usage('sb-week', t("Plan's week"), t('Week'), account.seven_day),
+    `<span class="sb-desk">${esc(t('Free memory'))} <span class="num">${percent(state.computer.memory.free / state.computer.memory.total)}</span></span>`,
+  ].join('');
+  const html = `<div class="group sb-run">${left}</div><div class="group">${right}</div>`;
   draw('#statusbar', html, html);
 }
+// The status bar's shortcut to the autopilot: to the Usage section, its panel in view. Not the browser's own jump to
+// #usage (the meters, at the top); a hidden section can't be scrolled, so the panel waits for showView's hashchange.
+$('#statusbar').addEventListener('click', e => {
+  const link = e.target.closest('a[data-goto]');
+  if (!link) return;
+  e.preventDefault();
+  const go = () => $(`#${link.dataset.goto}`)?.scrollIntoView({ block: 'start', behavior: calm() ? 'auto' : 'smooth' });
+  if (location.hash === link.hash) return go();
+  addEventListener('hashchange', go, { once: true });
+  location.hash = link.hash;
+});
 
 function drawClock() {
   $('#clock').textContent = new Date().toLocaleString(locale(), { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -2034,6 +2061,11 @@ function liveFeedHtml(x) {
   return html;
 }
 
+// The folds of the band of what the session asks (ui/asks.js), kept while its conversation is shown.
+let askFolds = newFolds(null);
+const askFacts = r => (r.explain ? permissionFacts(r.explain, r.id)
+  : `<span class="ask-full">${esc(t('The agent asks to: {what}', { what: r.what }))}</span><span class="hint">${esc(t('Allowed, it is told to go ahead; the permission lasts for this session.'))}</span>`);
+
 function drawLive() {
   const d = liveChat.data;
   if (!liveChat.id) return;
@@ -2069,12 +2101,11 @@ function drawLive() {
     }
   }
 
-  // What the agent asks of you: each permission, with Allow and Refuse.
-  const asks = (d?.requests ?? []).filter(r => r.kind === 'permission').map(r => `<div class="needs live-ask" role="alert">
-      <div class="needs-text"><span class="needs-label">${esc(t('Needs you'))}</span>${r.explain ? `<strong class="perm-what">${esc(r.explain.summary)}</strong>${permissionFacts(r.explain, r.id)}` : `${esc(t('The agent asks to: {what}', { what: r.what }))}<span class="hint">${esc(t('Allowed, it is told to go ahead; the permission lasts for this session.'))}</span>`}</div>
-      <span class="compose-buttons"><button type="button" class="button secondary small" data-live-refuse="${esc(r.id)}">${esc(t('Refuse'))}</button><button type="button" class="button small" data-live-allow="${esc(r.id)}">${esc(t('Allow'))}</button></span>
-    </div>`).join('');
-  draw('#live-asks', JSON.stringify([x.id, d?.requests ?? [], language()]), asks);
+  // What the agent asks of you: a compact band (ui/asks.js), each permission with Allow and Refuse.
+  const asks = (d?.requests ?? []).filter(r => r.kind === 'permission');
+  if (askFolds.session !== x.id) askFolds = newFolds(x.id);
+  askFolds = keepFolds(askFolds, asks);
+  draw('#live-asks', JSON.stringify([x.id, asks, askFolds, language()]), asksHtml(asks, askFolds, { t, esc, facts: askFacts }));
 
   const queue = d?.queue ?? [];
   $('#live-queue').hidden = !queue.length;
@@ -2573,13 +2604,13 @@ function browsersHtml() {
       <td>${esc(b.task ?? t('Opened before the projects had browsers of their own'))}</td>
       <td class="num">${elapsed(b.since)}</td>
       <td>${stateHtml(BROWSER_STATES[b.state]?.() ?? BROWSER_STATES.unknown())}</td>
-      <td class="row-actions"><button type="button" class="button small" data-browser-focus="${b.pid}">${esc(t('Bring to front'))}</button> <button type="button" class="button ${b.state === 'running' ? 'danger ' : ''}small" data-browser-close="${b.pid}">${esc(t('Close'))}</button></td>
+      <td class="row-actions">${offered('browser-focus') ? `<button type="button" class="button small" data-browser-focus="${b.pid}">${esc(t('Bring to front'))}</button> ` : ''}<button type="button" class="button ${b.state === 'running' ? 'danger ' : ''}small" data-browser-close="${b.pid}">${esc(t('Close'))}</button></td>
     </tr>`);
   const table = list.length
     ? `<table class="table"><thead><tr><th>${esc(t('Project'))}</th><th>${esc(t('Task'))}</th><th>${esc(t('For how long'))}</th><th>${esc(t('Status'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
     : `<div class="empty">${esc(t('No browser of the crew open.'))}</div>`;
   return `<h2 class="section-title">${esc(t('Open browsers'))}</h2>
-    <p class="hint">${esc(t("Each project's browser has its own profile, its color on the frame and its name in the window's title. Chiefmate closes it when its task ends, unless a request waits for you, such as a sign-in."))}</p>
+    <p class="hint">${esc(t("Each project's browser has its own profile, its color on the frame and its name in the window's title. Chiefmate closes it when its task ends, unless a request waits for you, such as a sign-in."))}${offered('browser-focus') ? '' : ` ${esc(t('Bringing one to the front is done on the computer where Chiefmate runs.'))}`}</p>
     ${table}`;
 }
 
@@ -2650,8 +2681,23 @@ const projectHash = (id, tab = 'overview') => `#project/${encodeURIComponent(id)
 const projectOpenItems = (id, p) => planItemsNow().filter(i => openItem(i) && (i.project === id || i.project === p?.name));
 const noCloneAttr = info => (info && !info.clone ? ` disabled title="${esc(t('No clone of yours on this computer: set "local_clone" in its settings.'))}"` : '');
 
-function openSystem(url) {
-  return url ? `<a class="button secondary small" href="${esc(url)}" target="_blank" rel="noopener">${esc(t('Open the system'))}</a>` : '';
+/**
+ * The button to the development environment's system, or ''. From another device, "localhost" is this computer's name
+ * in the tailnet: it opens there when the system listens beyond this computer (such as with --host).
+ */
+function openSystem(address) {
+  let url;
+  try {
+    url = new URL(address);
+  } catch {
+    return '';
+  }
+  if (!['http:', 'https:'].includes(url.protocol)) return '';
+  const afar = !onThisComputer() && ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(url.hostname);
+  if (afar) url.hostname = location.hostname;
+  else if (url.hostname === '0.0.0.0') url.hostname = 'localhost'; // "every address" doesn't open on Windows
+  const hint = afar ? ` title="${esc(t('Opens from here when the system accepts connections from other devices (such as with --host).'))}"` : '';
+  return `<a class="button secondary small" href="${esc(url.href)}" target="_blank" rel="noopener"${hint}>${esc(t('Open the system'))}</a>`;
 }
 
 function drawProjectPage() {
@@ -2839,7 +2885,8 @@ function drawProjectMore(id, info) {
   const item = (attrs, label) => `<button type="button" class="menu-item" ${attrs}>${esc(label)}</button>`;
   const session = (tool, window = false) => {
     const profile = profiles.find(x => x.tool === tool);
-    if (!profile) return '';
+    // From another device, a window would open in the app anyway: the live session already does that.
+    if (!profile || (window && !onThisComputer())) return '';
     return window
       ? item(`data-session-open="${esc(profile.id)}" data-window="1"${noClone}`, t('Open in an external window: {tool}', { tool: toolName(tool) }))
       : item(`data-session-open="${esc(profile.id)}"${noClone}`, t('Live session: {tool}', { tool: toolName(tool) }));
@@ -2853,12 +2900,15 @@ function drawProjectMore(id, info) {
     state.charge?.[id] && !workSession(id) ? item(`data-work-now="codex"${noClone}`, t('Work now with Codex')) : '',
     state.prompts?.configured ? item('data-project-live', t('Prompt builder, then a live session')) : '',
     devItem,
-    item(`data-project-open="folder"${noClone}`, t('Open folder')),
-    info?.vscode ? item(`data-project-open="vscode"${noClone}`, t('Open in VS Code')) : '',
+    offered('project-open') ? item(`data-project-open="folder"${noClone}`, t('Open folder')) : '',
+    info?.vscode && offered('project-vscode') ? item(`data-project-open="vscode"${noClone}`, t('Open in VS Code')) : '',
+    // From another device, the project's files open in the app instead.
+    offered('project-open') ? '' : `<a class="menu-item" href="${esc(projectHash(id, 'files'))}">${esc(t('Browse the files'))}</a>`,
     session('claude'),
     session('codex'),
     session('claude', true),
     session('codex', true),
+    onThisComputer() ? '' : `<p class="menu-note">${esc(t('Opening the folder, VS Code or a window is done on the computer where Chiefmate runs.'))}</p>`,
   ].join('');
   const html = `<details class="menu"><summary class="button secondary">${esc(t('More'))}</summary><div class="menu-list">${items}</div></details>`;
   draw('#project-more', html, html);
@@ -4608,6 +4658,8 @@ async function fetchState() {
   const r = await fetch('/api/state', { cache: 'no-store', headers: stateTag && state ? { 'if-none-match': stateTag } : {} });
   if (r.status === 304) return state;
   const data = await r.json().catch(() => ({}));
+  // Through the remote access, the lockdown refuses the state but says why (423).
+  if (r.status === 423 && data.lockdown) throw Object.assign(new Error(data.error), { lockdown: data.lockdown, language: data.language });
   if (!r.ok) throw new Error(data.error || t('Error {code}', { code: r.status }));
   stateTag = r.headers.get('etag');
   return data;
@@ -4617,10 +4669,16 @@ async function refresh() {
   let next;
   try {
     next = await fetchState();
-  } catch {
+  } catch (error) {
+    lockedAfar = error.lockdown ?? null;
+    if (lockedAfar && error.language && !started && error.language !== language()) {
+      await setLanguage(error.language);
+      translatePage();
+    }
     drawOffline();
     return;
   }
+  lockedAfar = null;
   const fresh = next !== state;
   if (!started) {
     await setLanguage(next.language);
@@ -4825,6 +4883,14 @@ $('#live-interrupt').addEventListener('click', async () => {
   }
 });
 $('#live-body').addEventListener('click', async event => {
+  // The band of asks: the group or an ask's details fold and unfold; the focus stays on the toggle drawn again.
+  const fold = event.target.closest('[data-ask-fold]')?.dataset.askFold;
+  if (fold) {
+    askFolds = toggleFold(askFolds, fold);
+    drawLive();
+    [...$('#live-asks').querySelectorAll('[data-ask-fold]')].find(b => b.dataset.askFold === fold)?.focus();
+    return;
+  }
   const target = event.target.closest('[data-live-resume],[data-live-allow],[data-live-refuse],[data-live-unqueue]');
   if (!target || !liveChat.id) return;
   target.disabled = true;
@@ -4981,14 +5047,14 @@ document.addEventListener('click', async event => {
     } else if (target.dataset.projectDev) {
       const project = pageProject();
       if (target.dataset.projectDev === 'stop') {
-        const ok = await confirmDialog(t('Stop the development environment'), t('The window of the development environment of {project} closes, with everything it started.', { project: projectName(project) }), t('Stop'));
+        const ok = await confirmDialog(t('Stop the development environment'), t('The development environment of {project} stops, with everything it started.', { project: projectName(project) }), t('Stop'));
         if (!ok) return;
         const r = await api('/api/project/dev', { project, action: 'stop' });
         toast(r.stopped ? t('Development environment stopped.') : t('It was no longer running.'));
       } else {
         target.disabled = true;
-        await api('/api/project/dev', { project, action: 'start' });
-        toast(t('Development environment starting in a window of its own.'));
+        const r = await api('/api/project/dev', { project, action: 'start' });
+        toast(r.background ? t('Development environment starting in the background: its address shows on this page when it is up.') : t('Development environment starting in a window of its own.'));
       }
       await refreshProjectPage();
     } else if (target.dataset.run) {
@@ -5159,6 +5225,8 @@ async function openFile(ref, { gallery = null } = {}) {
   try {
     info = await api(fileUrl('info', ref));
   } catch (error) {
+    // Outside the viewer's folders, or in none of the project's copies: perhaps a file of your user folder.
+    if (ref.path && !ref.file && (error.status === 404 || error.data?.reason === 'outside')) return openOnComputer(ref.path, error);
     toast(error.message);
     return;
   }
@@ -5169,6 +5237,42 @@ async function openFile(ref, { gallery = null } = {}) {
   if (!$('#viewer').open) $('#viewer').showModal();
   drawViewer(token);
 }
+
+/**
+ * A file of your user folder (src/files.mjs, openOnComputer): on this computer, opened with its own app; elsewhere (the
+ * phone), its path to copy, as it opens only on the computer. Not found: the path tried, with what the viewer said.
+ */
+async function openOnComputer(file, viewerError = null) {
+  const here = offered('file-open');
+  try {
+    const r = await api('/api/files/open', { path: file, dryRun: !here });
+    if (!here) pathDialog(t('Opens on the computer'), r.path, t('This file opens on the computer where Chiefmate runs, not here: copy its path to find it there.'));
+    else toast(r.how === 'reveal' ? t('Shown in its folder on the computer: {name}', { name: baseName(r.path) }) : t('Opened on the computer: {name}', { name: baseName(r.path) }));
+  } catch (error) {
+    if (error.status !== 404) return toast(error.message);
+    pathDialog(t('File not found'), error.data?.tried ?? file, [viewerError?.status === 404 ? viewerError.message : '', error.message].filter(Boolean).join('\n'));
+  }
+}
+
+/** A path to copy, with a line on it (#path-dialog). */
+function pathDialog(title, file, text) {
+  $('#path-dialog-title').textContent = title;
+  $('#path-dialog-text').textContent = text;
+  $('#path-dialog-path').textContent = file;
+  if (!$('#path-dialog').open) $('#path-dialog').showModal();
+}
+
+$('#path-dialog-copy').addEventListener('click', async () => {
+  const file = $('#path-dialog-path').textContent;
+  try {
+    await navigator.clipboard.writeText(file);
+  } catch {
+    // Without a secure context (http on the phone), the browser's own copy of the selected path.
+    getSelection().selectAllChildren($('#path-dialog-path'));
+    document.execCommand('copy');
+  }
+  toast(t('Path copied.'));
+});
 
 function stepGallery(by) {
   const { gallery, index } = viewer;
@@ -5188,6 +5292,8 @@ function drawViewer(token = viewer.token) {
   $('#viewer-tools').innerHTML = [
     info.kind === 'image' ? `<button type="button" class="button secondary small" data-viewer="zoom" aria-pressed="${viewer.zoom}">${esc(viewer.zoom ? t('Fit to screen') : t('Actual size'))}</button>` : '',
     info.dir ? '' : `<a class="button secondary small" href="${esc(raw)}" target="_blank" rel="noopener"${downloads(info) ? ' download' : ''}>${esc(downloads(info) ? t('Download') : t('Open in a tab'))}</a>`,
+    // With its own app (an HTML page shown as a page, not as its code), on this computer only.
+    info.ref.path && offered('file-open') ? `<button type="button" class="button secondary small" data-viewer="computer">${esc(t('Open on the computer'))}</button>` : '',
   ].join('');
   const body = $('#viewer-body');
   body.dataset.kind = info.kind;
@@ -5338,6 +5444,7 @@ document.addEventListener('click', event => {
   event.preventDefault();
   const inViewer = !!el.closest('#viewer');
   if (el.dataset.viewer === 'prev' || el.dataset.viewer === 'next') stepGallery(el.dataset.viewer === 'next' ? 1 : -1);
+  else if (el.dataset.viewer === 'computer') openOnComputer(viewer.info.ref.path);
   else if (el.dataset.viewer === 'zoom') {
     // Without drawing again: the image is not read a second time.
     viewer.zoom = !viewer.zoom;

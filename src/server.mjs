@@ -14,7 +14,7 @@ import { effortHistory, effortSource, runEffortChanges, setEffort } from './effo
 import { agentTool, runTools, toolModel } from './tools.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
 import { addQuestion, decide, decisionCards, openPushes, openQuestions, openRepoRequests } from './decisions.mjs';
-import { listFolder, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
+import { listFolder, openOnComputer, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
 import { engage, isLocked, lockdownView, recordSignal, release } from './lockdown.mjs';
@@ -235,7 +235,7 @@ async function filesRoute(req, res, url) {
     }
     return reply(res, 404, { error: 'not found' });
   } catch (error) {
-    return reply(res, typeof error.code === 'number' ? error.code : 400, { error: error.message });
+    return reply(res, typeof error.code === 'number' ? error.code : 400, { error: error.message, ...(error.reason ? { reason: error.reason } : {}) });
   }
 }
 
@@ -489,15 +489,30 @@ export function remoteRefusal(req, remote) {
   return '';
 }
 
-// Commands that open a window or a program on the computer where Chiefmate runs: from another device, nobody would see
-// them, so they are refused there (their "dryRun" still answers).
-const OPENS_ON_PC = {
-  '/api/project/open': () => true,
-  '/api/project/dev': body => body.action === 'start',
-  '/api/session': body => !!body.window,
-  '/api/prompt-builder/session': body => !!body.window,
-  '/api/browser': body => body.action === 'focus',
-};
+/**
+ * A command from another device (the remote access), where nobody would see a window open on the computer where
+ * Chiefmate runs: { body } as it goes on, or { refused: true }. A session (the prompt builder's too) opens in the app
+ * instead of a window, and the development environment runs in the background with no window. Opening the folder or
+ * VS Code, a file of your user folder and bringing a browser to the front work only on the computer, so they are
+ * refused, and the app doesn't offer them there (ui/afar.js; a file's path is shown to copy). Their "dryRun" still
+ * answers.
+ */
+export function fromAfar(route, body) {
+  switch (route) {
+    case '/api/session':
+    case '/api/prompt-builder/session':
+      return { body: { ...body, window: false } };
+    case '/api/project/dev':
+      return { body: body.action === 'start' ? { ...body, background: true } : body };
+    case '/api/project/open':
+    case '/api/files/open':
+      return { body, refused: true };
+    case '/api/browser':
+      return { body, refused: body.action === 'focus' };
+    default:
+      return { body };
+  }
+}
 
 export function startServer() {
   const config = loadConfig();
@@ -522,8 +537,17 @@ export function startServer() {
           recordSignal(refused === 'not allowed in' ? 'login_failed' : 'unknown_origin', `${req.method} ${clip(String(req.url), 120)} (${refused})`, { who: 'remote' });
           return reply(res, 403, { error: refused });
         }
-        // In an emergency lockdown, the remote access is off: only engaging it again is taken.
-        if (isLocked() && !(req.method === 'POST' && req.url === '/api/lockdown')) return reply(res, 423, { error: t('Chiefmate is in emergency lockdown: the remote access is off until the owner releases it on the computer.') });
+        // In an emergency lockdown, the remote access is off: only engaging it again is taken. The app's own files
+        // still load, and the refusal carries the reason, so the device shows the lockdown instead of a lost connection.
+        // The path is read as the routes below read it, so "/./api/state" and the like are the API, not a file.
+        const appFile = req.method === 'GET' && !new URL(req.url, `https://${remote.host}`).pathname.startsWith('/api/');
+        if (isLocked() && !appFile && !(req.method === 'POST' && req.url === '/api/lockdown')) {
+          const { since, reason } = lockdownView();
+          return reply(res, 423, {
+            error: t('Chiefmate is in emergency lockdown: the remote access is off until the owner releases it on the computer.'),
+            lockdown: { active: true, since, reason }, language: loadConfig().language || 'en',
+          });
+        }
       } else if (!allowed.has(req.headers.host)) {
         recordSignal('unknown_origin', `${req.method} ${clip(String(req.url), 120)} (host ${clip(String(req.headers.host ?? ''), 80)})`, { who: 'app' });
         return reply(res, 403, { error: 'address not allowed' });
@@ -583,9 +607,11 @@ export function startServer() {
         recordSignal('unknown_origin', `POST ${clip(String(req.url), 120)} (origin ${clip(String(origin ?? 'none'), 80)})`, { who: remote ? 'remote' : 'app' });
         return reply(res, 403, { error: 'request refused' });
       }
-      const body = await readBody(req);
-      if (remote && !body.dryRun && OPENS_ON_PC[url.pathname]?.(body)) {
-        return reply(res, 403, { error: t('This opens on the computer where Chiefmate runs: do it there.') });
+      let body = await readBody(req);
+      if (remote) {
+        const afar = fromAfar(url.pathname, body);
+        if (afar.refused && !body.dryRun) return reply(res, 403, { error: t('This opens on the computer where Chiefmate runs: do it there.') });
+        body = afar.body;
       }
       switch (url.pathname) {
         case '/api/mission': {
@@ -671,12 +697,21 @@ export function startServer() {
           return reply(res, 200, { queue: removeQueued(String(body.id ?? ''), String(body.item ?? '')) });
         case '/api/session/permission':
           return reply(res, 200, answerPermission(String(body.id ?? ''), String(body.request ?? ''), body.allow === true));
+        case '/api/files/open':
+          // A file of your user folder, opened on this computer (src/files.mjs); "dryRun" only finds it, as the phone does.
+          try {
+            return reply(res, 200, openOnComputer(body.path, { dryRun: !!body.dryRun }));
+          } catch (error) {
+            if (typeof error.code !== 'number') throw error;
+            return reply(res, error.code, { error: error.message, ...(error.reason ? { reason: error.reason } : {}), ...(error.tried ? { tried: error.tried } : {}) });
+          }
         case '/api/project/open':
           // "app": "folder" (the file manager) or "vscode", in your own clone of the project.
           return reply(res, 200, openProjectApp(String(body.project ?? ''), String(body.app ?? ''), { dryRun: !!body.dryRun }));
         case '/api/project/dev': {
-          // The project's development environment ("dev_start"): "action": "start" or "stop".
-          const options = { dryRun: !!body.dryRun };
+          // The project's development environment ("dev_start"): "action": "start" or "stop"; "background" runs it
+          // with no window (from another device), its output kept in a log.
+          const options = { dryRun: !!body.dryRun, background: !!body.background };
           if (body.action === 'start') return reply(res, 200, await startDev(String(body.project ?? ''), options));
           if (body.action === 'stop') return reply(res, 200, await stopDev(String(body.project ?? ''), options));
           return reply(res, 400, { error: t('Say "start" or "stop".') });
