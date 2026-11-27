@@ -16,7 +16,7 @@ import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/conf
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, opening, openOnComputer, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
 import { plainPush, publishing, riskyCommand } from '../src/guard.mjs';
-import { checkSignals, engage, isLocked, readLockdown, recordSignal, refuseWhileLocked, release, RULES, weigh, WINDOW_MINUTES } from '../src/lockdown.mjs';
+import { checkSignals, engage, isLocked, ownerKeyFile, protectedFolders, readLockdown, recordSignal, refuseWhileLocked, release, RULES, weigh, WINDOW_MINUTES } from '../src/lockdown.mjs';
 import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
 import { copyHolders, pickNext } from '../src/queue.mjs';
@@ -36,7 +36,8 @@ import './away-ui.test.mjs';
 import { AFAR_VERSION, offered, ONLY_ON_PC } from '../ui/afar.js';
 import { asksHtml, asksLayout, GROUP_FROM, keepFolds, newFolds, toggleFold } from '../ui/asks.js';
 import { devLog, startDev } from '../src/projects.mjs';
-import { fromAfar } from '../src/server.mjs';
+import { connectionOwner, fromAfar, fromServe, isTailscaleService, ownAddresses, ownerOnly, remoteRefusal, tailnetSource } from '../src/server.mjs';
+import { forAgent, isOwner, openAppWindow, OWNER_HEADER, ownerHeaders, ownerKey, pairingCode, redeemCode } from '../src/owner.mjs';
 
 const windows = process.platform === 'win32';
 const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-unit-'));
@@ -1388,6 +1389,140 @@ test('from afar, what opens on the computer is refused and not offered, and the 
   assert.deepEqual(fromAfar('/api/browser', { action: 'close', pid: 1 }), { body: { action: 'close', pid: 1 }, refused: false });
   assert.deepEqual(fromAfar('/api/project/dev', { action: 'stop' }).body, { action: 'stop' });
   assert.deepEqual(fromAfar('/api/task', { x: 1 }), { body: { x: 1 } });
+});
+
+test("the remote access takes only Tailscale Serve's connections, from another device of the tailnet", () => {
+  const remote = { host: 'pc.tailnet.ts.net', logins: ['owner@example.com'], port: 4748 };
+  const request = from => ({ method: 'GET', headers: { host: remote.host, 'tailscale-user-login': 'owner@example.com', ...(from === undefined ? {} : { 'x-forwarded-for': from }) } });
+  // The phone, by its tailnet address (IPv4 or IPv6), goes on.
+  assert.equal(tailnetSource('100.101.102.103', ['127.0.0.1']), '');
+  assert.equal(tailnetSource('fd7a:115c:a1e0::1234', []), '');
+  // This computer's own node calling its tailnet name carries the owner's login too: refused.
+  assert.equal(tailnetSource('100.94.1.2', ['127.0.0.1', '100.94.1.2']), 'from this computer');
+  // No address, one outside the tailnet, or a list of them: not what Serve sends.
+  for (const from of [undefined, '', '127.0.0.1', '192.168.0.5', '100.128.0.1', '100.101.102.103, 100.1.2.3']) {
+    assert.equal(tailnetSource(from, []), 'not through the tailnet', `${from} was taken as a tailnet device`);
+  }
+  assert.equal(remoteRefusal(request(undefined), remote), 'not through the tailnet');
+  assert.equal(remoteRefusal(request('127.0.0.1'), remote), 'not through the tailnet');
+  assert.ok(ownAddresses().includes('127.0.0.1'), "this computer's addresses were not read");
+  const ownNode = ownAddresses().find(a => tailnetSource(a, []) === '');
+  if (ownNode) assert.equal(remoteRefusal(request(ownNode), remote), 'from this computer');
+  assert.equal(remoteRefusal(request('100.101.102.103'), remote), '');
+
+  // Who opened the connection, read from netstat: the client's side of it, never the listener's.
+  const netstat = [
+    '  Proto  Local Address          Foreign Address        State           PID',
+    '  TCP    127.0.0.1:4748         0.0.0.0:0              LISTENING       9768',
+    '  TCP    127.0.0.1:4748         127.0.0.1:63518        ESTABLISHED     9768',
+    '  TCP    127.0.0.1:63518        127.0.0.1:4748         ESTABELECIDA    8376',
+    '  TCP    127.0.0.1:63520        127.0.0.1:4747         ESTABLISHED     5555',
+  ].join('\r\n');
+  assert.equal(connectionOwner(netstat, 63518, 4748), 8376);
+  assert.equal(connectionOwner(netstat, 63520, 4748), 0);
+  assert.equal(connectionOwner('', 63518, 4748), 0);
+  // Tailscale's service runs in session 0, where a user's programs can't; one named like it elsewhere is refused.
+  assert.equal(isTailscaleService('"tailscaled.exe","8376","Services","0","67,904 K"'), true);
+  assert.equal(isTailscaleService('"tailscaled.exe","9000","Console","1","10,000 K"'), false);
+  assert.equal(isTailscaleService('"svchost.exe","1200","Services","0","9,000 K"'), false);
+  assert.equal(isTailscaleService('INFO: No tasks are running which match the specified criteria.'), false);
+});
+
+test('a program of this computer sending Serve\'s headers to the remote listener is refused', { skip: process.platform !== 'win32' }, async () => {
+  const http = await import('node:http');
+  let stand = {};
+  const server = http.createServer((req, res) => fromServe(req.socket, stand).then(ok => res.end(String(ok))));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const ask = () => new Promise((resolve, reject) => http.get({ host: '127.0.0.1', port: server.address().port, agent: false }, res => {
+    let text = '';
+    res.on('data', d => (text += d)).on('end', () => resolve(text));
+  }).on('error', reject));
+  try {
+    // This test's own process is not Tailscale's service.
+    assert.equal(await ask(), 'false');
+    // The lookup finds the process that opened the connection: this one, when it stands in for Serve.
+    stand = { servePid: process.pid };
+    assert.equal(await ask(), 'true');
+    stand = { servePid: process.pid + 1 };
+    assert.equal(await ask(), 'false');
+  } finally {
+    server.close();
+  }
+});
+
+// ---------- The owner's local key ----------
+
+test("the owner's key is made once, kept in its file and checked exactly", () => {
+  const dir = path.join(temp, 'owner-security');
+  const key = ownerKey(dir);
+  assert.match(key, /^[\w-]{40,}$/);
+  assert.equal(readFileSync(ownerKeyFile(dir), 'utf8').trim(), key);
+  assert.equal(ownerKey(dir), key, 'the key changed on a second reading');
+  assert.equal(isOwner({ [OWNER_HEADER]: key }, dir), true);
+  for (const wrong of [undefined, '', key.slice(1), `${key}x`, key.toUpperCase()]) assert.equal(isOwner({ [OWNER_HEADER]: wrong }, dir), false, `${wrong} was taken for the key`);
+});
+
+test("only the owner's terminal sends the key: an agent's command never does", () => {
+  const dir = path.join(temp, 'owner-security');
+  assert.deepEqual(ownerHeaders({}, dir), { [OWNER_HEADER]: ownerKey(dir) });
+  for (const name of ['CHIEFMATE_RUN', 'CHIEFMATE_MANAGER', 'CHIEFMATE_SESSION', 'CHIEFMATE_RESCUER']) {
+    assert.equal(forAgent({ [name]: '1' }), true, `${name} is not an agent`);
+    assert.deepEqual(ownerHeaders({ [name]: '1' }, dir), {}, `the key goes with ${name}`);
+  }
+});
+
+test("the owner's key is a protected place: an agent's command that reaches it is refused", () => {
+  const data = path.join(temp, 'owner-data');
+  const file = ownerKeyFile(path.join(data, 'security'));
+  const protect = protectedFolders({}, data);
+  assert.ok(protect.includes(file), "the key's file is not protected");
+  for (const command of [`type "${file}"`, `node -e "console.log(require('fs').readFileSync('${file.replaceAll('\\', '/')}', 'utf8'))"`]) {
+    assert.ok(riskyCommand(command, { cwd: temp, protect, home: temp, temp }).some(f => f.kind === 'protected_access'), `reading the key was not caught: ${command}`);
+  }
+});
+
+test('a pairing code gives the key once, and only within its time', () => {
+  const dir = path.join(temp, 'owner-security');
+  const at = Date.now();
+  const code = pairingCode(at);
+  assert.equal(redeemCode(code, { at, dir }), ownerKey(dir));
+  assert.equal(redeemCode(code, { at, dir }), null, 'a code was used twice');
+  assert.equal(redeemCode(pairingCode(at), { at: at + 3 * 60_000, dir }), null, 'an expired code was taken');
+  for (const wrong of ['made-up', undefined, '']) assert.equal(redeemCode(wrong, { at, dir }), null);
+  assert.deepEqual(openAppWindow({ port: 1, dryRun: true }), { opened: false, dryRun: true }, 'a test opened a window');
+});
+
+test('without the key, a command may do only what an agent may, never as the owner', () => {
+  const owners = [
+    ['/api/lockdown', { action: 'release', confirm: true }], ['/api/lockdown', { action: 'engage', by: 'owner' }],
+    ['/api/decide', { card: 'x', action: 'approve' }], ['/api/merge', { run: 'r' }], ['/api/merge', { run: 'r', by: 'owner' }],
+    ['/api/close-pr', { run: 'r', replacedBy: 'n' }], ['/api/manager', { message: 'hi' }], ['/api/manager/edit', { id: '1' }],
+    ['/api/manager/interrupt', {}], ['/api/needs-you/done', { run: 'r', id: '1', by: 'owner' }], ['/api/needs-you/done', { by: 'check', answer: 'yes' }],
+    ['/api/defect/close', { id: 1 }], ['/api/session/say', { id: 's', text: 'x' }], ['/api/steer', { by: 'cli' }], ['/api/power', { action: 'standby' }],
+    ['/api/planning', { action: 'approve', id: 1 }], ['/api/planning', { action: 'set', id: 1, status: 'approved' }], ['/api/radar', { action: 'choose', id: 1 }],
+    ['/api/radar', { action: 'choose', id: 1, by: 'crew' }], ['/api/radar', { action: 'set', id: 1, status: 'virou projeto', by: 'crew' }], ['/api/radar', { action: 'set', id: 1 }],
+    ['/api/update-now', { interruptManager: true }], ['/api/usage-reader', { enabled: true }], ['/api/files/open', { path: 'x' }], ['/api/effort', {}],
+    ['/api/autopilot', {}], ['/api/away', { on: true }], ['/api/attention/seen', { ids: [] }], ['/api/run/talk', {}], ['/api/new-conversation', {}],
+    ['/api/session/permission', {}], ['/api/work-now', {}], ['/api/voice-input', {}], ['/api/no-such-route', {}],
+  ];
+  for (const [route, body] of owners) assert.equal(ownerOnly(route, body), true, `${route} ${JSON.stringify(body)} goes without the key`);
+  // What the command line sends for an agent (a step, a live session, the manager, the watchdog and its rescuer).
+  const agents = [
+    ['/api/needs-you', { run: 'r', what: 'x' }], ['/api/needs-you/poll', { run: 'r', id: '1' }], ['/api/needs-you/done', { run: 'r', id: '1', by: 'check' }],
+    ['/api/defect', { text: 'x', from: { run: 'r' } }], ['/api/defect/close', { id: 1, by: 'manager' }], ['/api/manager', { message: 'x', from: { session: 's' } }],
+    ['/api/request', { id: 'x', action: 'approve' }], ['/api/ask-owner', { question: 'x' }], ['/api/task', {}], ['/api/ask', {}], ['/api/mission', {}],
+    ['/api/level', {}], ['/api/cancel', {}], ['/api/resume', {}], ['/api/planning', { action: 'propose', project: 'p', title: 't', run: 'r' }],
+    ['/api/planning', { action: 'approve', id: 1, by: 'manager' }], ['/api/radar', { action: 'add', by: 'crew' }], ['/api/session', { profile: 'x' }],
+    ['/api/radar', { action: 'set', id: 1, summary: 'x', by: 'crew' }], ['/api/radar', { action: 'set', id: 1, status: 'project', project: 'p', by: 'manager' }],
+    ['/api/session/end', { id: 's' }], ['/api/session/say', { id: 's', text: 'x', by: 'manager' }], ['/api/steer', { by: 'manager' }],
+    ['/api/merge', { run: 'r', preview: true }], ['/api/merge', { run: 'r', by: 'manager' }], ['/api/close-pr', { run: 'r', by: 'manager' }],
+    ['/api/lockdown', { action: 'engage', by: 'step' }], ['/api/limits', {}], ['/api/stop-project', { project: 'p', pids: [1] }], ['/api/project/dev', {}],
+    ['/api/prompts-sync', {}], ['/api/update-check', {}], ['/api/update-now', {}], ['/api/usage-reader', { read: true }], ['/api/watchdog', { text: 'x' }],
+    ['/api/owner/window', {}], ['/api/owner/pair', { code: 'x' }],
+  ];
+  for (const [route, body] of agents) assert.equal(ownerOnly(route, body), false, `${route} ${JSON.stringify(body)} needs the key`);
+  // The app sends the key in the server's header.
+  assert.ok(readFileSync(path.join(import.meta.dirname, '..', 'ui', 'app.js'), 'utf8').includes(`'${OWNER_HEADER}': owner`), "the app doesn't send the owner's key");
 });
 
 test('the development environment started from afar runs in the background', async () => {

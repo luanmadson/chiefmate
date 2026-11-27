@@ -1,7 +1,9 @@
 // The app (http://localhost:4747) and the API it uses. It only answers this computer.
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { attentionArchive, attentionItems, attentionSummary, markSeen } from './attention.mjs';
@@ -27,8 +29,9 @@ import { awayInfo, reportEvent, setAway } from './news.mjs';
 import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
 import { cancelStop, powerInfo, powerPreview, setStandby, stopSystem } from './power.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
-import { changePlan, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
-import { changeRadar, RADAR_STATUSES, radarIdeas } from './radar.mjs';
+import { isOwner, OWNER_HEADER, openAppWindow, redeemCode } from './owner.mjs';
+import { changePlan, parseStatus, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
+import { changeRadar, parseRadarStatus, RADAR_STATUSES, radarIdeas } from './radar.mjs';
 import { deliverDevNotices, devState, openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
@@ -44,7 +47,7 @@ import {
 import { talkTo } from './talk.mjs';
 import { listRuns, readConversation, readNotifications, readPending, readRun, readUsage, runDir, runEnded, stepsOf } from './store.mjs';
 import { checkNow, updateInfo, updateMode, updateNow } from './update.mjs';
-import { isReading, loginState, openLogin, readerSettings, readerStatus, readUsagePage, signedIn, signInNeeded } from './usagepage.mjs';
+import { browserPath, isReading, loginState, openLogin, readerSettings, readerStatus, readUsagePage, signedIn, signInNeeded } from './usagepage.mjs';
 import { clip, now, ROOT, VERSION } from './util.mjs';
 import { projectDir } from './workspace.mjs';
 
@@ -481,7 +484,8 @@ export function remoteSettings(settings, mainPort) {
 /**
  * Why a request to the remote listener is refused, or '' when it may go on. Tailscale Serve sets
  * Tailscale-User-Login and removes one sent by the device; Funnel (the public internet) and tagged devices send none.
- * Host and Origin must be the tailnet name, so no other website can drive the app through the browser.
+ * Host and Origin must be the tailnet name, so no other website can drive the app through the browser. The device
+ * must be another one of the tailnet (tailnetSource); that the headers are Serve's is checked apart (fromServe).
  */
 export function remoteRefusal(req, remote) {
   const hostname = String(req.headers.host ?? '').toLowerCase().replace(/:443$/, '');
@@ -491,7 +495,62 @@ export function remoteRefusal(req, remote) {
   if (req.method !== 'GET' && origin === undefined) return 'request refused';
   const login = String(req.headers['tailscale-user-login'] ?? '').trim().toLowerCase();
   if (!login || !remote.logins.includes(login)) return 'not allowed in';
-  return '';
+  return tailnetSource(req.headers['x-forwarded-for'], ownAddresses());
+}
+
+// A Tailscale address: 100.64.0.0/10 or fd7a:115c:a1e0::/48.
+const TAILNET_ADDRESS = /^(100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}|fd7a:115c:a1e0:[0-9a-f:]*)$/i;
+
+/** This computer's own addresses, its node in the tailnet among them. */
+export function ownAddresses() {
+  return Object.values(os.networkInterfaces()).flat().map(a => String(a?.address ?? '').toLowerCase());
+}
+
+/**
+ * Why the device behind a request is refused, or '' when it may go on. Tailscale Serve puts the device's tailnet
+ * address in X-Forwarded-For, replacing one the device sent. A request from this computer's own node (its programs
+ * calling the tailnet name) carries the owner's login too, so it is refused: only another device comes in this way.
+ */
+export function tailnetSource(forwarded, own) {
+  const address = String(forwarded ?? '').trim().toLowerCase();
+  if (!TAILNET_ADDRESS.test(address)) return 'not through the tailnet';
+  return own.includes(address) ? 'from this computer' : '';
+}
+
+/**
+ * The process that opened a TCP connection from 127.0.0.1:<from> to 127.0.0.1:<to>, read from `netstat -ano -p TCP`:
+ * its PID, or 0. The connection's state is skipped, as Windows may translate it.
+ */
+export function connectionOwner(netstat, from, to) {
+  for (const line of String(netstat).split(/\r?\n/)) {
+    const cols = line.trim().split(/\s+/);
+    if (cols[0] === 'TCP' && cols[1] === `127.0.0.1:${from}` && cols[2] === `127.0.0.1:${to}`) return Number(cols.at(-1)) || 0;
+  }
+  return 0;
+}
+
+/** Whether a row of `tasklist /FO CSV /NH` is Tailscale's own service process: tailscaled.exe in session 0. */
+export function isTailscaleService(row) {
+  const [image, , , session] = (String(row).trim().match(/"[^"]*"/g) ?? []).map(x => x.slice(1, -1));
+  return image?.toLowerCase() === 'tailscaled.exe' && session === '0';
+}
+
+const output = (command, args) => new Promise(resolve =>
+  execFile(command, args, { windowsHide: true, timeout: 10_000 }, (error, stdout) => resolve(error ? '' : String(stdout))));
+
+/**
+ * Whether the connection to the remote listener was opened by Tailscale Serve itself, and not by another program of
+ * this computer sending Serve's headers. Serve runs inside Tailscale's Windows service (session 0, where a user's
+ * programs can't run); a stand-in's PID replaces it in the smoke test. Elsewhere than Windows, nothing is taken.
+ * A raw TCP forward that Serve's own settings point here (tailscale serve --tcp) is opened by the service too, with
+ * whatever headers its sender writes: changing Tailscale's settings is beyond this check.
+ */
+export async function fromServe(socket, remote) {
+  if (process.platform !== 'win32' || socket.remoteAddress !== '127.0.0.1') return false;
+  const pid = connectionOwner(await output('netstat', ['-ano', '-p', 'TCP']), socket.remotePort, socket.localPort);
+  if (!pid) return false;
+  if (remote.servePid) return pid === remote.servePid;
+  return isTailscaleService(await output('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH']));
 }
 
 /**
@@ -519,6 +578,65 @@ export function fromAfar(route, body) {
   }
 }
 
+// What a command without the owner's key may do on this computer: what the command line lets an agent (a step, a live
+// session, the manager, the watchdog and its rescuer) do, and never as the owner. Anything else is the owner's: the
+// app and the owner's terminal send the key (src/owner.mjs). A route missing here needs the key.
+const PLAN_DECISIONS = ['triage', 'approve', 'later', 'discard', 'restore', 'order'];
+const DECIDED = ['proposed', 'triaged', 'approved', 'discarded'];
+// The radar: the crew adds and updates ideas; deciding on one is the owner's (the manager's on the owner's word).
+const RADAR_DECISIONS = ['choose', 'later', 'discard', 'restore'];
+const RADAR_DECIDED = ['chosen', 'discarded', 'project'];
+const statusOf = (text, parse = parseStatus) => {
+  try {
+    return parse(text);
+  } catch {
+    return null;
+  }
+};
+const KEYLESS = {
+  '/api/needs-you': true,
+  '/api/needs-you/poll': true,
+  '/api/needs-you/done': b => b.by === 'check' && !b.session && b.answer == null && b.note == null,
+  '/api/defect': true,
+  '/api/defect/close': b => b.by === 'manager',
+  '/api/manager': b => !!b.from && typeof b.from === 'object', // an agent's message, marked as the agent's
+  '/api/request': true,
+  '/api/ask-owner': true,
+  '/api/task': true,
+  '/api/ask': true,
+  '/api/mission': true,
+  '/api/level': true,
+  '/api/cancel': true,
+  '/api/resume': true,
+  '/api/planning': b => b.by === 'manager' || !(PLAN_DECISIONS.includes(b.action) || (b.status && DECIDED.includes(statusOf(b.status)))),
+  '/api/radar': b => b.by === 'manager'
+    || (b.by === 'crew' && !RADAR_DECISIONS.includes(b.action) && !(b.status && RADAR_DECIDED.includes(statusOf(b.status, parseRadarStatus)))),
+  '/api/session': true,
+  '/api/session/end': true,
+  '/api/session/say': b => b.by === 'manager',
+  '/api/steer': b => b.by === 'manager',
+  '/api/merge': b => !!b.preview || b.by === 'manager',
+  '/api/close-pr': b => !!b.preview || b.by === 'manager',
+  '/api/lockdown': b => b.action === 'engage' && ['manager', 'step'].includes(b.by),
+  '/api/limits': true,
+  '/api/stop-project': true,
+  '/api/project/dev': true,
+  '/api/prompts-sync': true,
+  '/api/update-check': true,
+  '/api/update-now': b => !b.interruptManager,
+  '/api/usage-reader': b => b.read === true && b.enabled === undefined && !b.login,
+  '/api/watchdog': true,
+  // Opening the app's window, and the trade of its pairing code for the key.
+  '/api/owner/window': true,
+  '/api/owner/pair': true,
+};
+
+/** Whether a command (route and body) needs the owner's key on this computer. */
+export function ownerOnly(route, body = {}) {
+  const rule = KEYLESS[route];
+  return !(rule === true || (typeof rule === 'function' && rule(body ?? {})));
+}
+
 export function startServer() {
   const config = loadConfig();
   const port = Number(process.env.CHIEFMATE_PORT) || config.port || 4747;
@@ -532,15 +650,24 @@ export function startServer() {
       console.error(`Development environment notices: ${error.message}`);
     }
   }, 2000).unref();
+  // Whether each connection to the remote listener came from Tailscale Serve (fromServe), checked once.
+  const servePeers = new WeakMap();
+  const servePeer = (socket, remote) => {
+    if (!servePeers.has(socket)) servePeers.set(socket, fromServe(socket, remote).catch(() => false));
+    return servePeers.get(socket);
+  };
   const handle = async (req, res, remote = null) => {
     try {
       // Guards against another website open in the browser trying to send commands here.
       // Each refusal is a signal for the emergency lockdown's detection (src/lockdown.mjs).
       if (remote) {
-        const refused = remoteRefusal(req, remote);
+        // The headers first, then who opened the connection: once per connection, as Serve keeps them open.
+        const refused = remoteRefusal(req, remote) || (!(await servePeer(req.socket, remote)) && 'not through Tailscale Serve');
         if (refused) {
           recordSignal(refused === 'not allowed in' ? 'login_failed' : 'unknown_origin', `${req.method} ${clip(String(req.url), 120)} (${refused})`, { who: 'remote' });
-          return reply(res, 403, { error: refused });
+          // A connection refused stays refused (servePeer), so it is closed: a lookup that failed once must not keep
+          // refusing the connection Serve reuses for the app's reads, each refusal a signal toward the lockdown.
+          return reply(res, 403, { error: refused }, refused === 'not through Tailscale Serve' ? { connection: 'close' } : {});
         }
         // In an emergency lockdown, the remote access is off: only engaging it again is taken. The app's own files
         // still load, and the refusal carries the reason, so the device shows the lockdown instead of a lost connection.
@@ -613,6 +740,11 @@ export function startServer() {
         return reply(res, 403, { error: 'request refused' });
       }
       let body = await readBody(req);
+      // On this computer, what is the owner's needs the owner's key; the remote access keeps its own checks.
+      if (!remote && ownerOnly(url.pathname, body) && !isOwner(req.headers)) {
+        recordSignal('unknown_origin', `POST ${clip(String(req.url), 120)} (no owner key)`, { who: 'app' });
+        return reply(res, 403, { error: t("Refused: this is the owner's, and the request doesn't carry the owner's key."), owner: true });
+      }
       if (remote) {
         const afar = fromAfar(url.pathname, body);
         if (afar.refused && !body.dryRun) return reply(res, 403, { error: t('This opens on the computer where Chiefmate runs: do it there.') });
@@ -787,6 +919,19 @@ export function startServer() {
           const pending = url.pathname.endsWith('/edit') ? editPending(id, body.message) : removePending(id);
           return pending ? reply(res, 200, { pending }) : reply(res, 404, { error: t('This message is no longer in the queue: it was delivered or removed.') });
         }
+        case '/api/owner/window':
+          // The app's window, opened here with a pairing code (scripts/open.vbs, or the app without the key).
+          if (remote) return reply(res, 403, { error: t('This opens on the computer where Chiefmate runs: do it there.') });
+          return reply(res, 200, openAppWindow({ port, section: String(body.section ?? ''), browser: browserPath(loadConfig()) }));
+        case '/api/owner/pair': {
+          // The app trades its window's pairing code for the key, once.
+          const key = remote ? null : redeemCode(body.code);
+          if (!key) {
+            recordSignal('unknown_origin', 'POST /api/owner/pair (a pairing code unknown, spent or expired)', { who: remote ? 'remote' : 'app' });
+            return reply(res, 403, { error: t('This pairing code is not valid: open Chiefmate again from its shortcut.') });
+          }
+          return reply(res, 200, { key, header: OWNER_HEADER });
+        }
         case '/api/watchdog':
           // The watchdog (src/watch.mjs), a process apart from Chiefmate, tells the manager what it found and did.
           return reply(res, 200, { event: reportEvent('watchdog', clip(String(body.text ?? ''), 3000)) });
@@ -906,10 +1051,15 @@ export function startServer() {
   server.listen(port, '127.0.0.1');
   // The remote access: a second listener, also on this computer only, for Tailscale Serve alone. The smoke test's
   // temporary Chiefmate never opens the installation's: it takes its own from CHIEFMATE_REMOTE_ACCESS.
-  const remote = remoteSettings(process.env.CHIEFMATE_SMOKE ? JSON.parse(process.env.CHIEFMATE_REMOTE_ACCESS || 'null') : config.remote_access, port);
+  const smokeRemote = process.env.CHIEFMATE_SMOKE ? JSON.parse(process.env.CHIEFMATE_REMOTE_ACCESS || 'null') : null;
+  const remote = remoteSettings(process.env.CHIEFMATE_SMOKE ? smokeRemote : config.remote_access, port);
+  // The smoke test's process stands in for Tailscale Serve there.
+  if (remote && smokeRemote) remote.servePid = Number(smokeRemote.serve_pid) || 0;
   let remoteServer = null;
   if (remote) {
     remoteServer = http.createServer((req, res) => handle(req, res, remote));
+    // Serve's connections stay open between the app's reads, so each is checked once (fromServe).
+    remoteServer.keepAliveTimeout = 65_000;
     remoteServer.on('error', error => console.error(`Remote access is off: ${error.message}`));
     remoteServer.listen(remote.port, '127.0.0.1', () => console.log(`Remote access through Tailscale Serve at https://${remote.host} (127.0.0.1:${remote.port})`));
   }
