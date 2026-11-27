@@ -1151,7 +1151,7 @@ function drawNavAttention() {
 }
 
 function drawStatusbar() {
-  $('#statusbar').classList.toggle('offline', !online); // phones show the bar only then
+  $('#statusbar').classList.toggle('offline', !online); // a lost connection shows on phones even while typing
   if (!online) {
     draw('#statusbar', 'off', `<div class="group">${stateHtml([t('No connection to Chiefmate. Trying again…'), 'error'])}</div>`);
     return;
@@ -1183,10 +1183,16 @@ function drawStatusbar() {
   const html = `<div class="group sb-run">${left}</div><div class="group">${right}</div>`;
   draw('#statusbar', html, html);
 }
-// The status bar's shortcut to the autopilot: to the Usage section, its panel in view.
+// The status bar's shortcut to the autopilot: to the Usage section, its panel in view. Not the browser's own jump to
+// #usage (the meters, at the top); a hidden section can't be scrolled, so the panel waits for showView's hashchange.
 $('#statusbar').addEventListener('click', e => {
-  const id = e.target.closest('[data-goto]')?.dataset.goto;
-  if (id) setTimeout(() => $(`#${id}`)?.scrollIntoView({ block: 'start', behavior: calm() ? 'auto' : 'smooth' }), 0);
+  const link = e.target.closest('a[data-goto]');
+  if (!link) return;
+  e.preventDefault();
+  const go = () => $(`#${link.dataset.goto}`)?.scrollIntoView({ block: 'start', behavior: calm() ? 'auto' : 'smooth' });
+  if (location.hash === link.hash) return go();
+  addEventListener('hashchange', go, { once: true });
+  location.hash = link.hash;
 });
 
 function drawClock() {

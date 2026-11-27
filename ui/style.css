@@ -1088,9 +1088,10 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   .toast { bottom: calc(68px + env(safe-area-inset-bottom)); }
   .agent-panel { top: calc(48px + env(safe-area-inset-top)); bottom: auto; height: calc(var(--app-h, 100dvh) - 48px - env(safe-area-inset-top)); width: 100vw; }
 
-  /* With the keyboard open, the bottom bar and the notices step aside; in a conversation, so do the title bar, the headers
-     and the decisions: its last messages and the field take the whole visible area, Send always beside the field */
-  html.typing .nav, html.typing .alerts, html.typing .suggestions { display: none; }
+  /* With the keyboard open, the bottom bar, the status bar (unless the connection is lost) and the notices step aside; in a
+     conversation, so do the title bar, the headers and the decisions: its last messages and the field take the whole visible
+     area, Send always beside the field */
+  html.typing .nav, html.typing .alerts, html.typing .suggestions, html.typing .statusbar:not(.offline) { display: none; }
   html.typing-chat .titlebar, html.typing-chat .view-header, html.typing-chat .focus-bar, html.typing-chat #session-page,
   html.typing-chat #view-project > :not(#project-live):not(#project-charge):not(#project-manager), html.typing-chat #project-live-list, html.typing-chat .live-head,
   html.typing-chat #project-charge-top, html.typing-chat #project-manager > .hint { display: none; }
