@@ -1644,6 +1644,8 @@ test('without the key, a command may do only what an agent may, never as the own
     ['/api/planning', { action: 'triage', id: 1, recommend: 'now' }], ['/api/planning', { action: 'reorder', ids: [1] }], ['/api/planning', { action: 'restore', id: 1 }],
     ['/api/planning', { action: 'add', project: 'p', title: 't', status: 'triaged' }], ['/api/planning', { action: 'triage', id: 1, by: 'owner' }],
     ['/api/say', { text: 'x' }], ['/api/say', { run: '', text: 'x' }],
+    ['/api/calls', { action: 'park', run: 'r', by: 'owner' }], ['/api/calls', { action: 'done', run: 'r', id: '1', ownerSaid: 'x' }],
+    ['/api/quarantine', { action: 'release', project: 'p', by: 'owner' }], ['/api/quarantine', { action: 'release', project: 'p' }],
   ];
   for (const [route, body] of owners) assert.equal(ownerOnly(route, body), true, `${route} ${JSON.stringify(body)} goes without the key`);
   // What the command line sends for an agent (a step, a live session, the manager, the watchdog and its rescuer).
@@ -1664,6 +1666,9 @@ test('without the key, a command may do only what an agent may, never as the own
     ['/api/planning', { action: 'restore', id: 1, by: 'manager' }], ['/api/planning', { action: 'set', id: 1, status: 'triaged', by: 'manager' }],
     ['/api/planning', { action: 'add', project: 'p', title: 't', status: 'approved', by: 'manager' }], ['/api/planning', { action: 'set', id: 1, status: 'done' }],
     ['/api/say', { run: 'r', step: 1, text: 'x' }],
+    // The manager's handling of the calls and the quarantine holds (src/needs.mjs, src/quarantine.mjs).
+    ['/api/calls', {}], ['/api/calls', { action: 'list' }], ['/api/calls', { action: 'done', run: 'r', id: '1', ownerSaid: 'x', by: 'manager' }],
+    ['/api/calls', { action: 'park', run: 'r', by: 'manager' }], ['/api/quarantine', {}], ['/api/quarantine', { action: 'release', project: 'p', by: 'manager' }],
   ];
   for (const [route, body] of agents) assert.equal(ownerOnly(route, body), false, `${route} ${JSON.stringify(body)} needs the key`);
   // The app sends the key in the server's header.

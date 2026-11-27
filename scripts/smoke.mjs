@@ -631,7 +631,7 @@ try {
       expect(keylessId > 0, `a step could not propose an item without the owner's key: ${fromStep.error}`);
       for (const args of [['plan', 'triage', `${keylessId}`, '--recommend', 'now', '--priority', 'high', '--note', 'Keyless.'], ['plan', 'order', `${keylessId}`],
         ['plan', 'set', `${keylessId}`, '--status', 'triaged'], ['plan', 'discard', `${keylessId}`, '--reason', 'Smoke.'], ['plan', 'restore', `${keylessId}`],
-        ['plan', 'add', 'Sample', 'Smoke manager item', '--status', 'proposed']]) {
+        ['plan', 'add', 'Sample', 'Smoke manager item', '--status', 'proposed'], ['calls'], ['quarantine']]) {
         const r = refusal(args, as.manager);
         expect(r.out && !r.error, `the manager's "${args.slice(0, 2).join(' ')}" was refused without the owner's key: ${r.error}`);
       }
@@ -646,6 +646,15 @@ try {
         expect(!r.out && (who === 'step' ? /only proposes/ : ownerRefused).test(r.error), `a ${who} triaged an item of the planning board: ${r.out ?? r.error}`);
       }
       expect((await keyless('/api/say', { text: 'As the owner' })).status === 403, "a line for a bubble without a run went without the owner's key");
+      // The manager parks a run and lifts a hold without the key (refused here only for the made-up run and project);
+      // as the owner, those need it.
+      for (const args of [['calls', 'park', 'smoke-no-run'], ['quarantine', 'release', 'smoke-no-project']]) {
+        const r = refusal(args, as.manager);
+        expect(r.error && !ownerRefused.test(r.error), `the manager's "${args.slice(0, 2).join(' ')}" was refused as the owner's: ${r.out ?? r.error}`);
+      }
+      for (const body of [{ action: 'park', run: 'smoke-no-run', by: 'owner' }, { action: 'release', project: 'smoke-no-project' }]) {
+        expect((await keyless(body.run ? '/api/calls' : '/api/quarantine', body)).status === 403, `${JSON.stringify(body)} went without the owner's key`);
+      }
     } finally {
       // Whatever failed above, the items it made leave the board, so the checks of the board further on stay true.
       for (const id of (await import('../src/planning.mjs')).planItems().filter(i => /^Smoke (keyless|session|manager) /.test(i.title) && i.status !== 'discarded').map(i => i.id)) refusal(['plan', 'discard', `${id}`, '--reason', 'Smoke.'], as.manager);

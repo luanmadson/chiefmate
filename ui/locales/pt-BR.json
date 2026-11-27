@@ -2008,6 +2008,8 @@
   "Say something: one short line.": "Diga algo: uma linha curta.",
   "I'm back from the pause and going on where I stopped.": "Voltei da pausa e sigo de onde parei.",
   "I paused at a safe point while you work on this project; I'll go on when your session ends.": "Pausei num ponto seguro enquanto você trabalha neste projeto; sigo quando a sua sessão terminar.",
+  "I'm parked while I wait for you, so the next run of this project can go; I'll go on first once you answer.": "Estou estacionado enquanto espero por você, para a próxima execução deste projeto poder seguir; sigo primeiro assim que você responder.",
+  "I paused: a file I wrote was probably quarantined by the antivirus. I'll go on once it can be read again.": "Pausei: um arquivo que escrevi provavelmente foi posto em quarentena pelo antivírus. Sigo assim que ele puder ser lido de novo.",
   "I paused at a safe point: Chiefmate is on standby. I'll go on when it's back.": "Pausei num ponto seguro: o Chiefmate está em espera. Sigo quando ele voltar.",
   "I paused at a safe point: this project is out of your focus for now.": "Pausei num ponto seguro: este projeto está fora do seu foco por enquanto.",
   "I paused at a safe point: Chiefmate is shutting down. I'll go on at the next start.": "Pausei num ponto seguro: o Chiefmate está desligando. Sigo quando ele iniciar de novo.",

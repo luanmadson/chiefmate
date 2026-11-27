@@ -305,6 +305,8 @@ export const pauseAll = (why = 'update') => [...live.keys()].filter(id => pauseL
 /** The bubble's line of a step that paused (src/speech.mjs), in the first person. */
 function pausedLine(why) {
   if (why === 'owner') return t("I paused at a safe point while you work on this project; I'll go on when your session ends.");
+  if (why === 'park') return t("I'm parked while I wait for you, so the next run of this project can go; I'll go on first once you answer.");
+  if (why === 'quarantine') return t("I paused: a file I wrote was probably quarantined by the antivirus. I'll go on once it can be read again.");
   if (why === 'standby') return t("I paused at a safe point: Chiefmate is on standby. I'll go on when it's back.");
   if (why === 'focus') return t('I paused at a safe point: this project is out of your focus for now.');
   if (why === 'stop') return t("I paused at a safe point: Chiefmate is shutting down. I'll go on at the next start.");
@@ -962,6 +964,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     logAction(l, { type: 'action', text: quarantineLine(lost) });
     holdForQuarantine({ project: run.project, file: lost.file, state: lost.state, run: run.id, step: index + 1, agent: step.agent, title: run.title });
     Object.assign(step, { status: 'pending', ended: null, paused: { session: r.session ?? l.session ?? session.id, spentMs, total, at: now(), why: 'quarantine', file: lost.file } });
+    addSpeech(run, { step: index + 1, agent: step.agent, by: 'auto', state: 'waiting', text: pausedLine('quarantine') });
     l.pauseRequest = 'quarantine';
     saveRun(run);
     return { paused: true };

@@ -598,6 +598,10 @@ const KEYLESS = {
   '/api/needs-you': true,
   '/api/needs-you/poll': true,
   '/api/needs-you/done': b => b.by === 'check' && !b.session && b.answer == null && b.note == null,
+  // The open calls and the quarantine holds may be read; a call marked done, a run parked or a hold lifted, only by the
+  // manager (src/needs.mjs, src/quarantine.mjs).
+  '/api/calls': b => (b.action ?? 'list') === 'list' || b.by === 'manager',
+  '/api/quarantine': b => b.action !== 'release' || b.by === 'manager',
   '/api/defect': true,
   '/api/defect/close': b => b.by === 'manager',
   '/api/manager': b => !!b.from && typeof b.from === 'object', // an agent's message, marked as the agent's
