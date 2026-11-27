@@ -488,6 +488,17 @@
     </div>
     <div id="viewer-body" class="viewer-body"></div>
   </dialog>
+  <dialog id="path-dialog" class="confirm" aria-labelledby="path-dialog-title">
+    <form method="dialog">
+      <div class="label" id="path-dialog-title"></div>
+      <p id="path-dialog-text"></p>
+      <code id="path-dialog-path" class="path-dialog-path"></code>
+      <div class="actions">
+        <button type="button" class="button secondary" id="path-dialog-copy" data-t="Copy the path">Copy the path</button>
+        <button value="close" class="button" data-t="Close">Close</button>
+      </div>
+    </form>
+  </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/app.js" type="module"></script>
 </body>

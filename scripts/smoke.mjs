@@ -116,7 +116,7 @@ try {
     expect(state.crew?.some(a => a.id === 'manager'), 'the crew has no manager');
     const context = state.manager?.context;
     expect(typeof context?.renewAt === 'number' && typeof context.renewing === 'boolean', "/api/state has no context for the manager's conversation");
-    for (const file of ['/', '/app.js', '/faces.js', '/i18n.js', '/style.css', '/manifest.webmanifest', '/locales/pt-BR.json', '/icon-32.png']) {
+    for (const file of ['/', '/app.js', '/asks.js', '/faces.js', '/i18n.js', '/countdown.js', '/style.css', '/manifest.webmanifest', '/locales/pt-BR.json', '/icon-32.png']) {
       const r = await fetch(base + file);
       expect(r.ok, `${file} answered ${r.status}`);
     }
@@ -178,6 +178,10 @@ try {
     const voice = await (await fetch(`${base}/voice.js`)).text();
     expect(typeof state.ui?.voice_input === 'boolean' && html.includes('id="voice-notice"') && voice.includes('export class Dictation') && appJs.includes("from './voice.js'"),
       `dictation lacks its setting, notice or module: ${JSON.stringify(state.ui)}`);
+    // What a live session asks: a band of one line per ask (or one for the group), at most 40% of the column.
+    const asks = await (await fetch(`${base}/asks.js`)).text();
+    expect(asks.includes('export function asksHtml') && appJs.includes("from './asks.js'") && /#live-asks \{[^}]*max-height: 40%/.test(styles),
+      "the band of what a live session asks lacks its module, or may cover the conversation");
     // The autopilot's panel in the Usage section: its state, and limits refused before anything is saved.
     const ap = state.autopilot;
     expect(ap && typeof ap.enabled === 'boolean' && ap.stop_at_5h_window > 0 && (ap.week_pace === null || ap.week_pace > 0) && typeof ap.mode === 'string' && ap.now?.state && Array.isArray(ap.changes) && Array.isArray(ap.queued) && Array.isArray(ap.wakes) && (ap.enabled || ap.blocked?.reason === 'off'),
@@ -353,6 +357,8 @@ try {
     // (nothing opens: the actions are refused or asked for as a dry run).
     expect((await fetch(`${base}/api/project/no-such-project`)).status === 400, "the page of a project that does not exist did not answer 400");
     expect((await post('/api/project/open', { project: 'no-such-project', app: 'folder', dryRun: true })).status === 400, 'opening the folder of a project that does not exist was not refused');
+    const outsideHome = await post('/api/files/open', { path: path.join(path.parse(os.homedir()).root, 'Windows', 'win.ini'), dryRun: true });
+    expect(outsideHome.status === 403, `a file outside the user folder was not refused for opening on the computer: ${outsideHome.status}`);
     expect((await post('/api/project/dev', { project: 'no-such-project', action: 'start', dryRun: true })).status === 400, 'starting the environment of a project that does not exist was not refused');
     expect((await post('/api/project/dev', { project: 'no-such-project', action: 'other' })).status === 400, 'an unknown action on the development environment was not refused');
     expect((await post('/api/session', { profile: 'no-such-profile', dryRun: true })).status === 400, 'a dry run of an unknown session profile was not refused');
@@ -409,6 +415,16 @@ try {
     const opens = await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder' });
     expect(opens.status === 403 && JSON.parse(opens.text).error?.includes('computer'), `opening a window on the computer from another device was not refused: ${opens.status}`);
     expect((await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder', dryRun: true })).status !== 403, 'a dry run of opening a folder was refused through the remote access');
+    expect((await ask(remote.port, '/api/browser', command, { action: 'focus', pid: 0 })).status === 403, 'bringing a browser to the front from another device was not refused');
+    // A session asked in a window, or the development environment, is not refused there: it has a version from afar.
+    expect((await ask(remote.port, '/api/session', command, { profile: 'no-such-profile', window: true })).status === 400, 'a session in a window was refused from another device instead of opening in the app');
+    expect((await ask(remote.port, '/api/project/dev', command, { project: 'no-such-project', action: 'start' })).status === 400, 'the development environment was refused from another device instead of running in the background');
+    // A file of the user folder: opened only on the computer; from the phone, only found (its path to copy).
+    const missing = path.join(os.homedir(), 'chiefmate-smoke-no-such-file.html');
+    const fileOpens = await ask(remote.port, '/api/files/open', command, { path: missing });
+    expect(fileOpens.status === 403 && JSON.parse(fileOpens.text).error?.includes('computer'), `opening a file on the computer from another device was not refused: ${fileOpens.status}`);
+    const fileFound = await ask(remote.port, '/api/files/open', command, { path: missing, dryRun: true });
+    expect(fileFound.status === 404 && JSON.parse(fileFound.text).tried === missing, `looking for a file from another device did not say the path tried: ${fileFound.status} ${fileFound.text}`);
     const remoteStop = await ask(remote.port, '/api/power', command, { action: 'stop' });
     expect(remoteStop.status === 403 && JSON.parse(remoteStop.text).error?.includes('computer'), `stopping Chiefmate from another device was not refused: ${remoteStop.status}`);
     expect((await ask(port, '/api/state', tailnet)).status === 403, "the app's own port answered the tailnet name");
@@ -421,7 +437,17 @@ try {
       `the lockdown was not engaged, or the app does not show it: ${JSON.stringify(lockState.lockdown)}`);
     const lockedMerge = await post('/api/merge', { run: 'smoke-feed' });
     expect(lockedMerge.status === 400 && /lockdown|emergência/i.test((await lockedMerge.json()).error ?? ''), 'a merge was not refused in the lockdown');
-    expect((await ask(remote.port, '/api/state', tailnet)).status === 423, 'the remote access answered in the lockdown');
+    const lockedAfar = await ask(remote.port, '/api/state', tailnet);
+    const lockedBody = JSON.parse(lockedAfar.text);
+    expect(lockedAfar.status === 423 && lockedBody.lockdown?.active && lockedBody.lockdown.reason === 'Smoke test' && lockedBody.language && !('runs' in lockedBody),
+      `the remote access answered in the lockdown, or without saying why: ${lockedAfar.status} ${lockedAfar.text.slice(0, 200)}`);
+    // The app itself still loads there, to show the lockdown instead of a lost connection; its data stays refused.
+    expect((await ask(remote.port, '/', tailnet)).status === 200, "the app's page did not load through the remote access in the lockdown");
+    expect((await ask(remote.port, '/', { host: remote.host })).status === 403, "the app's page loaded without a Tailscale login in the lockdown");
+    for (const disguised of ['/./api/state', '/%2e/api/state', '/ui/../api/state', `http://${remote.host}/api/state`]) {
+      expect((await ask(remote.port, disguised, tailnet)).status === 423, `the state answered through the remote access in the lockdown at ${disguised}`);
+    }
+    expect((await ask(remote.port, '/api/manager/interrupt', command, {})).status === 423, 'a command through the remote access was taken in the lockdown');
     expect((await ask(remote.port, '/api/lockdown', command, { action: 'release', confirm: true })).status === 403, 'the lockdown was released through the remote access');
     expect((await post('/api/lockdown', { action: 'release' })).status === 400, "the lockdown was released without the owner's confirmation");
     const released = await post('/api/lockdown', { action: 'release', confirm: true });
@@ -2100,12 +2126,14 @@ try {
 }
 
 // The reading of claude.ai: a notice marked as seen stays seen while its cause lasts (once a day it reminds), and the
-// sign-in window closes by itself, leaving one "Sign in" card. Made-up records only: stand-ins for the browser and
-// Windows, a made-up empty profile folder in this test's data, and nothing opened or read.
+// sign-in window closes by itself (warning first, and waiting while the owner uses it), leaving one "Sign in" card; a
+// request's page window has the same time limit; a page with no limit is a failure of its own. Made-up records only:
+// stand-ins for the browser, Windows and the page, a made-up empty profile folder in this test's data, and nothing
+// opened or read.
 try {
   const src = file => pathToFileURL(path.join(root, 'src', file)).href;
   const { attentionItems, markSeen } = await import(src('attention.mjs'));
-  const { checkLogin, failed, LOGIN_MINUTES, loginState, openLogin, PROFILE_DIR, readingDue, signInNeeded } = await import(src('usagepage.mjs'));
+  const { checkLogin, checkOwnerWindow, failed, LOGIN_MINUTES, loginState, openLogin, openOwnerPage, ownerWindowState, PROFILE_DIR, readingDue, readUsagePage, signInNeeded, WARN_MINUTES } = await import(src('usagepage.mjs'));
   const { readState, saveState } = await import(src('store.mjs'));
   const { DATA } = await import(src('util.mjs'));
   const statusFile = path.join(DATA, 'usage-page.json');
@@ -2151,11 +2179,18 @@ try {
   expect(!signInNeeded() && !readerNotices().some(i => i.kind === 'reader-login'), 'the sign-in card shows while its window is open');
   const closedPids = [];
   const close = async login => closedPids.push(login.pid);
+  const warnings = [];
+  const warn = win => warnings.push(win.pid);
+  const stand = (at, more = {}) => ({ at, alive: () => true, close, warn, inUse: () => false, ...more });
   const opening = Date.parse(loginState().opened);
-  expect(await checkLogin({ at: opening + (LOGIN_MINUTES - 1) * 60_000, alive: () => true, close }) === 'open' && !closedPids.length, 'the sign-in window closed before its time');
+  expect(await checkLogin(stand(opening + (LOGIN_MINUTES - WARN_MINUTES - 1) * 60_000)) === 'open' && !warnings.length && !closedPids.length, 'the sign-in window warned or closed before its time');
+  expect(await checkLogin(stand(opening + (LOGIN_MINUTES - WARN_MINUTES) * 60_000)) === 'warned' && warnings.join() === '4242' && !closedPids.length, 'the sign-in window did not warn before closing');
+  expect(await checkLogin(stand(opening + (LOGIN_MINUTES - 1) * 60_000)) === 'open' && warnings.length === 1, 'the sign-in window warned twice or closed before its time');
   const atLimit = opening + LOGIN_MINUTES * 60_000;
-  expect(await checkLogin({ at: atLimit, alive: () => true, close }) === 'timed_out' && closedPids.join() === '4242' && loginState().timed_out, 'the sign-in window was left open past its time');
-  expect(await checkLogin({ at: atLimit + 60_000, alive: () => true, close }) === null && closedPids.length === 1, 'a closed sign-in window was closed again');
+  // Still in use at the limit (in front, the owner typing): it waits; once the owner stops using it, it closes.
+  expect(await checkLogin(stand(atLimit, { inUse: async () => true })) === 'open' && !closedPids.length, 'the sign-in window closed while the owner was using it');
+  expect(await checkLogin(stand(atLimit)) === 'timed_out' && closedPids.join() === '4242' && loginState().timed_out, 'the sign-in window was left open past its time');
+  expect(await checkLogin(stand(atLimit + 60_000)) === null && closedPids.length === 1, 'a closed sign-in window was closed again');
   const cards = readerNotices();
   expect(cards.length === 1 && cards[0].id === 'reader:login' && cards[0].kind === 'reader-login' && signInNeeded(), `there is not one "Sign in" card: ${JSON.stringify(cards)}`);
   // Tried once a minute after it closed, away or not (it tells whether the owner signed in); after that, a failure only
@@ -2181,6 +2216,44 @@ try {
     refused = error;
   }
   expect(refused?.readerCause === 'no_start' && loginState().pid === 6060, 'a sign-in window that never started was noted as open');
+
+  // A request's page (needs-you) on the reading profile: noted, the full time again with each new page (even one arriving
+  // while it is checked), no time limit with the reading off, a warning before closing (late, if the server was off at
+  // the time), and no "Sign in" card once it closes by its time limit.
+  const pages = [];
+  const owner = openOwnerPage('https://example.com/first', config, { start: (browser, args) => (pages.push(args.at(-1)), 7070), alive: () => false });
+  expect(owner.pid === 7070 && ownerWindowState().pid === 7070 && pages.join() === 'https://example.com/first', `the request's page window was not noted: ${JSON.stringify(ownerWindowState())}`);
+  const ownerOpened = Date.parse(owner.opened);
+  writeFileSync(path.join(DATA, 'owner-window.json'), JSON.stringify({ ...ownerWindowState(), opened: new Date(ownerOpened - 9 * 60_000).toISOString() }));
+  expect(await checkOwnerWindow(stand(ownerOpened)) === 'warned' && warnings.at(-1) === 7070, "the request's page window did not warn before closing");
+  const again = openOwnerPage('https://example.com/second', config, { start: (browser, args) => (pages.push(args.at(-1)), 8080), alive: () => true });
+  expect(again.pid === 7070 && !again.warned && Date.parse(again.opened) >= ownerOpened && pages.at(-1) === 'https://example.com/second', `a new page did not give the window its full time again: ${JSON.stringify(again)}`);
+  const ownerLimit = Date.parse(again.opened) + LOGIN_MINUTES * 60_000;
+  // With the reading off, nothing needs the profile: the page stays open past its time, with no warning.
+  const warnedBefore = warnings.length;
+  expect(await checkOwnerWindow(stand(ownerLimit + 5 * 60_000, { timed: false })) === 'open' && warnings.length === warnedBefore && !closedPids.includes(7070),
+    "a request's page was warned or closed with the reading off");
+  expect(await checkOwnerWindow(stand(ownerLimit + 5 * 60_000)) === 'warned', 'a window found past its time was closed with no warning');
+  expect(await checkOwnerWindow(stand(ownerLimit + 6 * 60_000)) === 'open', "the request's page window closed right after its warning");
+  const closedBefore = closedPids.length;
+  // A new page while the owner's input is looked up: the window stays, with its full time again.
+  const third = { inUse: async () => (openOwnerPage('https://example.com/third', config, { start: () => 9090, alive: () => true }), false) };
+  expect(await checkOwnerWindow(stand(ownerLimit + 7 * 60_000, third)) === 'open' && closedPids.length === closedBefore && !ownerWindowState().warned && !ownerWindowState().closed,
+    'a new page while the window was being checked was closed with it');
+  expect(await checkOwnerWindow(stand(ownerLimit + 7 * 60_000)) === 'warned', "the request's page window did not warn again after a new page");
+  expect(await checkOwnerWindow(stand(ownerLimit + 9 * 60_000)) === 'timed_out' && closedPids.at(-1) === 7070 && closedPids.length === closedBefore + 1 && ownerWindowState().timed_out,
+    "the request's page window was left open past its time");
+
+  // The page opened, signed in, but showed no limit: a failure with a cause of its own, and a notice; the latest values stay.
+  const good = { ok: true, error: null, cause: null, failing_since: null, attempted: minutes(300), read_at: minutes(300), five_hour: 0.4, seven_day: 0.2 };
+  setStatus(good);
+  expect(!readerNotices().length, `a request's page closed by its time limit asked to sign in: ${JSON.stringify(readerNotices())}`);
+  const empty = await readUsagePage(config, { open: async () => ({ url: 'https://claude.ai/settings/usage', text: 'Settings\nUsage\nLoading' }) });
+  expect(empty.ok === false && empty.cause === 'no_data' && empty.error.includes('/settings/usage') && empty.five_hour === 0.4 && empty.read_at === good.read_at,
+    `a page with no limit was not a failure of its own: ${JSON.stringify(empty)}`);
+  expect(readerNotices().some(i => i.id === 'reader:no_data' && !i.seen), `a page with no limit left no notice: ${JSON.stringify(readerNotices())}`);
+  const full = await readUsagePage(config, { open: async () => ({ url: 'https://claude.ai/settings/usage', text: 'Current session\n35% used\nWeekly limits\n12% used' }) });
+  expect(full.ok === true && full.five_hour === 0.35 && full.seven_day === 0.12 && !full.cause && !readerNotices().some(i => i.id === 'reader:no_data'), `a page with its limits was not read: ${JSON.stringify(full)}`);
 } catch (error) {
   failures.push(`usage reading notices and sign-in window: ${error.message}`);
 }
@@ -2814,6 +2887,28 @@ try {
     const told = notices(s.id).slice(-2);
     expect(told.length === 2 && told[0].text.includes(address) && told.every(n => !n.error) && !told[1].text.includes('3221225786') && !existsSync(devRecord),
       'Ctrl+C in the window was told as a failure, or its stop was not told');
+    // From another device: no window, the launcher in the background with its output in a log, the address read as in a window.
+    let detached;
+    const noWindow = () => expect(false, 'a window opened for the environment started from afar');
+    const behind = await startDev(devProject, { config: devConfig, background: true, open: noWindow, readWindows: async () => [], detach: (cwd, args, log) => (detached = { cwd, args, log }, null) });
+    expect(behind.background && behind.window === null && detached?.cwd === devClone && detached.args.join(' ') === `dev-run ${devProject} ${detached.args[2]} --background`
+      && detached.log === path.join(data, 'projects', devProject, 'dev.log'), `the environment started from afar did not run in the background: ${JSON.stringify(detached)}`);
+    const quiet = devChild();
+    let hidden;
+    const unseen = runDev(devProject, detached.args[2], { background: true, config: devConfig, spawnCommand: (command, options) => (hidden = options, quiet), probe: async url => url.href === address });
+    try {
+      quiet.stdout.write(`  Local: ${address}\n`);
+      for (let i = 0; i < 40 && !devState(devProject, projectConfig, machine).url; i++) await delay(50);
+      expect(devState(devProject, projectConfig, machine).url === address, 'the address of the environment run in the background was not exposed');
+      // With no console of the launcher's, the command would get a visible one of its own.
+      expect(hidden?.windowsHide === true && hidden.stdio[0] === 'ignore', `the command run in the background may open a window: ${JSON.stringify(hidden)}`);
+    } finally {
+      closeDev(quiet, 0);
+      await unseen;
+    }
+    deliverDevNotices();
+    await Promise.all([idle(s.id), idle(c.id)]);
+    expect(!existsSync(devRecord), 'the environment run in the background left its record when it ended');
     // A record left by a window that closed, its process id since given to another process (here, this one).
     const reading = dev => ({ supported: true, measured: new Date().toISOString(), dev });
     const leftOver = () => writeFileSync(devRecord, JSON.stringify({ token: 'old', at: Date.now() - 120_000, name: 'Sample dev', status: 'running', pid: process.pid, url: address }));

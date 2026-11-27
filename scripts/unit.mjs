@@ -1,6 +1,7 @@
 // Unit tests with no dependency (node:test): the file viewer's checks of paths, its choice among a project's copies and
 // its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation;
-// the emergency lockdown and its detection; each agent's effort; the redacted backup of the settings.
+// the band of what a live session asks; the emergency lockdown and its detection; each agent's effort; the redacted
+// backup of the settings; the usage resets' countdowns.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -8,11 +9,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
+import { runInNewContext } from 'node:vm';
 import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE, projectColor, shouldClose, themeManifest, windowName } from '../src/browsers.mjs';
 import { describeDoing, readFeed } from '../src/claude.mjs';
 import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
-import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
+import { checkPath, kindOf, listFolder, newestCopy, opening, openOnComputer, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
 import { plainPush, publishing, riskyCommand } from '../src/guard.mjs';
 import { checkSignals, engage, isLocked, readLockdown, recordSignal, refuseWhileLocked, release, RULES, weigh, WINDOW_MINUTES } from '../src/lockdown.mjs';
 import { startedAt } from '../src/machine.mjs';
@@ -28,8 +30,13 @@ import { parseLevel } from '../src/util.mjs';
 import { behindOrigin, checkoutBranch, fastForward, freshenBranch, projectLibraries, restoreShelf, sameRepository, shelfRef, shelveWork } from '../src/workspace.mjs';
 import { syntaxProblem } from './check.mjs';
 import { SAMPLE_CSV, sampleXlsx, zip } from './fixtures.mjs';
+import { countdown, resetLabel, spare, SPARE_MIN_FREE, SPARE_WITHIN_MS, timeLeft } from '../ui/countdown.js';
 import { compose, Dictation, nextState, recognizer, transcript } from '../ui/voice.js';
 import './away-ui.test.mjs';
+import { AFAR_VERSION, offered, ONLY_ON_PC } from '../ui/afar.js';
+import { asksHtml, asksLayout, GROUP_FROM, keepFolds, newFolds, toggleFold } from '../ui/asks.js';
+import { devLog, startDev } from '../src/projects.mjs';
+import { fromAfar } from '../src/server.mjs';
 
 const windows = process.platform === 'win32';
 const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-unit-'));
@@ -162,6 +169,123 @@ test("a local delivery's Files tab opens your folder first, and the working copy
   // Delivered as a pull request, the crew's working copy stays first.
   const pr = { projects: { ...local.projects, lessons: { ...local.projects.lessons, deliver: 'pull_request' } } };
   assert.equal(rootsFor(pr, 'lessons', { workspaces: hostWs })[0].kind, 'workspace');
+});
+
+// A made-up user folder: a document in Documents, a script, a protected name, Chiefmate's data inside it and a junction
+// to the folder outside it.
+const home = path.join(temp, 'home');
+const homeData = path.join(home, 'chiefmate', 'data');
+const report = path.join(home, 'Documents', 'atlas-anexos', 'guia-visual', 'comparacao.html');
+for (const f of [report, path.join(home, 'Documents', 'run.bat'), path.join(home, '.ssh', 'config'), path.join(homeData, 'state.json')]) write(f);
+linkDir(outside, path.join(home, 'Documents', 'escape'));
+const atHome = (p, more = {}) => openOnComputer(p, { home, blocked: [homeData], dryRun: true, ...more });
+const refusedAtHome = (p, status = 403) => assert.throws(() => atHome(p), e => e.code === status, `${p} was not refused with ${status}`);
+
+test('opening on the computer: absolute or from the user folder, with / or \\', () => {
+  for (const p of [report, report.replaceAll('\\', '/'), 'Documents\\atlas-anexos\\guia-visual\\comparacao.html', 'Documents/atlas-anexos/guia-visual/comparacao.html',
+    '~\\Documents\\atlas-anexos\\guia-visual\\comparacao.html', '~/Documents/atlas-anexos/guia-visual/comparacao.html', '%USERPROFILE%\\Documents\\atlas-anexos\\guia-visual\\comparacao.html',
+    `\`${report}\``, `${report}:12`]) {
+    assert.equal(atHome(p).path, realpathSync.native(report), `${p} did not lead to the file`);
+  }
+  assert.equal(atHome(report).how, 'app');
+  assert.equal(atHome('Documents').how, 'folder');
+  // A script is never run: only shown in its folder.
+  assert.equal(atHome('Documents/run.bat').how, 'reveal');
+  // Without "dryRun", started once with the file, and nothing really opens in the test.
+  const started = [];
+  openOnComputer(report, { home, blocked: [homeData], start: how => started.push(how) });
+  assert.equal(started.length, 1);
+  assert.ok(started[0].args.join(' ').includes(path.basename(report)));
+});
+
+test('opening on the computer: how each platform opens or shows a file', () => {
+  assert.deepEqual(opening('C:\\Users\\a\\x,y.html', false, 'win32'), { how: 'app', command: 'explorer.exe', args: ['"C:\\Users\\a\\x,y.html"'], verbatim: true });
+  assert.deepEqual(opening('C:\\Users\\a\\run.ps1', false, 'win32').args, ['/select,"C:\\Users\\a\\run.ps1"']);
+  assert.deepEqual(opening('/home/a/run.sh', false, 'darwin'), { how: 'reveal', command: 'open', args: ['-R', '/home/a/run.sh'] });
+  assert.deepEqual(opening('/home/a/run.sh', false, 'linux').args, ['/home/a']);
+  for (const name of ['a.exe', 'a.cmd', 'a.vbs', 'a.lnk', 'a.js', 'a.xlsm', 'a.docm', 'a.hta', 'noextension']) assert.equal(opening(name, false, 'win32').how, 'reveal', name);
+});
+
+test('opening on the computer: a missing file says the path tried', () => {
+  const tried = path.join(home, 'Documents', 'atlas-anexos', 'nada.html');
+  assert.throws(() => atHome('Documents\\atlas-anexos\\nada.html'), e => e.code === 404 && e.tried === tried && e.message.includes(tried));
+});
+
+test("opening on the computer: never outside the user folder nor Chiefmate's protected places", () => {
+  refusedAtHome(path.join(outside, 'private.txt'));
+  refusedAtHome('..\\outside\\private.txt');
+  refusedAtHome('../outside/private.txt');
+  refusedAtHome('Documents/escape/private.txt');
+  refusedAtHome(path.parse(temp).root);
+  refusedAtHome('\\\\server\\share\\file.txt');
+  refusedAtHome('//server/share/file.txt');
+  refusedAtHome('');
+  refusedAtHome(`${report}\0.png`);
+  refusedAtHome(path.join(homeData, 'state.json'));
+  refusedAtHome('chiefmate/data');
+  refusedAtHome('.ssh/config');
+  if (windows) {
+    refusedAtHome(`${report}:secret`);
+    refusedAtHome('CHIEFMATE\\DATA\\state.json');
+  }
+  assert.equal(atHome(path.join(outside, 'private.txt'), { home: outside }).how, 'app', 'the made-up user folder itself was refused');
+});
+
+// The app's side: the paths in a text and the click that can't open in the viewer (ui/app.js, run on its own).
+const appJs = readFileSync(new URL('../ui/app.js', import.meta.url), 'utf8');
+const between = (from, to) => appJs.slice(appJs.indexOf(from), appJs.indexOf(to));
+const linkOf = html => [...html.matchAll(/data-file="([^"]*)"/g)].map(m => m[1].replaceAll('&#39;', "'"));
+
+test('app: a path in a text becomes a link, from the user folder too, with / or \\', () => {
+  const inline = runInNewContext(`${between('// ---------- Text and formats', '/** Simple markdown')} inline;`, {});
+  assert.deepEqual(linkOf(inline('Abra Documents\\atlas-anexos\\guia-visual\\comparacao.html.')), ['Documents\\atlas-anexos\\guia-visual\\comparacao.html']);
+  assert.deepEqual(linkOf(inline('Veja ~/Documents/atlas-anexos/guia-visual/comparação.html, por favor')), ['~/Documents/atlas-anexos/guia-visual/comparação.html']);
+  assert.deepEqual(linkOf(inline('Em C:/Users/luan/Documents/a.md e C:\\Users\\luan\\b.pdf.')), ['C:/Users/luan/Documents/a.md', 'C:\\Users\\luan\\b.pdf']);
+  assert.deepEqual(linkOf(inline('`C:\\Users\\luan\\Área de Trabalho\\relatório.html`')), ['C:\\Users\\luan\\Área de Trabalho\\relatório.html']);
+  assert.deepEqual(linkOf(inline('Sem caminho aqui: 1/2 e https://example.com/a.html')), []);
+});
+
+function openUi({ here = true, answer }) {
+  const nodes = Object.fromEntries(['path-dialog', 'path-dialog-title', 'path-dialog-text', 'path-dialog-path'].map(id => [id, { open: false, showModal() { this.open = true; } }]));
+  const sent = [];
+  const toasts = [];
+  const open = runInNewContext(`${between('async function openOnComputer', "$('#path-dialog-copy')")} openOnComputer;`, {
+    // The table of ui/afar.js itself, seen from the computer or from the phone.
+    $: selector => nodes[selector.slice(1)], offered: action => offered(action, here ? 'localhost' : 'pc.tailnet.ts.net'), toast: text => toasts.push(text), baseName: p => p.split(/[\\/]/).pop(),
+    t: (text, values = {}) => text.replace(/\{(\w+)\}/g, (m, k) => values[k]),
+    api: async (route, body) => {
+      sent.push({ route, body });
+      const r = answer(body);
+      if (r.status) throw Object.assign(new Error(r.error), r);
+      return r;
+    },
+  });
+  return { open, nodes, sent, toasts };
+}
+
+test('app: on the computer the file opens there; on the phone, its path to copy and where it opens', async () => {
+  const pc = openUi({ answer: () => ({ path: report, how: 'app' }) });
+  await pc.open('Documents\\atlas-anexos\\guia-visual\\comparacao.html');
+  assert.deepEqual(JSON.parse(JSON.stringify(pc.sent)), [{ route: '/api/files/open', body: { path: 'Documents\\atlas-anexos\\guia-visual\\comparacao.html', dryRun: false } }]);
+  assert.equal(pc.toasts[0], 'Opened on the computer: comparacao.html');
+  assert.equal(pc.nodes['path-dialog'].open, false);
+  const phone = openUi({ here: false, answer: () => ({ path: report, how: 'app', dryRun: true }) });
+  await phone.open('Documents/atlas-anexos/guia-visual/comparacao.html');
+  assert.equal(phone.sent[0].body.dryRun, true, 'the phone asked to open the file on the computer');
+  assert.ok(phone.nodes['path-dialog'].open, 'the phone was left without the path');
+  assert.equal(phone.nodes['path-dialog-path'].textContent, report);
+  assert.match(phone.nodes['path-dialog-text'].textContent, /opens on the computer/);
+  // The copy button is in the page, in the same dialog.
+  assert.match(readFileSync(new URL('../ui/index.html', import.meta.url), 'utf8'), /id="path-dialog"[\s\S]*id="path-dialog-path"[\s\S]*id="path-dialog-copy"/);
+});
+
+test('app: a file found nowhere shows the path tried', async () => {
+  const tried = path.join(home, 'Documents', 'nada.html');
+  const ui = openUi({ answer: () => ({ status: 404, error: `File not found: ${tried}.`, data: { tried } }) });
+  await ui.open('Documents\\nada.html', Object.assign(new Error('File not found: Documents/nada.html. Looked in: your clone (C:\\x).'), { status: 404 }));
+  assert.equal(ui.nodes['path-dialog-title'].textContent, 'File not found');
+  assert.equal(ui.nodes['path-dialog-path'].textContent, tried);
+  assert.match(ui.nodes['path-dialog-text'].textContent, /Looked in: your clone[\s\S]*File not found: .*nada\.html/);
 });
 
 test('kinds and headers: nothing runs in the app', () => {
@@ -866,6 +990,71 @@ test("A process's start, as Windows PowerShell writes it", () => {
   assert.equal(startedAt('nonsense'), null);
 });
 
+// ---------- What a live session asks (ui/asks.js): the compact band, its group and its folds ----------
+
+const askUi = {
+  t: (text, values = {}) => text.replace(/\{(\w+)\}/g, (_, k) => values[k]),
+  esc: s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'),
+  facts: a => `<p class="facts-of-${a.id}">${a.what}</p>`,
+};
+const ask = (id, summary) => ({ id, kind: 'permission', what: `run ${id}`, ...(summary ? { explain: { summary } } : {}) });
+const toggles = html => [...html.matchAll(/data-ask-fold="([^"]+)" aria-expanded="(true|false)"/g)].map(m => [m[1], m[2] === 'true']);
+
+test('Asks band: one ask is one line, its details folded until opened and folded again', () => {
+  const one = [ask('a1', 'Delete the build folder')];
+  let folds = newFolds('s1');
+  let html = asksHtml(one, folds, askUi);
+  assert.equal(asksLayout(one, folds).grouped, false);
+  assert.match(html, /Needs you/);
+  assert.match(html, /Delete the build folder/);
+  assert.match(html, /data-live-allow="a1"/);
+  assert.match(html, /data-live-refuse="a1"/);
+  assert.deepEqual(toggles(html), [['a1', false]]);
+  assert.doesNotMatch(html, /facts-of-a1/);
+  folds = toggleFold(folds, 'a1');
+  html = asksHtml(one, folds, askUi);
+  assert.deepEqual(toggles(html), [['a1', true]]);
+  assert.match(html, /<div class="ask-details" id="ask-a1"><p class="facts-of-a1">/);
+  folds = toggleFold(folds, 'a1');
+  assert.deepEqual(toggles(asksHtml(one, folds, askUi)), [['a1', false]]);
+  assert.equal(asksHtml([], folds, askUi), '');
+});
+
+test('Asks band: from two asks, one line with their number, unfolded into the lines and folded back', () => {
+  const two = [ask('a1', 'Delete the build folder'), ask('a2')];
+  let folds = newFolds('s1');
+  let html = asksHtml(two, folds, askUi);
+  assert.equal(GROUP_FROM, 2);
+  assert.deepEqual(asksLayout(two, folds), { grouped: true, expanded: false, count: 2, rows: [] });
+  assert.match(html, /2 permissions asked/);
+  assert.deepEqual(toggles(html), [['band', false]]);
+  assert.doesNotMatch(html, /data-live-allow/);
+  folds = toggleFold(folds, 'band');
+  html = asksHtml(two, folds, askUi);
+  assert.deepEqual(toggles(html), [['band', true], ['a1', false], ['a2', false]]);
+  assert.match(html, /The agent asks to: run a2/);
+  assert.equal((html.match(/data-live-allow=/g) ?? []).length, 2);
+  assert.equal((html.match(/Needs you/g) ?? []).length, 1, 'the label shows once, on the group line');
+  folds = toggleFold(folds, 'a2');
+  assert.deepEqual(toggles(asksHtml(two, folds, askUi)), [['band', true], ['a1', false], ['a2', true]]);
+  folds = toggleFold(folds, 'band');
+  html = asksHtml(two, folds, askUi);
+  assert.deepEqual(toggles(html), [['band', false]]);
+  assert.doesNotMatch(html, /facts-of-a2/);
+});
+
+test("Asks band: the folds don't change in place, and what was answered is forgotten", () => {
+  const folds = newFolds('s1');
+  const opened = toggleFold(toggleFold(folds, 'a1'), 'a2');
+  assert.deepEqual(folds, { session: 's1', band: false, open: [] });
+  assert.deepEqual(opened.open, ['a1', 'a2']);
+  assert.deepEqual(keepFolds(opened, [ask('a2')]).open, ['a2']);
+  const group = toggleFold(folds, 'band');
+  assert.equal(keepFolds(group, [ask('a1')]).band, true, 'the group stays open while asks remain');
+  assert.equal(keepFolds(group, []).band, false, 'once all are answered, the next ones come folded');
+  assert.match(asksHtml([ask('<x>', 'a "quoted" <b>')], folds, askUi), /data-ask-fold="&lt;x>"[^]*a &quot;quoted&quot; &lt;b>/);
+});
+
 // ---------- The emergency lockdown (src/lockdown.mjs): made-up signals and made-up actions, nothing stopped for real ----------
 
 const lockDir = () => mkdtempSync(path.join(temp, 'lockdown-'));
@@ -1176,4 +1365,69 @@ test('speech bubbles: the lines kept, who asked, the line shown now and its stat
   assert.equal(describeDoing('Bash', { command: 'node "C:/x/src/cli.mjs" say "Adjusting the screen"' }), null);
   assert.equal(describeDoing('Bash', { command: 'node C:/x/src/cli.mjs say "Adjusting the screen"' }), null);
   assert.notEqual(describeDoing('Bash', { command: 'npm test' }), null);
+});
+
+// ---------- From another device (the remote access) ----------
+
+test('from afar, what opens on the computer is refused and not offered, and the rest has a version that works', () => {
+  for (const [action, { route, body }] of Object.entries(ONLY_ON_PC)) {
+    assert.equal(fromAfar(route, { project: 'demo', ...body }).refused, true, `${action} is offered from afar but the server refuses it`);
+    assert.equal(offered(action, 'pc.tailnet.ts.net'), false, `${action} is offered from afar`);
+    assert.equal(offered(action, 'localhost'), true, `${action} is not offered on the computer`);
+  }
+  for (const [action, { route, body, becomes }] of Object.entries(AFAR_VERSION)) {
+    const afar = fromAfar(route, { project: 'demo', ...body });
+    assert.ok(!afar.refused, `${action} is refused from afar`);
+    assert.deepEqual(afar.body, { project: 'demo', ...becomes }, `${action} does not become its version from afar`);
+    assert.equal(offered(action, 'pc.tailnet.ts.net'), true, `${action} is not offered from afar`);
+  }
+  // What doesn't open anything goes on as it is.
+  assert.deepEqual(fromAfar('/api/browser', { action: 'close', pid: 1 }), { body: { action: 'close', pid: 1 }, refused: false });
+  assert.deepEqual(fromAfar('/api/project/dev', { action: 'stop' }).body, { action: 'stop' });
+  assert.deepEqual(fromAfar('/api/task', { x: 1 }), { body: { x: 1 } });
+});
+
+test('the development environment started from afar runs in the background', async () => {
+  const dev = { projects: { demo: { name: 'Demo', local_clone: clone, dev_start: 'npm run dev' } } };
+  const plan = await startDev('demo', { dryRun: true, background: true, config: dev });
+  assert.equal(plan.background, true);
+  assert.equal(plan.window, undefined, 'a window would open');
+  assert.deepEqual(plan.run, ['dev-run', 'demo', '--background']);
+  assert.equal(plan.log, devLog('demo'));
+  assert.ok(plan.log.endsWith(path.join('projects', 'demo', 'dev.log')));
+  assert.deepEqual((await startDev('demo', { dryRun: true, config: dev })).window, ['dev-run', 'demo'], 'on the computer, it no longer opens in a window');
+});
+
+// ---------- The usage resets' countdowns and the spare notice (ui/countdown.js), on a fixed clock ----------
+
+test('the status bar counts down to each usage reset and flags a spare 5-hour window', () => {
+  const now = Date.parse('2026-11-26T21:00:00Z');
+  const at = minutes => new Date(now + minutes * 60_000).toISOString();
+  // Rounded up to the minute: never "0 min" before the reset.
+  assert.deepEqual(timeLeft(at(174), now), { days: 0, hours: 2, minutes: 54, total: 174 });
+  assert.equal(timeLeft(at(0.2), now).total, 1);
+  assert.equal(timeLeft(at(0), now), null);
+  assert.equal(timeLeft(null, now), null);
+  assert.deepEqual([at(45), at(60), at(174), at(24 * 60), at(2 * 1440 + 14 * 60 + 30)].map(iso => countdown(iso, now)), ['45 min', '1h00', '2h54', '1d0h', '2d14h']);
+
+  // Within a day the time left; beyond it the day and hour; past, the reading is old; unknown, nothing.
+  assert.equal(resetLabel(at(174), now), 'renews in 2h54');
+  const week = resetLabel(at(2 * 1440 + 14 * 60), now, { locale: 'pt-BR' });
+  assert.match(week, /^renews \S+ \d{2}:\d{2}$/);
+  assert.ok(!week.includes('.'), "the weekday keeps no abbreviation's period");
+  assert.equal(resetLabel(at(-5), now), 'renewed');
+  assert.equal(resetLabel(undefined, now), '');
+  assert.equal(resetLabel('nonsense', now), '');
+  const pt = { 'renews in {left}': 'renova em {left}', '{hours}h{minutes}': '{hours}h{minutes}' };
+  const translate = (text, values) => (pt[text] ?? text).replace(/\{(\w+)\}/g, (m, k) => values[k]);
+  assert.equal(resetLabel(at(174), now, { t: translate }), 'renova em 2h54');
+
+  // The spare notice: under an hour left and over 30% unused, both needed.
+  assert.deepEqual(spare({ used: 0.59, resets: at(48) }, now), { free: 0.41, left: '48 min' });
+  assert.equal(spare({ used: 0.59, resets: at(61) }, now), null, 'more than an hour left');
+  assert.ok(spare({ used: 0.59, resets: at(SPARE_WITHIN_MS / 60_000) }, now), 'exactly an hour left still counts');
+  assert.equal(spare({ used: 1 - SPARE_MIN_FREE, resets: at(30) }, now), null, 'only 30% unused');
+  assert.equal(spare({ used: 0.2, resets: at(-1) }, now), null, 'already reset: the reading is old');
+  assert.equal(spare({ used: 0.2 }, now), null, 'reset unknown');
+  assert.equal(spare(undefined, now), null, 'not measured');
 });

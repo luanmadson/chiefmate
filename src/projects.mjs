@@ -2,11 +2,12 @@
 // delivered) and what you can do from it besides queuing work: open its folder or VS Code, and start or stop its
 // development environment ("dev_start" in its settings). The environment runs in a window of its own, through
 // "node src/cli.mjs dev-run <project>": the app finds it by that command line (src/machine.mjs), counts its memory in
-// the project's and stops it with everything it started. Every action takes "dryRun", which says what it would do
+// the project's and stops it with everything it started. Started from another device, it runs in the background with
+// no window, its output kept in data/projects/<id>/dev.log. Every action takes "dryRun", which says what it would do
 // and does nothing (the smoke test uses it).
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readdirSync, rmSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readdirSync, rmSync } from 'node:fs';
 import { connect, isIP } from 'node:net';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -15,7 +16,7 @@ import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { computer, devIdOf, processes, refreshProcesses, SUPPORTED } from './machine.mjs';
 import { openConsole, projectClone, tellProjectSessions, where } from './sessions.mjs';
-import { clip, DATA, now, readJson, writeJson } from './util.mjs';
+import { clip, DATA, ensureDir, now, readJson, ROOT, writeJson } from './util.mjs';
 
 const validId = id => /^[\w.-]+$/.test(String(id ?? '')) && !String(id).includes('..');
 
@@ -142,15 +143,31 @@ async function devWindows(id, maxAge) {
   return list.filter(p => devIdOf(p.cmd) === id);
 }
 
-/** Starts the project's development environment in a window of its own. */
-export async function startDev(id, { dryRun = false, config = loadConfig(), open = openConsole, readWindows = devWindows } = {}) {
+/** Where a development environment run in the background keeps its output. */
+export const devLog = id => path.join(DATA, 'projects', id, 'dev.log');
+
+/** Runs "cli.mjs <args>" with no window, its output in the log (started afresh). */
+function runDetached(cwd, args, log, onError) {
+  rmSync(log, { force: true });
+  ensureDir(path.dirname(log));
+  const out = openSync(log, 'a');
+  try {
+    spawn(process.execPath, [path.join(ROOT, 'src', 'cli.mjs'), ...args], { cwd, detached: true, stdio: ['ignore', out, out], windowsHide: true }).once('error', onError).unref();
+  } finally {
+    closeSync(out);
+  }
+  return null;
+}
+
+/** Starts the project's development environment in a window of its own, or with "background" in no window. */
+export async function startDev(id, { dryRun = false, background = false, config = loadConfig(), open = openConsole, detach = runDetached, readWindows = devWindows } = {}) {
   const project = projectOf(config, id);
   const name = project.name ?? id;
   let plan;
   let windows;
   try {
     plan = devPlan(config, id);
-    if (dryRun) return { dryRun: true, ...plan, window: ['dev-run', id] };
+    if (dryRun) return background ? { dryRun: true, ...plan, background: true, log: devLog(id), run: ['dev-run', id, '--background'] } : { dryRun: true, ...plan, window: ['dev-run', id] };
     windows = await readWindows(id, 5000);
   } catch (error) {
     if (!dryRun) devNotice(id, t('The development environment for {name} failed to start: {error}', { name, error: clip(error.message, 300) }), true);
@@ -166,8 +183,8 @@ export async function startDev(id, { dryRun = false, config = loadConfig(), open
   writeJson(devFile(id), { token, at: Date.now(), name: plan.name, status: 'starting' });
   const failed = error => failLaunch(id, token, plan.name, error.message);
   try {
-    const window = open(`${plan.name} (dev)`, plan.cwd, ['dev-run', id, token], failed);
-    return { started: true, window, ...plan };
+    const window = background ? detach(plan.cwd, ['dev-run', id, token, '--background'], devLog(id), failed) : open(`${plan.name} (dev)`, plan.cwd, ['dev-run', id, token], failed);
+    return { started: true, window, background, ...plan };
   } catch (error) {
     failed(error);
     throw error;
@@ -270,8 +287,8 @@ function devFacts(state) {
   ].filter(Boolean);
 }
 
-/** In the environment's window: runs "dev_start" in the project's clone and waits for it to end. */
-export async function runDev(id, token, { config = loadConfig(), spawnCommand = spawn, probe = listening, keepFailedWindow = process.stdin.isTTY } = {}) {
+/** In the environment's window (or in the background): runs "dev_start" in the project's clone and waits for it to end. */
+export async function runDev(id, token, { background = false, config = loadConfig(), spawnCommand = spawn, probe = listening, keepFailedWindow = !background && process.stdin.isTTY } = {}) {
   const state = validId(id) ? readDev(id) : null;
   if (!state || state.token !== token) return;
   let plan;
@@ -368,7 +385,8 @@ export async function runDev(id, token, { config = loadConfig(), spawnCommand = 
   }
   let wasRunning = false;
   try {
-    const child = spawnCommand(plan.command, { cwd: plan.cwd, shell: true, stdio: ['inherit', 'pipe', 'pipe'] });
+    // In the background the launcher has no console, and Windows would give the command a visible one of its own.
+    const child = spawnCommand(plan.command, { cwd: plan.cwd, shell: true, stdio: [background ? 'ignore' : 'inherit', 'pipe', 'pipe'], windowsHide: background });
     const output = [
       [child.stdout, process.stdout, false],
       [child.stderr, process.stderr, true],
