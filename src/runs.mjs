@@ -504,6 +504,8 @@ function toolLines(tool) {
       '## Working on Codex',
       "- You run on the Codex CLI, in its sandbox: you may write only inside the working copy, its `.git` folder is read-only and there is no network. So leave your changes uncommitted: Chiefmate commits them when your step ends. Don't install packages from the network; if the work truly needs it, say so in your report.",
       "- Chiefmate's command line above (needs-you, plan, defect) talks to Chiefmate on this computer and works from the sandbox.",
+      // Codex's unelevated sandbox on Windows: libuv's named pipes are refused (EPERM), the process itself is not.
+      ...(process.platform === 'win32' ? ["- On Windows, the sandbox refuses the pipes a program opens to read the output of another one it starts: Node.js's child_process with its default stdio fails with EPERM, so do most test runners (`node --test`, `npm test`) and scripts that call git that way. That is the sandbox, not your change, and there is no way around it from inside: don't spend time on it. Chiefmate runs the project's checks itself after your step, outside the sandbox; say in your report which ones you couldn't run."] : []),
     ];
   }
   if (tool === 'grok') {

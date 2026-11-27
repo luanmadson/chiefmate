@@ -1172,6 +1172,7 @@ try {
   const parts = args => runs.promptParts({ run, previous: [], changes: '', traces: [], config, libraries: [], base: 'main', access, built: null, agents: {}, ...args });
   const text = args => parts(args).flatMap(x => x.lines).join('\n');
   expect(text({ step: run.steps[0], project: config.projects.p, finalReview: false }).includes('## Working on Codex'), "a task chosen for Codex does not tell its step how it runs");
+  expect(process.platform !== 'win32' || text({ step: run.steps[0], project: config.projects.p, finalReview: false }).includes('fails with EPERM'), "a step on Codex is not told that the sandbox refuses Node.js's pipes on Windows");
   expect(!text({ step: run.steps[0], project: { name: 'P', sensitive: true }, finalReview: false }).includes('## Working on'), 'a sensitive project ran a step on Codex');
   expect(!text({ step: run.review, project: config.projects.p, finalReview: true }).includes('Corrections:'), 'the final review asked for corrections with no step on Codex or Grok');
   Object.assign(run.steps[0], { status: 'done', tool: 'codex', durationMs: 3 * 60000, report: 'Done.' });
