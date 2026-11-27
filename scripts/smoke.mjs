@@ -346,6 +346,8 @@ try {
     // (nothing opens: the actions are refused or asked for as a dry run).
     expect((await fetch(`${base}/api/project/no-such-project`)).status === 400, "the page of a project that does not exist did not answer 400");
     expect((await post('/api/project/open', { project: 'no-such-project', app: 'folder', dryRun: true })).status === 400, 'opening the folder of a project that does not exist was not refused');
+    const outsideHome = await post('/api/files/open', { path: path.join(path.parse(os.homedir()).root, 'Windows', 'win.ini'), dryRun: true });
+    expect(outsideHome.status === 403, `a file outside the user folder was not refused for opening on the computer: ${outsideHome.status}`);
     expect((await post('/api/project/dev', { project: 'no-such-project', action: 'start', dryRun: true })).status === 400, 'starting the environment of a project that does not exist was not refused');
     expect((await post('/api/project/dev', { project: 'no-such-project', action: 'other' })).status === 400, 'an unknown action on the development environment was not refused');
     expect((await post('/api/session', { profile: 'no-such-profile', dryRun: true })).status === 400, 'a dry run of an unknown session profile was not refused');
@@ -402,6 +404,12 @@ try {
     const opens = await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder' });
     expect(opens.status === 403 && JSON.parse(opens.text).error?.includes('computer'), `opening a window on the computer from another device was not refused: ${opens.status}`);
     expect((await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder', dryRun: true })).status !== 403, 'a dry run of opening a folder was refused through the remote access');
+    // A file of the user folder: opened only on the computer; from the phone, only found (its path to copy).
+    const missing = path.join(os.homedir(), 'chiefmate-smoke-no-such-file.html');
+    const fileOpens = await ask(remote.port, '/api/files/open', command, { path: missing });
+    expect(fileOpens.status === 403 && JSON.parse(fileOpens.text).error?.includes('computer'), `opening a file on the computer from another device was not refused: ${fileOpens.status}`);
+    const fileFound = await ask(remote.port, '/api/files/open', command, { path: missing, dryRun: true });
+    expect(fileFound.status === 404 && JSON.parse(fileFound.text).tried === missing, `looking for a file from another device did not say the path tried: ${fileFound.status} ${fileFound.text}`);
     const remoteStop = await ask(remote.port, '/api/power', command, { action: 'stop' });
     expect(remoteStop.status === 403 && JSON.parse(remoteStop.text).error?.includes('computer'), `stopping Chiefmate from another device was not refused: ${remoteStop.status}`);
     expect((await ask(port, '/api/state', tailnet)).status === 403, "the app's own port answered the tailnet name");

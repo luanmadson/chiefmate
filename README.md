@@ -327,6 +327,8 @@ Where it opens from: the file paths in the conversation with the manager, the ne
 
 What it may open (its roots): each project's working copy (`workspaces/<id>`), your own clone of it, the reference libraries (`workspaces/.library`) and the folders you add in `viewer.extra_roots`. Nothing else, and never, even inside them, Chiefmate's `data/` and `config/chiefmate.json`, `.git`, `node_modules`, `.env` files, keys (`*.pem`, `*.key`, `id_rsa`…) or anything named for secrets. Each file is at most 50 MB. See "Security".
 
+A path outside those folders, in your user folder (`C:\Users\<you>\…`, `~\…`, or relative to it, such as `Documents\reports\summary.html`, with `/` or `\`), **opens on the computer** with its own app: a document, picture, PDF, page or video opens; a program, script, shortcut or unknown type is only shown in its folder, so a click never runs anything. The viewer also has **Open on the computer**, to see an HTML page as a page. On the phone (the remote access) nothing opens: the path shows with **Copy the path** and a line saying it opens on the computer. A path found nowhere shows the path tried. Never opened this way: anything outside your user folder (links and junctions followed), Chiefmate's `data/`, `config/chiefmate.json` and `security.protected_folders`, and the protected names above.
+
 ### The Context tab
 
 The page's **Context** tab (`#project/<id>/context`) shows everything that is passed to whoever works on the project, put together by the same code the runs use, in the real order and with the source of each part:
@@ -859,7 +861,7 @@ English is the source. The app, the notifications and the reports follow `langua
 ## Development
 
 - `npm run check` checks the syntax of every script and lists any text without a translation. A script it couldn't check is named with the reason and the error's code (for example `EPERM`, when a sandbox refuses to start Node.js), and the check ends with "Check failed".
-- `npm test` runs the unit tests (`scripts/unit.mjs`, with `node:test`): the file viewer's checks of paths and its CSV and XLSX readers.
+- `npm test` runs the unit tests (`scripts/unit.mjs`, with `node:test`): the file viewer's checks of paths, the opening on the computer of a file of your user folder (with nothing really opened) and its CSV and XLSX readers.
 - `npm run smoke` starts a temporary Chiefmate on a spare port, with no queue, schedule or updates and with records of its own in a temporary folder (`CHIEFMATE_DATA`), and checks that the app and the API answer. It never starts a real answer of the manager.
 - [docs/playbook.md](docs/playbook.md) has the rules for changing Chiefmate, for the crew and for people alike.
 

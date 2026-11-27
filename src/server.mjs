@@ -14,7 +14,7 @@ import { effortHistory, effortSource, runEffortChanges, setEffort } from './effo
 import { agentTool, runTools, toolModel } from './tools.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
 import { addQuestion, decide, decisionCards, openPushes, openQuestions, openRepoRequests } from './decisions.mjs';
-import { listFolder, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
+import { listFolder, openOnComputer, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
 import { engage, isLocked, lockdownView, recordSignal, release } from './lockdown.mjs';
@@ -234,7 +234,7 @@ async function filesRoute(req, res, url) {
     }
     return reply(res, 404, { error: 'not found' });
   } catch (error) {
-    return reply(res, typeof error.code === 'number' ? error.code : 400, { error: error.message });
+    return reply(res, typeof error.code === 'number' ? error.code : 400, { error: error.message, ...(error.reason ? { reason: error.reason } : {}) });
   }
 }
 
@@ -490,6 +490,7 @@ export function remoteRefusal(req, remote) {
 // them, so they are refused there (their "dryRun" still answers).
 const OPENS_ON_PC = {
   '/api/project/open': () => true,
+  '/api/files/open': () => true,
   '/api/project/dev': body => body.action === 'start',
   '/api/session': body => !!body.window,
   '/api/prompt-builder/session': body => !!body.window,
@@ -668,6 +669,14 @@ export function startServer() {
           return reply(res, 200, { queue: removeQueued(String(body.id ?? ''), String(body.item ?? '')) });
         case '/api/session/permission':
           return reply(res, 200, answerPermission(String(body.id ?? ''), String(body.request ?? ''), body.allow === true));
+        case '/api/files/open':
+          // A file of your user folder, opened on this computer (src/files.mjs); "dryRun" only finds it, as the phone does.
+          try {
+            return reply(res, 200, openOnComputer(body.path, { dryRun: !!body.dryRun }));
+          } catch (error) {
+            if (typeof error.code !== 'number') throw error;
+            return reply(res, error.code, { error: error.message, ...(error.reason ? { reason: error.reason } : {}), ...(error.tried ? { tried: error.tried } : {}) });
+          }
         case '/api/project/open':
           // "app": "folder" (the file manager) or "vscode", in your own clone of the project.
           return reply(res, 200, openProjectApp(String(body.project ?? ''), String(body.app ?? ''), { dryRun: !!body.dryRun }));

@@ -747,6 +747,8 @@ button.tab { background: transparent; border-top: 0; border-left: 0; border-righ
 /* "Work now" when the crew is on the project: its runs, before the choice */
 .work-runs { margin: 0 0 14px; padding-left: 18px; color: var(--text); }
 .work-runs li { margin: 2px 0; }
+/* A path to copy (#path-dialog): whole, broken anywhere, selected with one tap. */
+.path-dialog-path { display: block; margin: 8px 0 14px; padding: 8px 10px; background: var(--raised); border: 1px solid var(--line); word-break: break-all; user-select: all; }
 /* The project's agent in charge: who it is, its requests to the manager (each with its state), then the conversation. */
 .action-big.accent { border-color: var(--accent); }
 .action-big.accent .action-title { color: var(--accent); }

@@ -1849,5 +1849,14 @@
   "Your conversation with the manager, without leaving the project. What you send from here says which project it is about.": "Sua conversa com o gerente, sem sair do projeto. O que você envia daqui diz de qual projeto se trata.",
   "The crew is working on this project": "A equipe está trabalhando neste projeto",
   "Work in a separate copy": "Trabalhar numa cópia separada",
-  "Pause the crew's task": "Pausar a tarefa da equipe"
+  "Pause the crew's task": "Pausar a tarefa da equipe",
+  "This file is outside your user folder: Chiefmate never opens it.": "Este arquivo está fora da sua pasta de usuário: o Chiefmate nunca o abre.",
+  "Opens on the computer": "Abre no computador",
+  "This file opens on the computer where Chiefmate runs, not here: copy its path to find it there.": "Este arquivo abre no computador onde o Chiefmate roda, não aqui: copie o caminho para encontrá-lo lá.",
+  "Shown in its folder on the computer: {name}": "Mostrado na pasta dele, no computador: {name}",
+  "Opened on the computer: {name}": "Aberto no computador: {name}",
+  "File not found": "Arquivo não encontrado",
+  "Path copied.": "Caminho copiado.",
+  "Open on the computer": "Abrir no computador",
+  "Copy the path": "Copiar o caminho"
 }
