@@ -1593,6 +1593,61 @@ test("A heredoc's text written into a file by a command that does nothing else i
   ]) assert.deepEqual(rules(command), ['Bash(git push:*)'], command);
 });
 
+test('Quoted text that only goes as text (a message, a search, a commit message, notes) is no command; what runs still is', () => {
+  const rules = command => publishing(command).map(f => f.rule);
+  const cli = 'node C:/Users/x/chiefmate/src/cli.mjs';
+  // As the crew and the manager wrote them (defects #15 and #22): a message naming the push to the main branch, after cd
+  // or with 2>&1; gh's commands in escaped backquotes, in a message or a search; a message or a commit message written by
+  // a heredoc; notes written by node -e or echo.
+  for (const command of [
+    `${cli} chat say "Done; git push origin main stays with Chiefmate" 2>&1`,
+    `cd /c/x && ${cli} defect report "Refused:\ngit push origin main, quoted in the text.\nExpected: only a real git command."`,
+    `${cli} chat say "Fixed: \\\`gh pr create\\\` and \\\`git push origin main\\\` stay with Chiefmate."`,
+    `${cli} chat say "Never \\\`git push --force origin main\\\`"`,
+    `${cli} chat say "Use "" for no title; gh pr create stays refused"`,
+    'node src/cli.mjs defect close 22 --note "The guard no longer reads \\`git push origin main\\` in a message as a command"',
+    'grep -n "\\`gh release create\\`" README.md',
+    'grep -rn "gh pr create\\|git push" src | head -20',
+    "grep -n 'gh gist create; git push' docs/playbook.md",
+    `${cli} chat say "$(cat <<'EOF'\nSummary:\n- gh pr create; git push origin main stay with Chiefmate\n- \`git push --force\` never (nor "gh repo delete")\nEOF\n)"`,
+    `git add -A && git commit -m "$(cat <<'EOF'\nGuard: text that names git push origin main\n\ngh pr create; git push --force stay refused when real\nEOF\n)"`,
+    `node -e "require('fs').appendFileSync('.tmp/notes.md', 'Refused: git push origin main; gh pr create\\n')"`,
+    "node -e \"const fs = require('node:fs'); fs.mkdirSync('.tmp', { recursive: true }); fs.writeFileSync('.tmp/n.md', 'gh release create; git push --force: never')\"",
+    'echo "gh pr create; git push origin main" >> .tmp/notes.md',
+  ]) assert.deepEqual(rules(command), [], command);
+  // What runs is still looked at: a real command beside the text, a substitution, a backquote bash runs, text piped to a
+  // shell or written and run in the same command (a script, a hook), a --check, inline code that can run a command, and
+  // quotes that bash and PowerShell read otherwise (an escaped backquote before another quote, joined quotes in code).
+  for (const command of [
+    `${cli} chat say "ok" && git push origin main`,
+    `${cli} chat say "$(git push origin main)"`,
+    `${cli} chat say "\`git push origin main\`"`,
+    `${cli} chat say "$(cat <<'EOF'\ngit push origin main\nEOF\n)" | sh`,
+    `${cli} chat say "$(cat <<EOF\n$(git push origin main)\nEOF\n)"`,
+    `${cli} chat say "$(cat <<'EOF'\nEOF\ngit push origin main\nEOF\n)"`,
+    `${cli} chat say "a \\\`" b "; git push origin main; "`,
+    `${cli} needs-you "Done?" --wait --check "git push origin main"`,
+    "node -e 'console.log(''\"''); require(''child_process'').execSync(''git push origin main''); console.log(''\"'')'",
+    `node -e "require('child_process').execSync('git push origin main')"`,
+    `node -e "require('fs')['constructor']['constructor']('return process')().mainModule.require('child_process').execSync('git push origin main')"`,
+    'echo "git push origin main" > t.sh && bash t.sh',
+    `node -e "require('fs').writeFileSync('t.sh', 'git push origin main')" && bash t.sh`,
+    'echo "git push origin main" > .git/hooks/pre-commit && git commit -m "x"',
+    'echo "git push origin main">.git/hooks/pre-commit&&git commit -m "x"',
+    'grep -h "git push origin main" notes.md | sh',
+    'rg --pre=bash "git push origin main" .',
+    'git -c core.editor=x commit -m "a; git push origin main"',
+    'git push --force origin x',
+  ]) assert.deepEqual(rules(command), ['Bash(git push:*)'], command);
+  assert.deepEqual(rules('gh pr create --title "x" --body "y; git push origin main"'), ['Bash(gh pr:*)']);
+  // A deletion in a message or in notes is text; a real one is still grave.
+  const home = path.join(temp, 'text-home');
+  const kinds = command => riskyCommand(command, { cwd: path.join(home, 'work'), protect: [], home, root: path.join(home, 'app'), temp: path.join(temp, 'tmp') }).map(f => f.kind);
+  assert.deepEqual(kinds(`${cli} chat say "Careful; rm -rf ~ would delete everything"`), []);
+  assert.deepEqual(kinds(`node -e "require('fs').appendFileSync('n.md', 'never: rm -rf ~')"`), []);
+  for (const command of [`${cli} chat say "ok" && rm -rf ~`, 'bash -c "rm -rf ~"', 'echo "rm -rf ~" | sh', 'rm -rf ~/Documents']) assert.deepEqual(kinds(command), ['wide_delete'], command);
+});
+
 test('effort: each level from its place, the project only, the history and the run report', () => {
   const config = {
     owner: 'Someone', crew: { writer: { effort: 'medium' } },

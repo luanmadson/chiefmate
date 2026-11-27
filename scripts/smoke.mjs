@@ -2084,10 +2084,14 @@ try {
     const guarded = JSON.parse(claudeArgs({ model: 'm', hooks: crewGuard(guardLog) }).find((a, i, all) => all[i - 1] === '--settings'));
     const hook = guarded.hooks?.PreToolUse?.[0]?.hooks?.[0]?.command ?? '';
     const refuses = command => /"permissionDecision":"deny"/.test(execFileSync(hook, { shell: true, encoding: 'utf8', input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', tool_input: { command } }) }));
-    const publish = ['git -C . push origin main', 'gh api repos/a/b/pulls -f title=T -f head=h', 'cd x && git push', 'bash -c "gh pr create --fill"', 'git -c a=b remote add up u', 'gh gist create notes.md --public', 'gh release create v1'];
-    // A heredoc's text that only goes into a file is data, not a command.
+    const publish = ['git -C . push origin main', 'gh api repos/a/b/pulls -f title=T -f head=h', 'cd x && git push', 'bash -c "gh pr create --fill"', 'git -c a=b remote add up u', 'gh gist create notes.md --public', 'gh release create v1',
+      'node src/cli.mjs chat say "ok" && git push origin main'];
+    // A heredoc's text that only goes into a file is data, not a command; so is the quoted text of a command that only
+    // takes it as text: a message naming a push, with 2>&1, a search for a command in backquotes, a message by a heredoc.
     const written = "cat > t.mjs <<'EOF'\ngh pr create\ngit push origin main\nEOF";
-    const wrong = [...publish.filter(c => !refuses(c)), ...['git status', 'gh api repos/a/b/pulls', 'git commit -m "no git push here"', 'gh release list', written].filter(refuses)];
+    const texts = ['node src/cli.mjs chat say "Done; git push origin main stays with Chiefmate" 2>&1', 'grep -n "\\`gh release create\\`" README.md',
+      "node src/cli.mjs defect report \"$(cat <<'EOF'\nRefused: gh pr create; git push origin main\nEOF\n)\""];
+    const wrong = [...publish.filter(c => !refuses(c)), ...['git status', 'gh api repos/a/b/pulls', 'git commit -m "no git push here"', 'gh release list', written, ...texts].filter(refuses)];
     const noted = readFileSync(guardLog, 'utf8').trim().split('\n').length;
     expect(hook.includes('guard.mjs') && !hook.includes('--allow') && !wrong.length && noted === publish.length,
       `the guard of the crew and the manager misjudged what publishes: ${JSON.stringify({ hook, wrong, noted })}`);
@@ -3194,6 +3198,11 @@ try {
       'node src/cli.mjs chat say "Refused: git push -u origin x 2>&1; git remote add y z"': '', "node src/cli.mjs chat say 'run `git push origin x`'": '',
       'node src/cli.mjs chat say "$(git push origin x)"': 'git push', 'node src/cli.mjs chat say "`git push origin x`"': 'git push', 'node src/cli.mjs chat say hi && git push origin x': 'git push',
       'node C:/x/src/cli.mjs defect report "Refused: git push origin x; gh pr create.\nExpected: C:\\Users ok"': '',
+      // So is the text of a command made only of commands that take it as text, after cd, with 2>&1, in escaped
+      // backquotes, written by a heredoc or by node -e into notes; a backquote bash runs, a pipe to a shell, still count.
+      'cd x && node src/cli.mjs chat say "Done; \\`git push origin x\\` stays with Chiefmate" 2>&1': '', 'grep -rn "gh pr create\\|git push" src | head': '',
+      "node src/cli.mjs chat say \"$(cat <<'EOF'\ngh pr create; git push origin x\nEOF\n)\"": '', "node -e \"require('fs').appendFileSync('n.md', 'gh pr create; git push origin x')\"": '',
+      'grep -n "gh pr create; git push origin x" notes.md | sh': 'gh pr,git push',
       // A message that bash or PowerShell would read another way (an escaped quote, $'...', a comment, $(...) after a
       // backslash, curly quotes) is looked at whole: what runs after it is found.
       'node src/cli.mjs chat say "x\\" "; git push origin x': 'git push', "node src/cli.mjs chat say $'x\\' '; git push origin x": 'git push',
