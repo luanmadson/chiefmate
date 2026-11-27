@@ -53,7 +53,8 @@
   },
   "mcp_servers": {},
   "needs_you": {
-    "max_wait_minutes": 120
+    "max_wait_minutes": 120,
+    "park_after_minutes": 15
   },
   "manager_updates": true,
   "autopilot": {

@@ -28,7 +28,8 @@ import { agentSender, chat, editPending, interruptManager, managerContext, newCo
 import { closeDefect, reportDefect } from './defects.mjs';
 import { closeReplaced, mergeRun, previewClose, previewMerge } from './merge.mjs';
 import { awayInfo, reportEvent, setAway } from './news.mjs';
-import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
+import { askOwner, confirmByOwnerWords, finishRequest, openCalls, openRequests, parkRun, pollRequest } from './needs.mjs';
+import { quarantineList, releaseQuarantine } from './quarantine.mjs';
 import { cancelStop, powerInfo, powerPreview, setStandby, stopSystem } from './power.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { isOwner, OWNER_HEADER, openAppWindow, redeemCode } from './owner.mjs';
@@ -387,7 +388,7 @@ function buildState() {
   const pushes = openPushes();
   const repos = openRepoRequests();
   const security = lockdownView();
-  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo, questions, pushes, repos, lockdown: security });
+  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo, questions, pushes, repos, lockdown: security, quarantine: quarantineList() });
   const lastOf = id => runs.find(r => r.mission === id && !['queued', 'waiting'].includes(r.status));
   return {
     now: now(),
@@ -604,6 +605,10 @@ const KEYLESS = {
   '/api/needs-you': true,
   '/api/needs-you/poll': true,
   '/api/needs-you/done': b => b.by === 'check' && !b.session && b.answer == null && b.note == null,
+  // The open calls and the quarantine holds may be read; a call marked done, a run parked or a hold lifted, only by the
+  // manager (src/needs.mjs, src/quarantine.mjs).
+  '/api/calls': b => (b.action ?? 'list') === 'list' || b.by === 'manager',
+  '/api/quarantine': b => b.action !== 'release' || b.by === 'manager',
   '/api/defect': true,
   '/api/defect/close': b => b.by === 'manager',
   '/api/manager': b => !!b.from && typeof b.from === 'object', // an agent's message, marked as the agent's
@@ -805,6 +810,30 @@ export function startServer() {
         case '/api/needs-you/done':
           if (body.session) return reply(res, 200, finishSessionRequest(String(body.session), String(body.id ?? '')));
           return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner', body.answer ?? null, body.note ?? null));
+        case '/api/calls': {
+          // The manager's handling of the open calls (cli.mjs calls): list them, mark one done on the owner's words in
+          // its conversation (only while it answers, src/needs.mjs), or park a run that waits for the owner.
+          const action = String(body.action ?? 'list');
+          if (action === 'list') return reply(res, 200, { calls: openCalls() });
+          if (action === 'done') {
+            if (body.by !== 'manager') return reply(res, 403, { error: t("Only the manager, while it answers the owner, marks a call done on the owner's word.") });
+            return reply(res, 200, confirmByOwnerWords(body.run, String(body.id ?? ''), body.ownerSaid, { conversation: readConversation(), answering: chat.responding }));
+          }
+          if (action === 'park') {
+            const parked = parkRun(body.run, { by: body.by === 'owner' ? 'owner' : 'manager', request: body.id ? String(body.id) : null });
+            nudgeQueue();
+            return reply(res, 200, parked);
+          }
+          return reply(res, 400, { error: t('Unknown action: {action}', { action }) });
+        }
+        case '/api/quarantine':
+          // The projects waiting for a file the antivirus probably took (src/quarantine.mjs); "release" lifts a hold.
+          if (body.action === 'release') {
+            const released = releaseQuarantine(String(body.project ?? ''), body.by === 'manager' ? 'manager' : 'owner');
+            nudgeQueue();
+            return reply(res, 200, released);
+          }
+          return reply(res, 200, { holds: quarantineList() });
         case '/api/decide': {
           // The owner's click on a decision card: approve (a merge goes through src/merge.mjs), later, discard or answer.
           const decided = await decide({ card: body.card, action: body.action, option: body.option, note: body.note, reason: body.reason }, buildState().decisions);
@@ -943,7 +972,7 @@ export function startServer() {
         case '/api/merge':
           // Merges a finished run's work with the owner's authorization (src/merge.mjs): "preview" only shows it.
           if (body.preview) return reply(res, 200, await previewMerge(body.run));
-          return reply(res, 200, await mergeRun(body.run, { by: body.by === 'manager' ? 'manager' : 'owner' }));
+          return reply(res, 200, await mergeRun(body.run, { by: body.by === 'manager' ? 'manager' : 'owner', savePending: body.savePending === true }));
         case '/api/close-pr':
           // Closes a run's pull request replaced by a newer run's (src/merge.mjs): "preview" only shows it.
           if (body.preview) return reply(res, 200, previewClose(body.run, body.replacedBy));

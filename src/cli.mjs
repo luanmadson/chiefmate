@@ -208,10 +208,27 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 ask-owner opens a card in Decisions; forward links to a project or run;
                                                 in-progress links to an active run; reject refuses it. --note is required
                                                 except to approve. The answer goes back to the conversation.
-  node src/cli.mjs merge <id> [--yes]           merges a finished run's work, only with the owner's authorization: shows
+  node src/cli.mjs merge <id> [--yes] [--save-pending]
+                                                merges a finished run's work, only with the owner's authorization: shows
                                                 the pull request (or the branch delivered locally), the checks and the
                                                 review's verdict; with --yes, Chiefmate merges it (a pull request on
-                                                GitHub; a local branch into your clone's base branch, nothing pushed)
+                                                GitHub; a local branch into your clone's base branch, nothing pushed).
+                                                --save-pending: a local merge into a clone with changes not committed
+                                                first saves its changed tracked files (never the untracked ones) in one
+                                                commit with a neutral message, only when nothing conflicts
+  node src/cli.mjs calls                        for the manager: the owner's open calls (needs-you) of the runs, oldest
+                                                first, with the parked runs
+  node src/cli.mjs calls done <run> <request> --owner-said "<the owner's words>"
+                                                for the manager, in its conversation only: marks a call done on what the
+                                                owner told it (their words, as written to the manager), recorded in the
+                                                request, the step's log and the run's conversation
+  node src/cli.mjs calls park <run> [<request>]  parks a run that waits for the owner: its step pauses at a safe point
+                                                with its work committed, its project's next run takes the turn, and it
+                                                resumes first once the owner answers
+  node src/cli.mjs quarantine [release <project>]
+                                                the projects waiting for a file the antivirus probably quarantined (the
+                                                queue waits and checks again every few minutes); release lifts a hold
+                                                without the file
   node src/cli.mjs push <folder> <branch>       for the manager: the push the owner allowed on its card (that branch,
                                                 from that folder, once, within 30 minutes; never the main branch, never
                                                 forced). Without the owner's grant it refuses and sends nothing
@@ -336,7 +353,13 @@ async function needsYou() {
       if (s.answer && s.note) console.log(`The owner answered you from the app:\n${s.answer}\n\nAnd wrote:\n${s.note}\n\nTake the answer into account and go on.`);
       else if (s.note) console.log(`The owner answered you from the app in their own words (none of the options):\n${s.note}\n\nTake the answer into account and go on.`);
       else if (s.answer) console.log(`The owner answered you from the app:\n${s.answer}\n\nTake the answer into account and go on.`);
+      else if (s.ownerSaid) console.log(`Done: the owner told the manager in their conversation: "${s.ownerSaid}". Take it into account and go on.`);
       else console.log(s.by === 'check' ? 'Done: the check succeeded.' : 'Done: the owner says they did it. Go on.');
+      return;
+    }
+    if (s.parked) {
+      // Parked (src/needs.mjs): the session stops at this safe point and resumes with the owner's answer.
+      console.log("Chiefmate parked this run until the owner answers, so the project's next run can use its turn. Stop here and don't write your report now: this session resumes with the owner's answer.");
       return;
     }
     if (s.status === 'closed') {
@@ -1416,14 +1439,53 @@ async function main() {
         console.log("Nothing was merged. Add --yes only with the owner's explicit yes for this run.");
         return;
       }
-      const m = await api('/api/merge', { run: id, by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' });
+      const m = await api('/api/merge', { run: id, by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner', savePending: has('--save-pending') });
       if (m.discarded || m.merged.by === 'outside') {
         console.log(m.discarded ? `Local branch deleted: ${m.branch}.` : `Branch already merged: ${m.branch}.`);
         return;
       }
       console.log(m.kind === 'pr' ? `Merged: ${m.url}.` : `Merged: ${m.branch} into ${m.base}, in ${m.dir}. Nothing was sent to GitHub.`);
+      if (m.savedNote) console.log(m.savedNote);
       if (m.copies?.done?.length) console.log(`Updated after the merge: ${m.copies.done.join(', ')}.`);
       if (m.copiesNote) console.log(`Not updated: ${m.copiesNote}`);
+      return;
+    }
+    case 'calls': {
+      // The owner's open calls, for the manager (src/needs.mjs). Never from a step: a step asks with needs-you.
+      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) await crewRefused('calls', 'A step of a run never answers or parks the calls to the owner: ask with needs-you.');
+      const [action = 'list', run, request] = rest.filter((x, i) => !x.startsWith('--') && rest[i - 1] !== '--owner-said');
+      if (action === 'list') {
+        const { calls } = await api('/api/calls', { action: 'list' });
+        if (!calls.length) console.log('No open call to the owner.');
+        for (const c of calls) console.log(`${c.run} ${c.id}  ${c.at.slice(0, 16).replace('T', ' ')}  ${c.project}: ${c.title}${c.parked ? ' [parked]' : ''}${c.wait ? '' : ' [the step goes on]'}\n    ${c.options ? `${c.what} (options: ${c.options.join(' | ')})` : c.what}`);
+        return;
+      }
+      if (!run) throw new Error('Which run? node src/cli.mjs calls done|park <run> [<request>]');
+      if (action === 'done') {
+        if (!process.env.CHIEFMATE_MANAGER) throw new Error('Only the manager, in its conversation, marks a call done on the owner\'s word. You can click "I did it" in the app.');
+        if (!request || !option('--owner-said')) throw new Error('node src/cli.mjs calls done <run> <request> --owner-said "<the owner\'s words, as written to you>"');
+        const done = await api('/api/calls', { action: 'done', run, id: request, ownerSaid: option('--owner-said'), by: 'manager' });
+        console.log(`Call ${done.id} of run ${done.run} marked done on the owner's word: "${done.ownerSaid}".`);
+        return;
+      }
+      if (action === 'park') {
+        const parked = await api('/api/calls', { action: 'park', run, id: request ?? null, by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' });
+        console.log(parked.already ? `Run ${parked.run} is already parked.` : `Run ${parked.run} parks at a safe point, waiting for the owner (call ${parked.request}); its project's next run takes the turn, and it resumes first once the owner answers.`);
+        return;
+      }
+      throw new Error('node src/cli.mjs calls [done <run> <request> --owner-said "..." | park <run> [<request>]]');
+    }
+    case 'quarantine': {
+      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER && rest[0] === 'release') throw new Error('A step of a run never lifts a hold: the owner restores the file.');
+      if (rest[0] === 'release') {
+        if (!rest[1]) throw new Error('Which project? node src/cli.mjs quarantine release <project>');
+        const r = await api('/api/quarantine', { action: 'release', project: rest[1], by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' });
+        console.log(`The queue of ${r.project} goes on without waiting for ${r.file}.`);
+        return;
+      }
+      const { holds } = await api('/api/quarantine', {});
+      if (!holds.length) console.log('No project waits for a quarantined file.');
+      for (const h of holds) console.log(`${h.project}: ${h.file} (${h.state}) since ${h.since.slice(0, 16).replace('T', ' ')}${h.run ? `, run ${h.run}` : ''}`);
       return;
     }
     case 'close-pr': {

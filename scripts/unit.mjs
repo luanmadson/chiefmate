@@ -785,6 +785,17 @@ test('a run paused in the middle of its work keeps the copy: no other run of the
   assert.deepEqual(pickNext([later, runB], [], 3, Date.now(), copyHolders([later, runB])).map(r => r.id), []);
   // Once it resumed and ended, B goes.
   assert.deepEqual(pickNext([runB], [], 3, Date.now(), copyHolders([{ ...runA, status: 'done' }, runB])).map(r => r.id), ['b']);
+  // Parked for the owner's answer with its work committed (src/needs.mjs): it leaves the copy, so B goes; once answered
+  // it is first in the queue, but waits for a run that keeps the copy. A parked run whose commit failed still keeps it.
+  const parked = { ...runA, parked: { request: 'q', committed: true } };
+  assert.equal(holdsCopy(parked), false);
+  assert.deepEqual(pickNext([runB, runC], [], 3, Date.now(), copyHolders([parked, runB, runC])).map(r => r.id), ['b', 'c']);
+  const answered = { ...parked, status: 'queued' };
+  const pausedB = { ...runB, status: 'queued', prepared: true, resumeFirst: true };
+  assert.deepEqual(pickNext([answered, pausedB], [], 3, Date.now(), copyHolders([answered, pausedB])).map(r => r.id), ['b']);
+  assert.deepEqual(pickNext([answered, runB], [], 3, Date.now(), copyHolders([answered, runB])).map(r => r.id), ['a']);
+  assert.equal(holdsCopy({ ...runA, parked: { request: 'q' } }), true);
+  assert.equal(holdsCopy({ ...parked, shelf: { commit: 'x' } }), true);
 });
 
 // ---------- The crew's tools (src/tools.mjs): which one a member runs on, until when, and how each is started ----------
@@ -1882,6 +1893,8 @@ test('without the key, a command may do only what an agent may, never as the own
     ['/api/lockdown', { action: 'note', note: 'x' }], ['/api/lockdown', { action: 'note', note: 'x', by: 'step' }],
     ['/api/escalation', { action: 'pin', pin: '480215' }], ['/api/escalation', { action: 'token', token: 'x' }], ['/api/escalation', { action: 'test' }],
     ['/api/escalation', { action: 'remove', channel: 'telegram' }], ['/api/escalation', { action: 'status' }],
+    ['/api/calls', { action: 'park', run: 'r', by: 'owner' }], ['/api/calls', { action: 'done', run: 'r', id: '1', ownerSaid: 'x' }],
+    ['/api/quarantine', { action: 'release', project: 'p', by: 'owner' }], ['/api/quarantine', { action: 'release', project: 'p' }],
   ];
   for (const [route, body] of owners) assert.equal(ownerOnly(route, body), true, `${route} ${JSON.stringify(body)} goes without the key`);
   // What the command line sends for an agent (a step, a live session, the manager, the watchdog and its rescuer).
@@ -1906,6 +1919,9 @@ test('without the key, a command may do only what an agent may, never as the own
     ['/api/queue', { action: 'move', id: 'r', top: true, by: 'manager' }], ['/api/queue', { action: 'hold', id: 'r', by: 'manager' }],
     ['/api/run/edit', { id: 'r', changes: { title: 'x' }, by: 'manager' }], ['/api/retry', { id: 'r', agent: 'designer', by: 'manager' }],
     ['/api/run/talk', { run: 'r', text: 'x', by: 'manager' }], ['/api/gap', { action: 'record', what: 'x', by: 'manager' }], ['/api/gap', { action: 'close', id: 1, by: 'manager' }],
+    // The manager's handling of the calls and the quarantine holds (src/needs.mjs, src/quarantine.mjs).
+    ['/api/calls', {}], ['/api/calls', { action: 'list' }], ['/api/calls', { action: 'done', run: 'r', id: '1', ownerSaid: 'x', by: 'manager' }],
+    ['/api/calls', { action: 'park', run: 'r', by: 'manager' }], ['/api/quarantine', {}], ['/api/quarantine', { action: 'release', project: 'p', by: 'manager' }],
   ];
   for (const [route, body] of agents) assert.equal(ownerOnly(route, body), false, `${route} ${JSON.stringify(body)} needs the key`);
   // The app sends the key in the server's header.
@@ -2312,4 +2328,114 @@ test('The e-mail goes through SMTP: login, sender, recipient and the text, and n
   } finally {
     mute.close();
   }
+});
+
+test("the owner's words for a call: found only in their own messages of the last day, however quoted", async () => {
+  const { needsSettings, ownerWordsFound } = await import('../src/needs.mjs');
+  const at = Date.parse('2026-11-27T10:00:00Z');
+  const conversation = [
+    { who: 'you', text: 'Liberei o arquivo no antivírus, pode seguir.', at: '2026-11-27T09:50:00Z' },
+    { who: 'manager', text: 'ok, done it', at: '2026-11-27T09:51:00Z' },
+    { who: 'agent', text: 'I did it myself', at: '2026-11-27T09:52:00Z' },
+    { who: 'you', text: 'old yes', at: '2026-11-25T09:00:00Z' },
+  ];
+  assert.ok(ownerWordsFound('"liberei o arquivo  no antivírus"', conversation, at), 'quotes, case and spaces do not matter');
+  assert.ok(ownerWordsFound('Liberei o arquivo no antivírus, pode seguir.', conversation, at));
+  assert.equal(ownerWordsFound('ok, done it', conversation, at), null, "the manager's own words are not the owner's");
+  assert.equal(ownerWordsFound('I did it myself', conversation, at), null, "an agent's message is not the owner's");
+  assert.equal(ownerWordsFound('old yes', conversation, at), null, 'older than a day');
+  assert.equal(ownerWordsFound('"', conversation, at), null, 'no words');
+  assert.deepEqual(needsSettings({}), { maxWaitMinutes: 120, parkAfterMinutes: 15 });
+  assert.equal(needsSettings({ needs_you: { park_after_minutes: 0 } }).parkAfterMinutes, 0, '0 turns the away parking off');
+  assert.equal(needsSettings({ needs_you: { park_after_minutes: 30 } }).parkAfterMinutes, 30);
+});
+
+test('a parked step resumes with what the owner answered, and knows its working copy was shared', async () => {
+  const { pauseAbout, updatedTurn } = await import('../src/runs.mjs');
+  const run = { requests: [
+    { id: 'a', what: 'Allow the file', status: 'done', by: 'manager', ownerSaid: 'liberei' },
+    { id: 'b', what: 'Resend or SES?', status: 'done', by: 'owner', answer: 'SES', note: 'cheaper' },
+    { id: 'c', what: 'Sign in', status: 'open' },
+    { id: 'd', what: 'Confirm', status: 'done', by: 'owner' },
+  ] };
+  assert.match(pauseAbout(run, { why: 'park', request: 'a' }), /conversation with the manager.*"liberei"/);
+  assert.match(pauseAbout(run, { why: 'park', request: 'b' }), /SES — cheaper/);
+  assert.match(pauseAbout(run, { why: 'park', request: 'c' }), /not answered/);
+  assert.match(pauseAbout(run, { why: 'park', request: 'd' }), /did what you asked/);
+  assert.equal(pauseAbout(run, { why: 'update' }), '');
+  const turn = updatedTurn([], { owner: 'Ana' }, 'park', '', pauseAbout(run, { why: 'park', request: 'b' }));
+  assert.match(turn, /parked your run while it waited for Ana/);
+  assert.match(turn, /another run of this project may have used the working copy/);
+  assert.match(updatedTurn([], {}, 'quarantine', '', 'the file was C:/x/a.txt'), /quarantined by the antivirus \(the file was C:\/x\/a\.txt\)/);
+});
+
+test('a probable antivirus quarantine: the paths an error names, files gone or unreadable, deliberate removals left out', async () => {
+  const { blockedPaths, fileState, lostFile, writtenSuspects } = await import('../src/quarantine.mjs');
+  const dir = path.join(temp, 'quarantine');
+  write(path.join(dir, 'src', 'ok.txt'), 'here');
+  const inDir = (...p) => path.resolve(dir, ...p);
+  assert.deepEqual(blockedPaths('error: unable to create file src/app.js: Permission denied\nfatal: cannot go on', dir), [inDir('src/app.js')]);
+  assert.deepEqual(blockedPaths(`error: unable to index file '${inDir('lib', 'x.dll')}': Invalid argument`, dir), [inDir('lib/x.dll')]);
+  assert.deepEqual(blockedPaths(`EPERM: operation not permitted, open '${inDir('a.bin')}'`, dir), [inDir('a.bin')]);
+  assert.deepEqual(blockedPaths('error: open("tools/run.ps1"): Permission denied', dir), [inDir('tools/run.ps1')]);
+  assert.deepEqual(blockedPaths('error: unable to create file ../outside.txt: Permission denied', dir), [], 'a path outside the working copy');
+  assert.deepEqual(blockedPaths('fatal: not a git repository', dir), []);
+  assert.equal(fileState(inDir('src', 'ok.txt')), 'ok');
+  assert.equal(fileState(inDir('src', 'gone.txt')), 'missing');
+  assert.equal(fileState(inDir('src')), 'ok', 'a folder is not a lost file');
+  const noWait = { wait: async () => {} };
+  assert.deepEqual(await lostFile([inDir('src', 'ok.txt'), inDir('src', 'gone.txt')], noWait), { file: inDir('src', 'gone.txt'), state: 'missing' });
+  assert.equal(await lostFile([inDir('src', 'ok.txt')], noWait), null);
+  // A file a later command names, or one written before a command that can remove or move files, doesn't count (done
+  // on purpose); one written again after it does, and so does one followed only by other commands.
+  const writes = [
+    { file: inDir('src', 'gone.txt'), seq: 1 }, { file: inDir('tmp.txt'), seq: 3 }, { file: inDir('again.txt'), seq: 3 }, { file: inDir('again.txt'), seq: 6 },
+    { file: path.join(temp, 'elsewhere.txt'), seq: 6 },
+  ];
+  assert.deepEqual(writtenSuspects(writes, [{ text: 'Ran: npm test', seq: 2 }, { text: 'Ran: type tmp.txt', seq: 4 }], dir), [inDir('src', 'gone.txt'), inDir('again.txt')]);
+  assert.deepEqual(writtenSuspects(writes, [{ text: 'Ran: git checkout -- .', seq: 5 }], dir), [inDir('again.txt')]);
+  assert.deepEqual(writtenSuspects(writes, [{ text: 'Ran: Remove-Item build -Recurse', seq: 2 }], dir), [inDir('tmp.txt'), inDir('again.txt')]);
+});
+
+test("a local merge saves the clone's changed tracked files first, only when nothing conflicts, never the untracked ones", async () => {
+  const { savePendingFirst, SAVE_MESSAGE } = await import('../src/merge.mjs');
+  const repo = path.join(temp, 'save-pending');
+  mkdirSync(repo, { recursive: true });
+  const git = (...args) => gitIn(repo, ...args);
+  git('init', '-q', '-b', 'main');
+  for (const f of ['a.txt', 'b.txt']) writeFileSync(path.join(repo, f), `${f}\n`);
+  git('add', '.');
+  git('commit', '-q', '-m', 'start');
+  git('checkout', '-q', '-b', 'work');
+  writeFileSync(path.join(repo, 'b.txt'), 'the run\n');
+  git('commit', '-q', '-am', 'the run');
+  git('checkout', '-q', 'main');
+  const start = git('rev-parse', 'HEAD');
+  // A change to the same file as the branch: refused, nothing saved, the change still there.
+  writeFileSync(path.join(repo, 'b.txt'), 'the owner\n');
+  await assert.rejects(savePendingFirst({ dir: repo, branch: 'work' }), e => e.conflict && /conflict/.test(e.message));
+  assert.equal(git('rev-parse', 'HEAD'), start, 'nothing committed on a conflict');
+  assert.equal(readFileSync(path.join(repo, 'b.txt'), 'utf8'), 'the owner\n');
+  git('checkout', '-q', '--', 'b.txt');
+  // A change elsewhere, plus an untracked file: only the tracked change is saved, with the neutral message.
+  writeFileSync(path.join(repo, 'a.txt'), 'the owner\n');
+  writeFileSync(path.join(repo, 'notes.txt'), 'mine\n');
+  const saved = await savePendingFirst({ dir: repo, branch: 'work' });
+  assert.deepEqual(saved.files, ['a.txt']);
+  assert.equal(git('log', '-1', '--format=%s'), SAVE_MESSAGE);
+  assert.doesNotMatch(SAVE_MESSAGE, /chiefmate/i);
+  assert.equal(git('show', '--name-only', '--format=', 'HEAD'), 'a.txt');
+  assert.equal(git('status', '--porcelain'), '?? notes.txt', 'the untracked file is left as it was');
+  // A merge under way: refused.
+  git('checkout', '-q', '-b', 'side', start);
+  writeFileSync(path.join(repo, 'a.txt'), 'side\n');
+  git('commit', '-q', '-am', 'side');
+  git('checkout', '-q', 'main');
+  try {
+    git('merge', 'side');
+  } catch {
+    // the conflict is the point
+  }
+  await assert.rejects(savePendingFirst({ dir: repo, branch: 'work' }), e => e.conflict && /under way/.test(e.message));
+  git('merge', '--abort');
 });
