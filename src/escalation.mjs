@@ -14,12 +14,12 @@ import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypt
 import { chmodSync } from 'node:fs';
 import path from 'node:path';
 import { formatDateTime, t } from './i18n.mjs';
-import { readLockdown, release, saveEscalation, SECURITY_DIR } from './lockdown.mjs';
+import { readLockdown, release, saveEscalation, secretsFolder, SECURITY_DIR } from './lockdown.mjs';
 import { reasonText } from './sentinel.mjs';
 import { isLocalHost, SECURITY, sendMail, validAddress } from './smtp.mjs';
-import { clip, DATA, readJson, writeJson } from './util.mjs';
+import { clip, readJson, writeJson } from './util.mjs';
 
-export const SECRETS_DIR = path.join(DATA, 'secrets');
+export const SECRETS_DIR = secretsFolder();
 export const CODE_MINUTES = 30;
 export const MAX_TRIES = 3;
 // While nothing reached the owner (the network down, say): called again after 5, 10, 20... minutes, MAX_CALLS in all.

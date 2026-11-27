@@ -25,7 +25,7 @@ import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { assembleBlocks, builderSettings, parseBlocks } from './prompts.mjs';
 import { codexEnvironment, signedIn, spawnable, toolCommand, where } from './tools.mjs';
-import { isLocked, ownerKeyFile, refuseWhileLocked } from './lockdown.mjs';
+import { isLocked, ownerKeyFile, refuseWhileLocked, secretsFolder } from './lockdown.mjs';
 import { updating } from './update.mjs';
 import { stopping } from './power.mjs';
 import { clip, DATA, ensureDir, languageName, now, readJson, ROOT, slug, stamp, WORKSPACES, writeJson } from './util.mjs';
@@ -666,7 +666,7 @@ export function deliverSession(id) {
       dir: session.cwd, prompt: withNews(charge && !resume ? charge.requests : '', changes),
       system: charge?.system ?? [appSystem(config.owner || 'the owner'), ...(session.work ? [workSystem(config, session)] : [])].join('\n'), model: charge?.model ?? session.model ?? config.default_model,
       tools: charge ? charge.tools : [...APP_TOOLS, ...mcp.tools, ...(session.allowed ?? []).filter(r => !ASK_FIRST.includes(r))],
-      disallowed: [...(charge ? [...charge.disallowed, ...ASK_FIRST] : ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r) && !(granted && r === PUSH))), ...denyRules(ownerKeyFile(), false)], mcpServers: charge ? {} : browserServers(config, mcp.servers, sessionBrowser(session)),
+      disallowed: [...(charge ? [...charge.disallowed, ...ASK_FIRST] : ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r) && !(granted && r === PUSH))), ...denyRules(ownerKeyFile(), false), ...denyRules(secretsFolder())], mcpServers: charge ? {} : browserServers(config, mcp.servers, sessionBrowser(session)),
       addDirs: charge?.addDirs ?? [], hooks: guardHooks({ log: guardLog(id), allowed: charge ? [] : session.allowed ?? [], who: 'session', noMain: !!session.work, ...mainCard }),
       attribution: config.attribution !== false, maxMinutes: TURN_MINUTES, env: sessionEnv(id),
       session: { id: session.toolSession, resume }, log: rawLog(id), onEvent,

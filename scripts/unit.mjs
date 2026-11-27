@@ -21,7 +21,7 @@ import { checkPath, kindOf, listFolder, newestCopy, opening, openOnComputer, pro
 import { createdPaths, guardHooks, mainPushTarget, mainPushTargets, plainPush, publishing, riskyCommand } from '../src/guard.mjs';
 import {
   addNote, checkSignals, engage, isLocked, ownerKeyFile, protectedFolders, readIncidents, readLockdown, recordCreated, recordSignal, refuseWhileLocked, release, RULES,
-  weigh, WINDOW_MINUTES,
+  secretsFolder, weigh, WINDOW_MINUTES,
 } from '../src/lockdown.mjs';
 import {
   escalate, escalationView, handleUpdate, hashPin, pinMatches, pinProblem, pollOnce, readSecrets, removeChannel, sendTest, setEmail, setPin, setToken, startLinking, wantsOwner,
@@ -1876,6 +1876,10 @@ test('without the key, a command may do only what an agent may, never as the own
     ['/api/planning', { action: 'triage', id: 1, recommend: 'now' }], ['/api/planning', { action: 'reorder', ids: [1] }], ['/api/planning', { action: 'restore', id: 1 }],
     ['/api/planning', { action: 'add', project: 'p', title: 't', status: 'triaged' }], ['/api/planning', { action: 'triage', id: 1, by: 'owner' }],
     ['/api/say', { text: 'x' }], ['/api/say', { run: '', text: 'x' }],
+    // The owner's note on an alarm, and calling the owner outside the app (src/escalation.mjs).
+    ['/api/lockdown', { action: 'note', note: 'x' }], ['/api/lockdown', { action: 'note', note: 'x', by: 'step' }],
+    ['/api/escalation', { action: 'pin', pin: '480215' }], ['/api/escalation', { action: 'token', token: 'x' }], ['/api/escalation', { action: 'test' }],
+    ['/api/escalation', { action: 'remove', channel: 'telegram' }], ['/api/escalation', { action: 'status' }],
   ];
   for (const [route, body] of owners) assert.equal(ownerOnly(route, body), true, `${route} ${JSON.stringify(body)} goes without the key`);
   // What the command line sends for an agent (a step, a live session, the manager, the watchdog and its rescuer).
@@ -2240,7 +2244,12 @@ test('Escalation setup: the token checked, a chat linked only with its code, the
   removeChannel('telegram', o);
   assert.equal(escalationView(o).telegram, null);
   // Chiefmate's secrets are a protected folder: an agent reaching into it engages the lockdown.
-  assert.ok(protectedFolders({}, path.join(temp, 'data')).includes(path.join(temp, 'data', 'secrets')));
+  const data = path.join(temp, 'data');
+  assert.ok(protectedFolders({}, data).includes(path.join(data, 'secrets')));
+  assert.equal(secretsFolder(data), path.join(data, 'secrets'));
+  const file = path.join(secretsFolder(data), 'escalation.json');
+  assert.ok(riskyCommand(`type "${file}"`, { cwd: temp, protect: protectedFolders({}, data), home: temp, temp }).some(f => f.kind === 'protected_access'),
+    'reading the secrets was not caught');
 });
 
 test('The e-mail goes through SMTP: login, sender, recipient and the text, and never in clear to another computer', async () => {

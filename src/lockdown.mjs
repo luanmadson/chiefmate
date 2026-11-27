@@ -18,6 +18,8 @@ const lockFile = (dir = SECURITY_DIR) => path.join(dir, 'lockdown.json');
 const signalsFile = (dir = SECURITY_DIR) => path.join(dir, 'signals.jsonl');
 /** The owner's local key (src/owner.mjs): only the server and the owner's command line read it. */
 export const ownerKeyFile = (dir = SECURITY_DIR) => path.join(dir, 'owner-key');
+/** Chiefmate's secrets (src/escalation.mjs): like the owner's key, out of every agent's reach. */
+export const secretsFolder = (data = DATA) => path.join(data, 'secrets');
 const createdFile = (dir = SECURITY_DIR) => path.join(dir, 'created.jsonl');
 const incidentsFile = (dir = SECURITY_DIR) => path.join(dir, 'incidents.jsonl');
 
@@ -65,7 +67,7 @@ export function refuseWhileLocked(what, dir) {
 export function protectedFolders(config = loadConfig(), data = DATA) {
   const extra = [config?.security?.protected_folders ?? []].flat().map(x => String(x ?? '').trim()).filter(Boolean);
   return [path.join(data, 'browser-profile'), path.join(data, 'browsers'), ownerKeyFile(path.join(data, 'security')),
-    path.join(data, 'secrets'), ...extra.map(p => path.resolve(p))];
+    secretsFolder(data), ...extra.map(p => path.resolve(p))];
 }
 
 /**
