@@ -37,7 +37,8 @@ import { changeRadar, parseRadarStatus, RADAR_STATUSES, radarIdeas } from './rad
 import { deliverDevNotices, devState, openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
-import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
+import { cancel, focus, maxParallel, nudgeQueue, queueInTurn, resume } from './queue.mjs';
+import { changeSession, spendingStatus } from './spending.mjs';
 import { activeRun, createRun, describeLater, doingNow, liveRuns, liveSpeech, needsBrief, outcomeLater, pauseLive, setRunLevel, stepSays } from './runs.mjs';
 import { speechView } from './speech.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
@@ -374,7 +375,8 @@ function buildState() {
     // The agent's speech bubble and the run's latest lines (src/speech.mjs).
     speech: speechView(run, liveSpeech(l)),
   }));
-  const queue = queued();
+  // in the order the turns go: a fair turn among projects (src/queue.mjs)
+  const queue = queueInTurn(runs);
   const conversation = readConversation();
   // The runs the app lists without a title and summary of their own (older ones) get them, one at a time.
   for (const r of [...queue, ...runs.slice(0, 30)]) if (needsBrief(r)) describeLater(r.id, r);
@@ -386,7 +388,8 @@ function buildState() {
   const pushes = openPushes();
   const repos = openRepoRequests();
   const security = lockdownView();
-  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo, questions, pushes, repos, lockdown: security });
+  const spending = spendingStatus(config, { usage, runs, items });
+  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo, questions, pushes, repos, lockdown: security, spare: spending.offer });
   const lastOf = id => runs.find(r => r.mission === id && !['queued', 'waiting'].includes(r.status));
   return {
     now: now(),
@@ -434,6 +437,8 @@ function buildState() {
     },
     // The autopilot (src/autopilot.mjs): its settings, whether it may act now and what it did today.
     autopilot: autopilotStatus(config, usage, new Date(), runs),
+    // The session's spending (src/spending.mjs): its mode now, a boost, the estimate of what will be left and the offer.
+    spending,
     alerts: alerts(config, usage, machine),
     // What needs the owner, in three levels (src/attention.mjs): the band at the top, the sections, the title and the icon.
     attention: { items: attention, ...attentionSummary(attention), archived: attentionArchive().length },
@@ -464,6 +469,8 @@ function buildState() {
 function validLimits(body) {
   const limits = {};
   for (const key of ['pause_at_5h_window', 'pause_at_plan_week']) if (body[key] !== undefined) limits[key] = Math.min(1, Math.max(0.05, Number(body[key]) || 0.9));
+  // the session's pause may be off: only the safety margin (src/spending.mjs)
+  if (body.pause_at_5h_window === null || String(body.pause_at_5h_window).trim().toLowerCase() === 'off') limits.pause_at_5h_window = null;
   return limits;
 }
 
@@ -1026,6 +1033,10 @@ export function startServer() {
           const { paused } = changeSteer(body, { by, live, pause: id => pauseLive(id, 'focus') });
           return reply(res, 200, { steer: steerView(), paused });
         }
+        case '/api/spending':
+          // The session's mode, runs at once and pause, "Spend all until" the renewal and "Not now" (src/spending.mjs).
+          changeSession(body, { by: remote ? `remote:${String(req.headers['tailscale-user-login'] ?? '').trim().toLowerCase()}` : 'app' });
+          return reply(res, 200, spendingStatus());
         case '/api/autopilot':
           // Save the autopilot's settings and record who changed them (src/autopilot.mjs).
           changeAutopilot(body, { by: remote ? `remote:${String(req.headers['tailscale-user-login'] ?? '').trim().toLowerCase()}` : 'app' });

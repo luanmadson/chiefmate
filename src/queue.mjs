@@ -1,17 +1,20 @@
-// The queue: runs of different projects go on at the same time, up to "max_parallel" (3 by default); within one
-// project, one run at a time, in the order requested. This is what keeps agents from setting off other agents.
+// The queue: runs of different projects go on at the same time, up to the session's runs at once ("max_parallel", 3 by
+// default; src/spending.mjs); within one project, one run at a time, in the order requested. This is what keeps agents
+// from setting off other agents. When there is less room than projects waiting, the turn is fair: the room goes to the
+// project that has gone longest without running.
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { activeRun, cancelLive, doingNow, execute, holdsCopy, limitWaitCleared, live, liveRuns } from './runs.mjs';
 import { held } from './power.mjs';
+import { effectiveLimits, sessionNow } from './spending.mjs';
 import { listRuns, readRun, readUsage, saveRun, stepsOf } from './store.mjs';
 import { isLocked } from './lockdown.mjs';
 import { holdReason, readSteer } from './steer.mjs';
 import { updating } from './update.mjs';
 import { now } from './util.mjs';
 
-/** "max_parallel": how many runs (of different projects) may go on at once. 3 by default, at least 1. */
-export const maxParallel = (config = loadConfig()) => Math.max(1, Math.floor(Number(config.max_parallel) || 3));
+/** How many runs (of different projects) may go on at once now: the session's (src/spending.mjs), a boost included. */
+export const maxParallel = (config = loadConfig()) => sessionNow(config).parallel;
 
 // Runs being started (between the queue's choice and execute() registering them), so a tick never picks one twice.
 const starting = new Set();
@@ -40,16 +43,35 @@ export function queued(runs = listRuns()) {
 
 const ready = (run, at = Date.now()) => !run.notBefore || new Date(run.notBefore).getTime() <= at;
 
+/** A run marked to go before the others: paused for an update or a shutdown (resumeFirst). A new mark joins here. */
+export const goesFirst = run => !!run.resumeFirst;
+
+/** By project, when it last ran: its latest run's end, or start while it hasn't ended. A project never run has none. */
+export function lastRan(runs = listRuns()) {
+  const ran = new Map();
+  for (const r of runs) {
+    const at = r.started ? r.ended ?? r.started : null;
+    if (at && at > (ran.get(r.project) ?? '')) ran.set(r.project, at);
+  }
+  return ran;
+}
+
+// The turn among projects: the runs marked to go first, then the project that has gone longest without running
+// (one never run first), then the queue's order.
+const byTurn = ran => (a, b) => (goesFirst(b.run) ? 1 : 0) - (goesFirst(a.run) ? 1 : 0)
+  || (ran.get(a.run.project) ?? '').localeCompare(ran.get(b.run.project) ?? '') || a.order - b.order;
+
 /**
- * Which runs of the queue start now: the oldest ready run of each project that has nothing going on, while there is
- * room under the limit. queue: oldest first; busy: the projects with a run going on (or starting); free: the room left;
- * holders: by project, the runs paused in the middle of their work, which keep its working copy (copyHolders).
+ * Which runs of the queue start now: the first ready run of each project that has nothing going on, while there is
+ * room under the limit; with less room than such projects, the turn decides (byTurn), so a long queue of one project
+ * doesn't hold up the others. queue: in the queue's order; busy: the projects with a run going on (or starting); free:
+ * the room left; holders: by project, the runs paused in the middle of their work, which keep its working copy
+ * (copyHolders); ran: lastRan.
  */
-export function pickNext(queue, busy, free, at = Date.now(), holders = new Map()) {
+export function pickNext(queue, busy, free, at = Date.now(), holders = new Map(), ran = new Map()) {
   const taken = new Set(busy);
-  const chosen = [];
+  const firsts = [];
   for (const run of queue) {
-    if (chosen.length >= free) break;
     // One run per project at a time: the others wait in order. A run not ready yet (waiting for a limit or a start
     // time) doesn't hold up the ones behind it, as before.
     if (!ready(run, at) || taken.has(run.project)) continue;
@@ -57,10 +79,25 @@ export function pickNext(queue, busy, free, at = Date.now(), holders = new Map()
     // other one prepares the copy (checkout, reset, clean) under it.
     if (waitsForCopy(run, holders)) continue;
     taken.add(run.project);
-    chosen.push(run);
+    firsts.push({ run, order: firsts.length });
   }
-  return chosen;
+  return firsts.sort(byTurn(ran)).slice(0, Math.max(0, free)).map(x => x.run);
 }
+
+/**
+ * The queue in the order its turns go, for the app and the manager: round by round, one run per project, the projects
+ * in turn (byTurn); within a project, the queue's order.
+ */
+export function turnOrder(queue, ran = new Map()) {
+  const byProject = new Map();
+  for (const run of queue) byProject.set(run.project, [...(byProject.get(run.project) ?? []), run]);
+  const projects = [...byProject.values()].map((runs, order) => ({ run: runs[0], runs, order })).sort(byTurn(ran));
+  const rounds = Math.max(0, ...projects.map(p => p.runs.length));
+  return Array.from({ length: rounds }, (_, i) => projects.map(p => p.runs[i]).filter(Boolean)).flat();
+}
+
+/** The queue now, in the order its turns go (turnOrder). runs: the records already read, if any. */
+export const queueInTurn = (runs = listRuns()) => turnOrder(queued(runs), lastRan(runs));
 
 /** By project, the ids of the runs that keep its working copy while they are not going on (holdsCopy in src/runs.mjs). */
 export function copyHolders(runs = listRuns()) {
@@ -101,7 +138,7 @@ export function focus(config = loadConfig()) {
   const runs = listRuns();
   const holders = copyHolders(runs);
   const queue = queued(runs).filter(r => !holdReason(r.project, steer) && !waitsForCopy(r, holders));
-  const next = queue.find(r => ready(r)) ?? [...queue].sort((a, b) => a.notBefore.localeCompare(b.notBefore))[0];
+  const next = pickNext(queue, [], 1, Date.now(), holders, lastRan(runs))[0] ?? [...queue].sort((a, b) => a.notBefore.localeCompare(b.notBefore))[0];
   if (!next) return null;
   const agent = stepsOf(next).find(s => s.status === 'pending')?.agent ?? null;
   return { state: 'next', ...about(next), agent, status: next.status, notBefore: next.notBefore ?? null, others: [] };
@@ -117,8 +154,10 @@ function tick() {
   const waiting = queue.filter(run => run.status === 'waiting' && !ready(run));
   if (waiting.length) {
     const usage = readUsage();
+    // the session's pause (src/spending.mjs) in place of the 5-hour limit: a boost or a new mode counts at once
+    const limits = effectiveLimits(config);
     for (const run of waiting) {
-      if (!limitWaitCleared(run, config.limits ?? {}, usage)) continue;
+      if (!limitWaitCleared(run, limits, usage)) continue;
       Object.assign(run, { status: 'queued', notBefore: null, note: null });
       delete run.limitWait;
       saveRun(run);
@@ -128,7 +167,7 @@ function tick() {
   if (free <= 0) return;
   // The owner's focus (src/steer.mjs): a paused project, or one out of the focus, starts nothing; its runs wait in order.
   const steer = readSteer();
-  for (const next of pickNext(queue.filter(r => !holdReason(r.project, steer)), busyProjects(), free, Date.now(), copyHolders(runs))) {
+  for (const next of pickNext(queue.filter(r => !holdReason(r.project, steer)), busyProjects(), free, Date.now(), copyHolders(runs), lastRan(runs))) {
     starting.add(next.id);
     // Each run goes on by itself; the queue looks again as soon as one ends.
     Promise.resolve()

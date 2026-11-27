@@ -1513,6 +1513,8 @@ function attnNotice(i, brief = false) {
     : r && brief && r.options?.length ? `<a class="button small" href="#${esc(i.view)}">${esc(t('Answer'))}</a>`
     : r ? needsButtons({ ...r, project: i.project }, ' small')
     : decide ? `<a class="button small" href="#decisions">${esc(t('Decide'))}</a>`
+    // the session renewing with usage to spare (src/spending.mjs): spend all until then, or not now
+    : i.kind === 'spare' ? `<button type="button" class="button small" data-session-boost="on">${esc(t('Spend all until {time}', { time: clockTime(i.until) }))}</button><button type="button" class="button secondary small" data-spending-dismiss>${esc(t('Not now'))}</button>`
     : `${i.kind === 'reader-login' ? `<button type="button" class="button small" data-reader="login">${esc(t('Open the sign-in window'))}</button>` : ''}${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
   return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
       <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
@@ -1667,7 +1669,7 @@ function drawStatusbar() {
   const left5h = spare(account.five_hour, now, t);
   const right = [
     `<span class="sb-desk">${claude.found ? `Claude Code <span class="num">${esc(claude.version ?? '')}</span>` : esc(claude.found === false ? t('Claude Code not found') : t('Checking Claude Code…'))}</span>`,
-    left5h ? `<span class="sb-spare">${esc(t('{free} spare, renews in {left}', { free: percent(left5h.free), left: left5h.left }))} · <a href="#usage" data-goto="autopilot-panel">${esc(t('Autopilot'))}</a></span>` : '',
+    left5h ? `<span class="sb-spare">${esc(t('{free} spare, renews in {left}', { free: percent(left5h.free), left: left5h.left }))} · <a href="#usage" data-goto="spending">${esc(t('Session'))}</a></span>` : '',
     usage('sb-five', t('5-hour window'), t('5 h'), account.five_hour),
     usage('sb-week', t("Plan's week"), t('Week'), account.seven_day),
     `<span class="sb-desk">${esc(t('Free memory'))} <span class="num">${percent(state.computer.memory.free / state.computer.memory.total)}</span></span>`,
@@ -1675,7 +1677,7 @@ function drawStatusbar() {
   const html = `<div class="group sb-run">${left}</div><div class="group">${right}</div>`;
   draw('#statusbar', html, html);
 }
-// The status bar's shortcut to the autopilot: to the Usage section, its panel in view. Not the browser's own jump to
+// The status bar's shortcut to the session's spending: to the Usage section, its panel in view. Not the browser's own jump to
 // #usage (the meters, at the top); a hidden section can't be scrolled, so the panel waits for showView's hashchange.
 $('#statusbar').addEventListener('click', e => {
   const link = e.target.closest('a[data-goto]');
@@ -1835,6 +1837,7 @@ const newsEvent = kind => ({
   idle: t('empty queue'), autopilot_report: t('autopilot report'), watchdog: t('watchdog'), lockdown: t('emergency lockdown'), security_warning: t('security warning'),
   away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'), power: t('power mode'),
   owner_working: t('you working now'), defect: t('defect reported'), agent_message: t('message from an agent'), focus: t('focus changed'),
+  session_spare: t('session with usage to spare'),
 }[kind] ?? kind);
 
 // Who wrote an agent's message to the manager (a live session or a step of a run, from the command line).
@@ -2819,18 +2822,116 @@ function drawUsage() {
     </div>
     <div class="panel">
       <div class="label">${esc(t('How Chiefmate looks after your plan'))}</div>
-      <p class="hint">${esc(t("Before every step, Chiefmate checks the current limits: {window} for the 5-hour window and {week} for the plan's week. A run paused by these limits returns to the queue after the reset or when you raise the limit enough for the current usage.", { window: percent(l.pause_at_5h_window), week: percent(l.pause_at_plan_week) }))}</p>
+      <p class="hint">${esc(t("Before every step, Chiefmate checks the current limits: {window} of the session (its mode, below) and {week} of the plan's week. A run paused by these limits returns to the queue after the reset or when you raise the limit enough for the current usage.", { window: percent(state.spending?.session?.limit ?? 0.85), week: l.pause_at_plan_week ? percent(l.pause_at_plan_week) : t('none') }))}</p>
       <p class="hint">${esc(t('If the account runs out in the middle of a step, that step starts over after the reset. Each step also has a time limit, in case an agent gets stuck.'))}</p>
     </div>
   </div>`;
   draw('#usage', html, html);
   const form = $('#limits-form');
   if (!form.contains(document.activeElement) && !form.dataset.filled) {
-    form.window.value = Math.round((l.pause_at_5h_window ?? 0.85) * 100);
     form.week.value = Math.round((l.pause_at_plan_week ?? 0.9) * 100);
     form.dataset.filled = '1';
   }
 }
+
+// ---------- Spending: the session and the week ----------
+
+// The session's modes (src/spending.mjs, SESSION_MODES): each one's sentence says what it does.
+const SESSION_MODES = () => [
+  ['save', t('Save usage'), t('One run at a time, with no early pause: the crew stops only at the {safety} safety margin, which leaves you room to work live.', { safety: percent(state.spending?.safety ?? 0.85) })],
+  ['normal', t('Normal'), t("The settings' defaults: {count} runs at a time, pausing at {pause} of the session.", { count: state.spending?.modes?.normal?.parallel ?? 3, pause: percent(state.spending?.modes?.normal?.pause ?? 0.85) })],
+  ['all', t('Spend all'), t('{count} runs at a time, pausing at {pause}: the session is spent almost to the end.', { count: state.spending?.modes?.all?.parallel ?? 4, pause: percent(state.spending?.modes?.all?.pause ?? 0.97) })],
+];
+const SESSION_PAUSES = [0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.97, 1];
+
+/** What holds in the session now, in one sentence (a boost, a mode, or the custom pair). */
+function sessionSentence(sp) {
+  const s = sp.session;
+  const pause = p => (p == null ? t('no early pause (only the {safety} safety margin)', { safety: percent(sp.safety) }) : t('pausing at {pause}', { pause: percent(p) }));
+  const mode = name => (name === 'custom' ? t('Custom') : SESSION_MODES().find(m => m[0] === name)?.[1] ?? name);
+  if (s.boost) {
+    return t('Spend all until {time} ({who}): {count} runs at a time, pausing at {pause}. Then back to {mode} by itself.', {
+      time: clockTime(s.boost.until), who: s.boost.by === 'away' ? t('Chiefmate, while you were away') : t('your choice'),
+      count: s.parallel, pause: percent(s.limit), mode: mode(s.configured.mode),
+    });
+  }
+  const own = SESSION_MODES().find(m => m[0] === s.mode);
+  return own ? own[2] : t('Custom: {count} run(s) at a time, {pause}.', { count: s.parallel, pause: pause(s.pause) });
+}
+
+/** What will be left of the session when it renews, roughly (src/spending.mjs, forecast). */
+function sessionEstimate(f) {
+  if (!f) return t('The estimate of what will be left comes once the session is measured (every run reports it).');
+  const at = { left: percent(f.left), time: clockTime(f.resets), all: percent(f.all.left) };
+  return f.all.runs
+    ? t('At this pace, about {left} of the session will go unused when it renews at {time}; spending all, about {all}.', at)
+    : t('At this pace, about {left} of the session will go unused when it renews at {time}. With no work queued, spending all would change nothing.', at);
+}
+
+function drawSpending() {
+  const sp = state.spending;
+  const a = state.autopilot;
+  if (!sp || !a) return;
+  const s = sp.session;
+  const c = s.configured;
+  // the session: its shortcuts (and "Custom" when the pair is none of them), its two settings and what holds now
+  const tabs = (list, active, attr) => list.map(([key, label, about]) =>
+    `<button type="button" class="tab${key === active ? ' active' : ''}" aria-pressed="${key === active}" ${attr}="${key}" title="${esc(about)}">${esc(label)}</button>`).join('');
+  const custom = c.mode === 'custom' ? `<span class="tab active" aria-current="true">${esc(t('Custom'))}</span>` : '';
+  const counts = [...new Set([1, 2, 3, 4, c.parallel])].sort((x, y) => x - y);
+  const pauses = [...new Set([...SESSION_PAUSES, ...(c.pause == null ? [] : [c.pause])])].sort((x, y) => x - y);
+  const pauseValue = p => (p == null ? 'off' : String(p));
+  const session = `<div>
+      <div class="label">${esc(t('Session (5 hours)'))}</div>
+      <div class="tabs autopilot-modes" role="group" aria-label="${esc(t('Session mode'))}">${tabs(SESSION_MODES(), c.mode, 'data-session-mode')}${custom}</div>
+      <div class="fields">
+        <label><span>${esc(t('Runs at a time'))}</span><select data-session-parallel>${counts.map(n => `<option value="${n}"${n === c.parallel ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
+        <label><span>${esc(t('Pause the crew at'))}</span><select data-session-pause>
+          <option value="off"${c.pause == null ? ' selected' : ''}>${esc(t('Off (only the {safety} safety margin)', { safety: percent(sp.safety) }))}</option>
+          ${pauses.map(p => `<option value="${p}"${pauseValue(c.pause) === String(p) ? ' selected' : ''}>${esc(percent(p))}</option>`).join('')}
+        </select></label>
+      </div>
+      <p class="autopilot-now">${esc(sessionSentence(sp))}${s.boost ? ` <button type="button" class="button secondary small" data-session-boost="off">${esc(t('End now'))}</button>` : ''}</p>
+      <p class="hint">${esc(sessionEstimate(sp.forecast))}</p>
+      ${sp.offer ? `<p class="hint state-warn">${esc(t('Little time is left and much of the session would go unused.'))}</p>
+      <div class="actions left"><button type="button" class="button small" data-session-boost="on">${esc(t('Spend all until {time}', { time: clockTime(sp.offer.until) }))}</button><button type="button" class="button secondary small" data-spending-dismiss>${esc(t('Not now'))}</button></div>` : ''}
+    </div>`;
+  // the week: the autopilot's pace (src/autopilot.mjs, MODES)
+  const modes = AUTOPILOT_MODES();
+  const mode = modes.find(m => m[0] === a.mode);
+  const week = `<div>
+      <div class="label">${esc(t('Week'))}</div>
+      <div class="tabs autopilot-modes" role="group" aria-label="${esc(t('Spending mode'))}">${tabs(modes, a.mode, 'data-autopilot-mode')}${mode ? '' : `<span class="tab active" aria-current="true">${esc(t('Custom'))}</span>`}</div>
+      <p class="autopilot-now">${esc(mode ? mode[2] : t('Custom pace: it ends the week at {target} (set on the command line or in the settings).', { target: percent(a.week_pace) }))}</p>
+      <p class="hint">${esc(a.enabled ? t("The week's pace guides the autopilot: above it, nothing new goes on the queue by itself.") : t("The week's pace guides the autopilot, which is off: it holds once you turn it on."))}</p>
+      ${a.reset && a.mode !== 'all' ? `<p class="hint state-warn">${esc(a.reset.expires
+        ? t('You have a free reset of the plan until {when}: "Spend all" uses the whole week before it.', { when: shortDate(a.reset.expires) })
+        : t('You have a free reset of the plan: "Spend all" uses the whole week before it.'))}
+        <button type="button" class="button small" data-autopilot-mode="all">${esc(t('Use "Spend all"'))}</button></p>` : ''}
+    </div>`;
+  const html = `<div class="label">${esc(t('Spending'))}</div>
+    <p class="hint">${esc(t('Saving means going slower, not stopping. Each part has its shortcuts; change a value by hand and the mode shows as Custom.'))}</p>
+    <div class="usage-grid spending-grid">${session}${week}</div>`;
+  // not redrawn while one of its lists is open
+  if (!$('#spending').contains(document.activeElement) || document.activeElement.tagName !== 'SELECT') draw('#spending', html, html);
+}
+
+async function setSession(body, message) {
+  try {
+    await api('/api/spending', body);
+    toast(message);
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+$('#spending').addEventListener('change', event => {
+  const select = event.target.closest('select');
+  select?.blur(); // the panel is not redrawn under an open list
+  if (select?.hasAttribute('data-session-parallel')) setSession({ parallel: Number(select.value) }, t('Runs at a time: {count}.', { count: select.value }));
+  else if (select?.hasAttribute('data-session-pause')) setSession({ pause: select.value === 'off' ? 'off' : Number(select.value) }, select.value === 'off' ? t('No early pause: only the safety margin.') : t('The crew pauses at {pause} of the session.', { pause: percent(Number(select.value)) }));
+});
 
 // ---------- The autopilot ----------
 
@@ -2880,6 +2981,7 @@ function autopilotWho(by) {
   if (by?.startsWith('remote:')) return t('you, through the remote access ({login})', { login: by.slice(7) });
   if (by === 'cli') return t('the command line');
   if (by === 'manager') return t('the manager');
+  if (by === 'away') return t('Chiefmate, while you were away');
   if (by?.startsWith('step:')) return t('a step of run {run}', { run: by.slice(5) });
   return by ?? '';
 }
@@ -2894,7 +2996,17 @@ const autopilotValue = (key, v) => {
   if (key === 'stop_at_5h_window') return percent(Number(v));
   return String(v);
 };
-const AUTOPILOT_KEYS = () => ({ enabled: t('switch'), week_pace: t('mode'), stop_at_5h_window: t('5-hour window'), quiet_hours: t('quiet hours'), daily_report: t('daily report') });
+// the session's changes (src/spending.mjs, changeSession) share the list
+const sessionValue = (key, v) => {
+  if (key === 'pause_at_5h_window') return v == null ? t('off') : percent(Number(v));
+  if (key === 'session_boost') return v == null ? t('off') : t('until {time}', { time: clockTime(v) });
+  return String(v ?? '');
+};
+const changeValue = (key, v) => (['max_parallel', 'pause_at_5h_window', 'session_boost'].includes(key) ? sessionValue(key, v) : autopilotValue(key, v));
+const AUTOPILOT_KEYS = () => ({
+  enabled: t('switch'), week_pace: t('mode'), stop_at_5h_window: t('5-hour window'), quiet_hours: t('quiet hours'), daily_report: t('daily report'),
+  max_parallel: t('runs at a time'), pause_at_5h_window: t('session pause'), session_boost: t('spend all until the renewal'),
+});
 
 function autopilotItemState(status) {
   if (status === 'archived') return [t('Archived item'), 'neutral'];
@@ -2909,20 +3021,13 @@ function drawAutopilot() {
   const line = !a.enabled
     ? t('Nothing goes on the queue without you. Approved items still start by themselves, one per project at a time.')
     : t('When the queue of a project empties, the manager puts its next item triaged "do now" on the queue.');
-  const modes = AUTOPILOT_MODES();
-  const mode = modes.find(m => m[0] === a.mode);
-  const modeHtml = `<div class="label autopilot-today-label">${esc(t('Spending mode'))}</div>
-    <div class="tabs autopilot-modes" role="group" aria-label="${esc(t('Spending mode'))}">${modes.map(([key, label]) =>
-      `<button type="button" class="tab${key === a.mode ? ' active' : ''}" aria-pressed="${key === a.mode}" data-autopilot-mode="${key}">${esc(label)}</button>`).join('')}</div>
-    <p class="hint">${esc(mode ? mode[2] : t('Custom pace: it ends the week at {target} (set on the command line or in the settings).', { target: percent(a.week_pace) }))}</p>
-    ${a.reset && a.mode !== 'all' ? `<p class="hint state-warn">${esc(a.reset.expires
-      ? t('You have a free reset of the plan until {when}: "Spend all" uses the whole week before it.', { when: shortDate(a.reset.expires) })
-      : t('You have a free reset of the plan: "Spend all" uses the whole week before it.'))}
-      <button type="button" class="button small" data-autopilot-mode="all">${esc(t('Use "Spend all"'))}</button></p>` : ''}`;
+  // its pace for the week and the 5-hour stop are set in Spending, above (drawSpending)
+  const mode = AUTOPILOT_MODES().find(m => m[0] === a.mode);
+  const modeHtml = `<p class="hint">${esc(t('Its pace for the week: {mode} (Spending, above).', { mode: mode ? mode[1] : t('Custom') }))}${a.window_stop > a.stop_at_5h_window ? ` ${esc(t('With the session spending all, it stops at {limit} of the 5-hour window, not {own}.', { limit: percent(a.window_stop), own: percent(a.stop_at_5h_window) }))}` : ''}</p>`;
   const keys = AUTOPILOT_KEYS();
   const changes = (a.changes ?? []).map(c => `<li>
       <span>${clockTime(c.at)}</span>
-      <span><span class="primary">${esc(Object.entries(c.changes ?? {}).map(([k, [from, to]]) => `${keys[k] ?? k}: ${autopilotValue(k, from)} → ${autopilotValue(k, to)}`).join('; '))}</span><span class="secondary">${esc(autopilotWho(c.by))} · ${esc(shortDate(c.at))}</span></span>
+      <span><span class="primary">${esc(Object.entries(c.changes ?? {}).map(([k, [from, to]]) => `${keys[k] ?? k}: ${changeValue(k, from)} → ${changeValue(k, to)}`).join('; '))}</span><span class="secondary">${esc(autopilotWho(c.by))} · ${esc(shortDate(c.at))}</span></span>
       <span></span>
     </li>`);
   const items = a.queued.map(e => `<li>
@@ -5158,6 +5263,7 @@ async function refresh() {
   drawSpeechDialog();
   drawLog();
   drawUsage();
+  drawSpending();
   drawAutopilot();
   drawComputer();
   drawPlan();
@@ -5417,7 +5523,7 @@ document.addEventListener('click', event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-autopilot-mode],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-work-now],[data-work-open],[data-work-release],[data-project-manager],[data-browser-focus],[data-browser-close]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-autopilot-mode],[data-session-mode],[data-session-boost],[data-spending-dismiss],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-work-now],[data-work-open],[data-work-release],[data-project-manager],[data-browser-focus],[data-browser-close]');
   if (!target) return;
   // A project's name inside a row that opens on a click (Projects) goes to its page, and nothing else.
   if (event.target.closest('a.project-link') && !target.matches('a')) return;
@@ -5619,6 +5725,17 @@ document.addEventListener('click', async event => {
       toast(on ? t('Autopilot turned on.') : t('Autopilot turned off.'));
     } else if (target.dataset.autopilotMode) {
       await setAutopilotMode(target.dataset.autopilotMode);
+    } else if (target.dataset.sessionMode) {
+      // the session's shortcuts fill both settings (src/spending.mjs)
+      await api('/api/spending', { mode: target.dataset.sessionMode });
+      toast(t('Session mode: {mode}.', { mode: SESSION_MODES().find(m => m[0] === target.dataset.sessionMode)?.[1] ?? target.dataset.sessionMode }));
+    } else if (target.dataset.sessionBoost) {
+      const on = target.dataset.sessionBoost === 'on';
+      await api('/api/spending', { boost: on });
+      toast(on ? t('Spending all until the session renews; then your mode holds again.') : t('Back to your mode now.'));
+    } else if (target.hasAttribute('data-spending-dismiss')) {
+      await api('/api/spending', { dismiss: true });
+      toast(t('Not now: no more offers until the session renews.'));
     } else if (target.dataset.reader) {
       const action = target.dataset.reader;
       await api('/api/usage-reader', action === 'now' ? { read: true } : action === 'login' ? { login: true } : { enabled: action === 'on' });

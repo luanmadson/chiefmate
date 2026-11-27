@@ -3,7 +3,7 @@
 // blocked, a memory or usage alert, a live session ends, the crew proposes items for the planning board, the autopilot
 // finds a project's queue empty or sends its daily report, the watchdog finds Chiefmate stuck, the owner decides a card
 // in the app, the agent in charge of a project sends a request from its talk with the owner, an agent reports a defect of Chiefmate
-// (src/defects.mjs)), Chiefmate tells the manager in a short system message, and
+// (src/defects.mjs), the session would renew with much of it unused (src/spending.mjs)), Chiefmate tells the manager in a short system message, and
 // the manager writes the owner a notice in the conversation (and triages the proposals). Events close together (within
 // WINDOW_MS) go as one message; while the manager answers, they wait in the conversation's queue. The setting
 // "manager_updates" turns this off or picks the events.
@@ -23,21 +23,23 @@ export const NEWS_EVENTS = [
   'run_finished', 'run_failed', 'run_paused', 'pr_ready', 'merged', 'merge_failed', 'needs_you',
   'update_installed', 'update_blocked', 'memory_alert', 'usage_alert', 'session_ended', 'plan_proposed',
   'idle', 'autopilot_report', 'watchdog', 'away', 'back', 'owner_decided', 'push_allowed', 'repo_allowed', 'owner_request',
-  'lockdown', 'security_warning', 'power', 'owner_working', 'defect', 'focus',
+  'lockdown', 'security_warning', 'power', 'owner_working', 'defect', 'focus', 'session_spare',
 ];
 
 // The owner's own switches (away mode, the power modes of src/power.mjs, the focus of src/steer.mjs), a push the owner
-// allowed (for a short time), the owner's "Work now" sessions (src/worknow.mjs) and the emergency lockdown: always told
-// to the manager, whatever "manager_updates" says.
-const OWNER_EVENTS = ['away', 'back', 'push_allowed', 'repo_allowed', 'lockdown', 'security_warning', 'power', 'owner_working', 'focus'];
+// allowed (for a short time), the owner's "Work now" sessions (src/worknow.mjs), the emergency lockdown and the session
+// put in "Spend all" for the owner or offered to them (src/spending.mjs): always told to the manager, whatever
+// "manager_updates" says.
+const OWNER_EVENTS = ['away', 'back', 'push_allowed', 'repo_allowed', 'lockdown', 'security_warning', 'power', 'owner_working', 'focus', 'session_spare'];
 
 /**
- * While the owner is away, these events wait for the summary when they are back. The rest still go at once: the
- * proposals to triage, the autopilot's empty queues, a step that needs the owner and the watchdog.
+ * While the owner is away, these events wait for the summary when they are back (such as the session put in "Spend
+ * all" until its renewal, src/spending.mjs). The rest still go at once: the proposals to triage, the autopilot's empty
+ * queues, a step that needs the owner and the watchdog.
  */
 export const HELD_WHILE_AWAY = [
   'run_finished', 'run_failed', 'run_paused', 'pr_ready', 'merged', 'update_installed', 'update_blocked',
-  'memory_alert', 'usage_alert', 'session_ended', 'autopilot_report', 'defect',
+  'memory_alert', 'usage_alert', 'session_ended', 'autopilot_report', 'defect', 'session_spare',
 ];
 
 // Events within a minute of the first one go to the manager together.
