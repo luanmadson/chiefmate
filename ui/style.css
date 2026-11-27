@@ -195,6 +195,10 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .statusbar { grid-area: status; display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 0 14px; font-size: 12px; color: var(--muted); background: var(--panel); border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden; }
 .statusbar .group { display: flex; gap: 18px; align-items: center; overflow: hidden; }
 .statusbar .num { color: var(--text); }
+.statusbar .sb-short { display: none; }
+/* Little time left in the 5-hour window and much of it unused: a quiet brass mark with the way to the autopilot */
+.statusbar .sb-spare { color: var(--accent); background: var(--accent-bg); border: 1px solid var(--accent); padding: 1px 7px; }
+.statusbar .sb-spare a { text-decoration: underline; text-underline-offset: 2px; }
 
 /* Common parts */
 .panel { background: var(--panel); border: 1px solid var(--line); padding: 16px 18px; }
@@ -1078,8 +1082,10 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   .away { min-width: 44px; justify-content: center; }
   .away-notice { padding-inline: max(12px, env(safe-area-inset-left)) max(12px, env(safe-area-inset-right)); }
   .away-notice select { font-size: 16px; }
-  .statusbar { display: none; }
-  .statusbar.offline { display: flex; height: 28px; }
+  /* The status bar keeps only the account's usage, short (or the lost connection); the spare mark, while it lasts (under an hour), takes the whole bar */
+  .statusbar { height: 28px; }
+  .statusbar:not(.offline) .sb-run, .statusbar .sb-desk, .statusbar .sb-long, .statusbar:has(.sb-spare) :is(.sb-five, .sb-week) { display: none; }
+  .statusbar .sb-short { display: inline; }
 
   /* The bottom bar: Manager, Operations, Planning, Projects and More, each 56 px high, the marks on a line of their own */
   .nav { flex-wrap: wrap; overflow: visible; border-bottom: 0; border-top: 1px solid var(--line-strong); padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
@@ -1114,9 +1120,10 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   .toast { bottom: calc(68px + env(safe-area-inset-bottom)); }
   .agent-panel { top: calc(48px + env(safe-area-inset-top)); bottom: auto; height: calc(var(--app-h, 100dvh) - 48px - env(safe-area-inset-top)); width: 100vw; }
 
-  /* With the keyboard open, the bottom bar and the notices step aside; in a conversation, so do the title bar, the headers
-     and the decisions: its last messages and the field take the whole visible area, Send always beside the field */
-  html.typing .nav, html.typing .alerts, html.typing .suggestions { display: none; }
+  /* With the keyboard open, the bottom bar, the status bar (unless the connection is lost) and the notices step aside; in a
+     conversation, so do the title bar, the headers and the decisions: its last messages and the field take the whole visible
+     area, Send always beside the field */
+  html.typing .nav, html.typing .alerts, html.typing .suggestions, html.typing .statusbar:not(.offline) { display: none; }
   html.typing-chat .app-header, html.typing-chat .view-header, html.typing-chat .focus-bar, html.typing-chat #session-page,
   html.typing-chat #view-project > :not(#project-live):not(#project-charge):not(#project-manager), html.typing-chat #project-live-list, html.typing-chat .live-head,
   html.typing-chat #project-charge-top, html.typing-chat #project-manager > .hint { display: none; }

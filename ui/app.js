@@ -2,6 +2,7 @@
 import { offered, onThisComputer } from './afar.js';
 import { face } from './faces.js';
 import { language, locale, setLanguage, t, translatePage } from './i18n.js';
+import { resetLabel, spare } from './countdown.js';
 import { Dictation, recognizer } from './voice.js';
 import { asksHtml, keepFolds, newFolds, toggleFold } from './asks.js';
 
@@ -1184,7 +1185,7 @@ function drawNavAttention() {
 }
 
 function drawStatusbar() {
-  $('#statusbar').classList.toggle('offline', !online); // phones show the bar only then
+  $('#statusbar').classList.toggle('offline', !online); // a lost connection shows on phones even while typing
   if (!online) {
     const text = lockedAfar ? t('Emergency lockdown: release it on the computer where Chiefmate runs.') : t('No connection to Chiefmate. Trying again…');
     draw('#statusbar', `off ${text}`, `<div class="group">${stateHtml([text, 'error'])}</div>`);
@@ -1199,15 +1200,35 @@ function drawStatusbar() {
   else if (state.queue.length) left = stateHtml([t('{count} in the queue', { count: state.queue.length }), 'info']);
   else left = stateHtml([t('Idle'), 'ok']);
   const claude = state.ai.claude;
+  const now = Date.now() + skew;
+  // Each window: its share and when it renews (live, as the state is read every few seconds); a phone shows the short name.
+  const usage = (cls, name, short, w) => {
+    const renews = resetLabel(w?.resets, now, { t, locale: locale() });
+    const title = w?.resets ? ` title="${esc(t('Resets {when} ({relative}).', { when: shortDate(w.resets), relative: relative(w.resets) }))}"` : '';
+    return `<span class="${cls}"${title}><span class="sb-long">${esc(name)}</span><span class="sb-short">${esc(short)}</span> <span class="num">${percent(w?.used)}</span>${renews ? ` · ${esc(renews)}` : ''}</span>`;
+  };
+  const left5h = spare(account.five_hour, now, t);
   const right = [
-    claude.found ? `Claude Code <span class="num">${esc(claude.version ?? '')}</span>` : esc(claude.found === false ? t('Claude Code not found') : t('Checking Claude Code…')),
-    `${esc(t('5-hour window'))} <span class="num">${percent(account.five_hour?.used)}</span>`,
-    `${esc(t("Plan's week"))} <span class="num">${percent(account.seven_day?.used)}</span>`,
-    `${esc(t('Free memory'))} <span class="num">${percent(state.computer.memory.free / state.computer.memory.total)}</span>`,
-  ].map(s => `<span>${s}</span>`).join('');
-  const html = `<div class="group">${left}</div><div class="group">${right}</div>`;
+    `<span class="sb-desk">${claude.found ? `Claude Code <span class="num">${esc(claude.version ?? '')}</span>` : esc(claude.found === false ? t('Claude Code not found') : t('Checking Claude Code…'))}</span>`,
+    left5h ? `<span class="sb-spare">${esc(t('{free} spare, renews in {left}', { free: percent(left5h.free), left: left5h.left }))} · <a href="#usage" data-goto="autopilot-panel">${esc(t('Autopilot'))}</a></span>` : '',
+    usage('sb-five', t('5-hour window'), t('5 h'), account.five_hour),
+    usage('sb-week', t("Plan's week"), t('Week'), account.seven_day),
+    `<span class="sb-desk">${esc(t('Free memory'))} <span class="num">${percent(state.computer.memory.free / state.computer.memory.total)}</span></span>`,
+  ].join('');
+  const html = `<div class="group sb-run">${left}</div><div class="group">${right}</div>`;
   draw('#statusbar', html, html);
 }
+// The status bar's shortcut to the autopilot: to the Usage section, its panel in view. Not the browser's own jump to
+// #usage (the meters, at the top); a hidden section can't be scrolled, so the panel waits for showView's hashchange.
+$('#statusbar').addEventListener('click', e => {
+  const link = e.target.closest('a[data-goto]');
+  if (!link) return;
+  e.preventDefault();
+  const go = () => $(`#${link.dataset.goto}`)?.scrollIntoView({ block: 'start', behavior: calm() ? 'auto' : 'smooth' });
+  if (location.hash === link.hash) return go();
+  addEventListener('hashchange', go, { once: true });
+  location.hash = link.hash;
+});
 
 function drawClock() {
   $('#clock').textContent = new Date().toLocaleString(locale(), { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });

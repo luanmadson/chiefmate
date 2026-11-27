@@ -116,7 +116,7 @@ try {
     expect(state.crew?.some(a => a.id === 'manager'), 'the crew has no manager');
     const context = state.manager?.context;
     expect(typeof context?.renewAt === 'number' && typeof context.renewing === 'boolean', "/api/state has no context for the manager's conversation");
-    for (const file of ['/', '/app.js', '/asks.js', '/faces.js', '/i18n.js', '/style.css', '/manifest.webmanifest', '/locales/pt-BR.json', '/icon-32.png']) {
+    for (const file of ['/', '/app.js', '/asks.js', '/faces.js', '/i18n.js', '/countdown.js', '/style.css', '/manifest.webmanifest', '/locales/pt-BR.json', '/icon-32.png']) {
       const r = await fetch(base + file);
       expect(r.ok, `${file} answered ${r.status}`);
     }

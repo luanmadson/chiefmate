@@ -552,6 +552,7 @@ The Radar section keeps ideas for new systems and sites with high potential. The
 
 Chiefmate measures what really counts on a subscription plan: your account's usage in the 5-hour window and in the plan's week, which Claude Code reports on every run. There are no spending caps in dollars.
 
+- **The status bar at the bottom of the app** shows each window's share and when it renews, counting down by itself: "5-hour window 59% · renews in 2h54", "Plan's week 16% · renews Sun 08:00" (the time left once the week is within a day). When less than an hour is left in the 5-hour window and more than 30% of it is unused, a brass mark says so ("41% spare, renews in 48 min") with a link to the autopilot. On phones the bar keeps only the usage, short ("5 h 59% · renews in 2h54"), and the mark takes the whole bar while it lasts.
 - **Before a run starts and before every step**, Chiefmate checks your account against the latest settings (85% for the 5-hour window and 90% for the plan's week by default). A run that reaches a configured limit waits until the reset. If you raise the limit in Usage or with `limits` and the current usage fits within both limits, the run returns to the queue automatically.
 - **If the account runs out in the middle of a step**, that step starts over after the reset.
 - **Each step has a time limit** (in the agent's header), in case an agent gets stuck.

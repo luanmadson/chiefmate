@@ -1,7 +1,7 @@
 // Unit tests with no dependency (node:test): the file viewer's checks of paths, its choice among a project's copies and
 // its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation;
 // the band of what a live session asks; the emergency lockdown and its detection; each agent's effort; the redacted
-// backup of the settings.
+// backup of the settings; the usage resets' countdowns.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -27,6 +27,7 @@ import { parseLevel } from '../src/util.mjs';
 import { behindOrigin, checkoutBranch, fastForward, projectLibraries, sameRepository } from '../src/workspace.mjs';
 import { syntaxProblem } from './check.mjs';
 import { SAMPLE_CSV, sampleXlsx, zip } from './fixtures.mjs';
+import { countdown, resetLabel, spare, SPARE_MIN_FREE, SPARE_WITHIN_MS, timeLeft } from '../ui/countdown.js';
 import { compose, Dictation, nextState, recognizer, transcript } from '../ui/voice.js';
 import './away-ui.test.mjs';
 import { AFAR_VERSION, offered, ONLY_ON_PC } from '../ui/afar.js';
@@ -1075,4 +1076,38 @@ test('the development environment started from afar runs in the background', asy
   assert.equal(plan.log, devLog('demo'));
   assert.ok(plan.log.endsWith(path.join('projects', 'demo', 'dev.log')));
   assert.deepEqual((await startDev('demo', { dryRun: true, config: dev })).window, ['dev-run', 'demo'], 'on the computer, it no longer opens in a window');
+});
+
+// ---------- The usage resets' countdowns and the spare notice (ui/countdown.js), on a fixed clock ----------
+
+test('the status bar counts down to each usage reset and flags a spare 5-hour window', () => {
+  const now = Date.parse('2026-11-26T21:00:00Z');
+  const at = minutes => new Date(now + minutes * 60_000).toISOString();
+  // Rounded up to the minute: never "0 min" before the reset.
+  assert.deepEqual(timeLeft(at(174), now), { days: 0, hours: 2, minutes: 54, total: 174 });
+  assert.equal(timeLeft(at(0.2), now).total, 1);
+  assert.equal(timeLeft(at(0), now), null);
+  assert.equal(timeLeft(null, now), null);
+  assert.deepEqual([at(45), at(60), at(174), at(24 * 60), at(2 * 1440 + 14 * 60 + 30)].map(iso => countdown(iso, now)), ['45 min', '1h00', '2h54', '1d0h', '2d14h']);
+
+  // Within a day the time left; beyond it the day and hour; past, the reading is old; unknown, nothing.
+  assert.equal(resetLabel(at(174), now), 'renews in 2h54');
+  const week = resetLabel(at(2 * 1440 + 14 * 60), now, { locale: 'pt-BR' });
+  assert.match(week, /^renews \S+ \d{2}:\d{2}$/);
+  assert.ok(!week.includes('.'), "the weekday keeps no abbreviation's period");
+  assert.equal(resetLabel(at(-5), now), 'renewed');
+  assert.equal(resetLabel(undefined, now), '');
+  assert.equal(resetLabel('nonsense', now), '');
+  const pt = { 'renews in {left}': 'renova em {left}', '{hours}h{minutes}': '{hours}h{minutes}' };
+  const translate = (text, values) => (pt[text] ?? text).replace(/\{(\w+)\}/g, (m, k) => values[k]);
+  assert.equal(resetLabel(at(174), now, { t: translate }), 'renova em 2h54');
+
+  // The spare notice: under an hour left and over 30% unused, both needed.
+  assert.deepEqual(spare({ used: 0.59, resets: at(48) }, now), { free: 0.41, left: '48 min' });
+  assert.equal(spare({ used: 0.59, resets: at(61) }, now), null, 'more than an hour left');
+  assert.ok(spare({ used: 0.59, resets: at(SPARE_WITHIN_MS / 60_000) }, now), 'exactly an hour left still counts');
+  assert.equal(spare({ used: 1 - SPARE_MIN_FREE, resets: at(30) }, now), null, 'only 30% unused');
+  assert.equal(spare({ used: 0.2, resets: at(-1) }, now), null, 'already reset: the reading is old');
+  assert.equal(spare({ used: 0.2 }, now), null, 'reset unknown');
+  assert.equal(spare(undefined, now), null, 'not measured');
 });

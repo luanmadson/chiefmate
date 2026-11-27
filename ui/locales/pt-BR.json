@@ -1860,5 +1860,13 @@
   "Browse the files": "Ver os arquivos",
   "Opening the folder, VS Code or a window is done on the computer where Chiefmate runs.": "Abrir a pasta, o VS Code ou uma janela é no computador onde o Chiefmate roda.",
   "The development environment of {project} stops, with everything it started.": "O ambiente de desenvolvimento de {project} para, com tudo o que ele iniciou.",
-  "Development environment starting in the background: its address shows on this page when it is up.": "Ambiente de desenvolvimento iniciando em segundo plano: o endereço dele aparece nesta página quando estiver no ar."
+  "Development environment starting in the background: its address shows on this page when it is up.": "Ambiente de desenvolvimento iniciando em segundo plano: o endereço dele aparece nesta página quando estiver no ar.",
+  "renews in {left}": "renova em {left}",
+  "renews {when}": "renova {when}",
+  "renewed": "já renovou",
+  "{hours}h{minutes}": "{hours}h{minutes}",
+  "{days}d{hours}h": "{days}d{hours}h",
+  "5 h": "5 h",
+  "Week": "Semana",
+  "{free} spare, renews in {left}": "Sobra {free}, renova em {left}"
 }
