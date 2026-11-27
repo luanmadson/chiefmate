@@ -434,6 +434,15 @@ try {
     const afterRelease = await (await fetch(`${base}/api/state`)).json();
     expect(released.ok && !afterRelease.lockdown?.active && afterRelease.lockdown?.last?.reason === 'Smoke test' && afterRelease.lockdown.last.notes?.length === 2, 'the owner could not release the lockdown on this computer, or the notes were lost');
     expect((await ask(remote.port, '/api/state', tailnet)).status === 200, 'the remote access stayed off after the release');
+    // Calling the owner outside the app (src/escalation.mjs): shown in the state with no secret, set up on this computer
+    // only (a PIN set here, refused through the remote access), and nothing sent to Telegram (no token in this data).
+    expect(afterRelease.escalation?.ready === false && afterRelease.escalation.telegram === null, `the escalation's view is missing: ${JSON.stringify(afterRelease.escalation)}`);
+    const pinSet = await post('/api/escalation', { action: 'pin', pin: '480215' });
+    const pinState = await (await fetch(`${base}/api/state`)).json();
+    expect(pinSet.ok && pinState.escalation.pin.set === true && !JSON.stringify(pinState).includes('480215'), 'the PIN was not set, or it shows in the state');
+    expect((await post('/api/escalation', { action: 'pin', pin: '123456' })).status === 400, 'an easy PIN was accepted');
+    expect((await ask(remote.port, '/api/escalation', command, { action: 'pin', pin: '480216' })).status === 403, 'the PIN was changed through the remote access');
+    expect((await post('/api/escalation', { action: 'test' })).status === 400, 'a test went out with no Telegram set up');
     // The refused requests above (a login not allowed, an unknown address) became signals for the detection.
     const signals = readFileSync(path.join(data, 'security', 'signals.jsonl'), 'utf8');
     expect(/"kind":"login_failed"/.test(signals) && /"kind":"unknown_origin"/.test(signals), 'the refused requests were not noted for the detection');

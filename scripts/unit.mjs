@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
@@ -14,7 +15,11 @@ import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/conf
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
 import { createdPaths, plainPush, publishing, riskyCommand } from '../src/guard.mjs';
-import { addNote, checkSignals, engage, isLocked, readIncidents, readLockdown, recordCreated, recordSignal, refuseWhileLocked, release, RULES, weigh, WINDOW_MINUTES } from '../src/lockdown.mjs';
+import { addNote, checkSignals, engage, isLocked, protectedFolders, readIncidents, readLockdown, recordCreated, recordSignal, refuseWhileLocked, release, RULES, weigh, WINDOW_MINUTES } from '../src/lockdown.mjs';
+import {
+  escalate, escalationView, handleUpdate, hashPin, pinMatches, pinProblem, pollOnce, readSecrets, removeChannel, sendTest, setEmail, setPin, setToken, startLinking, wantsOwner,
+} from '../src/escalation.mjs';
+import { sendMail } from '../src/smtp.mjs';
 import { analystPrompt, commandsInLog, decide, githubRead, parseVerdict, protectedChanges, reviewIncident, sendsOut } from '../src/sentinel.mjs';
 import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
@@ -1349,4 +1354,270 @@ test('npm run check says why a script was not checked, with no pipe a sandbox co
   const stdio = o => typeof o?.stdio === 'string' ? [o.stdio, o.stdio, o.stdio] : [0, 1, 2].map(i => o?.stdio?.[i]);
   assert.ok(calls.length === 3 && calls.every(o => stdio(o).every(s => s != null && s !== 'pipe' && s !== 'overlapped')), 'node --check got a pipe');
   assert.equal(syntaxProblem(path.join('scripts', 'fixtures.mjs')), null, 'a real script failed the check');
+});
+
+// ---------- Calling the owner outside the app (src/escalation.mjs): Telegram simulated, e-mail on a local server ----------
+
+/** A made-up Telegram Bot API: it records each call and answers as Telegram would. getUpdates hands out "queue". */
+function fakeTelegram({ down = false } = {}) {
+  const calls = [];
+  const queue = [];
+  let id = 500;
+  const fetch = async (url, init) => {
+    const method = url.split('/').at(-1);
+    calls.push({ method, body: JSON.parse(init.body), url });
+    if (down) throw new Error(`connect ECONNREFUSED ${url}`);
+    const result = method === 'getMe' ? { id: 77, username: 'demo_watch_bot' } : method === 'sendMessage' ? { message_id: ++id } : method === 'getUpdates' ? queue.splice(0) : true;
+    return { status: 200, json: async () => ({ ok: true, result }) };
+  };
+  return { calls, queue, fetch, sent: () => calls.filter(c => c.method === 'sendMessage') };
+}
+
+const OWNER_CHAT = 9001;
+const BOT_TOKEN = '123456789:AAEexampleexampleexampleexample-x';
+const chatMessage = (text, chat = OWNER_CHAT) => ({ update_id: 1, message: { message_id: 40, chat: { id: chat, type: 'private' }, from: { id: chat }, text } });
+const tap = (data, chat = OWNER_CHAT, type = 'private') => ({ update_id: 2, callback_query: { id: 'q1', data, from: { id: chat }, message: { message_id: 501, chat: { id: chat, type } } } });
+
+/** An alarm the watch kept for the owner, with Telegram (and the e-mail) set up as the owner would. */
+async function escalatedAlarm({ telegram = {}, email = false, link = true } = {}) {
+  const { dir } = await watchAlarm([{ ...ownDelete(), kind: 'protected_access', target: undefined, existed: undefined, command: 'cat browser-profile/Cookies' }]);
+  const tg = fakeTelegram(telegram);
+  const mails = [];
+  const told = [];
+  const lockCalls = { resume: 0 };
+  const o = {
+    dir, secretsDir: mkdtempSync(path.join(temp, 'secrets-')), fetch: tg.fetch,
+    mail: async m => {
+      if (email === 'down') throw new Error('SMTP 535 authentication failed');
+      mails.push(m);
+    },
+    tell: x => told.push(x), lockHooks: { stopAll: async () => ({}), resume: () => lockCalls.resume++, tell: () => {} },
+  };
+  await setToken(BOT_TOKEN, { ...o, fetch: fakeTelegram().fetch });
+  if (link) {
+    const { command } = startLinking(o);
+    await handleUpdate(chatMessage(command), { ...o, fetch: fakeTelegram().fetch });
+  }
+  setPin('480215', o);
+  if (email) setEmail({ host: 'smtp.example.com', port: 587, security: 'starttls', user: 'me', pass: 'app-pass', from: 'alarm@example.com', to: 'owner@example.com' }, o);
+  return { dir, o, tg, mails, told, lockCalls };
+}
+
+const callCode = tg => tg.sent()[0].body.reply_markup.inline_keyboard.flat().find(b => b.callback_data.startsWith('r:')).callback_data.slice(2);
+
+test("The owner's PIN: only a salted hash is kept, and easy ones are refused", () => {
+  assert.ok(pinProblem('12345'), 'too short');
+  assert.ok(pinProblem('12a456'), 'not digits');
+  for (const easy of ['111111', '123456', '987654', '890123']) assert.ok(pinProblem(easy), easy);
+  assert.equal(pinProblem('480215'), null);
+  const a = hashPin('480215');
+  const b = hashPin('480215');
+  assert.notEqual(a.salt, b.salt);
+  assert.notEqual(a.hash, b.hash);
+  assert.ok(!JSON.stringify(a).includes('480215'));
+  assert.ok(pinMatches('480215', a));
+  assert.ok(!pinMatches('480216', a));
+  assert.ok(!pinMatches('480215', null));
+});
+
+test('Escalation: one Telegram message per alarm, with what happened and three buttons; strangers get nothing', async () => {
+  const { dir, o, tg } = await escalatedAlarm();
+  assert.equal(wantsOwner(readLockdown(dir)), true);
+  const call = await escalate(null, o);
+  assert.deepEqual(call.channels, ['telegram']);
+  assert.equal(tg.sent().length, 1);
+  const { body } = tg.sent()[0];
+  assert.equal(body.chat_id, OWNER_CHAT);
+  for (const part of ['cat browser-profile/Cookies', 'Demo', 'Tidy the docs']) assert.ok(body.text.includes(part), `the message lacks "${part}"`);
+  assert.deepEqual(body.reply_markup.inline_keyboard.flat().map(b => b.callback_data[0]), ['r', 'k', 'd']);
+  // Once per alarm, even if called again (a restart).
+  await escalate(null, o);
+  assert.equal(tg.sent().length, 1);
+  assert.deepEqual(readLockdown(dir).escalation.channels, ['telegram']);
+  // Another chat, a group with the owner in it, or a forged sender: no answer at all.
+  const code = callCode(tg);
+  tg.calls.length = 0;
+  await handleUpdate(tap(`r:${code}`, 1234), o);
+  await handleUpdate(tap(`r:${code}`, OWNER_CHAT, 'group'), o);
+  await handleUpdate(chatMessage('480215', 1234), o);
+  await handleUpdate({ update_id: 3, message: { message_id: 1, chat: { id: OWNER_CHAT, type: 'private' }, from: { id: 1234 }, text: 'hi' } }, o);
+  assert.deepEqual(tg.calls, []);
+  // The token, the PIN's hash and the chats never reach the app's view.
+  const view = JSON.stringify(escalationView(o));
+  for (const secret of [BOT_TOKEN, String(OWNER_CHAT), readSecrets(o).pin.hash]) assert.ok(!view.includes(secret));
+});
+
+test('Escalation: Keep stopped only records; Details sends the report; Release asks for the PIN, deletes it and releases', async () => {
+  const { dir, o, tg, lockCalls } = await escalatedAlarm();
+  await escalate(null, o);
+  const code = callCode(tg);
+  tg.calls.length = 0;
+  await handleUpdate(tap(`k:${code}`), o);
+  assert.equal(isLocked(dir), true);
+  assert.deepEqual(readLockdown(dir).escalation.decisions.map(d => d.action), ['keep']);
+  assert.deepEqual(tg.calls.map(c => c.method), ['answerCallbackQuery', 'sendMessage']);
+  await handleUpdate(tap(`d:${code}`), o);
+  assert.ok(tg.sent().at(-1).body.text.includes('cat browser-profile/Cookies'));
+  // Release: the PIN is asked, then deleted from the chat whatever it is.
+  await handleUpdate(tap(`r:${code}`), o);
+  assert.equal(tg.sent().at(-1).body.reply_markup.force_reply, true);
+  tg.calls.length = 0;
+  await handleUpdate(chatMessage('000999'), o);
+  assert.equal(tg.calls[0].method, 'deleteMessage');
+  assert.equal(isLocked(dir), true, 'a wrong PIN releases nothing');
+  await handleUpdate(chatMessage('480215'), o);
+  assert.equal(isLocked(dir), false);
+  assert.equal(lockCalls.resume, 1);
+  const incident = readIncidents(dir).at(-1);
+  assert.equal(incident.releasedFrom, 'telegram');
+  assert.deepEqual(incident.escalation.decisions.map(d => d.action), ['keep', 'release']);
+  // The buttons go away; the code was single-use.
+  assert.ok(tg.calls.some(c => c.method === 'editMessageReplyMarkup'));
+  tg.calls.length = 0;
+  await handleUpdate(tap(`r:${code}`), o);
+  assert.equal(isLocked(dir), false);
+  assert.equal(tg.sent().length, 1, 'only "this alarm is over"');
+});
+
+test('Escalation: 3 wrong PINs block the release by Telegram until the PIN is set again; an old code expires', async () => {
+  const { dir, o, tg, told } = await escalatedAlarm();
+  await escalate(null, o);
+  const code = callCode(tg);
+  await handleUpdate(tap(`r:${code}`), o);
+  for (const pin of ['111222', '333444', '555666']) await handleUpdate(chatMessage(pin), o);
+  assert.ok(escalationView(o).pin.blocked);
+  assert.equal(told.length, 1, 'the owner and the manager are told');
+  // Even the right PIN, now: blocked.
+  await handleUpdate(tap(`r:${code}`), o);
+  await handleUpdate(chatMessage('480215'), o);
+  assert.equal(isLocked(dir), true);
+  assert.deepEqual(readLockdown(dir).escalation.decisions.map(d => d.action), ['pin_blocked']);
+  // Set again on the computer: unblocked, but this alarm's code is past its time.
+  setPin('480215', o);
+  assert.equal(escalationView(o).pin.blocked, null);
+  const file = path.join(dir, 'escalation.json');
+  const state = JSON.parse(readFileSync(file, 'utf8'));
+  for (const c of Object.values(state.incidents)) c.expires = minutesAgo(1);
+  writeFileSync(file, JSON.stringify(state));
+  tg.calls.length = 0;
+  await handleUpdate(tap(`r:${code}`), o);
+  await handleUpdate(chatMessage('480215'), o);
+  assert.equal(isLocked(dir), true, 'an expired code releases nothing');
+  assert.ok(!tg.calls.some(c => c.body.reply_markup?.force_reply), 'no PIN is asked for an expired code');
+});
+
+test('Escalation: the e-mail warns when Telegram fails or is not set up; nothing for a false alarm or a lockdown the owner engaged', async () => {
+  const down = await escalatedAlarm({ telegram: { down: true }, email: true });
+  const call = await escalate(null, down.o);
+  assert.deepEqual(call.channels, ['email']);
+  assert.equal(call.errors[0].channel, 'telegram');
+  assert.ok(!call.errors[0].error.includes(BOT_TOKEN), 'the token never shows in an error');
+  assert.equal(down.mails.length, 1);
+  assert.equal(down.mails[0].to, 'owner@example.com');
+  assert.ok(down.mails[0].text.includes('cat browser-profile/Cookies'));
+  const unlinked = await escalatedAlarm({ link: false, email: true });
+  assert.deepEqual((await escalate(null, unlinked.o)).channels, ['email']);
+  assert.equal(unlinked.tg.sent().length, 0);
+  // Both failing: the owner is told on the computer.
+  const both = await escalatedAlarm({ telegram: { down: true }, email: 'down' });
+  assert.deepEqual((await escalate(null, both.o)).channels, []);
+  assert.equal(both.told.length, 1);
+  // A false alarm the watch released, or a lockdown the owner engaged: no call.
+  const released = await watchAlarm([ownDelete()]);
+  assert.equal(wantsOwner(readLockdown(released.dir)), false);
+  const mine = lockDir();
+  await engage({ reason: 'mine', by: 'owner', from: 'app' }, { dir: mine, h: fakeHooks().h });
+  assert.equal(wantsOwner(readLockdown(mine)), false);
+  assert.equal(await escalate(readLockdown(mine), { dir: mine, secretsDir: down.o.secretsDir, fetch: fakeTelegram().fetch }), null);
+  // One an agent engaged: the owner is called.
+  const agent = lockDir();
+  await engage({ reason: 'agent', by: 'step', from: 'cli' }, { dir: agent, h: fakeHooks().h });
+  assert.equal(wantsOwner(readLockdown(agent)), true);
+});
+
+test('Escalation setup: the token checked, a chat linked only with its code, the updates read once', async () => {
+  const tg = fakeTelegram();
+  const o = { dir: lockDir(), secretsDir: mkdtempSync(path.join(temp, 'secrets-')), fetch: tg.fetch };
+  await assert.rejects(setToken('not-a-token', o));
+  const view = await setToken(BOT_TOKEN, o);
+  assert.equal(view.telegram.bot, 'demo_watch_bot');
+  assert.ok(tg.calls.some(c => c.method === 'deleteWebhook'), 'a webhook would stop the polling');
+  const { link, command } = startLinking(o);
+  assert.ok(link.startsWith('https://t.me/demo_watch_bot?start='));
+  tg.calls.length = 0;
+  // A wrong code, or the right one from a group: ignored, with no answer.
+  await handleUpdate(chatMessage('/start wrongcode', 555), o);
+  await handleUpdate({ update_id: 4, message: { message_id: 2, chat: { id: -100, type: 'group' }, from: { id: 555 }, text: command } }, o);
+  assert.equal(escalationView(o).telegram.chats, 0);
+  assert.deepEqual(tg.calls, []);
+  // Through polling: the right code links the chat, and the offset moves past it.
+  tg.queue.push({ ...chatMessage(command), update_id: 70 });
+  assert.equal(await pollOnce(o, { timeout: 0 }), 1);
+  assert.equal(escalationView(o).telegram.chats, 1);
+  assert.equal(tg.calls.find(c => c.method === 'getUpdates').body.offset, 0);
+  await pollOnce(o, { timeout: 0 });
+  assert.equal(tg.calls.filter(c => c.method === 'getUpdates').at(-1).body.offset, 71);
+  // The same code twice links nothing more; the test reaches the chat.
+  await handleUpdate(chatMessage(command, 556), o);
+  assert.equal(escalationView(o).telegram.chats, 1);
+  assert.deepEqual(await sendTest('telegram', o), { telegram: 1 });
+  // The e-mail: checked, its password kept when left empty, never shown.
+  assert.throws(() => setEmail({ host: 'smtp.example.com', security: 'none', from: 'a@example.com', to: 'b@example.com' }, o));
+  assert.throws(() => setEmail({ host: 'smtp.example.com', from: 'a@example.com', to: 'b@example.com\r\nBcc: x@example.com' }, o));
+  setEmail({ host: 'smtp.example.com', user: 'me', pass: 'secret-pass', from: 'a@example.com', to: 'b@example.com' }, o);
+  setEmail({ host: 'smtp.example.com', user: 'me', pass: '', from: 'a@example.com', to: 'c@example.com' }, o);
+  assert.equal(readSecrets(o).email.pass, 'secret-pass');
+  assert.ok(!JSON.stringify(escalationView(o)).includes('secret-pass'));
+  removeChannel('telegram', o);
+  assert.equal(escalationView(o).telegram, null);
+  // Chiefmate's secrets are a protected folder: an agent reaching into it engages the lockdown.
+  assert.ok(protectedFolders({}, path.join(temp, 'data')).includes(path.join(temp, 'data', 'secrets')));
+});
+
+test('The e-mail goes through SMTP: login, sender, recipient and the text, and never in clear to another computer', async () => {
+  const seen = [];
+  const server = net.createServer(socket => {
+    let data = false;
+    let body = '';
+    let buffer = '';
+    socket.write('220 fake ESMTP\r\n');
+    socket.on('data', chunk => {
+      buffer += chunk.toString();
+      let i;
+      while ((i = buffer.indexOf('\r\n')) >= 0) {
+        const line = buffer.slice(0, i);
+        buffer = buffer.slice(i + 2);
+        if (data) {
+          if (line === '.') {
+            data = false;
+            seen.push(`BODY ${body}`);
+            socket.write('250 queued\r\n');
+          } else body += `${line}\n`;
+          continue;
+        }
+        seen.push(line);
+        if (/^EHLO/.test(line)) socket.write('250-fake\r\n250 AUTH PLAIN LOGIN\r\n');
+        else if (/^AUTH PLAIN/.test(line)) socket.write('235 ok\r\n');
+        else if (/^DATA/.test(line)) {
+          data = true;
+          socket.write('354 go\r\n');
+        } else if (/^QUIT/.test(line)) socket.end('221 bye\r\n');
+        else socket.write('250 ok\r\n');
+      }
+    });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    await sendMail({ host: '127.0.0.1', port: server.address().port, security: 'none', user: 'me', pass: 'pw', from: 'alarm@example.com', to: 'owner@example.com', subject: 'Alarme: travamento', text: 'Linha 1\n.\nLinha 3' });
+  } finally {
+    server.close();
+  }
+  assert.ok(seen.includes(`AUTH PLAIN ${Buffer.from('\0me\0pw').toString('base64')}`));
+  assert.ok(seen.includes('MAIL FROM:<alarm@example.com>'));
+  assert.ok(seen.includes('RCPT TO:<owner@example.com>'));
+  const body = seen.find(s => s.startsWith('BODY '));
+  assert.match(body, /Subject: =\?UTF-8\?B\?/);
+  const text = Buffer.from(body.split('\n\n')[1].replace(/\s/g, ''), 'base64').toString('utf8');
+  assert.equal(text, 'Linha 1\r\n.\r\nLinha 3');
+  await assert.rejects(sendMail({ host: 'smtp.example.com', security: 'none', from: 'a@example.com', to: 'b@example.com', subject: 's', text: 't' }), /only to this computer/);
 });
