@@ -1035,8 +1035,8 @@ function powerLook() {
   if (p.mode === 'stopping') {
     const cancel = p.stage === 'closing' ? '' : `<button type="button" class="button danger small" data-power="cancel">${esc(t('Cancel'))}</button>`;
     const label = p.stage === 'countdown'
-      ? `${t('Shutting down')} · <span class="num" data-until="${esc(p.countdownUntil)}"></span> s`
-      : esc(p.target === 'shutdown' ? t('Shutting down…') : t('Stopping…'));
+      ? `${p.target === 'reboot' ? t('Restarting') : t('Shutting down')} · <span class="num" data-until="${esc(p.countdownUntil)}"></span> s`
+      : esc(p.target === 'reboot' ? t('Restarting…') : p.target === 'shutdown' ? t('Shutting down…') : t('Stopping…'));
     return [label, 'error', cancel, true];
   }
   return [t('On'), 'ok', ''];
@@ -1835,6 +1835,7 @@ const newsEvent = kind => ({
   idle: t('empty queue'), autopilot_report: t('autopilot report'), watchdog: t('watchdog'), lockdown: t('emergency lockdown'), security_warning: t('security warning'),
   away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'), power: t('power mode'),
   owner_working: t('you working now'), defect: t('defect reported'), agent_message: t('message from an agent'), focus: t('focus changed'),
+  run_parked: t('run parked'), quarantine: t('antivirus quarantine'),
 }[kind] ?? kind);
 
 // Who wrote an agent's message to the manager (a live session or a step of a run, from the command line).
@@ -2029,12 +2030,14 @@ function drawQueue() {
   };
   const start = r => {
     if (hold(r.project)) return esc(held[hold(r.project)]);
+    // Held by the manager (cli.mjs queue hold): it keeps its place and starts once released.
+    if (r.onHold) return esc(t('on hold, until released'));
     return r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? `${shortDate(r.notBefore)} (${esc(relative(r.notBefore))})` : esc(expected(r));
   };
-  const next = list.find(r => !hold(r.project));
+  const next = list.find(r => !hold(r.project) && !r.onHold);
   const rows = list.map((r, i) => `<tr class="${r === next ? 'next' : ''}">
       <td class="num">${i + 1}</td>
-      <td>${r === next ? `<span class="tag">${esc(t('Next'))}</span>` : ''}${lateTag(r)}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span></td>
+      <td>${r === next ? `<span class="tag">${esc(t('Next'))}</span>` : ''}${r.onHold ? `<span class="tag">${esc(t('On hold'))}</span>` : ''}${lateTag(r)}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span></td>
       <td>${stateHtml(runState(r.status))}</td>
       <td class="num">${start(r)}</td>
       <td class="row-actions"><button type="button" class="button danger small" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button></td>
@@ -2043,7 +2046,7 @@ function drawQueue() {
     ? `<div class="label" style="margin-top:24px">${esc(t('Queue'))}</div>
     <table class="table queue"><thead><tr><th>#</th><th>${esc(t('Run'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Expected start'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
     : '';
-  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools, r.due, hold(r.project)]), Math.floor(Date.now() / 60000)]), html);
+  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools, r.due, hold(r.project), !!r.onHold]), Math.floor(Date.now() / 60000)]), html);
 }
 
 /** A run going on: who is at work, the step out of how many, the time counting and the last action, all live. */
@@ -2770,7 +2773,11 @@ async function refreshDetail(force = false) {
     ? `<div class="report"><div class="report-top"><strong>${esc(t('Asked of you'))}</strong></div>${r.requests.map(q => {
       const status = q.status === 'closed' ? [t('No longer needed'), 'neutral']
         : q.status === 'open' ? [t('Waiting for your action'), 'warn'] : [t('Done'), 'ok'];
-      return `<div>${stateHtml(status)} ${esc(q.what)}${q.url ? ` · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${q.status === 'open' ? `${requestWhy(q)} ${requestButtons(r.id, q, ' small')}${requestReply(r.id, q, ' small')}` : q.answer || q.note ? ` · ${esc(t('Your answer: {answer}', { answer: [q.answer, q.note].filter(Boolean).join(' — ') }))}` : ''}</div>`;
+      // Parked while it waited, or marked done by the manager on the owner's words in the conversation.
+      const parked = q.status === 'open' && r.parked?.request === q.id ? ` · ${esc(t('Parked: it resumes first once you answer'))}` : '';
+      const done = q.ownerSaid ? ` · ${esc(t('Marked done by the manager on your words: "{words}"', { words: q.ownerSaid }))}`
+        : q.answer || q.note ? ` · ${esc(t('Your answer: {answer}', { answer: [q.answer, q.note].filter(Boolean).join(' — ') }))}` : '';
+      return `<div>${stateHtml(status)} ${esc(q.what)}${q.url ? ` · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${parked}${q.status === 'open' ? `${requestWhy(q)} ${requestButtons(r.id, q, ' small')}${requestReply(r.id, q, ' small')}` : done}</div>`;
     }).join('')}</div>`
     : '';
   // The effort changes made while the run went on (they count from the step after them).
@@ -3554,6 +3561,7 @@ function contextPartTitle(key) {
     case 'lead-role': return t("The team lead's role");
     case 'lead-notes': return t('Notes for the team lead');
     case 'header': return t('The run and the task');
+    case 'additions': return t('Added by the manager');
     case 'memory': return t('Project memory');
     case 'lead': return t('How the team lead reviews');
     case 'playbook': return t("The mission's playbook");
@@ -4936,9 +4944,11 @@ function drawAgentTalk(f) {
   const open = new Map(f.requests.map(r => [r.id, r]));
   const entries = f.talk.map(m => {
     const meta = [clockTime(m.at), t('step {n}', { n: m.step })];
-    if (m.who === 'owner') {
+    if (m.who === 'owner' || m.who === 'manager') {
       const status = { pending: t('waiting for a safe point'), delivered: m.via === 'request' ? t('delivered as the answer to the request') : t('delivered'), undelivered: t('not delivered') }[m.status];
-      return `<div class="talk owner"><div class="talk-head"><span class="talk-who">${esc(t('You'))}</span> · ${esc([...meta, status].filter(Boolean).join(' · '))}</div><div class="talk-text">${esc(m.text)}</div></div>`;
+      // The manager's guidance (cli.mjs guide) shows on your side, with its name.
+      const who = m.who === 'manager' ? t('Manager') : t('You');
+      return `<div class="talk owner"><div class="talk-head"><span class="talk-who">${esc(who)}</span> · ${esc([...meta, status].filter(Boolean).join(' · '))}</div><div class="talk-text">${esc(m.text)}</div></div>`;
     }
     const asking = m.kind === 'request';
     const request = asking ? open.get(m.request) : null;

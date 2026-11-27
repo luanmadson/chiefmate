@@ -233,7 +233,18 @@ try {
     expect(standby.mode === 'standby' && standbyState.power?.mode === 'standby' && backOn.mode === 'on', `standby did not go on and off: ${JSON.stringify([standby, standbyState.power, backOn])}`);
     expect((await post('/api/power', { action: 'stop' })).status === 400 && (await post('/api/power', { action: 'nap' })).status === 400, 'a stop was tried in the smoke test, or an unknown power mode was accepted');
     const powerPreview = await (await post('/api/power', { action: 'preview' })).json();
-    expect(Array.isArray(powerPreview.runs) && Array.isArray(powerPreview.sessions) && Array.isArray(powerPreview.unsaved), `the power preview lacks the runs, sessions or changes: ${JSON.stringify(powerPreview)}`);
+    expect(Array.isArray(powerPreview.runs) && Array.isArray(powerPreview.sessions) && Array.isArray(powerPreview.unsaved) && typeof powerPreview.away === 'boolean', `the power preview lacks the runs, sessions, changes or away mode: ${JSON.stringify(powerPreview)}`);
+    // A restart: never without a reason; the manager's (without the owner's key, as the manager sends it), outside away
+    // mode, becomes a question card for the owner; the owner's own needs the key, and would begin, which the smoke test
+    // can't (shutting down is off here): nothing restarts.
+    const noReason = await keyless('/api/power', { action: 'reboot', by: 'manager' });
+    const managerReboot = await (await keyless('/api/power', { action: 'reboot', by: 'manager', reason: 'a file locked by the antivirus' })).json();
+    const rebootQuestion = (await (await fetch(`${base}/api/state`)).json()).decisions?.find(c => c.question === managerReboot.asked);
+    const ownerReboot = await post('/api/power', { action: 'reboot', by: 'owner', reason: 'test' });
+    const ownerRebootKeyless = await keyless('/api/power', { action: 'reboot', by: 'owner', reason: 'test' });
+    expect(noReason.status === 409 && managerReboot.asked && managerReboot.mode === 'on' && rebootQuestion?.options?.length === 2 && ownerReboot.status === 400 && ownerRebootKeyless.status === 403,
+      `a restart went without a reason, the manager's did not wait for the owner's card, the owner's went without the key, or one began in the smoke test: ${JSON.stringify([noReason.status, managerReboot, rebootQuestion, ownerReboot.status, ownerRebootKeyless.status])}`);
+    await post('/api/decide', { card: rebootQuestion?.id, action: 'discard' });
     expect(Array.isArray(state.teams) && state.teams.every(x => x.project && Array.isArray(x.members)), '/api/state has no crews by project');
     expect(Array.isArray(state.needs), "/api/state has no list of the owner's requests");
     expect((await post('/api/needs-you', { what: 'Sign in' })).status === 400, 'a request for the owner without a run was not refused');
@@ -455,6 +466,7 @@ try {
     expect(fileFound.status === 404 && JSON.parse(fileFound.text).tried === missing, `looking for a file from another device did not say the path tried: ${fileFound.status} ${fileFound.text}`);
     const remoteStop = await ask(remote.port, '/api/power', command, { action: 'stop' });
     expect(remoteStop.status === 403 && JSON.parse(remoteStop.text).error?.includes('computer'), `stopping Chiefmate from another device was not refused: ${remoteStop.status}`);
+    expect((await ask(remote.port, '/api/power', command, { action: 'reboot', by: 'owner', reason: 'test' })).status === 403, 'restarting the computer from another device was not refused');
     expect((await ask(port, '/api/state', tailnet)).status === 403, "the app's own port answered the tailnet name");
     // Serve's headers sent by another program of this computer, or a request from this computer's own node: refused.
     const forged = spawnSync(process.execPath, ['-e', `require('node:http').get({ host: '127.0.0.1', port: ${remote.port}, path: '/api/state', headers: ${JSON.stringify(tailnet)} }, r => console.log(r.statusCode, r.headers.connection)).on('error', e => console.log(e.message))`], { encoding: 'utf8', windowsHide: true, timeout: 20_000 });
@@ -649,7 +661,7 @@ try {
       expect(keylessId > 0, `a step could not propose an item without the owner's key: ${fromStep.error}`);
       for (const args of [['plan', 'triage', `${keylessId}`, '--recommend', 'now', '--priority', 'high', '--note', 'Keyless.'], ['plan', 'order', `${keylessId}`],
         ['plan', 'set', `${keylessId}`, '--status', 'triaged'], ['plan', 'discard', `${keylessId}`, '--reason', 'Smoke.'], ['plan', 'restore', `${keylessId}`],
-        ['plan', 'add', 'Sample', 'Smoke manager item', '--status', 'proposed']]) {
+        ['plan', 'add', 'Sample', 'Smoke manager item', '--status', 'proposed'], ['calls'], ['quarantine']]) {
         const r = refusal(args, as.manager);
         expect(r.out && !r.error, `the manager's "${args.slice(0, 2).join(' ')}" was refused without the owner's key: ${r.error}`);
       }
@@ -664,10 +676,77 @@ try {
         expect(!r.out && (who === 'step' ? /only proposes/ : ownerRefused).test(r.error), `a ${who} triaged an item of the planning board: ${r.out ?? r.error}`);
       }
       expect((await keyless('/api/say', { text: 'As the owner' })).status === 403, "a line for a bubble without a run went without the owner's key");
+      // The manager parks a run and lifts a hold without the key (refused here only for the made-up run and project);
+      // as the owner, those need it.
+      for (const args of [['calls', 'park', 'smoke-no-run'], ['quarantine', 'release', 'smoke-no-project']]) {
+        const r = refusal(args, as.manager);
+        expect(r.error && !ownerRefused.test(r.error), `the manager's "${args.slice(0, 2).join(' ')}" was refused as the owner's: ${r.out ?? r.error}`);
+      }
+      for (const body of [{ action: 'park', run: 'smoke-no-run', by: 'owner' }, { action: 'release', project: 'smoke-no-project' }]) {
+        expect((await keyless(body.run ? '/api/calls' : '/api/quarantine', body)).status === 403, `${JSON.stringify(body)} went without the owner's key`);
+      }
     } finally {
       // Whatever failed above, the items it made leave the board, so the checks of the board further on stay true.
       for (const id of (await import('../src/planning.mjs')).planItems().filter(i => /^Smoke (keyless|session|manager) /.test(i.title) && i.status !== 'discarded').map(i => i.id)) refusal(['plan', 'discard', `${id}`, '--reason', 'Smoke.'], as.manager);
     }
+
+    // The manager's tools from the command line, through the running Chiefmate (whose queue never starts here):
+    // the queue numbered, moved, held and released; a queued run changed; a failed step redone; guidance refused
+    // with no agent at work; and a command Chiefmate lacks, recorded as a tool gap.
+    const at = minutes => new Date(Date.now() - minutes * 60_000).toISOString();
+    const readJson = file => JSON.parse(readFileSync(file, 'utf8'));
+    const queuedRun = (id, minutes, extra = {}) => writeFileSync(path.join(data, 'runs', `${id}.json`), JSON.stringify({
+      id, kind: 'task', project: 'none', title: `Smoke ${id}`, status: 'queued', created: at(minutes), steps: [{ agent: 'generalist', part: 'Do it.', status: 'pending' }], review: null, ...extra,
+    }));
+    queuedRun('smoke-q1', 30);
+    queuedRun('smoke-q2', 20);
+    const manager = { CHIEFMATE_MANAGER: '1', CHIEFMATE_RUN: '' };
+    const order = () => cli(['queue']).split('\n').filter(l => /smoke-q/.test(l)).map(l => /\[(smoke-q\d)\]/.exec(l)[1]).join();
+    expect(order() === 'smoke-q1,smoke-q2', `the queue is not listed in order: ${cli(['queue'])}`);
+    cli(['queue', 'move', 'smoke-q2', '--top'], manager);
+    expect(order() === 'smoke-q2,smoke-q1', `a run was not moved to the top of the queue: ${cli(['queue'])}`);
+    cli(['queue', 'move', 'smoke-q2', '--before', 'smoke-q1'], manager);
+    cli(['queue', 'hold', 'smoke-q1'], manager);
+    expect(/smoke-q1\].*ON HOLD/.test(cli(['queue'])) && readJson(path.join(data, 'runs', 'smoke-q1.json')).onHold?.by === 'manager', 'a run was not held in the queue');
+    expect((await (await fetch(`${base}/api/state`)).json()).queue.find(r => r.id === 'smoke-q1')?.onHold === true, 'the app is not told that a run is on hold');
+    cli(['queue', 'release', 'smoke-q1'], manager);
+    expect(!readJson(path.join(data, 'runs', 'smoke-q1.json')).onHold, 'a held run was not released');
+    cli(['edit', 'smoke-q1', '--instruction-append', 'Also check the footer.', '--title', 'Smoke edited', '--agent', 'designer', '--level', '2'], manager);
+    const changedRun = readJson(path.join(data, 'runs', 'smoke-q1.json'));
+    expect(changedRun.title === 'Smoke edited' && changedRun.briefBy?.title === 'given' && changedRun.steps[0].agent === 'designer' && changedRun.level === 2
+      && changedRun.additions?.[0]?.text === 'Also check the footer.' && changedRun.edits?.[0]?.by === 'manager', `a queued run was not changed: ${JSON.stringify(changedRun)}`);
+    const refusedCli = (args, env) => {
+      try {
+        cli(args, env);
+        return '';
+      } catch (error) {
+        return String(error.stderr);
+      }
+    };
+    // The server's errors come in the installation's language: what is checked is that it refused and changed nothing.
+    expect(/Error/.test(refusedCli(['edit', 'smoke-q1', '--agent', 'nobody'], manager)) && readJson(path.join(data, 'runs', 'smoke-q1.json')).steps[0].agent === 'designer', 'a queued run took an agent outside the crew');
+    expect(/only the manager steers/.test(refusedCli(['queue', 'move', 'smoke-q1', '--top'], { CHIEFMATE_RUN: 'x', CHIEFMATE_MANAGER: '' })), 'a step of a run moved the queue');
+    queuedRun('smoke-failed', 10, { status: 'failed', ended: at(5), steps: [{ agent: 'generalist', part: 'One.', status: 'done' }, { agent: 'generalist', part: 'Two.', status: 'failed' }] });
+    expect(/Error/.test(refusedCli(['edit', 'smoke-failed', '--title', 'x'], manager)) && readJson(path.join(data, 'runs', 'smoke-failed.json')).title === 'Smoke smoke-failed', 'a run that ended was changed as if it were queued');
+    cli(['retry', 'smoke-failed', '--agent', 'designer'], manager);
+    const retried = readJson(path.join(data, 'runs', 'smoke-failed.json'));
+    expect(retried.status === 'queued' && retried.steps[0].status === 'done' && retried.steps[1].status === 'pending' && retried.steps[1].agent === 'designer' && retried.retries?.[0]?.step === 2,
+      `a failed step was not redone with another agent: ${JSON.stringify(retried)}`);
+    // A run stopped after its review: with every step done, retry points to resume and changes nothing; a step redone
+    // brings its review back. Steps of different members are never all given to one by edit.
+    queuedRun('smoke-delivery', 8, { status: 'failed', ended: at(4), steps: [{ agent: 'generalist', part: 'One.', status: 'done' }], review: { agent: 'manager', part: 'Review.', status: 'done' } });
+    expect(/Error/.test(refusedCli(['retry', 'smoke-delivery'], manager)) && readJson(path.join(data, 'runs', 'smoke-delivery.json')).status === 'failed', 'a run with every step done was retried with no step chosen');
+    cli(['retry', 'smoke-delivery', '--step', '1'], manager);
+    const redone = readJson(path.join(data, 'runs', 'smoke-delivery.json'));
+    expect(redone.status === 'queued' && redone.steps[0].status === 'pending' && redone.review?.status === 'pending', `a step redone after the review did not bring the review back: ${JSON.stringify(redone)}`);
+    queuedRun('smoke-q3', 15, { steps: [{ agent: 'generalist', part: 'One.', status: 'pending' }, { agent: 'designer', part: 'Two.', status: 'pending' }] });
+    expect(/Error/.test(refusedCli(['edit', 'smoke-q3', '--agent', 'generalist'], manager)) && readJson(path.join(data, 'runs', 'smoke-q3.json')).steps[1].agent === 'designer', 'the steps of different members were all given to one');
+    expect(/Error/.test(refusedCli(['guide', 'smoke-q1', 'Look at the footer'], manager)) && !readJson(path.join(data, 'runs', 'smoke-q1.json')).talk, 'guidance went to a run with no agent at work');
+    const firstGap = refusedCli(['frobnicate', 'x'], manager);
+    const secondGap = refusedCli(['frobnicate', 'y'], manager);
+    expect(/tool gap #\d+ \(1x\)/.test(firstGap) && /tool gap #\d+ \(2x\)/.test(secondGap) && /frobnicate/.test(cli(['gap', 'list'])), `a command the manager lacked was not recorded as a tool gap: ${firstGap} / ${secondGap}`);
+    expect(!/tool gap/.test(refusedCli(['frobnicate'], { CHIEFMATE_MANAGER: '' })), "the owner's unknown command was recorded as the manager's gap");
+    for (const id of ['smoke-q1', 'smoke-q2', 'smoke-q3', 'smoke-failed', 'smoke-delivery']) rmSync(path.join(data, 'runs', `${id}.json`), { force: true });
 
     // The CLI sends the destination options to the running API. The queue is held while the approval is tested, and
     // the run it queues (in a real project) is canceled: a later part of this test wakes the queue up.
@@ -724,7 +803,9 @@ try {
     const { CONFIG_FILE, saveConfig } = await load('config');
     const { execute, live } = await load('runs');
     const { recordUsage, readRun, saveRun } = await load('store');
-    const { nudgeQueue } = await load('queue');
+    const { nudgeQueue, startQueue } = await load('queue');
+    // This process runs the copy's queue when nudged (only the process that starts the queue runs it), with no timer.
+    startQueue({ timer: false });
     const resetsAt = Math.floor(Date.now() / 1000) + 3600;
     const usage = utilization => ({ unifiedWindows: {
       five_hour: { utilization, resetsAt }, seven_day: { utilization: 0.20, resetsAt: resetsAt + 86400 },
@@ -1579,6 +1660,120 @@ try {
   busy = 0;
   expect(power.powerOffCommand({ dryRun: true }).args.join(' ') === '/s /t 0', "Windows' shutdown is forced or delayed");
 
+  // A restart, simulated (Windows' restart, the closing and the windows are made up): refused without a reason or while
+  // a live session's turn goes on; it pauses for "reboot", counts down, saves "off" with who asked and why, and restarts
+  // Windows, never forced. The watchdog brings back a Chiefmate restarted this way, never one shut down.
+  const { listRuns, readRun, saveRun } = await import(src('store.mjs'));
+  const { DATA, readJson, writeJson } = await import(src('util.mjs'));
+  expect(power.rebootRefusal({ reason: '' }, hooks) && power.rebootRefusal({ reason: 'x' }, { ...hooks, sessionsBusy: () => true }) && !power.rebootRefusal({ reason: 'x' }, hooks),
+    "a restart went without a reason, or in the middle of a live session's turn");
+  let noReason = '';
+  try {
+    power.stopSystem('reboot', { by: 'manager', reason: ' ' });
+  } catch (error) {
+    noReason = error.message;
+  }
+  expect(noReason && !power.stopping(), 'a restart with no reason began');
+  calls.length = 0;
+  busy = 1;
+  hooks.powerOff = async target => calls.push(`poweroff:${target}`);
+  const reason = 'a file of the working copy locked by the antivirus';
+  const rebootJob = { target: 'reboot', since: new Date().toISOString(), by: 'manager', reason, stage: 'pausing', paused: [], sessions: [], waitingFor: [], countdownUntil: null, canceled: false };
+  expect(await power.shutDown(rebootJob, hooks), 'a restart did not go to the end');
+  const off = readState().power;
+  expect(calls[0] === 'pause:reboot' && calls.at(-2) === 'poweroff:reboot' && calls.at(-1) === 'finish' && rebootJob.countdownUntil
+    && off?.mode === 'off' && off.target === 'reboot' && off.by === 'manager' && off.reason === reason && off.paused.join() === 'smoke-power-a',
+    `a restart did not pause, count down, save who asked and why, and restart Windows: ${calls} ${JSON.stringify(off)}`);
+  expect(power.powerOffCommand({ dryRun: true, target: 'reboot' }).args.join(' ') === '/r /t 0', "Windows' restart is forced or delayed");
+  const since = Date.parse(off.since);
+  const late = since + 20 * 60_000;
+  expect(power.offOnPurpose(off, since - 60_000) && !power.offOnPurpose(off, since + 60_000) && power.offOnPurpose({ ...off, target: 'shutdown' }, since + 60_000)
+    && !power.offOnPurpose(off, since - 60_000, late) && power.offOnPurpose({ ...off, target: 'shutdown' }, since - 60_000, late),
+    'the watchdog would leave off a Chiefmate whose computer restarted (or never did), or bring back one the owner shut down');
+  // Back after the restart: on again, the windows of the live sessions and the app's window open again, the log says so.
+  let reopenedAt = null;
+  let appWindows = 0;
+  const openApp = () => appWindows++;
+  power.startPower({ ...hooks, boot: since + 30_000, reopenWindows: boot => ((reopenedAt = boot), ['smoke-window']), openApp });
+  expect(!readState().power && power.powerInfo().mode === 'on' && reopenedAt === since + 30_000 && appWindows === 1 && power.powerLog().at(-1)?.outcome === 'back' && power.powerLog().at(-1).by === 'manager',
+    `back from a restart, Chiefmate is not on, the windows did not open again or the log missed it: ${JSON.stringify([appWindows, power.powerLog().at(-1)])}`);
+  // A restart Windows did not make (a program held it): on again once the watchdog brings Chiefmate back, no window
+  // opened again (none was closed), the app's neither (a start after a recent note, as an update's), and the log says it
+  // did not restart.
+  saveState({ ...readState(), power: off });
+  let reopenedAgain = false;
+  power.startPower({ ...hooks, boot: since - 60_000, reopenWindows: () => ((reopenedAgain = true), []), openApp });
+  expect(!readState().power && power.powerInfo().mode === 'on' && !reopenedAgain && appWindows === 1 && power.powerLog().at(-1)?.outcome === 'not-restarted',
+    `a restart Windows did not make was taken for one, or its windows opened again: ${JSON.stringify([appWindows, power.powerLog().at(-1)])}`);
+  // The app's window opens on the first start since the computer started only: never without a note of being alive
+  // (the first start of a version that keeps them, as through an update), nor after a note newer than the start.
+  expect(power.firstSinceBoot({ last: new Date(since - 1000).toISOString(), boot: since }) && !power.firstSinceBoot({ last: null, boot: since })
+    && !power.firstSinceBoot({ last: new Date(since + 1000).toISOString(), boot: since }), "the app's window would open on a start that is not the first since the computer started");
+
+  // The computer went down without a stop (a power cut): Chiefmate's last note of being alive is older than the
+  // computer's start. The runs it cut off (still running, or failed a moment before) go back to the front of the queue;
+  // one that failed long before stays failed, and so does a step of a running run that failed long before. The records
+  // already running or failed here are put back afterwards.
+  const t0 = Date.now();
+  const last = new Date(t0 - 10 * 60_000).toISOString();
+  const boot = t0 - 5 * 60_000;
+  const kept = listRuns().filter(r => ['running', 'failed'].includes(r.status));
+  const cutRun = (id, status, ended, steps) => saveRun({ id, kind: 'task', project: 'Sample', title: id, status, created: new Date(t0 - 3600_000).toISOString(), ended, steps });
+  cutRun('smoke-cut-running', 'running', null, [
+    { agent: 'writer', status: 'failed', ended: new Date(t0 - 60 * 60_000).toISOString(), error: 'a real error' },
+    { agent: 'generalist', status: 'failed', ended: new Date(t0 - 11 * 60_000).toISOString(), error: 'claude exited with code 1' },
+    { agent: 'designer', status: 'running' },
+  ]);
+  cutRun('smoke-cut-failed', 'failed', new Date(t0 - 11 * 60_000).toISOString(), [{ agent: 'generalist', status: 'failed', error: 'claude exited with code 1' }, { agent: 'designer', status: 'pending' }]);
+  cutRun('smoke-cut-old', 'failed', new Date(t0 - 60 * 60_000).toISOString(), [{ agent: 'generalist', status: 'failed', error: 'a real error' }]);
+  expect(power.cutOff({ power: null, last, boot }) && !power.cutOff({ power: { mode: 'off' }, last, boot }) && !power.cutOff({ power: null, last: new Date(boot + 1000).toISOString(), boot }),
+    'a computer that went down without a stop was not found, or a stop or a plain restart of Chiefmate was taken for one');
+  power.beat(last);
+  let windowsBack = null;
+  power.startPower({ ...hooks, boot, reopenWindows: b => ((windowsBack = b), []), openApp });
+  const [running, failed, old] = ['smoke-cut-running', 'smoke-cut-failed', 'smoke-cut-old'].map(readRun);
+  expect(running.status === 'queued' && running.resumeFirst && running.cutOff?.was === 'running' && running.steps.map(s => s.status).join() === 'failed,pending,pending'
+    && failed.status === 'queued' && failed.resumeFirst && !failed.ended && !failed.result && failed.steps[0].status === 'pending' && !failed.steps[0].error
+    && old.status === 'failed' && windowsBack === boot && appWindows === 2 && power.powerLog().at(-1)?.action === 'cut-off' && Date.parse(power.lastBeat()) > t0 - 1000,
+    `the runs cut off by a power cut were not put back at the front of the queue, or an old failure was: ${JSON.stringify([running, failed, old].map(r => [r.status, r.resumeFirst, r.steps.map(s => s.status)]))}`);
+  // Nothing of this check stays in the queue for a later one to start.
+  for (const id of ['smoke-cut-running', 'smoke-cut-failed', 'smoke-cut-old']) rmSync(path.join(DATA, 'runs', `${id}.json`), { force: true });
+  for (const r of kept) saveRun(r);
+
+  // The manager's restart outside away mode waits for the owner's yes on a card: refused while a live session's turn
+  // goes on (the card stays), started with the yes (then canceled here), and an old yes does nothing.
+  const decisions = await import(src('decisions.mjs'));
+  const asked = decisions.askReboot({ by: 'manager', reason, runs: [{ title: 'A run', project: 'Sample' }], sessions: [] });
+  expect(decisions.askReboot({ by: 'manager', reason }).id === asked.id && asked.reboot?.yes && asked.options.length === 2, 'a second restart question was asked while one waits, or it has no yes');
+  const cardsNow = () => decisions.decisionCards({ attention: decisions.openQuestions().map(q => ({ id: `question:${q.id}`, kind: 'question', level: 'urgent' })), items: [] });
+  const card = `question:${asked.id}`;
+  power.startPower({ ...hooks, sessionsBusy: () => true });
+  const busyAnswer = await decisions.decide({ card, action: 'answer', option: asked.reboot.yes }, cardsNow()).then(() => '', error => error.message);
+  expect(busyAnswer && decisions.openQuestions().some(q => q.id === asked.id) && !power.stopping(), "a restart confirmed during a live session's turn began, or its card closed");
+  calls.length = 0;
+  power.startPower({ ...hooks, sessionsBusy: () => false, crewBusy: () => true, countdownMs: 60_000 });
+  const yes = await decisions.decide({ card, action: 'answer', option: asked.reboot.yes }, cardsNow());
+  const going = power.powerInfo();
+  expect(yes.reboot && going.mode === 'stopping' && going.target === 'reboot' && going.by === 'manager' && going.reason === reason && power.powerLog().at(-1)?.confirmedBy === 'owner',
+    `the owner's yes did not start the manager's restart: ${JSON.stringify([yes, going])}`);
+  expect(power.cancelStop().mode === 'on' && power.powerLog().at(-1)?.outcome === 'canceled', 'a restart could not be canceled');
+  await new Promise(resolve => setTimeout(resolve, 40));
+  const stale = decisions.askReboot({ by: 'manager', reason });
+  const questionsPath = path.join(DATA, 'manager', 'questions.json');
+  writeJson(questionsPath, readJson(questionsPath, []).map(q => (q.id === stale.id ? { ...q, at: new Date(t0 - 31 * 60_000).toISOString() } : q)));
+  const staleAnswer = await decisions.decide({ card: `question:${stale.id}`, action: 'answer', option: stale.reboot.yes }, cardsNow()).then(() => '', error => error.message);
+  expect(staleAnswer && !power.stopping() && !decisions.openQuestions().some(q => q.id === stale.id), 'a restart confirmed over 30 minutes late began, or its card stayed');
+  // Asked again once the card's confirmation is no longer valid, a fresh card replaces it; its "no" is not the card's
+  // own "Not now", and the manager recommends the restart it asks for.
+  const older = decisions.askReboot({ by: 'manager', reason });
+  writeJson(questionsPath, readJson(questionsPath, []).map(q => (q.id === older.id ? { ...q, at: new Date(t0 - 31 * 60_000).toISOString() } : q)));
+  const fresh = decisions.askReboot({ by: 'manager', reason });
+  const { t: say } = await import(src('i18n.mjs'));
+  expect(fresh.id !== older.id && !decisions.openQuestions().some(q => q.id === older.id) && !fresh.options.includes(say('Not now')) && fresh.recommend === fresh.reboot.yes,
+    `a stale restart card was handed out again, or its options clash with the card's own "Not now": ${JSON.stringify([older.id, fresh])}`);
+  await decisions.decide({ card: `question:${fresh.id}`, action: 'discard' }, cardsNow());
+  busy = 0;
+
   const at = Date.now();
   expect(schedule.isLate(new Date(at - 30 * 60_000), at) && !schedule.isLate(new Date(at - 10 * 60_000), at), 'a mission missed for 30 minutes is not late, or one 10 minutes behind is');
 } catch (error) {
@@ -1668,7 +1863,7 @@ try {
   const { claudeArgs } = await import(src('claude.mjs'));
   const { assemble, assembleBlocks, parseBlocks } = await import(src('prompts.mjs'));
   const { pickNext } = await import(src('queue.mjs'));
-  const { planSession, sessionArgs, sessionIdOf } = await import(src('sessions.mjs'));
+  const { planSession, reopenWindows, savedConversation, sessionArgs, sessionIdOf } = await import(src('sessions.mjs'));
 
   // The queue: runs of different projects at once, up to the limit; one per project, in order; not before their time.
   const later = new Date(Date.now() + 3600_000).toISOString();
@@ -1894,6 +2089,30 @@ try {
     expect(JSON.parse(claude[claude.indexOf('--settings') + 1]).claudeMdExcludes?.includes(userFolder), "a Claude Code session would read the user's ~/.claude/CLAUDE.md");
     const codex = sessionArgs({ tool: 'codex', cwd: sessionTemp, model: null }, sessionConfig, 'Hello');
     expect(codex.join() === `-C,${sessionTemp},Hello`, `a Codex session's command line is wrong: ${codex.join(' ')}`);
+    // A Claude Code window keeps its own conversation id: it starts it, and after a restart of the computer carries it on
+    // when Claude Code saved it (a made-up ~/.claude here); Codex has none to carry on.
+    const own = { tool: 'claude', cwd: sessionTemp, toolSession: 'smoke-conversation-1' };
+    const started = sessionArgs(own, sessionConfig, 'Hello');
+    const resumed = sessionArgs(own, sessionConfig, null, undefined, { resume: true });
+    const claudeHome = path.join(sessionTemp, 'claude-home');
+    mkdirSync(path.join(claudeHome, 'projects', 'C--some-folder'), { recursive: true });
+    writeFileSync(path.join(claudeHome, 'projects', 'C--some-folder', 'smoke-conversation-1.jsonl'), '{}\n');
+    expect(started[started.indexOf('--session-id') + 1] === 'smoke-conversation-1' && started.at(-1) === 'Hello' && resumed[resumed.indexOf('--resume') + 1] === 'smoke-conversation-1' && !resumed.includes('--session-id')
+      && savedConversation(own, claudeHome) && !savedConversation({ ...own, toolSession: 'smoke-conversation-2' }, claudeHome) && !savedConversation({ ...own, tool: 'codex' }, claudeHome)
+      && !savedConversation({ ...own, toolSession: '../x' }, claudeHome),
+      `a Claude Code window can't start or carry on its own conversation: ${started.join(' ')} | ${resumed.join(' ')}`);
+    // After the computer restarted, the windows still open before it are the ones to open again (listed only here).
+    const sessionsDir = path.join((await import(src('util.mjs'))).DATA, 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    const old = new Date(Date.now() - 3600_000).toISOString();
+    const windowRecord = (id, extra) => writeFileSync(path.join(sessionsDir, `${id}.json`), JSON.stringify({ id, name: id, tool: 'claude', cwd: sessionTemp, mode: 'window', status: 'open', created: old, started: old, opened: old, ...extra }));
+    windowRecord('smoke-window-lost', {});
+    windowRecord('smoke-window-new', { opened: new Date().toISOString() });
+    windowRecord('smoke-window-ended', { status: 'ended' });
+    windowRecord('smoke-app-open', { mode: 'app' });
+    const lost = reopenWindows(Date.now() - 60_000, { dryRun: true });
+    expect(lost.includes('smoke-window-lost') && !lost.some(id => ['smoke-window-new', 'smoke-window-ended', 'smoke-app-open'].includes(id)), `the windows to open again after a restart are wrong: ${lost}`);
+    for (const id of ['smoke-window-lost', 'smoke-window-new', 'smoke-window-ended', 'smoke-app-open']) rmSync(path.join(sessionsDir, `${id}.json`), { force: true });
     let refused = false;
     try {
       planSession({ ...sessionConfig, sessions: { x: { tool: 'other', cwd: sessionTemp } } }, 'x');
@@ -2873,6 +3092,19 @@ try {
       'gh api repos/a/b/pulls -f title=T': 'gh api', 'gh api -X POST repos/a/b/pulls': 'gh api', 'curl -X POST https://api.github.com/repos/a/b/pulls -d @pr.json': 'gh api',
       'git -C x remote set-url origin u': 'git remote', 'gh pr create --fill': 'gh pr',
       'git status && git log': '', 'git commit -m "explain git push"': '', 'gh api repos/a/b/pulls': '', 'curl https://api.github.com/repos/a/b': '',
+      // What only reads publishes nothing; what writes, however placed, does.
+      'gh pr view 12': '', 'gh pr list --repo a/b --state open': '', 'gh -R a/b pr checks 3': '', 'gh pr diff 3': '', 'gh pr status': '', 'gh repo view a/b --json name': '', 'gh repo list': '',
+      'gh pr --repo a/b merge 3': 'gh pr', 'gh repo create x --public': 'gh repo', 'gh pr': 'gh pr', 'gh repo delete a/b': 'gh repo',
+      // An instruction for Chiefmate's command line, a commit message or an issue's body that only names a command is
+      // text, when the whole command is in plain words; what the command itself does still counts.
+      'node src/cli.mjs task p generalist "Fix it.\ngh pr create, then git push (gh repo view)"': '', 'git commit -m "Guard\n\ngit push origin main stays refused"': '',
+      'gh issue create --title "Guard" --body "Refused:\ngh pr create --fill; git push"': '', 'gh pr create --title "x" --body "y; git push"': 'gh pr',
+      // Text that a shell, inline code, git itself, a script or a --check runs is still looked at.
+      'echo "git push" | sh': 'git push', 'eval "git push"': 'git push', 'node -e "run(\'git push\')"': 'git push', 'gh alias set p --shell "git push"': 'git push',
+      'python tool.py "a; git push"': 'git push', 'git commit -m "$(git push origin x)"': 'git push', 'git commit -m "`git push origin x`"': 'git push',
+      'git commit -m "x\\" "; git push origin x"': 'git push', 'git rebase --exec "git push origin x" main': 'git push', 'git submodule foreach "git push"': 'git push',
+      'git -c core.editor=x commit -m "a; git push"': 'git push', 'node src/cli.mjs needs-you "Done?" --wait --check "git push origin x"': 'git push',
+      'node src/cli.mjs task p generalist "a; git push" | sh': 'git push',
       // Only reading the remote or GitHub, and a message to the manager that only quotes a command, publish nothing.
       'git remote -v': '', 'git -C x remote get-url origin': '', 'git remote show origin': '', 'echo "git remote -v"': '', 'gh pr list': '', 'gh pr -R a/b view 3': '', 'gh issue list': '', 'gh repo view': '',
       'node src/cli.mjs chat say "Refused: git push -u origin x 2>&1; git remote add y z"': '', "node src/cli.mjs chat say 'run `git push origin x`'": '',
@@ -3619,6 +3851,46 @@ try {
   failures.push(`agent in charge checks: ${error.message}`);
 }
 
+// The manager's tools, in this process: its guidance to an agent at work (recorded as the manager's, never answering a
+// request made to the owner), a run on hold skipped by the queue, and a tool gap that comes back proposed on the board.
+try {
+  process.env.CHIEFMATE_SMOKE = '1'; // the proposals here never reach the manager
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const { live } = await import(src('runs.mjs'));
+  const { ownerTurn, pendingTalk, talkSection, talkSituation, talkTo } = await import(src('talk.mjs'));
+  const run = { id: 'smoke-guide', title: 'Generalist: smoke', project: 'none', status: 'running', created: new Date().toISOString(), steps: [{ agent: 'generalist', status: 'running' }], requests: [] };
+  let interrupted = 0;
+  run.requests.push({ id: 'r1', step: 1, agent: 'generalist', what: 'Which file?', wait: true, status: 'open', at: new Date().toISOString() });
+  live.set(run.id, { run: run.id, memory: run, agent: 'generalist', step: 1, talking: true, heldUntil: Date.now() + 20_000, actions: [], process: { interrupt: () => interrupted++ } });
+  const guided = talkTo(run.id, 'Run the tests before you commit', { by: 'manager' });
+  expect(guided.who === 'manager' && guided.status === 'pending' && interrupted === 1 && run.requests[0].status === 'open' && pendingTalk(run, 1).length === 1,
+    `the manager's guidance was not kept for the agent, or answered a request made to the owner: ${JSON.stringify(guided)}`);
+  const turn = ownerTurn([guided], { owner: 'Owner', language: 'en' });
+  expect(turn.includes("Chiefmate's manager") && turn.includes('Run the tests before you commit') && turn.includes('First answer the manager'), `the agent is not told the guidance is the manager's: ${turn}`);
+  expect(talkSection(run, 1, id => id, { owner: 'Owner', language: 'en' }).includes('Run the tests before you commit') && talkSituation([run], 'Owner').includes('You (the manager) guided step 1'),
+    "the manager's guidance is not in the step's report or in its situation");
+  live.delete(run.id);
+
+  const { pickNext } = await import(src('queue.mjs'));
+  const waiting = [{ id: 'h1', project: 'a', onHold: { by: 'manager' } }, { id: 'h2', project: 'a' }, { id: 'h3', project: 'b' }];
+  expect(pickNext(waiting, [], 3).map(r => r.id).join() === 'h2,h3', `the queue started a run on hold, or held up its project: ${pickNext(waiting, [], 3).map(r => r.id).join()}`);
+
+  const gaps = await import(src('gaps.mjs'));
+  const config = { projects: { mine: { name: 'Mine', repository: 'https://github.com/someone/chiefmate.git' } } };
+  expect(gaps.chiefmateProject(config) === 'mine' && gaps.chiefmateProject({ projects: { x: { repository: 'a/b' } } }) === null, "Chiefmate's own project was not found by its repository");
+  const once = await gaps.recordGap({ what: 'Rename a mission', example: 'node src/cli.mjs mission rename a b' }, { config });
+  const twice = await gaps.recordGap({ what: 'rename a  mission', example: 'node src/cli.mjs mission-rename a b' }, { config });
+  const { readBoard } = await import(src('planning.mjs'));
+  const item = readBoard().items.find(i => i.id === twice.plan);
+  expect(once.id === twice.id && !once.plan && twice.count === 2 && twice.status === 'proposed' && item?.title === 'Manager tool: Rename a mission' && item.status === 'proposed',
+    `a tool gap that came back did not become a proposal: ${JSON.stringify([twice, item])}`);
+  expect(gaps.gapsLine().includes(`#${twice.id} Rename a mission (2x, proposed as board item #${item?.id})`), `the manager's situation does not list the open gaps: ${gaps.gapsLine()}`);
+  gaps.closeGap(twice.id, 'Done.');
+  expect(!gaps.readGaps().some(g => g.id === twice.id && g.status !== 'closed'), 'a gap was not closed');
+} catch (error) {
+  failures.push(`manager tools checks: ${error.message}`);
+}
+
 // The owner's focus (src/steer.mjs), in this process with made-up settings and the temporary records: focus on one
 // project, a project paused alone, pause all and back to no restriction; the preview that lists the work going on it
 // would hold and the pause of that work on the owner's choice; a timed change that comes back by itself; what the
@@ -3843,6 +4115,286 @@ try {
   rmSync(temp, { recursive: true, force: true, maxRetries: 5 });
 } catch (error) {
   failures.push(`work now checks: ${error.message}`);
+}
+
+// The owner's calls handled by the manager (src/needs.mjs), in this process with made-up runs going on: a run parked
+// while it waits leaves its project's turn and resumes first once answered; a call marked done on the owner's words
+// only while the manager answers and with words the owner wrote; away mode parks a call left unanswered; the summary
+// when the owner is back lists what still waits. Then a project held for a file the antivirus probably took
+// (src/quarantine.mjs), and a local merge that saves the clone's changes first (src/merge.mjs).
+{
+  const smokeFlag = process.env.CHIEFMATE_SMOKE;
+  process.env.CHIEFMATE_SMOKE = '1';
+  const load = name => import(pathToFileURL(path.join(root, 'src', `${name}.mjs`)).href);
+  try {
+    const { askOwner, confirmByOwnerWords, finishRequest, openCalls, parkRun, parkWaitingWhileAway, pollRequest } = await load('needs');
+    const { live } = await load('runs');
+    const { listRuns, readRun, saveRun } = await load('store');
+    const { focus, queued } = await load('queue');
+    const { waitingLine } = await load('news');
+    const at = new Date().toISOString();
+    const going = (id, project) => {
+      const run = saveRun({ id, kind: 'task', project, title: `Call ${id}`, status: 'running', created: at, started: at, steps: [{ agent: 'generalist', status: 'running' }], requests: [] });
+      const l = { run: id, project, memory: run, actions: [], heldUntil: 0, interrupted: 0, cancelRequest: null, preparing: null };
+      l.process = { interrupt: () => l.interrupted++, cancel: () => {} };
+      live.set(id, l);
+      return { run, l };
+    };
+    const { run, l } = going('smoke-park', 'park-sample');
+    saveRun({ id: 'smoke-park-next', kind: 'task', project: 'park-sample', title: 'Next of the project', status: 'queued', created: new Date(Date.now() - 60_000).toISOString(), steps: [] });
+    await askOwner({ run: run.id, step: 1, what: 'Read this when you can' });
+    expect(await Promise.resolve().then(() => parkRun(run.id)).then(() => false, e => /not waiting/.test(e.message)), 'a run whose step goes on without the owner was parked');
+    const call = await askOwner({ run: run.id, step: 1, what: 'Allow the file in the antivirus', wait: true });
+    const parked = parkRun(run.id, { by: 'manager' });
+    expect(parked.request === call.id && l.pauseRequest === 'park' && l.interrupted === 1 && l.holdWhile?.() === true, `the run was not asked to park on its call: ${JSON.stringify(parked)}`);
+    expect(pollRequest(run.id, call.id).parked === true, "the waiting command isn't told the run is parked");
+    expect(openCalls().some(c => c.id === call.id), 'the open call is not listed for the manager');
+    // What execute does at the safe point: held (paused) while the call is open, off the queue.
+    live.delete(run.id);
+    Object.assign(run, { status: 'paused' });
+    saveRun(run);
+    expect(!queued().some(r => r.id === run.id), "a parked run still holds its project's turn");
+    expect(openCalls().find(c => c.id === call.id)?.parked === true && /parked: it resumes first/.test(waitingLine(listRuns())), "the parked call isn't listed as parked in the back summary");
+    const conversation = [{ who: 'you', text: 'Já liberei o arquivo no antivírus.', at: new Date().toISOString() }, { who: 'manager', text: 'pode seguir', at: new Date().toISOString() }];
+    expect(await Promise.resolve().then(() => confirmByOwnerWords(run.id, call.id, 'liberei o arquivo', { conversation, answering: false })).then(() => false, () => true), 'a call was marked done outside the manager\'s answer');
+    expect(await Promise.resolve().then(() => confirmByOwnerWords(run.id, call.id, 'pode seguir', { conversation, answering: true })).then(() => false, e => /not in the owner's messages/.test(e.message)), "a call was marked done on words the owner didn't write");
+    const done = confirmByOwnerWords(run.id, call.id, 'liberei o arquivo no antivírus', { conversation, answering: true });
+    const after = readRun(run.id);
+    expect(done.status === 'done' && done.by === 'manager' && done.ownerSaid === 'liberei o arquivo no antivírus', `the call was not marked done on the owner's words: ${JSON.stringify(done)}`);
+    expect(after.talk?.some(m => m.via === 'manager' && m.request === call.id && /liberei o arquivo/.test(m.text)), "the owner's words are not in the run's conversation");
+    expect(after.status === 'queued' && after.resumeFirst && queued()[0]?.id === run.id, 'the answered run did not go back to the front of the queue');
+    expect(await Promise.resolve().then(() => finishRequest(run.id, call.id)).then(r => r.by === 'manager', () => false), 'a second answer changed the call');
+    try {
+      execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'calls', 'done', run.id, call.id, '--owner-said', 'x'], { env: { ...process.env, CHIEFMATE_MANAGER: '', CHIEFMATE_RUN: '' }, stdio: 'pipe', windowsHide: true, encoding: 'utf8' });
+      failures.push('calls done ran outside the manager');
+    } catch (error) {
+      expect(/Only the manager/.test(String(error.stderr ?? error.message)), `calls done outside the manager failed for another reason: ${error.stderr ?? error.message}`);
+    }
+    // Away mode: a call older than "park_after_minutes" parks its run by itself; a newer one doesn't.
+    const away = going('smoke-away', 'away-sample');
+    const fresh = going('smoke-fresh', 'fresh-sample');
+    const old = await askOwner({ run: away.run.id, step: 1, what: 'Sign in to the site', wait: true });
+    away.run.requests.find(r => r.id === old.id).at = new Date(Date.now() - 20 * 60_000).toISOString();
+    await askOwner({ run: fresh.run.id, step: 1, what: 'Choose a name', wait: true });
+    expect(parkWaitingWhileAway({ away: null, force: true }).length === 0, 'a call was parked with away mode off');
+    const byAway = parkWaitingWhileAway({ away: { since: at }, settings: { parkAfterMinutes: 15 }, force: true });
+    expect(byAway.length === 1 && byAway[0].run === away.run.id && away.run.parked?.by === 'away' && !fresh.l.pauseRequest, `away mode parked the wrong runs: ${JSON.stringify(byAway)}`);
+    expect(parkWaitingWhileAway({ away: { since: at }, settings: { parkAfterMinutes: 0 }, force: true }).length === 0, 'park_after_minutes 0 still parked');
+    for (const x of [away, fresh]) live.delete(x.run.id);
+    for (const id of ['smoke-park', 'smoke-park-next', 'smoke-away', 'smoke-fresh']) saveRun(Object.assign(readRun(id), { status: 'canceled', ended: new Date().toISOString() }));
+
+    // A file the antivirus probably took: the project's queue waits, the notice carries the steps, it goes on once the file is back.
+    const { checkQuarantine, holdForQuarantine, quarantineHold, releaseQuarantine } = await load('quarantine');
+    const { attentionItems } = await load('attention');
+    const folder = path.join(data, 'quarantine-copy');
+    const file = path.join(folder, 'tool.ps1');
+    mkdirSync(folder, { recursive: true });
+    saveRun({ id: 'smoke-q-next', kind: 'task', project: 'q-sample', title: 'After the quarantine', status: 'queued', created: new Date(Date.now() - 3_600_000).toISOString(), steps: [] });
+    holdForQuarantine({ project: 'q-sample', file, state: 'missing', run: 'smoke-q', step: 1 });
+    expect(quarantineHold('q-sample')?.file === file && focus()?.run !== 'smoke-q-next', 'a project waiting for a quarantined file was next in the queue');
+    const notice = attentionItems({ config: {}, quarantine: [quarantineHold('q-sample')] }).find(i => i.kind === 'quarantine');
+    expect(notice?.level === 'urgent' && notice.text.includes(file) && /Protection history/.test(notice.text) && notice.seenable === false, `the quarantine notice lacks the path or the steps: ${JSON.stringify(notice)}`);
+    expect(checkQuarantine({ force: true }).length === 0 && quarantineHold('q-sample'), 'a hold was lifted while the file is still gone');
+    writeFileSync(file, 'back');
+    expect(checkQuarantine({ force: true })[0] === 'q-sample' && !quarantineHold('q-sample'), 'the hold stayed after the file came back');
+    holdForQuarantine({ project: 'q-sample', file: path.join(folder, 'other.dll'), state: 'unreadable' });
+    expect(releaseQuarantine('q-sample', 'owner').by === 'owner' && !quarantineHold('q-sample'), 'the owner could not lift a hold');
+    expect(await Promise.resolve().then(() => releaseQuarantine('q-sample')).then(() => false, () => true), 'a project not held was released');
+    saveRun(Object.assign(readRun('smoke-q-next'), { status: 'canceled', ended: new Date().toISOString() }));
+
+    // A local merge into a clone with changes not committed: refused, unless asked to save them first.
+    const { mergeRun } = await load('merge');
+    const clone = path.join(data, 'save-clone');
+    mkdirSync(clone);
+    const git = (...args) => execFileSync('git', ['-c', 'user.name=smoke', '-c', 'user.email=smoke@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd: clone, encoding: 'utf8', windowsHide: true, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    writeFileSync(path.join(clone, 'a.txt'), 'a\n');
+    git('add', '.');
+    git('commit', '-q', '-m', 'start');
+    git('checkout', '-q', '-b', 'work/save');
+    writeFileSync(path.join(clone, 'b.txt'), 'b\n');
+    git('add', '.');
+    git('commit', '-q', '-m', 'the run');
+    git('checkout', '-q', 'main');
+    writeFileSync(path.join(clone, 'a.txt'), 'the owner\n');
+    writeFileSync(path.join(clone, 'scratch.txt'), 'untracked\n');
+    saveRun({ id: 'smoke-save', kind: 'task', project: 'save-sample', title: 'Save first', status: 'done', created: at, branch: 'work/save', base: 'main', delivered: clone, steps: [] });
+    const config = { projects: { 'save-sample': { local_clone: clone, main_branch: 'main', deliver: 'local' } } };
+    expect(await mergeRun('smoke-save', { by: 'manager' }, config).then(() => false, e => e.pending === true), 'a clone with changes was merged without saving them');
+    const merged = await mergeRun('smoke-save', { by: 'manager', savePending: true }, config);
+    const subjects = git('log', '--format=%s', '-3').trim().split('\n');
+    expect(merged.saved?.files?.join() === 'a.txt' && readRun('smoke-save').merged?.saved?.commit === merged.saved.commit && /a\.txt/.test(merged.savedNote), `the saved changes are not in the merge's report: ${JSON.stringify(merged.saved)}`);
+    expect(subjects[1] === 'Save local changes before merge' && existsSync(path.join(clone, 'b.txt')) && git('status', '--porcelain').trim() === '?? scratch.txt', `the merge with the changes saved went wrong: ${subjects.join(' | ')}`);
+  } catch (error) {
+    failures.push(`owner's calls, quarantine and saved changes: ${error.stack ?? error.message}`);
+  } finally {
+    for (const id of ['smoke-park', 'smoke-away', 'smoke-fresh']) (await load('runs')).live.delete(id);
+    if (smokeFlag === undefined) delete process.env.CHIEFMATE_SMOKE;
+    else process.env.CHIEFMATE_SMOKE = smokeFlag;
+  }
+}
+
+// A run whose step writes a file that is gone at its end (a stand-in for Claude that "writes" a file it never creates):
+// the step pauses without committing, the project waits for the file, and once it is back the step resumes in the
+// same session, told why, and the run finishes.
+{
+  const fixture = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-quarantine-'));
+  const env = { CHIEFMATE_DATA: process.env.CHIEFMATE_DATA, CHIEFMATE_SMOKE: process.env.CHIEFMATE_SMOKE, CHIEFMATE_CLAUDE: process.env.CHIEFMATE_CLAUDE };
+  try {
+    for (const entry of ['src', 'agents', 'ui/locales', 'package.json']) cpSync(path.join(root, entry), path.join(fixture, entry), { recursive: true });
+    const repo = path.join(fixture, 'repo');
+    mkdirSync(repo);
+    const git = (...args) => execFileSync('git', args, { cwd: repo, windowsHide: true, stdio: 'pipe', encoding: 'utf8' });
+    git('init', '-q', '-b', 'main');
+    git('-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'Start');
+    const fake = path.join(fixture, 'fake-claude.mjs');
+    const told = path.join(fixture, 'told.txt');
+    Object.assign(process.env, { CHIEFMATE_DATA: path.join(fixture, 'records'), CHIEFMATE_SMOKE: '1', CHIEFMATE_CLAUDE: fake });
+    writeFileSync(fake, [
+      "import { writeFileSync } from 'node:fs';",
+      'let input = "";',
+      "process.stdin.on('data', d => (input += d));",
+      "process.stdin.on('end', () => {",
+      "  const say = event => console.log(JSON.stringify(event));",
+      "  say({ type: 'system', subtype: 'init', session_id: 's-quarantine', model: 'claude-opus-5-5' });",
+      "  if (input.includes('quarantined by the antivirus')) writeFileSync(" + JSON.stringify(told) + ', input);',
+      "  else {",
+      "    writeFileSync('notes.md', 'Notes');",
+      "    say({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Write', input: { file_path: 'tool.ps1', content: 'x' } }] } });",
+      "    say({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } });",
+      "  }",
+      "  say({ type: 'result', subtype: 'success', result: 'Done', num_turns: 1, session_id: 's-quarantine' });",
+      "});",
+    ].join('\n'));
+    const load = name => import(pathToFileURL(path.join(fixture, 'src', `${name}.mjs`)).href);
+    const { saveConfig } = await load('config');
+    const { execute } = await load('runs');
+    const { readRun, saveRun } = await load('store');
+    const { checkQuarantine, quarantineHold } = await load('quarantine');
+    const { projectDir } = await load('workspace');
+    saveConfig({ quick_model: false, max_parallel: 1, projects: { demo: { repository: repo, main_branch: 'main', deliver: 'local' } }, limits: {} });
+    const run = saveRun({
+      id: 'quarantined', kind: 'task', project: 'demo', title: 'quarantined', created: new Date().toISOString(), status: 'queued', branch: 'work/quarantined',
+      steps: [{ agent: 'generalist', status: 'pending', instruction: 'Smoke test.' }],
+    });
+    await execute(run);
+    const file = path.join(projectDir('demo'), 'tool.ps1');
+    const paused = readRun('quarantined');
+    expect(paused.status === 'queued' && paused.resumeFirst && paused.steps[0].status === 'pending' && paused.steps[0].paused?.why === 'quarantine',
+      `a step whose file vanished was not paused for the antivirus: ${paused.status}, ${JSON.stringify(paused.steps[0].paused ?? paused.steps[0].error)}`);
+    expect(path.resolve(quarantineHold('demo')?.file ?? '') === path.resolve(file), `the project was not held for the file: ${JSON.stringify(quarantineHold('demo'))}`);
+    expect(execFileSync('git', ['log', '--format=%s', 'main..work/quarantined'], { cwd: projectDir('demo'), encoding: 'utf8', windowsHide: true }).trim() === '', 'the step was committed with its file gone');
+    // The rest of the step's work stays in the copy as it was (not put aside in a stash), for the file restored beside it.
+    const inCopy = (...args) => execFileSync('git', args, { cwd: projectDir('demo'), encoding: 'utf8', windowsHide: true }).trim();
+    expect(!paused.shelf && inCopy('stash', 'list') === '' && existsSync(path.join(projectDir('demo'), 'notes.md')), "the quarantined step's other work was put aside instead of staying in the copy");
+    writeFileSync(file, 'restored');
+    expect(checkQuarantine({ force: true })[0] === 'demo', 'the hold stayed once the file was back');
+    await execute(readRun('quarantined'));
+    const finished = readRun('quarantined');
+    expect(finished.status === 'done' && existsSync(told) && readFileSync(told, 'utf8').includes(file), `the step did not resume told about the file: ${finished.status} ${finished.result ?? ''}`);
+    expect(['notes.md', 'tool.ps1'].every(f => inCopy('ls-tree', '-r', '--name-only', 'work/quarantined').split('\n').includes(f)), "the resumed step's work and the file restored were not committed");
+  } catch (error) {
+    failures.push(`antivirus quarantine in a run: ${error.stack ?? error.message}`);
+  } finally {
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(fixture, { recursive: true, force: true, maxRetries: 5 });
+  }
+}
+
+// A run parked in the middle of a step while it waits for the owner, with a stand-in for Claude: its work is committed
+// on its branch and it leaves the working copy, so the project's next run starts and finishes; once the owner answers,
+// the parked run resumes on its own branch, in the same session, without what another run left in the copy.
+{
+  const fixture = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-parked-'));
+  const identity = { GIT_AUTHOR_NAME: 'Smoke', GIT_AUTHOR_EMAIL: 'smoke@example.com', GIT_COMMITTER_NAME: 'Smoke', GIT_COMMITTER_EMAIL: 'smoke@example.com' };
+  const env = Object.fromEntries(['CHIEFMATE_DATA', 'CHIEFMATE_SMOKE', 'CHIEFMATE_CLAUDE', ...Object.keys(identity)].map(name => [name, process.env[name]]));
+  try {
+    for (const entry of ['src', 'agents', 'ui/locales', 'package.json']) cpSync(path.join(root, entry), path.join(fixture, entry), { recursive: true });
+    const repo = path.join(fixture, 'repo');
+    mkdirSync(repo);
+    const git = (dir, ...args) => execFileSync('git', ['-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd: dir, windowsHide: true, stdio: 'pipe', encoding: 'utf8' }).trim();
+    git(repo, 'init', '-q', '-b', 'main');
+    writeFileSync(path.join(repo, 'app.md'), 'App\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'Start');
+    // The stand-in: for A, it leaves a new file and a changed one and "works" on until it is parked; resumed, it keeps
+    // the turn it got and ends. For B, it writes its own file and ends.
+    const fake = path.join(fixture, 'fake-claude.mjs');
+    const turn = path.join(fixture, 'resumed-turn.txt');
+    writeFileSync(fake, [
+      "import { writeFileSync } from 'node:fs';",
+      "const args = process.argv.slice(2);",
+      "let prompt = ''; process.stdin.on('data', d => (prompt += d)); process.stdin.on('end', () => {",
+      "  const say = e => process.stdout.write(JSON.stringify(e) + '\\n');",
+      "  const id = args[args.indexOf(args.includes('--resume') ? '--resume' : '--session-id') + 1];",
+      "  say({ type: 'system', subtype: 'init', session_id: id, model: 'm' });",
+      `  if (args.includes('--resume')) { writeFileSync(${JSON.stringify(turn)}, prompt); return say({ type: 'result', subtype: 'success', result: 'Done', session_id: id, num_turns: 1 }); }`,
+      "  if (!prompt.includes('Park the file')) { writeFileSync('b.md', 'B\\n'); return say({ type: 'result', subtype: 'success', result: 'Done', session_id: id, num_turns: 1 }); }",
+      "  writeFileSync('new.md', 'New\\n'); writeFileSync('app.md', 'App by A\\n');",
+      "  say({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test' } }] } });",
+      "  setTimeout(() => say({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } }), 500);",
+      "  setTimeout(() => say({ type: 'result', subtype: 'success', result: 'too late', session_id: id }), 30000);",
+      "});",
+    ].join('\n'));
+    Object.assign(process.env, identity, { CHIEFMATE_DATA: path.join(fixture, 'records'), CHIEFMATE_SMOKE: '1', CHIEFMATE_CLAUDE: fake });
+    const load = name => import(pathToFileURL(path.join(fixture, 'src', `${name}.mjs`)).href);
+    const { saveConfig } = await load('config');
+    const { execute, live } = await load('runs');
+    const { readRun, saveRun } = await load('store');
+    const { copyHolders, pickNext, queued } = await load('queue');
+    const { askOwner, finishRequest, parkRun } = await load('needs');
+    saveConfig({
+      quick_model: false, max_parallel: 3, limits: { pause_at_5h_window: 1, pause_at_plan_week: 1 },
+      projects: { demo: { repository: repo, main_branch: 'main', deliver: 'local', no_trace: false } },
+    });
+    const makeRun = (id, created, instruction) => ({
+      id, kind: 'task', project: 'demo', title: id, instruction, created, status: 'queued', branch: `chiefmate/${id}`, steps: [{ agent: 'generalist', status: 'pending', part: instruction }],
+    });
+    const first = makeRun('parked-a', '2026-11-27T12:00:00.000Z', 'Park the file.');
+    const second = makeRun('next-b', '2026-11-27T12:01:00.000Z', 'Write b.');
+    saveRun(second);
+    const going = execute(first);
+    const copy = path.join(fixture, 'workspaces', 'demo');
+    for (let n = 0; n < 200 && !(live.get(first.id)?.process && existsSync(path.join(copy, 'new.md'))); n++) await new Promise(r => setTimeout(r, 50));
+    const started = readRun(first.id);
+    if (!live.has(first.id)) throw new Error(`the run to park ended first: ${started.status} ${started.result ?? ''} ${JSON.stringify(started.steps.map(s => s.error ?? s.status))}`);
+    const call = await askOwner({ run: first.id, step: 1, what: 'Allow the file in the antivirus', wait: true });
+    expect(parkRun(first.id, { by: 'manager' }).request === call.id, 'the run going on was not parked on its call');
+    await going;
+    const parked = readRun(first.id);
+    expect(parked.status === 'paused' && parked.parked?.committed && !parked.shelf && parked.steps[0].paused?.why === 'park' && parked.steps[0].paused?.request === call.id,
+      `the parked run did not commit its work and keep its step: ${JSON.stringify({ status: parked.status, parked: parked.parked, shelf: parked.shelf, paused: parked.steps[0].paused })}`);
+    expect(git(copy, 'status', '--porcelain') === '' && git(copy, 'log', '-1', '--format=%s', first.branch) === `Chiefmate: work in progress (${first.id})`,
+      "the parked run's work was not committed on its branch");
+    // The project's next run takes the copy and finishes.
+    expect(pickNext(queued(), [], 3, Date.now(), copyHolders()).some(r => r.id === second.id), "a parked run still keeps its project's working copy");
+    await execute(readRun(second.id));
+    expect(readRun(second.id).status === 'done', `the next run of the project did not go on while the other was parked: ${readRun(second.id).result ?? readRun(second.id).note}`);
+    // What a run left in the copy, then the owner's answer: the parked run resumes first, on its own branch.
+    writeFileSync(path.join(copy, 'app.md'), 'Left by another run\n');
+    writeFileSync(path.join(copy, 'stray.md'), 'Left by another run\n');
+    finishRequest(first.id, call.id);
+    expect(readRun(first.id).status === 'queued' && queued()[0]?.id === first.id, 'the answered run did not go back to the front of the queue');
+    await execute(readRun(first.id));
+    const done = readRun(first.id);
+    const files = git(copy, 'ls-tree', '-r', '--name-only', first.branch).split('\n');
+    expect(done.status === 'done' && files.includes('new.md') && !files.includes('stray.md') && !files.includes('b.md') && git(copy, 'show', `${first.branch}:app.md`) === 'App by A',
+      `the parked run did not resume on its own work: ${done.status} ${done.result ?? ''} ${files.join(',')}`);
+    expect(existsSync(turn) && /parked your run/.test(readFileSync(turn, 'utf8')) && readFileSync(turn, 'utf8').includes('Allow the file in the antivirus'),
+      'the resumed step was not told it was parked and what the owner answered');
+    expect(git(copy, 'ls-tree', '-r', '--name-only', second.branch).split('\n').includes('b.md'), "the next run's branch lost its work");
+  } catch (error) {
+    failures.push(`parked run in a run: ${error.stack ?? error.message}`);
+  } finally {
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(fixture, { recursive: true, force: true, maxRetries: 5 });
+  }
 }
 
 try {

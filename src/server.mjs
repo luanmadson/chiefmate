@@ -15,7 +15,7 @@ import { EFFORTS, loadAgents, loadConfig, projectCrew, projectEfforts, projectLe
 import { effortHistory, effortSource, runEffortChanges, setEffort } from './effort.mjs';
 import { agentTool, runTools, toolModel } from './tools.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
-import { addQuestion, decide, decisionCards, openPushes, openQuestions, openRepoRequests } from './decisions.mjs';
+import { addQuestion, askReboot, decide, decisionCards, openPushes, openQuestions, openRepoRequests } from './decisions.mjs';
 import { listFolder, openOnComputer, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
@@ -28,8 +28,9 @@ import { agentSender, chat, editPending, interruptManager, managerContext, newCo
 import { closeDefect, reportDefect } from './defects.mjs';
 import { closeReplaced, mergeRun, previewClose, previewMerge } from './merge.mjs';
 import { awayInfo, reportEvent, setAway } from './news.mjs';
-import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
-import { cancelStop, powerInfo, powerPreview, setStandby, stopSystem } from './power.mjs';
+import { askOwner, confirmByOwnerWords, finishRequest, openCalls, openRequests, parkRun, pollRequest } from './needs.mjs';
+import { quarantineList, releaseQuarantine } from './quarantine.mjs';
+import { cancelStop, logPower, powerInfo, powerPreview, rebootRefusal, setStandby, stopSystem } from './power.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { isOwner, OWNER_HEADER, openAppWindow, redeemCode } from './owner.mjs';
 import { changePlan, parseStatus, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
@@ -37,9 +38,10 @@ import { changeRadar, parseRadarStatus, RADAR_STATUSES, radarIdeas } from './rad
 import { deliverDevNotices, devState, openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
-import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
-import { activeRun, createRun, describeLater, doingNow, liveRuns, liveSpeech, needsBrief, outcomeLater, pauseLive, setRunLevel, stepSays } from './runs.mjs';
+import { cancel, editQueued, focus, holdRun, maxParallel, moveInQueue, nudgeQueue, queued, resume } from './queue.mjs';
+import { activeRun, createRun, describeLater, doingNow, liveRuns, liveSpeech, needsBrief, outcomeLater, pauseLive, retryRun, setRunLevel, stepSays } from './runs.mjs';
 import { speechView } from './speech.mjs';
+import { closeGap, recordGap } from './gaps.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { changeSteer, steerView } from './steer.mjs';
 import {
@@ -141,7 +143,7 @@ function readBody(req) {
 const summary = run => ({
   id: run.id, title: run.title, summary: run.summary ?? null, outcome: run.outcome ?? null, kind: run.kind, mission: run.mission, project: run.project, origin: run.origin, status: run.status,
   created: run.created, started: run.started, ended: run.ended, notBefore: run.notBefore, due: run.due ?? null, note: run.note, result: run.result,
-  pullRequest: run.pullRequest, needsYou: (run.requests ?? []).filter(r => r.status === 'open').length,
+  pullRequest: run.pullRequest, needsYou: (run.requests ?? []).filter(r => r.status === 'open').length, onHold: !!run.onHold,
   // The run's speech bubble lines (src/speech.mjs), while it has not ended: a paused or waiting run shows its last ones.
   speech: runEnded(run) ? null : speechView(run),
   steps: stepsOf(run).map(s => ({ agent: s.agent, status: s.status, review: s === run.review, role: s.role ?? null, task: s.task ?? null, tool: s.tool ?? null })),
@@ -386,7 +388,7 @@ function buildState() {
   const pushes = openPushes();
   const repos = openRepoRequests();
   const security = lockdownView();
-  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo, questions, pushes, repos, lockdown: security });
+  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo, questions, pushes, repos, lockdown: security, quarantine: quarantineList() });
   const lastOf = id => runs.find(r => r.mission === id && !['queued', 'waiting'].includes(r.status));
   return {
     now: now(),
@@ -603,6 +605,10 @@ const KEYLESS = {
   '/api/needs-you': true,
   '/api/needs-you/poll': true,
   '/api/needs-you/done': b => b.by === 'check' && !b.session && b.answer == null && b.note == null,
+  // The open calls and the quarantine holds may be read; a call marked done, a run parked or a hold lifted, only by the
+  // manager (src/needs.mjs, src/quarantine.mjs).
+  '/api/calls': b => (b.action ?? 'list') === 'list' || b.by === 'manager',
+  '/api/quarantine': b => b.action !== 'release' || b.by === 'manager',
   '/api/defect': true,
   '/api/defect/close': b => b.by === 'manager',
   '/api/manager': b => !!b.from && typeof b.from === 'object', // an agent's message, marked as the agent's
@@ -623,6 +629,15 @@ const KEYLESS = {
   // A step's line for its speech bubble, always kept as the agent's (stepSays), never as the owner's.
   '/api/say': b => typeof b.run === 'string' && !!b.run,
   '/api/steer': b => b.by === 'manager',
+  // The manager's tools (cli.mjs queue, edit, retry, guide and gap): its changes to the queue and to a queued run, a
+  // step redone, its guidance to an agent at work (kept as the manager's) and its tool gaps.
+  '/api/queue': b => b.by === 'manager',
+  '/api/run/edit': b => b.by === 'manager',
+  '/api/retry': b => b.by === 'manager',
+  '/api/run/talk': b => b.by === 'manager',
+  '/api/gap': b => b.by === 'manager',
+  // What a restart of the computer would stop, and the manager's restart (src/power.mjs); never the owner's own.
+  '/api/power': b => b.action === 'preview' || (b.action === 'reboot' && b.by === 'manager'),
   '/api/merge': b => !!b.preview || b.by === 'manager',
   '/api/close-pr': b => !!b.preview || b.by === 'manager',
   '/api/lockdown': b => b.action === 'engage' && ['manager', 'step'].includes(b.by),
@@ -797,6 +812,30 @@ export function startServer() {
         case '/api/needs-you/done':
           if (body.session) return reply(res, 200, finishSessionRequest(String(body.session), String(body.id ?? '')));
           return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner', body.answer ?? null, body.note ?? null));
+        case '/api/calls': {
+          // The manager's handling of the open calls (cli.mjs calls): list them, mark one done on the owner's words in
+          // its conversation (only while it answers, src/needs.mjs), or park a run that waits for the owner.
+          const action = String(body.action ?? 'list');
+          if (action === 'list') return reply(res, 200, { calls: openCalls() });
+          if (action === 'done') {
+            if (body.by !== 'manager') return reply(res, 403, { error: t("Only the manager, while it answers the owner, marks a call done on the owner's word.") });
+            return reply(res, 200, confirmByOwnerWords(body.run, String(body.id ?? ''), body.ownerSaid, { conversation: readConversation(), answering: chat.responding }));
+          }
+          if (action === 'park') {
+            const parked = parkRun(body.run, { by: body.by === 'owner' ? 'owner' : 'manager', request: body.id ? String(body.id) : null });
+            nudgeQueue();
+            return reply(res, 200, parked);
+          }
+          return reply(res, 400, { error: t('Unknown action: {action}', { action }) });
+        }
+        case '/api/quarantine':
+          // The projects waiting for a file the antivirus probably took (src/quarantine.mjs); "release" lifts a hold.
+          if (body.action === 'release') {
+            const released = releaseQuarantine(String(body.project ?? ''), body.by === 'manager' ? 'manager' : 'owner');
+            nudgeQueue();
+            return reply(res, 200, released);
+          }
+          return reply(res, 200, { holds: quarantineList() });
         case '/api/decide': {
           // The owner's click on a decision card: approve (a merge goes through src/merge.mjs), later, discard or answer.
           const decided = await decide({ card: body.card, action: body.action, option: body.option, note: body.note, reason: body.reason }, buildState().decisions);
@@ -817,10 +856,31 @@ export function startServer() {
           // Marks notices as seen: they fade (an info notice goes to the archive).
           return reply(res, 200, { seen: markSeen(Array.isArray(body.ids) ? body.ids : [body.id]) });
         case '/api/run/talk':
-          return reply(res, 200, talkTo(body.run, body.text));
+          // "by": "manager" for the manager's guidance (cli.mjs guide); the owner's from the agent's panel otherwise.
+          return reply(res, 200, talkTo(body.run, body.text, { by: body.by === 'manager' ? 'manager' : 'owner' }));
         case '/api/say':
           // A line of the agent at work for its speech bubble (cli.mjs say, from its step; src/speech.mjs).
           return reply(res, 200, stepSays(body.run, body.step, body.text));
+        case '/api/queue': {
+          // The manager's (or the owner's) changes to the queue: move a run, hold it or release it (src/queue.mjs).
+          const id = String(body.id ?? '');
+          if (body.action === 'move') return reply(res, 200, { queue: moveInQueue(id, { before: body.before ?? null, top: !!body.top }).map(summary) });
+          if (body.action === 'hold' || body.action === 'release') return reply(res, 200, summary(holdRun(id, body.action === 'hold', body.by === 'owner' ? 'owner' : 'manager')));
+          return reply(res, 400, { error: t('Say "move", "hold" or "release".') });
+        }
+        case '/api/run/edit':
+          // A run still in the queue: more instructions, its title, summary, agent, tool or level (src/runs.mjs, editRun).
+          return reply(res, 200, summary(editQueued(body.id, body.changes ?? {}, { by: body.by === 'owner' ? 'owner' : 'manager' })));
+        case '/api/retry': {
+          // Redoes a step of a run that stopped, with another agent or tool if given (src/runs.mjs, retryRun).
+          const run = retryRun(body.id, { step: body.step, agent: body.agent, tool: body.tool }, { by: body.by === 'owner' ? 'owner' : 'manager' });
+          nudgeQueue();
+          return reply(res, 200, summary(run));
+        }
+        case '/api/gap':
+          // The manager's tool gaps (src/gaps.mjs): "record" one more case, or "close" one.
+          if (body.action === 'close') return reply(res, 200, { gap: closeGap(body.id, body.note) });
+          return reply(res, 200, { gap: await recordGap({ what: body.what, example: body.example, by: body.by ?? 'manager' }) });
         case '/api/session': {
           // With "dryRun": the folder and the first message it would open with, and nothing opens.
           if (body.dryRun) {
@@ -914,7 +974,7 @@ export function startServer() {
         case '/api/merge':
           // Merges a finished run's work with the owner's authorization (src/merge.mjs): "preview" only shows it.
           if (body.preview) return reply(res, 200, await previewMerge(body.run));
-          return reply(res, 200, await mergeRun(body.run, { by: body.by === 'manager' ? 'manager' : 'owner' }));
+          return reply(res, 200, await mergeRun(body.run, { by: body.by === 'manager' ? 'manager' : 'owner', savePending: body.savePending === true }));
         case '/api/close-pr':
           // Closes a run's pull request replaced by a newer run's (src/merge.mjs): "preview" only shows it.
           if (body.preview) return reply(res, 200, previewClose(body.run, body.replacedBy));
@@ -986,11 +1046,27 @@ export function startServer() {
           // The power modes (src/power.mjs). From another device, only standby: a Chiefmate stopped there could not be
           // started again from it.
           const action = String(body.action ?? '');
-          if (remote && ['stop', 'shutdown'].includes(action)) return reply(res, 403, { error: t('Shutting down is done on the computer itself: from another device, Chiefmate could not be started again.') });
-          if (action === 'preview') {
-            const runs = liveRuns().map(l => ({ run: l.run, title: l.title, project: l.project }));
-            const sessions = sessionsState().open.map(x => ({ id: x.id, name: x.name, cwd: x.cwd, mode: x.mode, tool: x.tool }));
-            return reply(res, 200, await powerPreview({ runs, sessions }));
+          if (remote && ['stop', 'shutdown', 'reboot'].includes(action)) return reply(res, 403, { error: t('Shutting down is done on the computer itself: from another device, Chiefmate could not be started again.') });
+          const runs = liveRuns().map(l => ({ run: l.run, title: l.title, project: l.project }));
+          const sessions = () => sessionsState().open.map(x => ({ id: x.id, name: x.name, cwd: x.cwd, mode: x.mode, tool: x.tool, phase: x.phase ?? null }));
+          if (action === 'preview') return reply(res, 200, { ...(await powerPreview({ runs, sessions: sessions() })), away: !!awayInfo() });
+          if (action === 'reboot') {
+            // A restart of the computer, the manager's or the owner's, always with a reason. Refused while a live
+            // session's turn goes on; the manager's, during an emergency lockdown, and outside away mode it waits for
+            // the owner's confirmation on a question card (askReboot in src/decisions.mjs).
+            const by = body.by === 'manager' ? 'manager' : 'owner';
+            const reason = clip(String(body.reason ?? '').trim(), 300);
+            const refusal = by === 'manager' && isLocked() ? t('The emergency lockdown is on: only the owner may restart the computer now.') : rebootRefusal({ reason });
+            if (refusal) {
+              logPower({ action: 'reboot', outcome: 'refused', by, reason, why: refusal });
+              return reply(res, 409, { error: refusal });
+            }
+            if (by === 'manager' && !awayInfo()) {
+              const q = askReboot({ by, reason, runs, sessions: sessions() });
+              logPower({ action: 'reboot', outcome: 'asked', by, reason, question: q.id });
+              return reply(res, 200, { ...powerInfo(), asked: q.id });
+            }
+            return reply(res, 200, stopSystem('reboot', { by, reason }));
           }
           if (action === 'standby') return reply(res, 200, setStandby(true));
           if (action === 'on') return reply(res, 200, setStandby(false));
