@@ -431,11 +431,13 @@ async function chatCommand() {
           console.log(`[${time(m.at)}] Agent, not you (${senderLabel(m.sender)}):\n${m.text}\n`);
           continue;
         }
-        const extra = [m.news ? `notice: ${m.news.join(', ')}` : '', m.queued ? `delivered ${time(m.delivered)}` : '', m.interrupted ? 'interrupted' : ''].filter(Boolean).join(', ');
+        const extra = [m.news ? `notice: ${m.news.join(', ')}` : '', m.queued ? `delivered ${time(m.delivered)}` : '', m.interrupted ? 'interrupted' : '', m.who === 'manager' && m.cut ? 'cut off by the usage limit' : ''].filter(Boolean).join(', ');
         console.log(`[${time(m.at)}] ${who[m.who] ?? m.who}${extra ? ` (${extra})` : ''}:\n${m.text}\n`);
       }
       if (g.responding) {
         console.log(`Now: ${g.context?.renewing ? 'renewing the conversation' : 'answering'} since ${time(g.since)}.${g.lastAction ? ` Last action, ${time(g.lastAction.at)}: ${g.lastAction.text}` : ''}`);
+      } else if (g.cut) {
+        console.log(`Now: the plan's usage ran out at ${time(g.cut.at)}, in the middle of an answer. The conversation goes on by itself once it renews, at ${time(g.cut.until)}, with what that answer was about and the queue.`);
       } else console.log('Now: waiting for you.');
       for (const m of g.pending) {
         console.log(m.from === 'chiefmate' ? `In the queue [${m.id}], Chiefmate's news for the manager since ${time(m.at)}: ${m.text}`

@@ -127,6 +127,16 @@ export function loginLine(owner = 'the owner', info = loginInfo, at = Date.now()
   return `Claude Code's sign-in on this computer ${when}: without it the crew and you stop. Only ${owner} can renew it, by running "${LOGIN_RENEW}" in a terminal; remind them${w.step === '3d' ? '' : ' now'}.`;
 }
 
+// Claude Code's own words when the plan's usage runs out: "You've hit your session limit · resets 3pm", "Weekly limit
+// reached ∙ resets Mon 8am", the older "Claude AI usage limit reached|1700000000", "You're out of extra usage".
+const LIMIT_WARNING = /\b(?:you['’]ve|you have) (?:hit|reached) your\b.{0,40}\blimit\b|\busage limit reached\b|\b(?:session|weekly|5-hour|daily) limit reached\b|\bout of (?:extra )?usage\b/i;
+
+/** Whether a text is Claude Code's warning that the plan's usage ran out: a short text only, never an answer that mentions a limit. */
+export function limitWarning(text) {
+  const s = String(text ?? '').trim();
+  return s.length > 0 && s.length <= 300 && LIMIT_WARNING.test(s);
+}
+
 /** One line saying what the agent did, for the logbook. */
 export function describeAction(name, input = {}, dir) {
   const file = p => (p ? path.relative(dir, p) || p : '');
@@ -263,7 +273,10 @@ export function claudeArgs({ model, effort, tools = [], disallowed = [], addDirs
  * actions under way finish (at most 2 minutes later), so the same session can be resumed with --resume: the result
  * then has "interrupted" and no error.
  * "start" carries what Claude Code loaded ({ init: tools, mcp_servers, skills, plugins, ... }). Besides "start", "say", "action" and "usage", onEvent gets "context" ({ used, window }: the tokens the last turn
- * filled) and "compact" (Claude Code compacted the conversation: { trigger, before }).
+ * filled) and "compact" (Claude Code compacted the conversation: { trigger, before }). A "say" that is Claude Code's
+ * warning of the plan's usage running out, not the agent's words, has "limit".
+ * The result's "limit" ({ text, rejected }, else null): that warning (or a final result with its words that is not
+ * the agent's own answer, which may quote it), or the account's usage refused during the call.
  */
 export function runClaude(options) {
   const {
@@ -282,6 +295,9 @@ export function runClaude(options) {
   let cancelReason = null;
   let final = null;
   let stderr = '';
+  let limitText = null; // Claude Code's warning that the plan's usage ran out
+  let rejected = false; // the account's usage refused a call (rate_limit_event)
+  let said = null; // the agent's own last words, not Claude Code's
   let mainModel = model;
   const context = { used: 0, window: contextWindow(model), compactions: 0 };
 
@@ -328,8 +344,15 @@ export function runClaude(options) {
       context.compactions++;
       onEvent({ type: 'compact', trigger: event.compact_metadata?.trigger ?? 'auto', before: event.compact_metadata?.pre_tokens ?? null });
     } else if (event.type === 'assistant') {
+      // Claude Code's own message about the refused call (its "error", or a message no model wrote), not the agent's.
+      const fromClaudeCode = event.error === 'rate_limit' || event.message?.model === '<synthetic>';
       for (const block of event.message?.content ?? []) {
-        if (block.type === 'text' && block.text.trim()) onEvent({ type: 'say', text: block.text });
+        if (block.type === 'text' && block.text.trim()) {
+          const limit = fromClaudeCode && limitWarning(block.text);
+          if (limit) limitText = block.text.trim();
+          else if (!fromClaudeCode) said = block.text.trim();
+          onEvent({ type: 'say', text: block.text, ...(limit ? { limit: true } : {}) });
+        }
         if (block.type === 'tool_use') {
           inFlight.add(block.id);
           onEvent({ type: 'action', tool: block.name, text: describeAction(block.name, block.input, dir), doing: describeDoing(block.name, block.input, dir) });
@@ -345,6 +368,7 @@ export function runClaude(options) {
       for (const block of event.message?.content ?? []) if (block?.type === 'tool_result') inFlight.delete(block.tool_use_id);
       if (interrupting && !inFlight.size) stop(child);
     } else if (event.type === 'rate_limit_event') {
+      if (event.rate_limit_info?.status === 'rejected') rejected = true;
       recordUsage(event.rate_limit_info);
       onEvent({ type: 'usage', info: event.rate_limit_info });
     } else if (event.type === 'result') {
@@ -388,6 +412,11 @@ export function runClaude(options) {
         // The tool uses refused for lack of permission: { tool_name, tool_use_id, tool_input }.
         denials: Array.isArray(final?.permission_denials) ? final.permission_denials : [],
       };
+      // The final result in the warning's words: Claude Code's, unless the call ended well with the agent's own answer.
+      const ended = typeof final?.result === 'string' ? final.result.trim() : '';
+      const ownWords = !!said && ended.includes(said);
+      const warned = limitText ?? (limitWarning(ended) && (final?.is_error || !ownWords) ? ended : null);
+      result.limit = warned || rejected ? { text: warned, rejected } : null;
       if (cancelReason) result.error = cancelReason;
       else if (interrupted) result.error = null;
       else if (!final) result.error = t('Claude Code ended without a result (exit code {code}). {output}', { code, output: clip(stderr, 600) });
