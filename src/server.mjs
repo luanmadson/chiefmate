@@ -31,8 +31,9 @@ import { openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
-import { activeRun, createRun, describeLater, doingNow, liveRuns, needsBrief, outcomeLater, setRunLevel } from './runs.mjs';
+import { activeRun, createRun, describeLater, doingNow, liveRuns, needsBrief, outcomeLater, pauseLive, setRunLevel } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
+import { changeSteer, steerView } from './steer.mjs';
 import {
   answerPermission, endSession, finishSessionRequest, interruptSession, listSessions, openSession, planSession, profileFor, removeQueued, resumeSession, sayToSession,
   sessionRequests, sessionsState, sessionView,
@@ -396,6 +397,8 @@ function buildState() {
     needs,
     prompts: { ...builderStatus(config), syncing: isSyncing(), cdp: !!config.browser_cdp },
     focus: focus(config),
+    // The owner's focus (src/steer.mjs): the mode, its line, the latest changes and each project's control and hold.
+    steer: steerView(config),
     // Every run going on (one per project, up to "max_parallel"); "current" is the oldest, for older readers of the API.
     running,
     current: running[0] ?? null,
@@ -770,6 +773,15 @@ export function startServer() {
           config.ui = { ...config.ui, voice_input: !!body.enabled };
           saveConfig(config);
           return reply(res, 200, { ui: uiSettings(config) });
+        }
+        case '/api/steer': {
+          // The owner's focus (src/steer.mjs), from the app's Focus panel or the command line ("focus", by the manager).
+          const by = remote ? `remote:${String(req.headers['tailscale-user-login'] ?? '').trim().toLowerCase()}` : ['manager', 'cli'].includes(body.by) ? body.by : 'owner';
+          const live = liveRuns().map(l => ({ run: l.run, project: l.project }));
+          // with "preview", only the runs going on the change would hold, for the owner's choice: finish or pause
+          if (body.preview) return reply(res, 200, changeSteer(body, { by, live, dryRun: true }));
+          const { paused } = changeSteer(body, { by, live, pause: id => pauseLive(id, 'focus') });
+          return reply(res, 200, { steer: steerView(), paused });
         }
         case '/api/autopilot':
           // The autopilot's switch, mode and limits, from the Usage section (src/autopilot.mjs), kept with who changed them.

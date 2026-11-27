@@ -178,6 +178,10 @@ try {
       `/api/state has no autopilot's state: ${JSON.stringify(ap)}`);
     expect(html.includes('id="autopilot"') && html.includes('id="autopilot-form"'), "the Usage section has no autopilot's panel");
     expect((await post('/api/autopilot', { quiet_hours: 'soon' })).status === 400 && (await post('/api/autopilot', { week_pace: 'much' })).status === 400, "the autopilot's invalid limits were not refused");
+    // The owner's focus (src/steer.mjs): in the state with its line, invalid changes refused, the panel in Operations.
+    expect(state.steer?.mode === 'free' && typeof state.steer.line === 'string' && Array.isArray(state.steer.projects) && Array.isArray(state.steer.changes), `/api/state has no focus: ${JSON.stringify(state.steer)}`);
+    expect((await post('/api/steer', { action: 'focus', projects: ['no-such-project'] })).status === 400 && (await post('/api/steer', { action: 'free', until: 'yesterday' })).status === 400, 'an invalid change of focus was not refused');
+    expect(html.includes('id="steer"') && html.includes('id="steer-dialog"'), 'Operations has no Focus panel');
     expect((await post('/api/stop-project', { project: 'none' })).status === 400, 'stopping a project without a confirmed list was not refused');
     expect((await post('/api/reset-grants', { action: 'used', index: 9999 })).status === 400, 'marking a free reset that does not exist was not refused');
     // Updates are off in the smoke test: "update now" and "update check" answer so, and nothing is fetched or installed.
@@ -2710,6 +2714,99 @@ try {
   rmSync(temp, { recursive: true, force: true, maxRetries: 5 });
 } catch (error) {
   failures.push(`agent in charge checks: ${error.message}`);
+}
+
+// The owner's focus (src/steer.mjs), in this process with made-up settings and the temporary records: focus on one
+// project, a project paused alone, pause all and back to no restriction; the preview that lists the work going on it
+// would hold and the pause of that work on the owner's choice; a timed change that comes back by itself; what the
+// autopilot, the board's approved items and the manager see; the command refused inside a step. Nothing starts.
+try {
+  process.env.CHIEFMATE_SMOKE = '1';
+  const steer = await import(pathToFileURL(path.join(root, 'src', 'steer.mjs')).href);
+  const { idleProjects } = await import(pathToFileURL(path.join(root, 'src', 'autopilot.mjs')).href);
+  const { t } = await import(pathToFileURL(path.join(root, 'src', 'i18n.mjs')).href); // the app's lines are in the installation's language
+  const config = { owner: 'Owner', projects: { atlas: { name: 'ATLAS' }, guitar: { name: 'Guitarra' }, book: { name: 'Book' } } };
+  const fresh = steer.readSteer();
+  expect(fresh.mode === 'free' && ['atlas', 'guitar', 'book'].every(id => !steer.holdReason(id, fresh)), `the focus does not start free: ${JSON.stringify(fresh)}`);
+  const at = new Date();
+  // the preview saves nothing and lists the work going on the change would hold
+  const live = [{ run: 'r-atlas', project: 'atlas' }, { run: 'r-guitar', project: 'guitar' }];
+  const preview = steer.changeSteer({ action: 'focus', projects: ['atlas'], preview: true }, { config, at, live });
+  expect(preview.held.map(h => h.run).join() === 'r-guitar' && steer.readSteer().mode === 'free', `the preview of a focus is wrong, or saved: ${JSON.stringify(preview)}`);
+  // focus on ATLAS, the work going on elsewhere paused on the owner's choice
+  const asked = [];
+  const focused = steer.changeSteer({ action: 'focus', projects: ['atlas'], running: 'pause' }, { config, at, live, pause: id => asked.push(id) > 0 });
+  const s1 = steer.readSteer();
+  expect(asked.join() === 'r-guitar' && focused.paused.join() === 'r-guitar', `the focus did not pause only the other project's work: ${asked}`);
+  expect(!steer.holdReason('atlas', s1) && steer.holdReason('guitar', s1) === 'focus' && steer.holdReason('book', s1) === 'focus', `the focus holds the wrong projects: ${JSON.stringify(s1)}`);
+  const focusLine = steer.steerLine(s1, config, at);
+  expect(focusLine.startsWith(`${t('Focus: only {list}', { list: 'ATLAS' })} ${t('since {time}', { time: '' })}`) && focusLine.endsWith(t("at the owner's request")), `the focus's line is wrong: ${focusLine}`);
+  // "finish" (the default) leaves the work going on alone
+  const none = [];
+  steer.changeSteer({ action: 'project', project: 'guitar', to: 'paused' }, { config, at, live, pause: id => none.push(id) > 0 });
+  const s2 = steer.readSteer();
+  expect(!none.length && steer.holdReason('guitar', s2) === 'paused' && steer.controlOf('guitar', s2) === 'paused' && steer.controlOf('atlas', s2) === 'focus', `a project paused alone is wrong: ${JSON.stringify(s2)}`);
+  // what the queue, the autopilot and the manager see: a held project's queued run is never next
+  const { focus } = await import(pathToFileURL(path.join(root, 'src', 'queue.mjs')).href);
+  const { saveRun } = await import(pathToFileURL(path.join(root, 'src', 'store.mjs')).href);
+  saveRun({ id: 'smoke-held', kind: 'task', project: 'guitar', title: 'Held', status: 'queued', created: new Date().toISOString(), steps: [{ agent: 'writer', status: 'pending' }] });
+  const next = focus(config);
+  expect(next?.run !== 'smoke-held', `a held project's run is next in the queue: ${JSON.stringify(next)}`);
+  saveRun({ id: 'smoke-held', kind: 'task', project: 'guitar', title: 'Held', status: 'canceled', created: new Date().toISOString(), steps: [{ agent: 'writer', status: 'pending' }] });
+  const idle = idleProjects(config, []);
+  expect(idle.has('atlas') && !idle.has('guitar') && !idle.has('book'), `the autopilot sees held projects as free: ${[...idle]}`);
+  const line = steer.steerManagerLine(config, s2);
+  expect(line.startsWith("Owner's focus: focus on atlas (ATLAS)") && line.includes('paused alone: guitar (Guitarra)') && line.includes('focus off'), `the manager's line about the focus is wrong: ${line}`);
+  // pause all, then no restriction: every pause ends
+  steer.changeSteer({ action: 'pause-all' }, { config, at, by: 'manager' });
+  expect(steer.holdReason('atlas') === 'all' && steer.readSteer().by === 'manager', 'pause all did not hold every project, or lost who changed it');
+  steer.changeSteer({ action: 'free' }, { config, at });
+  const s3 = steer.readSteer();
+  expect(s3.mode === 'free' && !s3.paused.length && ['atlas', 'guitar', 'book'].every(id => !steer.holdReason(id, s3)), `no restriction left a project held: ${JSON.stringify(s3)}`);
+  // a timed change comes back by itself to the state before it, recorded as the automatic return
+  const until = new Date(at.getTime() + 2 * 3600_000).toISOString();
+  steer.changeSteer({ action: 'project', project: 'book', to: 'paused', until }, { config, at });
+  const timed = steer.readSteer(at.getTime() + 3600_000);
+  expect(timed.until === until && steer.holdReason('book', timed) === 'paused' && steer.steerView(config, new Date(at.getTime() + 3600_000)).back === t('No restriction'), `a timed change is wrong: ${JSON.stringify(timed)}`);
+  const back = steer.readSteer(at.getTime() + 3 * 3600_000);
+  expect(back.mode === 'free' && !back.paused.length && !back.until && back.by === 'time' && back.changes.at(-1).by === 'time', `a timed change did not come back: ${JSON.stringify(back)}`);
+  expect(steer.steerView(config).changes[0].who === t('back automatically'), 'the automatic return is not in the latest changes');
+  // invalid changes are refused, and change nothing
+  for (const body of [{ action: 'focus', projects: [] }, { action: 'focus', projects: ['nope'] }, { action: 'project', project: 'atlas', to: 'gone' }, { action: 'free', until: at.toISOString() }]) {
+    let refused = false;
+    try {
+      steer.changeSteer(body, { config, at });
+    } catch {
+      refused = true;
+    }
+    expect(refused, `an invalid change of focus was accepted: ${JSON.stringify(body)}`);
+  }
+  expect(steer.parseFor('2h') === 7_200_000 && steer.parseFor('1h30m') === 5_400_000 && steer.parseFor('soon') === null, 'the length of a timed focus is misread');
+  const eight = new Date(steer.parseUntil('08:00', new Date(2026, 10, 26, 23, 0)));
+  expect(eight.getDate() === 27 && eight.getHours() === 8 && steer.parseUntil('whenever') === null, 'the end of a timed focus is misread');
+  // the board's approved items of a held project wait (only with a project of this installation's settings, read only)
+  const { loadConfig } = await import(pathToFileURL(path.join(root, 'src', 'config.mjs')).href);
+  const real = Object.keys(loadConfig().projects ?? {})[0];
+  if (real) {
+    const planning = await import(pathToFileURL(path.join(root, 'src', 'planning.mjs')).href);
+    const { readState, saveState } = await import(pathToFileURL(path.join(root, 'src', 'store.mjs')).href);
+    const before = readState().steer;
+    saveState({ ...readState(), steer: { mode: 'free', only: [], paused: [real], changes: [] } });
+    const waiting = planning.planItems().filter(i => i.project === real && i.status === 'approved').map(i => i.id);
+    const started = await planning.startApproved();
+    expect(!started.some(r => r.project === real) && waiting.every(id => planning.planItem(id).status === 'approved'), "an approved item of a paused project started");
+    saveState({ ...readState(), steer: before });
+  }
+  // a step never changes the focus
+  let refused = '';
+  try {
+    execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'focus', 'off'], { env: { ...process.env, CHIEFMATE_RUN: 'smoke-run', CHIEFMATE_MANAGER: '' }, stdio: 'pipe', windowsHide: true });
+  } catch (error) {
+    refused = String(error.stderr);
+  }
+  expect(refused.includes("A step doesn't change the owner's focus"), `a step could change the focus: ${refused}`);
+} catch (error) {
+  failures.push(`focus checks: ${error.message}`);
 }
 
 try {

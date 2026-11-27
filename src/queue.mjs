@@ -6,6 +6,7 @@ import { activeRun, cancelLive, doingNow, execute, live, liveRuns } from './runs
 import { held } from './power.mjs';
 import { listRuns, readRun, saveRun, stepsOf } from './store.mjs';
 import { isLocked } from './lockdown.mjs';
+import { holdReason, readSteer } from './steer.mjs';
 import { updating } from './update.mjs';
 import { now } from './util.mjs';
 
@@ -77,7 +78,9 @@ export function focus(config = loadConfig()) {
     })
     .filter(Boolean);
   if (running.length) return { ...running[0], others: running.slice(1) };
-  const queue = queued();
+  // a run of a project the owner's focus holds (src/steer.mjs) is never next: it waits for the focus to end
+  const steer = readSteer();
+  const queue = queued().filter(r => !holdReason(r.project, steer));
   const next = queue.find(r => ready(r)) ?? [...queue].sort((a, b) => a.notBefore.localeCompare(b.notBefore))[0];
   if (!next) return null;
   const agent = stepsOf(next).find(s => s.status === 'pending')?.agent ?? null;
@@ -90,7 +93,10 @@ function tick() {
   if (updating() || held() || isLocked()) return;
   const free = maxParallel() - live.size - starting.size;
   if (free <= 0) return;
-  for (const next of pickNext(queued().filter(r => !live.has(r.id) && !starting.has(r.id)), busyProjects(), free)) {
+  // The owner's focus (src/steer.mjs): a paused project, or one out of the focus, starts nothing; its runs wait in order.
+  const steer = readSteer();
+  const waiting = queued().filter(r => !live.has(r.id) && !starting.has(r.id) && !holdReason(r.project, steer));
+  for (const next of pickNext(waiting, busyProjects(), free)) {
     starting.add(next.id);
     // Each run goes on by itself; the queue looks again as soon as one ends.
     Promise.resolve()

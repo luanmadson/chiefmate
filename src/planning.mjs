@@ -513,8 +513,11 @@ async function startNext() {
   const open = readBoard().items.filter(i => !i.archived);
   const busy = new Set(open.filter(i => i.approved_at && ACTIVE.includes(i.status)).map(i => i.project));
   const next = new Map();
+  // a project held by the owner's focus (src/steer.mjs) keeps its approved items until it is free
+  const { holdReason, readSteer } = await import('./steer.mjs');
+  const steer = readSteer();
   for (const item of open.filter(i => i.status === 'approved').sort(byRank)) {
-    if (!busy.has(item.project) && !next.has(item.project)) next.set(item.project, item);
+    if (!busy.has(item.project) && !next.has(item.project) && !holdReason(item.project, steer)) next.set(item.project, item);
   }
   if (!next.size) return [];
   const { createRun } = await import('./runs.mjs'); // here, not at the top: runs.mjs is heavy and the board is read alone too

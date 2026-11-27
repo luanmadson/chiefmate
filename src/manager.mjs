@@ -26,6 +26,7 @@ import { addMessage, listRuns, readPending, readState, readUsage, savePending, s
 import { isLocked } from './lockdown.mjs';
 import { updateInfo, updating } from './update.mjs';
 import { stopping } from './power.mjs';
+import { steerManagerLine } from './steer.mjs';
 import { DATA, ensureDir, languageName, now, ROOT, VERSION } from './util.mjs';
 import { noTrace } from './workspace.mjs';
 
@@ -119,6 +120,7 @@ export function situation(libraries = []) {
   const lines = [`Now: ${formatDateTime(new Date())} (${zone}). Reply in ${languageName(config.language || 'en')}.`];
   lines.push(`Chiefmate ${VERSION}${updateInfo.waiting ? `; an approved update with ${updateInfo.waiting} change(s) is waiting to be installed${updateInfo.installing ? ` (being installed now: ${updateInfo.installing.stage})` : updateInfo.blocked ? ` (blocked: ${updateInfo.blocked})` : ''}` : ''}. Updates: "${updateInfo.mode}" mode${updateInfo.mode === 'pause' ? ' (the work going on pauses at a safe point and resumes after the restart)' : ' (installed once the crew and you are free)'}.`);
   lines.push(focusLine(config));
+  lines.push(steerManagerLine(config));
   const going = liveRuns();
   lines.push(
     going.length
