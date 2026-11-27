@@ -36,6 +36,7 @@ Function IsRunning()
 End Function
 
 ' Chiefmate opens the window itself, with a code that lets the app act as the owner (src/owner.mjs).
+' "wait": it opened one seconds ago (at its first start since Windows started, or a second click), so none more.
 Function OpenedByChiefmate()
   Dim http, ok
   ok = False
@@ -46,7 +47,7 @@ Function OpenedByChiefmate()
   http.setRequestHeader "content-type", "application/json"
   http.setRequestHeader "x-chiefmate", "1"
   http.Send "{""section"":""" & section & """}"
-  If Err.Number = 0 Then ok = (http.Status = 200 And InStr(http.responseText, """opened"":true") > 0)
+  If Err.Number = 0 Then ok = (http.Status = 200 And (InStr(http.responseText, """opened"":true") > 0 Or InStr(http.responseText, """wait"":true") > 0))
   On Error GoTo 0
   OpenedByChiefmate = ok
 End Function

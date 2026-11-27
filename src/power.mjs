@@ -8,6 +8,8 @@
 //   Back after the restart, the paused runs resume first and the live sessions' windows open again.
 // A computer that went down without a stop (a power cut, a crash) is found at the next start (startPower): the runs it
 // cut off go back to the front of the queue, never counted as failed.
+// The first start since the computer started (the sign-in after a restart, a shutdown or a power cut) opens the app's
+// window once; the scheduled task that starts Chiefmate at sign-in starts only the server.
 // Standby and "off" are kept in data/state.json ("power"); the stop going on lives in memory.
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -278,10 +280,17 @@ export const offOnPurpose = (power, boot = bootTime(), at = Date.now()) => power
   && !(power.target === 'reboot' && (Date.parse(power.since) < boot || at - Date.parse(power.since) > REBOOT_GRACE_MS));
 
 /**
+ * Whether this is Chiefmate's first start since the computer started (at sign-in, after a restart, a shutdown or a
+ * power cut): its last note of being alive is older than the computer's start. With no note at all (the first start of
+ * a version that keeps them) it is not, so an update's restart never counts.
+ */
+export const firstSinceBoot = ({ last = lastBeat(), boot = bootTime() } = {}) => !!last && Date.parse(last) < boot;
+
+/**
  * Whether the computer went down while Chiefmate was running, without a stop from it (a power cut, a crash, Windows
  * restarting by itself): Chiefmate's last note of being alive is older than the computer's start.
  */
-export const cutOff = ({ power = readState().power, last = lastBeat(), boot = bootTime() } = {}) => power?.mode !== 'off' && !!last && Date.parse(last) < boot;
+export const cutOff = ({ power = readState().power, last = lastBeat(), boot = bootTime() } = {}) => power?.mode !== 'off' && firstSinceBoot({ last, boot });
 
 /**
  * After the computer went down without a stop: the runs it cut off go back to the front of the queue, where they
@@ -318,10 +327,11 @@ let beating = null;
 /**
  * Starts the power modes. options: those of startUpdates (pauseRuns(why), crewBusy, crewWaiting, pauseSessions,
  * sessionsBusy, managerAnswering, interruptManager, resume), with updating(), closeBrowsers(), stopCrew(),
- * powerOff(target), finish() (closes the server and ends the process) and reopenWindows(boot) (the live sessions'
- * windows the restart closed; returns their ids). A Chiefmate stopped is "on" again here; after a restart, or after the
- * computer went down without a stop, the work it cut off resumes first and the windows open again. The manager hears
- * of what resumes. options.boot: when the computer started (ms), for the tests.
+ * powerOff(target), finish() (closes the server and ends the process), reopenWindows(boot) (the live sessions'
+ * windows the restart closed; returns their ids) and openApp() (the app's window). A Chiefmate stopped is "on" again
+ * here; after a restart, or after the computer went down without a stop, the work it cut off resumes first and the
+ * windows open again. The manager hears of what resumes. On the first start since the computer started, the app's
+ * window opens once. options.boot: when the computer started (ms), for the tests.
  */
 export function startPower(options) {
   hooks = options;
@@ -337,6 +347,9 @@ export function startPower(options) {
     }
   }, BEAT_MS);
   beating.unref?.();
+  // Up with Windows (sign-in): the app's window opens, once. A restart for an update or by the watchdog follows a recent
+  // note, and the window already open reloads by itself.
+  if (firstSinceBoot({ last, boot })) options.openApp?.();
   const state = readState();
   const power = state.power;
   if (power?.mode === 'off') {

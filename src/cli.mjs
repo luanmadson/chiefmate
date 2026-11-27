@@ -976,6 +976,17 @@ async function main() {
           powerOff: target => powerOffCommand({ target }),
           // After a restart (or the computer going down without a stop): the live sessions' windows open again.
           reopenWindows: boot => reopenWindows(boot),
+          // Up with Windows: the app's window, as the shortcut opens it (with a pairing code), once the server answers.
+          openApp: async () => {
+            try {
+              for (let i = 0; i < 20 && !(await answers()); i++) await sleep(500);
+              const { openAppWindow } = await import('./owner.mjs');
+              const { browserPath } = await import('./usagepage.mjs');
+              openAppWindow({ port: p, browser: browserPath(loadConfig()) });
+            } catch (error) {
+              console.error('Power:', error.message);
+            }
+          },
           // A connection slow to close must not keep Chiefmate alive.
           finish: async () => {
             await Promise.race([close(), sleep(10_000)]);
