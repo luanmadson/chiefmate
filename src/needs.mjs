@@ -6,7 +6,6 @@
 // over). A question (--options "A|B", --recommend, --why) always waits, with one button per option and a field where
 // the owner writes an explanation with the option, or an answer of their own instead. While it waits,
 // the step's time limit stands still. Past the longest wait, the command returns. Any open request closes when the run ends.
-import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
@@ -15,8 +14,8 @@ import { notify } from './notify.mjs';
 import { activeRun, liveOf } from './runs.mjs';
 import { listRuns, readRun, runEnded, saveRun, stepsOf } from './store.mjs';
 import { agentSays } from './talk.mjs';
-import { browserPath, PROFILE_DIR } from './usagepage.mjs';
-import { clip, ensureDir, now } from './util.mjs';
+import { openOwnerPage } from './usagepage.mjs';
+import { clip, now } from './util.mjs';
 
 const OPTIONS_MAX = 6; // as the manager's questions (src/decisions.mjs)
 
@@ -26,13 +25,11 @@ export const needsSettings = (config = loadConfig()) => ({ maxWaitMinutes: Math.
 // A run going on lives in memory (its steps save it as they go): requests are written to that same object.
 const runFor = id => activeRun(id) ?? readRun(id);
 
-let ownerBrowser = null;
-
 /**
  * Opens an address for the owner, without touching the tabs already open:
  * with "browser_cdp" (your own browser, signed in, with remote debugging on), in a new tab of it;
- * without it, in a visible browser with Chiefmate's own profile (data/browser-profile, which the crew can't read),
- * through Playwright when playwright-core is installed, else by starting Edge or Chrome on that profile.
+ * without it, in a visible Edge or Chrome on the browser's reading profile (which the crew can't read). With the usage
+ * reading on, that window has the sign-in window's time limit (src/usagepage.mjs), so it never keeps the reading out for long.
  */
 export async function openForOwner(url, config = loadConfig()) {
   if (config.browser_cdp) {
@@ -41,25 +38,7 @@ export async function openForOwner(url, config = loadConfig()) {
     if (!r.ok) throw new Error(t("Your browser at {address} didn't open the tab ({status}).", { address: base, status: r.status }));
     return 'browser_cdp';
   }
-  ensureDir(PROFILE_DIR);
-  let playwright = null;
-  try {
-    playwright = await import('playwright-core');
-  } catch {
-    // optional: without it, the browser is started directly on the same profile
-  }
-  if (playwright) {
-    if (!ownerBrowser) {
-      ownerBrowser = await playwright.chromium.launchPersistentContext(PROFILE_DIR, { headless: false, executablePath: browserPath(config) ?? undefined, viewport: null });
-      ownerBrowser.on('close', () => (ownerBrowser = null));
-    }
-    const page = await ownerBrowser.newPage();
-    page.goto(url).catch(() => {});
-    return 'playwright';
-  }
-  const browser = browserPath(config);
-  if (!browser) throw new Error(t('No Microsoft Edge or Google Chrome found. Set "usage_reader": { "browser": "<path>" } in the settings.'));
-  spawn(browser, [`--user-data-dir=${PROFILE_DIR}`, '--no-first-run', '--no-default-browser-check', url], { detached: true, stdio: 'ignore' }).unref();
+  openOwnerPage(url, config);
   return 'browser';
 }
 

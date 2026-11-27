@@ -2123,12 +2123,14 @@ try {
 }
 
 // The reading of claude.ai: a notice marked as seen stays seen while its cause lasts (once a day it reminds), and the
-// sign-in window closes by itself, leaving one "Sign in" card. Made-up records only: stand-ins for the browser and
-// Windows, a made-up empty profile folder in this test's data, and nothing opened or read.
+// sign-in window closes by itself (warning first, and waiting while the owner uses it), leaving one "Sign in" card; a
+// request's page window has the same time limit; a page with no limit is a failure of its own. Made-up records only:
+// stand-ins for the browser, Windows and the page, a made-up empty profile folder in this test's data, and nothing
+// opened or read.
 try {
   const src = file => pathToFileURL(path.join(root, 'src', file)).href;
   const { attentionItems, markSeen } = await import(src('attention.mjs'));
-  const { checkLogin, failed, LOGIN_MINUTES, loginState, openLogin, PROFILE_DIR, readingDue, signInNeeded } = await import(src('usagepage.mjs'));
+  const { checkLogin, checkOwnerWindow, failed, LOGIN_MINUTES, loginState, openLogin, openOwnerPage, ownerWindowState, PROFILE_DIR, readingDue, readUsagePage, signInNeeded, WARN_MINUTES } = await import(src('usagepage.mjs'));
   const { readState, saveState } = await import(src('store.mjs'));
   const { DATA } = await import(src('util.mjs'));
   const statusFile = path.join(DATA, 'usage-page.json');
@@ -2174,11 +2176,18 @@ try {
   expect(!signInNeeded() && !readerNotices().some(i => i.kind === 'reader-login'), 'the sign-in card shows while its window is open');
   const closedPids = [];
   const close = async login => closedPids.push(login.pid);
+  const warnings = [];
+  const warn = win => warnings.push(win.pid);
+  const stand = (at, more = {}) => ({ at, alive: () => true, close, warn, inUse: () => false, ...more });
   const opening = Date.parse(loginState().opened);
-  expect(await checkLogin({ at: opening + (LOGIN_MINUTES - 1) * 60_000, alive: () => true, close }) === 'open' && !closedPids.length, 'the sign-in window closed before its time');
+  expect(await checkLogin(stand(opening + (LOGIN_MINUTES - WARN_MINUTES - 1) * 60_000)) === 'open' && !warnings.length && !closedPids.length, 'the sign-in window warned or closed before its time');
+  expect(await checkLogin(stand(opening + (LOGIN_MINUTES - WARN_MINUTES) * 60_000)) === 'warned' && warnings.join() === '4242' && !closedPids.length, 'the sign-in window did not warn before closing');
+  expect(await checkLogin(stand(opening + (LOGIN_MINUTES - 1) * 60_000)) === 'open' && warnings.length === 1, 'the sign-in window warned twice or closed before its time');
   const atLimit = opening + LOGIN_MINUTES * 60_000;
-  expect(await checkLogin({ at: atLimit, alive: () => true, close }) === 'timed_out' && closedPids.join() === '4242' && loginState().timed_out, 'the sign-in window was left open past its time');
-  expect(await checkLogin({ at: atLimit + 60_000, alive: () => true, close }) === null && closedPids.length === 1, 'a closed sign-in window was closed again');
+  // Still in use at the limit (in front, the owner typing): it waits; once the owner stops using it, it closes.
+  expect(await checkLogin(stand(atLimit, { inUse: async () => true })) === 'open' && !closedPids.length, 'the sign-in window closed while the owner was using it');
+  expect(await checkLogin(stand(atLimit)) === 'timed_out' && closedPids.join() === '4242' && loginState().timed_out, 'the sign-in window was left open past its time');
+  expect(await checkLogin(stand(atLimit + 60_000)) === null && closedPids.length === 1, 'a closed sign-in window was closed again');
   const cards = readerNotices();
   expect(cards.length === 1 && cards[0].id === 'reader:login' && cards[0].kind === 'reader-login' && signInNeeded(), `there is not one "Sign in" card: ${JSON.stringify(cards)}`);
   // Tried once a minute after it closed, away or not (it tells whether the owner signed in); after that, a failure only
@@ -2204,6 +2213,44 @@ try {
     refused = error;
   }
   expect(refused?.readerCause === 'no_start' && loginState().pid === 6060, 'a sign-in window that never started was noted as open');
+
+  // A request's page (needs-you) on the reading profile: noted, the full time again with each new page (even one arriving
+  // while it is checked), no time limit with the reading off, a warning before closing (late, if the server was off at
+  // the time), and no "Sign in" card once it closes by its time limit.
+  const pages = [];
+  const owner = openOwnerPage('https://example.com/first', config, { start: (browser, args) => (pages.push(args.at(-1)), 7070), alive: () => false });
+  expect(owner.pid === 7070 && ownerWindowState().pid === 7070 && pages.join() === 'https://example.com/first', `the request's page window was not noted: ${JSON.stringify(ownerWindowState())}`);
+  const ownerOpened = Date.parse(owner.opened);
+  writeFileSync(path.join(DATA, 'owner-window.json'), JSON.stringify({ ...ownerWindowState(), opened: new Date(ownerOpened - 9 * 60_000).toISOString() }));
+  expect(await checkOwnerWindow(stand(ownerOpened)) === 'warned' && warnings.at(-1) === 7070, "the request's page window did not warn before closing");
+  const again = openOwnerPage('https://example.com/second', config, { start: (browser, args) => (pages.push(args.at(-1)), 8080), alive: () => true });
+  expect(again.pid === 7070 && !again.warned && Date.parse(again.opened) >= ownerOpened && pages.at(-1) === 'https://example.com/second', `a new page did not give the window its full time again: ${JSON.stringify(again)}`);
+  const ownerLimit = Date.parse(again.opened) + LOGIN_MINUTES * 60_000;
+  // With the reading off, nothing needs the profile: the page stays open past its time, with no warning.
+  const warnedBefore = warnings.length;
+  expect(await checkOwnerWindow(stand(ownerLimit + 5 * 60_000, { timed: false })) === 'open' && warnings.length === warnedBefore && !closedPids.includes(7070),
+    "a request's page was warned or closed with the reading off");
+  expect(await checkOwnerWindow(stand(ownerLimit + 5 * 60_000)) === 'warned', 'a window found past its time was closed with no warning');
+  expect(await checkOwnerWindow(stand(ownerLimit + 6 * 60_000)) === 'open', "the request's page window closed right after its warning");
+  const closedBefore = closedPids.length;
+  // A new page while the owner's input is looked up: the window stays, with its full time again.
+  const third = { inUse: async () => (openOwnerPage('https://example.com/third', config, { start: () => 9090, alive: () => true }), false) };
+  expect(await checkOwnerWindow(stand(ownerLimit + 7 * 60_000, third)) === 'open' && closedPids.length === closedBefore && !ownerWindowState().warned && !ownerWindowState().closed,
+    'a new page while the window was being checked was closed with it');
+  expect(await checkOwnerWindow(stand(ownerLimit + 7 * 60_000)) === 'warned', "the request's page window did not warn again after a new page");
+  expect(await checkOwnerWindow(stand(ownerLimit + 9 * 60_000)) === 'timed_out' && closedPids.at(-1) === 7070 && closedPids.length === closedBefore + 1 && ownerWindowState().timed_out,
+    "the request's page window was left open past its time");
+
+  // The page opened, signed in, but showed no limit: a failure with a cause of its own, and a notice; the latest values stay.
+  const good = { ok: true, error: null, cause: null, failing_since: null, attempted: minutes(300), read_at: minutes(300), five_hour: 0.4, seven_day: 0.2 };
+  setStatus(good);
+  expect(!readerNotices().length, `a request's page closed by its time limit asked to sign in: ${JSON.stringify(readerNotices())}`);
+  const empty = await readUsagePage(config, { open: async () => ({ url: 'https://claude.ai/settings/usage', text: 'Settings\nUsage\nLoading' }) });
+  expect(empty.ok === false && empty.cause === 'no_data' && empty.error.includes('/settings/usage') && empty.five_hour === 0.4 && empty.read_at === good.read_at,
+    `a page with no limit was not a failure of its own: ${JSON.stringify(empty)}`);
+  expect(readerNotices().some(i => i.id === 'reader:no_data' && !i.seen), `a page with no limit left no notice: ${JSON.stringify(readerNotices())}`);
+  const full = await readUsagePage(config, { open: async () => ({ url: 'https://claude.ai/settings/usage', text: 'Current session\n35% used\nWeekly limits\n12% used' }) });
+  expect(full.ok === true && full.five_hour === 0.35 && full.seven_day === 0.12 && !full.cause && !readerNotices().some(i => i.id === 'reader:no_data'), `a page with its limits was not read: ${JSON.stringify(full)}`);
 } catch (error) {
   failures.push(`usage reading notices and sign-in window: ${error.message}`);
 }
