@@ -4,7 +4,7 @@ import { closeSync, createWriteStream, existsSync, fstatSync, openSync, readSync
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { userClaudeExcludes } from './access.mjs';
-import { t } from './i18n.mjs';
+import { formatDateTime, t } from './i18n.mjs';
 import { recordUsage } from './store.mjs';
 import { clip, now } from './util.mjs';
 
@@ -47,6 +47,68 @@ export function checkClaude() {
       checked: now(),
     });
   });
+}
+
+// ---------- Claude Code's sign-in on this computer ----------
+
+const DAY = 86400_000;
+export const LOGIN_WARN = 3 * DAY; // the owner is warned 3 days before the sign-in expires...
+export const LOGIN_URGENT = DAY; // ...and strongly on its last day
+export const LOGIN_RENEW = 'claude auth login';
+
+/** When the sign-in expires, as Claude Code itself reports it. Checked when Chiefmate starts and once a day. */
+export const loginInfo = { expires: null, checked: null, error: null };
+
+/**
+ * The expiry in the output of `claude auth status --json`, and nothing else: the account's details (e-mail,
+ * organization, plan) are never kept. An expiry missing or unreadable is null.
+ */
+export function parseLoginStatus(text) {
+  let status;
+  try {
+    status = JSON.parse(String(text ?? ''));
+  } catch {
+    return null;
+  }
+  const at = Date.parse(status?.loginExpiresAt ?? '');
+  return Number.isNaN(at) ? null : new Date(at).toISOString();
+}
+
+/** Whether to ask Claude Code again: never asked, a day since, or within the warning, hourly (a renewal shows soon). */
+export function loginDue(info = loginInfo, at = Date.now()) {
+  if (!info.checked) return true;
+  const since = at - Date.parse(info.checked);
+  return since >= DAY || (!!info.expires && Date.parse(info.expires) - at <= LOGIN_WARN && since >= DAY / 24);
+}
+
+/** Asks Claude Code when its sign-in expires (`claude auth status --json`; it reads only, nothing changes). */
+export function checkLogin({ force = false } = {}) {
+  if (!force && !loginDue()) return;
+  const [file, first] = command();
+  execFile(file, [...first, 'auth', 'status', '--json'], { timeout: 30_000, windowsHide: true, env: environment() }, (error, stdout) => {
+    const expires = parseLoginStatus(stdout);
+    // The command ends with an error when signed out, with its JSON still on stdout.
+    Object.assign(loginInfo, { expires, checked: now(), error: expires || !error ? null : error.message });
+  });
+}
+
+/**
+ * The warning the sign-in calls for now: null while more than 3 days are left (or the expiry is unknown);
+ * else { expires, left (ms), step: "3d" | "1d" | "expired" }.
+ */
+export function loginWarning(info = loginInfo, at = Date.now()) {
+  if (!info?.expires) return null;
+  const left = Date.parse(info.expires) - at;
+  if (left > LOGIN_WARN) return null;
+  return { expires: info.expires, left, step: left <= 0 ? 'expired' : left <= LOGIN_URGENT ? '1d' : '3d' };
+}
+
+/** One line for the manager's situation while the warning lasts, else null. */
+export function loginLine(owner = 'the owner', info = loginInfo, at = Date.now()) {
+  const w = loginWarning(info, at);
+  if (!w) return null;
+  const when = w.step === 'expired' ? `expired ${formatDateTime(w.expires)}` : `expires ${formatDateTime(w.expires)}`;
+  return `Claude Code's sign-in on this computer ${when}: without it the crew and you stop. Only ${owner} can renew it, by running "${LOGIN_RENEW}" in a terminal; remind them${w.step === '3d' ? '' : ' now'}.`;
 }
 
 /** One line saying what the agent did, for the logbook. */

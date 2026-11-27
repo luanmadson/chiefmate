@@ -8,7 +8,7 @@ import { attentionArchive, attentionItems, attentionSummary, markSeen } from './
 import { autopilotStatus, changeAutopilot } from './autopilot.mjs';
 import { answerRequest, chargeProfileId, inCharge, openMatters, projectRequests } from './charge.mjs';
 import { openWork, releaseWork, workNotesView } from './worknow.mjs';
-import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
+import { checkClaude, checkLogin, claudeInfo, readFeed } from './claude.mjs';
 import { EFFORTS, loadAgents, loadConfig, projectCrew, projectEfforts, projectLead, saveConfig } from './config.mjs';
 import { effortHistory, effortSource, runEffortChanges, setEffort } from './effort.mjs';
 import { agentTool, runTools, toolModel } from './tools.mjs';
@@ -505,6 +505,9 @@ export function startServer() {
   const allowed = new Set([`localhost:${port}`, `127.0.0.1:${port}`]);
   checkClaude();
   setInterval(checkClaude, 10 * 60_000);
+  // Claude Code's sign-in: at the start, then once a day (hourly within the warning; checkLogin skips the rest).
+  checkLogin({ force: true });
+  setInterval(checkLogin, 60 * 60_000).unref();
   const devNotices = setInterval(() => {
     try {
       deliverDevNotices();

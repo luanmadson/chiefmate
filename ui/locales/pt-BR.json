@@ -1925,5 +1925,11 @@
   "The work put aside at the pause could not be put back. It is kept in the stash \"chiefmate: paused run {id}\" ({ref}) of {path}. {error}": "O trabalho guardado na pausa não pôde ser devolvido. Ele continua no stash \"chiefmate: paused run {id}\" ({ref}) de {path}. {error}",
   "The work not committed yet was put back.": "O trabalho ainda sem commit foi devolvido.",
   "The branch had no commits of its own: it now starts from the current {base}.": "O branch não tinha commits próprios: agora parte do {base} atual.",
-  "The work not committed yet didn't apply on the current {base}: the branch stays where it was.": "O trabalho ainda sem commit não coube no {base} atual: o branch ficou onde estava."
+  "The work not committed yet didn't apply on the current {base}: the branch stays where it was.": "O trabalho ainda sem commit não coube no {base} atual: o branch ficou onde estava.",
+  "Claude Code sign-in expiring": "Login do Claude Code vencendo",
+  "Claude Code sign-in expires today": "Login do Claude Code vence hoje",
+  "Claude Code sign-in expired": "Login do Claude Code vencido",
+  "The sign-in of Claude Code on this computer expires {when}. Without it, the crew and the manager stop.": "O login do Claude Code neste computador vence em {when}. Sem ele, a equipe e o gerente param.",
+  "The sign-in of Claude Code on this computer expired {when}: the crew and the manager stop until you sign in again.": "O login do Claude Code neste computador venceu em {when}: a equipe e o gerente ficam parados até você entrar de novo.",
+  "To renew it, run in a terminal: {command}": "Para renovar, rode num terminal: {command}"
 }

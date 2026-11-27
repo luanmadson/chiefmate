@@ -1,6 +1,6 @@
 // Unit tests with no dependency (node:test): the file viewer's checks of paths, its choice among a project's copies and
 // its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation;
-// the emergency lockdown and its detection; each agent's effort; the redacted backup of the settings.
+// the emergency lockdown and its detection; the warning before Claude Code's sign-in expires; each agent's effort; the redacted backup of the settings.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -9,7 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE, projectColor, shouldClose, themeManifest, windowName } from '../src/browsers.mjs';
-import { readFeed } from '../src/claude.mjs';
+import { LOGIN_RENEW, loginDue, loginLine, loginWarning, parseLoginStatus, readFeed } from '../src/claude.mjs';
+import { loginText } from '../src/plan.mjs';
 import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
@@ -1115,4 +1116,37 @@ test('npm run check says why a script was not checked, with no pipe a sandbox co
   const stdio = o => typeof o?.stdio === 'string' ? [o.stdio, o.stdio, o.stdio] : [0, 1, 2].map(i => o?.stdio?.[i]);
   assert.ok(calls.length === 3 && calls.every(o => stdio(o).every(s => s != null && s !== 'pipe' && s !== 'overlapped')), 'node --check got a pipe');
   assert.equal(syntaxProblem(path.join('scripts', 'fixtures.mjs')), null, 'a real script failed the check');
+});
+
+test("Claude Code's sign-in: only its expiry is read, warned 3 days before and strongly on its last day", () => {
+  const status = { loggedIn: true, email: 'someone@example.com', orgName: 'Org', loginExpiresAt: '2026-12-04T23:08:36.905Z' };
+  assert.equal(parseLoginStatus(JSON.stringify(status)), '2026-12-04T23:08:36.905Z');
+  assert.equal(parseLoginStatus(JSON.stringify({ loggedIn: false })), null);
+  assert.equal(parseLoginStatus('not json'), null);
+
+  const expires = '2026-12-04T23:08:36.905Z';
+  const at = days => Date.parse(expires) - days * 86400_000;
+  const info = { expires, checked: new Date(at(10)).toISOString() };
+  assert.equal(loginWarning(info, at(4)), null, 'warned more than 3 days before');
+  assert.equal(loginWarning({ expires: null }, at(1)), null, 'warned with no expiry known');
+  assert.equal(loginWarning(info, at(2.5)).step, '3d');
+  assert.equal(loginWarning(info, at(0.5)).step, '1d');
+  assert.equal(loginWarning(info, at(-0.1)).step, 'expired');
+
+  // Asked again at the start, once a day, and hourly within the warning (so a renewal shows soon).
+  assert.equal(loginDue({ checked: null }), true);
+  const checkedAt = (since, days) => ({ expires, checked: new Date(at(days) - since).toISOString() });
+  assert.equal(loginDue(checkedAt(2 * 3600_000, 10), at(10)), false);
+  assert.equal(loginDue(checkedAt(24 * 3600_000, 10), at(10)), true);
+  assert.equal(loginDue(checkedAt(2 * 3600_000, 2), at(2)), true);
+  assert.equal(loginDue(checkedAt(10 * 60_000, 2), at(2)), false);
+
+  // The owner's warning and the manager's line carry the command to renew it, and nothing of the account.
+  const strong = loginText(loginWarning(info, at(0.5)));
+  assert.ok(strong.title && strong.text.includes(LOGIN_RENEW) && !strong.text.includes('example.com'));
+  assert.notEqual(loginText(loginWarning(info, at(2))).title, strong.title, 'the last day reads as the others');
+  assert.equal(loginText(null), null);
+  assert.equal(loginLine('the owner', info, at(5)), null);
+  assert.ok(loginLine('the owner', info, at(2)).includes(LOGIN_RENEW));
+  assert.ok(loginLine('the owner', info, at(0.5)).endsWith('remind them now.'));
 });

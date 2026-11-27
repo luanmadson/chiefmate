@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { staleLine } from './attention.mjs';
-import { runClaude } from './claude.mjs';
+import { loginLine, runClaude } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectEfforts, projectLead } from './config.mjs';
 import { effortChangeLine, effortHistory } from './effort.mjs';
 import { formatDateTime, formatDuration, formatNumber, formatPercent, t } from './i18n.mjs';
@@ -152,6 +152,8 @@ export function situation(libraries = []) {
   lines.push(`${config.owner}'s account: ${window(usage.five_hour, '5-hour window')}; ${window(usage.seven_day, 'plan week')}. Measured ${usage.updated ? formatDateTime(usage.updated) : 'never'}. Runs pause at ${formatPercent(limits.pause_at_5h_window)} of the 5-hour window and ${formatPercent(limits.pause_at_plan_week)} of the plan week.`);
   lines.push(planLine(config, usage));
   lines.push(computerLine(config));
+  const login = loginLine(config.owner || 'the owner');
+  if (login) lines.push(login);
   lines.push(sessionsLine(config));
   const working = workLine(listSessions(), config);
   if (working) lines.push(working);

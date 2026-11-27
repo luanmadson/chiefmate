@@ -1,5 +1,6 @@
 // The plan's free resets, the week's pace, and the alerts about your account and this computer.
 // Alerts only warn (a band in the app and a Windows notification, once each): they never pause anything.
+import { LOGIN_RENEW, loginWarning } from './claude.mjs';
 import { loadConfig, saveConfig } from './config.mjs';
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
 import { computer, formatBytes, freeShare, processes } from './machine.mjs';
@@ -92,6 +93,17 @@ const suggestText = (week, grant) =>
 const expiryText = grant =>
   t('A free reset of your plan expires {when}, still unused.', { when: formatDateTime(grant.expires) }) + (grant.note ? ` (${grant.note})` : '');
 
+/** The warning about Claude Code's sign-in (src/claude.mjs): { title, text } for the owner, or null. */
+export function loginText(w = loginWarning()) {
+  if (!w) return null;
+  const renew = t('To renew it, run in a terminal: {command}', { command: LOGIN_RENEW });
+  if (w.step === 'expired') return { title: t('Claude Code sign-in expired'), text: `${t('The sign-in of Claude Code on this computer expired {when}: the crew and the manager stop until you sign in again.', { when: formatDateTime(w.expires) })} ${renew}` };
+  return {
+    title: w.step === '1d' ? t('Claude Code sign-in expires today') : t('Claude Code sign-in expiring'),
+    text: `${t('The sign-in of Claude Code on this computer expires {when}. Without it, the crew and the manager stop.', { when: formatDateTime(w.expires) })} ${renew}`,
+  };
+}
+
 /** What the band at the top of the app shows now: { level: "warn" | "critical", text, view }. */
 export function alerts(config, usage, c) {
   const list = [];
@@ -144,6 +156,14 @@ async function watch() {
     if (!step) continue;
     const keys = step === '1d' ? [`${id}:1d`, `${id}:3d`] : [`${id}:3d`];
     if (keys.map(fresh)[0]) send.push({ title: t('Free reset expiring'), text: expiryText(g), target: 'chiefmate:usage', event: 'usage_alert', urgent: step === '1d' });
+  }
+
+  // Claude Code's sign-in: once 3 days before it expires, again on its last day, and once it expired.
+  const login = loginWarning();
+  if (login) {
+    const steps = ['3d', '1d', 'expired'];
+    const keys = steps.slice(0, steps.indexOf(login.step) + 1).reverse().map(step => `login:${login.expires}:${step}`);
+    if (keys.map(fresh)[0]) send.push({ ...loginText(login), target: 'chiefmate:usage', event: 'usage_alert', urgent: login.step !== '3d' });
   }
 
   for (const [key, at] of Object.entries(a.sent)) if (Date.now() - Date.parse(at) > 30 * DAY) delete a.sent[key];
