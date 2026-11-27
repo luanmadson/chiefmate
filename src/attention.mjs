@@ -8,7 +8,7 @@
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
 import { RAM_LOW, availableResets, current } from './plan.mjs';
 import { readState, saveState, settleRunOutside } from './store.mjs';
-import { readerSettings, readerStatus } from './usagepage.mjs';
+import { LOGIN_MINUTES, readerSettings, readerStatus, signInNeeded } from './usagepage.mjs';
 import { ROOT } from './util.mjs';
 import { baseBranch, localBranchState, run as exec } from './workspace.mjs';
 
@@ -107,10 +107,17 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
   if (resets.length && current(week) && week.used >= 0.9) {
     add({ id: `reset-suggest:${week.resets ?? ''}`, level: 'important', kind: 'reset', title: t('Free reset available'), text: t('The week is almost used up: a good time to use a free reset.'), view: 'usage' });
   }
-  // Important: the reading of the account's usage page fails (the usage shown may be stale).
+  // Important: the reading of the account's usage page needs you to sign in (one card, with the button that opens the
+  // window), or fails otherwise (the usage shown may be stale). One id per cause: seen, it stays seen while the cause
+  // lasts, and comes back once a day ("remind").
   const reader = readerStatus();
-  if (readerSettings(config).enabled && reader.error) {
-    add({ id: `reader:${reader.error}`, level: 'important', kind: 'reader', title: t('Usage reading failed'), text: t('Reading claude.ai: {problem}', { problem: reader.error }), view: 'usage' });
+  if (readerSettings(config).enabled && signInNeeded(reader)) {
+    add({
+      id: 'reader:login', level: 'important', kind: 'reader-login', title: t('Sign in to claude.ai'), view: 'usage', at: reader.failing_since ?? null, remind: DAY,
+      text: t('The usage reading needs you to sign in to claude.ai, in a window of its own. Open it when you can: it closes by itself after {minutes} minutes.', { minutes: LOGIN_MINUTES }),
+    });
+  } else if (readerSettings(config).enabled && reader.error) {
+    add({ id: `reader:${reader.cause ?? 'other'}`, level: 'important', kind: 'reader', title: t('Usage reading failed'), text: t('Reading claude.ai: {problem}', { problem: reader.error }), view: 'usage', at: reader.failing_since ?? reader.attempted ?? null, remind: DAY });
   }
   // Important: the board's items waiting for the owner: a pull request to approve, an item waiting for their action,
   // or a crew proposal the manager triaged ("decision": the Planning view decides it in its Decide block).
@@ -164,7 +171,9 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
   }
 
   // The archive: what no longer needs the owner leaves the list. A seen notice fades; the marks of notices gone are forgotten.
+  // A notice with "remind" (ms) counts as seen only for that long after it was marked.
   const seen = state.attention_seen ?? {};
+  const isSeen = i => !!seen[i.id] && (!i.remind || Date.now() - Date.parse(seen[i.id]) < i.remind);
   const shown = state.attention_shown ?? {};
   const archive = { ...(state.attention_archive ?? {}) };
   const ids = new Set(list.map(i => i.id));
@@ -183,7 +192,7 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
     } else if (kept) continue;
     const settled = resolution(i, runs, items);
     if (settled) toArchive(i, settled);
-    else if (i.level === 'info' && (seen[i.id] || (!i.lasting && i.at && !ago(i.at, DONE_FOR)))) toArchive(i, seen[i.id] ? 'seen' : 'expired');
+    else if (i.level === 'info' && (isSeen(i) || (!i.lasting && i.at && !ago(i.at, DONE_FOR)))) toArchive(i, isSeen(i) ? 'seen' : 'expired');
     else active.push(i);
   }
   for (const i of list) {
@@ -207,7 +216,7 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
   if (!process.env.CHIEFMATE_SMOKE) checkLater(pullRequestTargets(active, runs, items), config);
   const rank = i => LEVELS.indexOf(i.level);
   return active
-    .map(i => ({ ...i, seen: !!keptSeen[i.id] && i.seenable }))
+    .map(i => ({ ...i, seen: !!keptSeen[i.id] && isSeen(i) && i.seenable }))
     .sort((a, b) => a.seen - b.seen || rank(a) - rank(b) || String(b.at ?? '').localeCompare(String(a.at ?? '')));
 }
 
