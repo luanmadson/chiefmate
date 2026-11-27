@@ -1155,9 +1155,9 @@ async function main() {
       return;
     }
     case 'dev-run': {
-      // Inside the development environment's window (see src/projects.mjs).
+      // Inside the development environment's window, or in the background with "--background" (see src/projects.mjs).
       const { runDev } = await import('./projects.mjs');
-      await runDev(rest[0], rest[1]);
+      await runDev(rest[0], rest[1], { background: rest.includes('--background') });
       return;
     }
     case 'prompts-sync': {

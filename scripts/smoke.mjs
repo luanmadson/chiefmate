@@ -116,7 +116,7 @@ try {
     expect(state.crew?.some(a => a.id === 'manager'), 'the crew has no manager');
     const context = state.manager?.context;
     expect(typeof context?.renewAt === 'number' && typeof context.renewing === 'boolean', "/api/state has no context for the manager's conversation");
-    for (const file of ['/', '/app.js', '/faces.js', '/i18n.js', '/style.css', '/manifest.webmanifest', '/locales/pt-BR.json', '/icon-32.png']) {
+    for (const file of ['/', '/app.js', '/asks.js', '/faces.js', '/i18n.js', '/countdown.js', '/style.css', '/manifest.webmanifest', '/locales/pt-BR.json', '/icon-32.png']) {
       const r = await fetch(base + file);
       expect(r.ok, `${file} answered ${r.status}`);
     }
@@ -178,6 +178,10 @@ try {
     const voice = await (await fetch(`${base}/voice.js`)).text();
     expect(typeof state.ui?.voice_input === 'boolean' && html.includes('id="voice-notice"') && voice.includes('export class Dictation') && appJs.includes("from './voice.js'"),
       `dictation lacks its setting, notice or module: ${JSON.stringify(state.ui)}`);
+    // What a live session asks: a band of one line per ask (or one for the group), at most 40% of the column.
+    const asks = await (await fetch(`${base}/asks.js`)).text();
+    expect(asks.includes('export function asksHtml') && appJs.includes("from './asks.js'") && /#live-asks \{[^}]*max-height: 40%/.test(styles),
+      "the band of what a live session asks lacks its module, or may cover the conversation");
     // The autopilot's panel in the Usage section: its state, and limits refused before anything is saved.
     const ap = state.autopilot;
     expect(ap && typeof ap.enabled === 'boolean' && ap.stop_at_5h_window > 0 && (ap.week_pace === null || ap.week_pace > 0) && typeof ap.mode === 'string' && ap.now?.state && Array.isArray(ap.changes) && Array.isArray(ap.queued) && Array.isArray(ap.wakes) && (ap.enabled || ap.blocked?.reason === 'off'),
@@ -406,6 +410,10 @@ try {
     const opens = await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder' });
     expect(opens.status === 403 && JSON.parse(opens.text).error?.includes('computer'), `opening a window on the computer from another device was not refused: ${opens.status}`);
     expect((await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder', dryRun: true })).status !== 403, 'a dry run of opening a folder was refused through the remote access');
+    expect((await ask(remote.port, '/api/browser', command, { action: 'focus', pid: 0 })).status === 403, 'bringing a browser to the front from another device was not refused');
+    // A session asked in a window, or the development environment, is not refused there: it has a version from afar.
+    expect((await ask(remote.port, '/api/session', command, { profile: 'no-such-profile', window: true })).status === 400, 'a session in a window was refused from another device instead of opening in the app');
+    expect((await ask(remote.port, '/api/project/dev', command, { project: 'no-such-project', action: 'start' })).status === 400, 'the development environment was refused from another device instead of running in the background');
     const remoteStop = await ask(remote.port, '/api/power', command, { action: 'stop' });
     expect(remoteStop.status === 403 && JSON.parse(remoteStop.text).error?.includes('computer'), `stopping Chiefmate from another device was not refused: ${remoteStop.status}`);
     expect((await ask(port, '/api/state', tailnet)).status === 403, "the app's own port answered the tailnet name");
@@ -418,7 +426,17 @@ try {
       `the lockdown was not engaged, or the app does not show it: ${JSON.stringify(lockState.lockdown)}`);
     const lockedMerge = await post('/api/merge', { run: 'smoke-feed' });
     expect(lockedMerge.status === 400 && /lockdown|emergência/i.test((await lockedMerge.json()).error ?? ''), 'a merge was not refused in the lockdown');
-    expect((await ask(remote.port, '/api/state', tailnet)).status === 423, 'the remote access answered in the lockdown');
+    const lockedAfar = await ask(remote.port, '/api/state', tailnet);
+    const lockedBody = JSON.parse(lockedAfar.text);
+    expect(lockedAfar.status === 423 && lockedBody.lockdown?.active && lockedBody.lockdown.reason === 'Smoke test' && lockedBody.language && !('runs' in lockedBody),
+      `the remote access answered in the lockdown, or without saying why: ${lockedAfar.status} ${lockedAfar.text.slice(0, 200)}`);
+    // The app itself still loads there, to show the lockdown instead of a lost connection; its data stays refused.
+    expect((await ask(remote.port, '/', tailnet)).status === 200, "the app's page did not load through the remote access in the lockdown");
+    expect((await ask(remote.port, '/', { host: remote.host })).status === 403, "the app's page loaded without a Tailscale login in the lockdown");
+    for (const disguised of ['/./api/state', '/%2e/api/state', '/ui/../api/state', `http://${remote.host}/api/state`]) {
+      expect((await ask(remote.port, disguised, tailnet)).status === 423, `the state answered through the remote access in the lockdown at ${disguised}`);
+    }
+    expect((await ask(remote.port, '/api/manager/interrupt', command, {})).status === 423, 'a command through the remote access was taken in the lockdown');
     expect((await ask(remote.port, '/api/lockdown', command, { action: 'release', confirm: true })).status === 403, 'the lockdown was released through the remote access');
     expect((await post('/api/lockdown', { action: 'release' })).status === 400, "the lockdown was released without the owner's confirmation");
     const released = await post('/api/lockdown', { action: 'release', confirm: true });
@@ -2811,6 +2829,28 @@ try {
     const told = notices(s.id).slice(-2);
     expect(told.length === 2 && told[0].text.includes(address) && told.every(n => !n.error) && !told[1].text.includes('3221225786') && !existsSync(devRecord),
       'Ctrl+C in the window was told as a failure, or its stop was not told');
+    // From another device: no window, the launcher in the background with its output in a log, the address read as in a window.
+    let detached;
+    const noWindow = () => expect(false, 'a window opened for the environment started from afar');
+    const behind = await startDev(devProject, { config: devConfig, background: true, open: noWindow, readWindows: async () => [], detach: (cwd, args, log) => (detached = { cwd, args, log }, null) });
+    expect(behind.background && behind.window === null && detached?.cwd === devClone && detached.args.join(' ') === `dev-run ${devProject} ${detached.args[2]} --background`
+      && detached.log === path.join(data, 'projects', devProject, 'dev.log'), `the environment started from afar did not run in the background: ${JSON.stringify(detached)}`);
+    const quiet = devChild();
+    let hidden;
+    const unseen = runDev(devProject, detached.args[2], { background: true, config: devConfig, spawnCommand: (command, options) => (hidden = options, quiet), probe: async url => url.href === address });
+    try {
+      quiet.stdout.write(`  Local: ${address}\n`);
+      for (let i = 0; i < 40 && !devState(devProject, projectConfig, machine).url; i++) await delay(50);
+      expect(devState(devProject, projectConfig, machine).url === address, 'the address of the environment run in the background was not exposed');
+      // With no console of the launcher's, the command would get a visible one of its own.
+      expect(hidden?.windowsHide === true && hidden.stdio[0] === 'ignore', `the command run in the background may open a window: ${JSON.stringify(hidden)}`);
+    } finally {
+      closeDev(quiet, 0);
+      await unseen;
+    }
+    deliverDevNotices();
+    await Promise.all([idle(s.id), idle(c.id)]);
+    expect(!existsSync(devRecord), 'the environment run in the background left its record when it ended');
     // A record left by a window that closed, its process id since given to another process (here, this one).
     const reading = dev => ({ supported: true, measured: new Date().toISOString(), dev });
     const leftOver = () => writeFileSync(devRecord, JSON.stringify({ token: 'old', at: Date.now() - 120_000, name: 'Sample dev', status: 'running', pid: process.pid, url: address }));
