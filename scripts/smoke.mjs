@@ -215,6 +215,8 @@ try {
     const request = await (await post('/api/needs-you', { run: waitingRun.id, what: 'Which?', options: 'A|B' })).json();
     const answered = await (await post('/api/needs-you', { run: waitingRun.id, what: 'Which?', options: 'A|B' })).json();
     await post('/api/needs-you/done', { run: waitingRun.id, id: answered.id, answer: 'B', note: 'My reason' });
+    // A question also goes in the agent's speech bubble, as a line of waiting written by Chiefmate.
+    expect((JSON.parse(readFileSync(waitingFile, 'utf8')).speech ?? []).some(x => x.by === 'auto' && x.state === 'waiting' && x.text.includes('Which?')), "a question for the owner left no line in the speech bubble");
     const noticeId = `needs:${waitingRun.id}:${request.id}`;
     const beforeCancel = await (await fetch(`${base}/api/state`)).json();
     expect(beforeCancel.attention.items.some(n => n.id === noticeId && n.level === 'urgent'), 'a paused run lost its open request');
@@ -332,6 +334,7 @@ try {
     expect((await fetch(`${base}/api/run/none/feed`)).status === 404, 'the panel of a run that does not exist did not answer 404');
     expect((await post('/api/run/talk', { run: 'smoke-feed', text: 'Hello' })).status === 400, 'a message to a run not going on was not refused');
     expect((await post('/api/run/talk', { run: 'smoke-feed', text: ' ' })).status === 400, 'an empty message to an agent was not refused');
+    expect((await post('/api/say', { run: 'smoke-feed', step: 1, text: 'Hello' })).status === 400, 'a line for the speech bubble of a run not going on was not refused');
     expect(state.crew.every(a => Array.isArray(a.runs) && 'waitingFor' in a), "the crew has no runs to open a panel on, or no \"waiting for\"");
     // Each agent's effort: shown with where it comes from; an unknown level or agent refused, the same level saves nothing.
     const chief = state.crew.find(a => a.id === 'manager');

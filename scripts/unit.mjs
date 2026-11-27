@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE, projectColor, shouldClose, themeManifest, windowName } from '../src/browsers.mjs';
-import { readFeed } from '../src/claude.mjs';
+import { describeDoing, readFeed } from '../src/claude.mjs';
 import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
@@ -18,7 +18,8 @@ import { checkSignals, engage, isLocked, readLockdown, recordSignal, refuseWhile
 import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
 import { copyHolders, pickNext } from '../src/queue.mjs';
-import { askedTool, copyHolder, holdsCopy, limitWaitCleared, stepTool } from '../src/runs.mjs';
+import { askedTool, copyHolder, endLine, holdsCopy, limitWaitCleared, stepTool } from '../src/runs.mjs';
+import { addSpeech, askedBy, SPEECH_KEEP, SPEECH_MAX, SPEECH_SHOWN, speechLine, speechNow, speechRule, speechView } from '../src/speech.mjs';
 import {
   agentTool, availableTools, chooseTool, codexEnvironment, codexEvents, codexGuard, codexStepArgs, correctionLine, GROK_DENY, grokEvents, grokStepArgs, parseTool,
   qualityRecords, qualitySummary, runTools, toolAvailable, toolEffort, toolModel,
@@ -1115,4 +1116,64 @@ test('npm run check says why a script was not checked, with no pipe a sandbox co
   const stdio = o => typeof o?.stdio === 'string' ? [o.stdio, o.stdio, o.stdio] : [0, 1, 2].map(i => o?.stdio?.[i]);
   assert.ok(calls.length === 3 && calls.every(o => stdio(o).every(s => s != null && s !== 'pipe' && s !== 'overlapped')), 'node --check got a pipe');
   assert.equal(syntaxProblem(path.join('scripts', 'fixtures.mjs')), null, 'a real script failed the check');
+});
+
+test('speech bubbles: the lines kept, who asked, the line shown now and its state', () => {
+  const at = minutes => new Date(Date.parse('2026-11-27T10:00:00Z') + minutes * 60_000).toISOString();
+  const run = { id: 'r', kind: 'task', origin: 'manager', title: 'Redo pull request #81 without conflicts', steps: [{ agent: 'generalist', status: 'running' }] };
+  // One line: spaces collapsed, at most SPEECH_MAX characters; nothing for an empty text.
+  assert.equal(speechLine('  Fixing\n the   tests '), 'Fixing the tests');
+  assert.ok(speechLine('x'.repeat(400)).length <= SPEECH_MAX);
+  assert.equal(addSpeech(run, { step: 1, agent: 'generalist', text: '   ' }), null);
+  // Who asked: the manager for a task it queued; the lead for a task it planned; nobody for a mission or a review.
+  assert.deepEqual(askedBy(run, run.steps[0]), { by: 'manager', text: run.title });
+  assert.deepEqual(askedBy({ ...run, origin: 'app' }, run.steps[0]), { by: 'owner', text: run.title });
+  assert.equal(askedBy({ ...run, kind: 'mission' }, run.steps[0]), null);
+  assert.deepEqual(askedBy(run, { agent: 'designer', by: 'lead', part: 'Adjust the Decisions screen' }), { by: 'lead', text: 'Adjust the Decisions screen' });
+  assert.equal(askedBy(run, { agent: 'manager', review: true }), null);
+  const asked = addSpeech(run, { step: 1, agent: 'generalist', ...askedBy(run, run.steps[0]), at: at(0) });
+  assert.equal(asked.by, 'manager');
+
+  // Fresh: the bubble shows who asked; ten minutes later with nothing said, a line from what the agent is doing, marked automatic.
+  const live = { step: 1, agent: 'generalist', doing: 'running the tests', held: false, lastAt: at(1), since: at(0) };
+  assert.deepEqual([speechNow(run, live, Date.parse(at(2)), 'en').by, speechNow(run, live, Date.parse(at(2)), 'en').auto], ['manager', false]);
+  const later = speechNow(run, { ...live, lastAt: at(11) }, Date.parse(at(12)), 'en');
+  assert.deepEqual([later.text, later.auto, later.state], ["I'm running the tests.", true, 'working']);
+  // The agent's own line; another within a minute takes its place, the same one only refreshes its time.
+  addSpeech(run, { step: 1, agent: 'generalist', text: 'Just finishing the tests', at: at(12) });
+  addSpeech(run, { step: 1, agent: 'generalist', text: 'Just finishing the tests; one failed and I am fixing it', at: at(12.5) });
+  addSpeech(run, { step: 1, agent: 'generalist', text: 'Just finishing the tests; one failed and I am fixing it', at: at(13) });
+  assert.deepEqual(run.speech.map(x => x.by), ['manager', 'agent']);
+  assert.equal(run.speech[1].at, at(13));
+  const said = speechNow(run, { ...live, lastAt: at(13) }, Date.parse(at(14)), 'en');
+  assert.deepEqual([said.text, said.by, said.auto], ['Just finishing the tests; one failed and I am fixing it', 'agent', false]);
+  addSpeech(run, { step: 1, agent: 'generalist', text: 'Tests pass now', at: at(15) });
+  assert.equal(run.speech.length, 3, 'a line more than a minute later is a new line');
+
+  // Waiting for the owner: the request's line stays while the step waits, and is passed over once it goes on.
+  addSpeech(run, { step: 1, agent: 'generalist', by: 'auto', state: 'waiting', text: 'I need you: sign in to the site', at: at(16) });
+  const waiting = speechNow(run, { ...live, held: true, lastAt: at(16) }, Date.parse(at(40)), 'en');
+  assert.deepEqual([waiting.state, waiting.text, waiting.auto], ['waiting', 'I need you: sign in to the site', true]);
+  const goingOn = speechNow(run, { ...live, doing: 'changing app.js', lastAt: at(41) }, Date.parse(at(41.5)), 'en');
+  assert.deepEqual([goingOn.state, goingOn.text], ['working', "I'm changing app.js."]);
+  // No action for twenty minutes: stuck.
+  assert.equal(speechNow(run, { ...live, lastAt: at(41) }, Date.parse(at(62)), 'en').state, 'stuck');
+
+  // The step's end: done with the sentence of its summary, stopped with its error, waiting for the plan's limit.
+  assert.equal(endLine({ status: 'done', outcome: { change: 'The Decisions screen is clearer.' } }).state, 'done');
+  assert.match(endLine({ status: 'done', outcome: { change: 'The Decisions screen is clearer.' } }).text, /The Decisions screen is clearer\./);
+  assert.deepEqual([endLine({ status: 'failed', error: 'time limit' }).state, /time limit/.test(endLine({ status: 'failed', error: 'time limit' }).text)], ['stuck', true]);
+  assert.equal(endLine({ status: 'pending' }, at(300)).state, 'waiting');
+
+  // Kept: at most SPEECH_KEEP lines; the app gets the last SPEECH_SHOWN, and the line now only for a run going on.
+  for (let i = 0; i < SPEECH_KEEP + 20; i++) addSpeech(run, { step: 2, agent: 'designer', by: 'auto', text: `Line ${i}`, at: at(100 + i) });
+  assert.equal(run.speech.length, SPEECH_KEEP);
+  assert.equal(speechView(run).lines.length, SPEECH_SHOWN);
+  assert.equal(speechView(run).now, null);
+  assert.equal(speechView({}).lines.length, 0);
+  // The rule the crew reads, and a line said through it that is not the agent's doing.
+  assert.match(speechRule('node cli.mjs', 'Brazilian Portuguese', 'Sam'), /node cli\.mjs say "<one short line>"`, in Brazilian Portuguese/);
+  assert.equal(describeDoing('Bash', { command: 'node "C:/x/src/cli.mjs" say "Adjusting the screen"' }), null);
+  assert.equal(describeDoing('Bash', { command: 'node C:/x/src/cli.mjs say "Adjusting the screen"' }), null);
+  assert.notEqual(describeDoing('Bash', { command: 'npm test' }), null);
 });

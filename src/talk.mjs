@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { loadConfig } from './config.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { activeRun, liveOf } from './runs.mjs';
+import { addSpeech } from './speech.mjs';
 import { saveRun } from './store.mjs';
 import { clip, languageName, now } from './util.mjs';
 
@@ -22,6 +23,8 @@ export function talkTo(runId, text) {
   if (!l || !run || !l.agent || !l.talking) throw new Error(t('No agent is at work on this run now: a message only goes to a step going on.'));
   const entry = { id: randomUUID().slice(0, 8), at: now(), who: 'owner', step: l.step, agent: l.agent, text: clip(message, 4000), status: 'pending' };
   (run.talk ??= []).push(entry);
+  // The owner's words go in the agent's speech bubble too (src/speech.mjs).
+  addSpeech(run, { step: l.step, agent: l.agent, by: 'owner', text: entry.text });
   // The agent is waiting for the owner right now (its waiting command asked within the last 20 seconds): the message
   // answers that request, and nothing is interrupted.
   const request = Date.now() < l.heldUntil ? [...(run.requests ?? [])].reverse().find(r => r.status === 'open' && r.wait && r.step === l.step) : null;

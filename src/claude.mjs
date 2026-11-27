@@ -83,7 +83,7 @@ export function describeAction(name, input = {}, dir) {
 const CODE_FILE = /\.(m?[jt]sx?|c[jt]s|py|rb|go|rs|java|kt|cs|php|swift|c|cc|cpp|h|css|scss|html?|vue|svelte|sh|ps1|vbs|sql)$/i;
 const TEST_COMMAND = /\b(test|tests|smoke|check|lint|pytest|jest|vitest|mocha|tsc|eslint|phpunit)\b/i;
 
-/** What the agent is doing now, in plain words and one short line, for the owner (Operations, focus, the manager). */
+/** What the agent is doing now, in plain words and one short line, for the owner (Operations, focus, the manager); null: no change. */
 export function describeDoing(name, input = {}, dir) {
   const file = input.file_path ? path.basename(input.file_path) : '';
   const kind = f => (CODE_FILE.test(f) ? 'code' : /\.(md|txt|rst|adoc)$/i.test(f) ? 'docs' : 'file');
@@ -91,6 +91,8 @@ export function describeDoing(name, input = {}, dir) {
     case 'Bash': {
       const command = String(input.command ?? '').trim();
       if (/needs-you/.test(command)) return t('waiting for you');
+      // A line for its speech bubble (cli.mjs say) leaves what it was doing as it was.
+      if (/cli\.mjs"?\s+say\s/.test(command)) return null;
       if (/^git\s+commit\b/.test(command)) return t('saving the work (commit)');
       if (/^git\s+(diff|log|status|show)\b/.test(command)) return t('reviewing the changes');
       if (/^git\b/.test(command)) return t('working with git');

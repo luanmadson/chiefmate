@@ -381,6 +381,89 @@ function agentDetail(agent) {
   }
 }
 
+// ---------- Speech bubbles (src/speech.mjs) ----------
+
+/** A bubble's state in words and level: working, waiting, stuck or done. */
+function speechState(s) {
+  switch (s) {
+    case 'waiting': return [t('Waiting'), 'warn'];
+    case 'stuck': return [t('Stuck'), 'error'];
+    case 'done': return [t('Part done'), 'ok'];
+    default: return [t('Working'), 'info'];
+  }
+}
+
+/** "Name (Role)", as the bubbles' history names a member. */
+function memberLabel(id, project) {
+  const m = member(id, project);
+  return m.title ? `${t(m.name ?? id)} (${t(m.title)})` : t(m.name ?? id);
+}
+
+/** A line's words: the agent's own, or who asked it for something ("Name (Role) asked: …"). */
+function speechText(line, project) {
+  if (line.by === 'manager' || line.by === 'lead') return t('{who} asked: {text}', { who: memberLabel(line.by, project), text: line.text });
+  if (line.by === 'owner') return t('You asked: {text}', { text: line.text });
+  return line.text;
+}
+
+/**
+ * The bubble of a crew member: its line now in a run going on, its last line in a run going on where its part is done
+ * (quiet), or its last line in a paused or waiting run. Null when it has nothing going on.
+ */
+function speechFor(agentId, project = null) {
+  if (!online || !state) return null;
+  const mine = r => !project || r.project === project;
+  const live = going().find(r => mine(r) && r.agent === agentId && r.speech?.now);
+  if (live) return { run: live, line: live.speech.now, quiet: false };
+  for (const r of [...going(), ...(state.queue ?? [])].filter(mine)) {
+    const line = (r.speech?.lines ?? []).filter(x => x.agent === agentId).at(-1);
+    if (line) return { run: r, line, quiet: line.state === 'done' };
+  }
+  return null;
+}
+
+/** The bubble: the line, its state (color and word), its time and, when Chiefmate wrote it, "automatic". A click opens the run's history. */
+function speechBubble(found) {
+  if (!found) return '';
+  const { run, line, quiet } = found;
+  const [label, level] = speechState(line.state);
+  const auto = line.auto || line.by === 'auto';
+  return `<button type="button" class="speech${quiet ? ' quiet' : ''}" data-level="${level}" data-speech-run="${esc(run.id)}" title="${esc(t('See what was said in this run'))}">`
+    + `<span class="speech-text">${esc(speechText(line, run.project))}</span>`
+    + `<span class="speech-meta">${stateHtml([label, level])}${line.at ? `<time>${clockTime(line.at)}</time>` : ''}${auto ? `<span class="speech-auto" title="${esc(t('Written by Chiefmate from what the agent is doing'))}">${esc(t('automatic'))}</span>` : ''}</span>`
+    + '</button>';
+}
+
+/** The run whose speech history is open, if any. */
+let speechRun = null;
+
+function openSpeech(runId) {
+  speechRun = runId;
+  delete signatures['#speech-list'];
+  drawSpeechDialog();
+  $('#speech-dialog').showModal();
+}
+
+/** The history of a run's speech, newest first, with the automatic line of now on top. Redrawn while open. */
+function drawSpeechDialog() {
+  if (!speechRun) return;
+  const run = [...going(), ...(state?.queue ?? [])].find(r => r.id === speechRun);
+  const lines = [...(run?.speech?.lines ?? [])].reverse();
+  const now = run?.speech?.now;
+  if (now?.auto && now.by === 'auto') lines.unshift({ ...now, current: true });
+  // A line's state shows only when it says something new: waiting, stuck, done, or the line of now.
+  const item = x => {
+    const shown = x.current || (x.state && x.state !== 'working');
+    const [label, level] = speechState(x.state);
+    const auto = x.auto || x.by === 'auto';
+    return `<li${shown ? ` data-level="${level}"` : ''}>${face(member(x.agent, run.project), 'still', 24)}<div>`
+      + `<div class="speech-who"><strong>${esc(memberLabel(x.agent, run.project))}</strong>${x.at ? `<time>${clockTime(x.at)}</time>` : ''}${shown ? stateHtml([label, level]) : ''}${auto ? `<span class="speech-auto">${esc(x.current ? t('automatic, now') : t('automatic'))}</span>` : ''}</div>`
+      + `<div class="speech-said">${esc(speechText(x, run.project))}</div></div></li>`;
+  };
+  $('#speech-run').textContent = run ? `${run.title} · ${projectName(run.project)}` : t('This run has ended: its reports are in the Log.');
+  draw('#speech-list', JSON.stringify([speechRun, lines.map(x => [x.id, x.at, x.text, x.state])]), lines.map(item).join('') || `<li class="hint">${esc(t('Nothing said yet.'))}</li>`);
+}
+
 const nextMission = () => state.missions.filter(m => m.next).sort((x, y) => x.next.localeCompare(y.next))[0];
 
 /** The queue in the order it will run, as the server picks: the runs ready to start by age, then the others by start time. */
@@ -1683,7 +1766,7 @@ function drawBridge() {
   else if (online && !job && update.waiting && !['changes', 'merge'].includes(update.blocked)) updateButton = `<button type="button" class="button small" data-update-now="now">${esc(t('Update now'))}</button>`;
   const roster = others.map(a => {
     const s = agentStatus(a);
-    return `<li>${face(a, faceState(a), 30, `${t(a.name)}: ${s[0]}`)}<div><div class="roster-name"><span>${esc(t(a.name))}</span>${stateHtml(s)}</div><div class="hint">${esc(agentDetail(a))} · ${esc(TOOL_LABELS[a.tool] && a.tool !== 'claude' ? `${TOOL_LABELS[a.tool]} · ` : '')}${esc(modelLabel(a))}</div></div></li>`;
+    return `<li>${face(a, faceState(a), 30, `${t(a.name)}: ${s[0]}`)}<div><div class="roster-name"><span>${esc(t(a.name))}</span>${stateHtml(s)}</div><div class="hint">${esc(agentDetail(a))} · ${esc(TOOL_LABELS[a.tool] && a.tool !== 'claude' ? `${TOOL_LABELS[a.tool]} · ` : '')}${esc(modelLabel(a))}</div>${speechBubble(speechFor(a.id))}</div></li>`;
   });
   const html = `
     <div class="bridge-head">${face(manager, faceState(manager), 72, `${t(manager.name)}: ${status[0]}`)}
@@ -1693,7 +1776,7 @@ function drawBridge() {
     <div class="label">${esc(t('Crew on board'))}</div>
     <ul class="roster">${roster.join('')}</ul>
     <div class="connection hint">${esc(claudeLine)}<br>${esc(accountLine)}${online && account.updated ? ` · ${esc(t('measured {when}', { when: relative(account.updated) }))}` : ''}${updateLine ? `<br>${esc(updateLine)}` : ''}${updateButton ? `<div class="actions left update-actions">${updateButton}</div>` : ''}</div>`;
-  const signature = JSON.stringify([online, (state?.crew ?? []).map(a => [a.id, a.status, a.run, a.last?.at, a.model, a.tool]), claude, account, update, Math.floor(Date.now() / 60000)]);
+  const signature = JSON.stringify([online, (state?.crew ?? []).map(a => [a.id, a.status, a.run, a.last?.at, a.model, a.tool]), roster, claude, account, update, Math.floor(Date.now() / 60000)]);
   draw('#bridge', signature, html);
 }
 
@@ -1761,6 +1844,7 @@ function liveCard(a, key) {
         <div class="hint">${esc([projectName(a.project), kindLabel(a.kind), ...runToolsLabel(a), t('started at {time}', { time: clockTime(a.started) })].join(' · '))}</div>
       </div>
       <div class="live-clock"><span class="label">${esc(t('Elapsed'))}</span><strong>${ticking(a.started)}</strong></div>
+      <div class="live-speech" id="${key}-speech"></div>
       <div class="live-progress">
         <div class="live-step"><strong>${esc(t('Step {n} of {total}', { n: a.step ?? 1, total: a.steps.length }))}</strong> · ${esc(who)}${step && stepRole(step) ? ` · ${esc(stepRole(step))}` : ''}${a.agent && a.stepStarted ? ` · ${ticking(a.stepStarted)} ${esc(t('on this step'))}` : ''}</div>
         <div class="live-steps">${segments.join('')}</div>
@@ -1808,7 +1892,12 @@ function drawRun(a) {
   if (block && block.dataset.level !== (a.needsYou ? 'urgent' : '')) block.dataset.level = a.needsYou ? 'urgent' : '';
   const statuses = a.steps.map(s => s.status);
   const working = a.agent ? member(a.agent, a.project) : null;
-  if (draw(`#${k}-live`, JSON.stringify([online, a.title, a.summary, a.step, a.agent, a.stepStarted, statuses, working?.status]), liveCard(a, k))) delete signatures[`#${k}-last`];
+  if (draw(`#${k}-live`, JSON.stringify([online, a.title, a.summary, a.step, a.agent, a.stepStarted, statuses, working?.status]), liveCard(a, k))) {
+    delete signatures[`#${k}-last`];
+    delete signatures[`#${k}-speech`];
+  }
+  const said = a.agent && a.speech?.now ? speechBubble({ run: a, line: a.speech.now, quiet: false }) : '';
+  draw(`#${k}-speech`, said, said);
   const last = a.actions.at(-1);
   draw(`#${k}-last`, JSON.stringify([last?.at, last?.text, a.doing]), lastAction(a));
   const steps = a.steps.map((s, i) => `<li${s.status === 'running' ? opensPanel(a.id) : ''}>${face(member(s.agent, a.project), online ? stepFace(s) : 'offline', 30)}<div><div class="name">${i + 1}. ${esc(agentName(s.agent, a.project))}${stepRole(s) ? `, ${esc(stepRole(s))}` : ''}</div><div class="hint">${esc(runState(s.status)[0])}${s.status === 'running' && a.stepStarted ? ` · ${ticking(a.stepStarted)}` : ''}</div></div></li>`);
@@ -2180,6 +2269,7 @@ function drawCrew() {
         <div class="crew-top"><div><h2>${esc(t(a.name))}</h2><div class="hint">${esc(t(a.title ?? ''))}</div></div><span class="marks">${toolBadge(a)}<span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></span></div>
         ${stateHtml(status)}
         ${busy ? `<div class="crew-now">${esc(agentDetail(a))}</div>` : ''}
+        ${speechBubble(speechFor(a.id))}
         <p class="crew-role">${esc(t(a.role ?? ''))}</p>
         <dl class="facts">
           <dt>${esc(t('Last work'))}</dt><dd>${esc(last)}</dd>
@@ -2215,20 +2305,20 @@ function fillTaskAgents() {
 }
 
 /** A project's team lead, above its crew: its base agent, its memory and what it is doing. */
-function teamLead(a, project) {
+function teamLead(a, project, bubbles = false) {
   const facts = [
     t('Team lead'),
     a.base ? t('Based on {agent}', { agent: agentName(a.base) }) : '',
     a.extra ? t('with instructions for this project') : '',
     a.memory ? t('memory: {count} line(s), updated {when}', { count: a.memory.lines, when: relative(a.memory.updated) }) : t('no memory yet'),
   ];
-  return `<div class="team-member team-lead"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 34)}<div><div class="name">${esc(t(a.name))} <span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></div><div class="hint">${esc(facts.filter(Boolean).join(' · '))}</div></div><div class="team-side">${effortPick(a, { project })}${stateHtml(agentStatus(a))}</div></div>`;
+  return `<div class="team-member team-lead"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 34)}<div><div class="name">${esc(t(a.name))} <span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></div><div class="hint">${esc(facts.filter(Boolean).join(' · '))}</div>${bubbles ? speechBubble(speechFor(a.id, project)) : ''}</div><div class="team-side">${effortPick(a, { project })}${stateHtml(agentStatus(a))}</div></div>`;
 }
 
-/** A project's crew: its lead, then its members, each with what it is doing. */
-function teamBody(team) {
-  const members = team.members.map(a => `<div class="team-member"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 30)}<div><div class="name">${esc(t(a.name))} <span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></div><div class="hint">${esc([a.base && a.base !== a.id ? t('Based on {agent}', { agent: agentName(a.base) }) : t(a.title ?? ''), a.extra ? t('with instructions for this project') : '', (a.mcp ?? []).length ? t('tools: {list}', { list: a.mcp.join(', ') }) : ''].filter(Boolean).join(' · '))}</div></div><div class="team-side">${effortPick(a, { project: team.project })}${stateHtml(agentStatus(a))}</div></div>`);
-  return `${team.lead ? teamLead(team.lead, team.project) : ''}${members.join('') || `<div class="hint">${esc(t('No members.'))}</div>`}`;
+/** A project's crew: its lead, then its members, each with what it is doing (with bubbles: its speech bubble too). */
+function teamBody(team, bubbles = false) {
+  const members = team.members.map(a => `<div class="team-member"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 30)}<div><div class="name">${esc(t(a.name))} <span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></div><div class="hint">${esc([a.base && a.base !== a.id ? t('Based on {agent}', { agent: agentName(a.base) }) : t(a.title ?? ''), a.extra ? t('with instructions for this project') : '', (a.mcp ?? []).length ? t('tools: {list}', { list: a.mcp.join(', ') }) : ''].filter(Boolean).join(' · '))}</div>${bubbles ? speechBubble(speechFor(a.id, team.project)) : ''}</div><div class="team-side">${effortPick(a, { project: team.project })}${stateHtml(agentStatus(a))}</div></div>`);
+  return `${team.lead ? teamLead(team.lead, team.project, bubbles) : ''}${members.join('') || `<div class="hint">${esc(t('No members.'))}</div>`}`;
 }
 
 function drawTeams() {
@@ -2959,7 +3049,7 @@ function drawProjectFacts(info) {
 function drawProjectTeam(id) {
   const team = state.teams?.find(x => x.project === id);
   const html = team
-    ? `<div class="team"><div class="team-top"><h3>${esc(t('Crew'))}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>${teamBody(team)}</div>`
+    ? `<div class="team"><div class="team-top"><h3>${esc(t('Crew'))}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>${teamBody(team, true)}</div>`
     : '';
   if (!pickingEffort('#project-team')) draw('#project-team', html, html);
 }
@@ -2970,7 +3060,7 @@ function drawProjectRuns(id) {
   const queue = online ? queueOrder().filter(r => r.project === id) : [];
   const live = runs.map(a => `<div class="project-run"${a.agent ? opensPanel(a.id) : ''}>
       ${face(a.agent ? member(a.agent, a.project) : member('manager'), a.agent ? faceState(member(a.agent, a.project)) : 'working', 30)}
-      <div style="min-width:0"><div class="name">${liveDot()} ${esc(a.title)}</div><div class="hint">${esc(stepLine(a))} · ${ticking(a.started)}</div>${a.doing ? `<div class="hint">${esc(t('Now: {what}', { what: a.doing }))}</div>` : ''}</div>
+      <div style="min-width:0"><div class="name">${liveDot()} ${esc(a.title)}</div><div class="hint">${esc(stepLine(a))} · ${ticking(a.started)}</div>${a.agent && a.speech?.now ? speechBubble({ run: a, line: a.speech.now, quiet: false }) : a.doing ? `<div class="hint">${esc(t('Now: {what}', { what: a.doing }))}</div>` : ''}</div>
       <button type="button" class="button danger small" data-cancel="${esc(a.id)}">${esc(t('Cancel run'))}</button>
     </div>`);
   const waiting = queue.map(r => `<div class="project-run">
@@ -2982,7 +3072,7 @@ function drawProjectRuns(id) {
       <div class="label">${esc(t('Running now'))}</div>${live.join('') || `<div class="hint">${esc(t('Nothing running for this project.'))}</div>`}
       <div class="label" style="margin-top:16px">${esc(t('Queue'))}</div>${waiting.join('') || `<div class="hint">${esc(t('Nothing in the queue for this project.'))}</div>`}
     </div>`;
-  draw('#project-runs', JSON.stringify([online, runs.map(a => [a.id, a.title, a.step, a.agent, a.status, a.doing, member(a.agent ?? 'manager', a.project).status]), queue.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.needsYou])]), html);
+  draw('#project-runs', JSON.stringify([online, runs.map(a => [a.id, a.title, a.step, a.agent, a.status, a.doing, a.speech?.now, member(a.agent ?? 'manager', a.project).status]), queue.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.needsYou])]), html);
 }
 
 /** The project's latest runs, each with its result and a link to its reports in the Log. */
@@ -4568,6 +4658,13 @@ document.addEventListener('click', event => {
   openAgentPanel(target.dataset.agentRun);
 });
 
+// A click on a speech bubble opens what was said in its run (the card around it keeps its own click).
+document.addEventListener('click', event => {
+  const bubble = event.target.closest('[data-speech-run]');
+  if (bubble) openSpeech(bubble.dataset.speechRun);
+});
+$('#speech-dialog').addEventListener('close', () => (speechRun = null));
+
 // ---------- Cycle ----------
 
 function drawOffline() {
@@ -4666,6 +4763,7 @@ async function refresh() {
   drawOperations();
   drawMissions();
   drawCrew();
+  drawSpeechDialog();
   drawLog();
   drawUsage();
   drawAutopilot();

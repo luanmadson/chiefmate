@@ -33,7 +33,8 @@ import { deliverDevNotices, devState, openProjectApp, projectInfo, startDev, sto
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
-import { activeRun, createRun, describeLater, doingNow, liveRuns, needsBrief, outcomeLater, pauseLive, setRunLevel } from './runs.mjs';
+import { activeRun, createRun, describeLater, doingNow, liveRuns, liveSpeech, needsBrief, outcomeLater, pauseLive, setRunLevel, stepSays } from './runs.mjs';
+import { speechView } from './speech.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { changeSteer, steerView } from './steer.mjs';
 import {
@@ -41,7 +42,7 @@ import {
   sessionRequests, sessionsState, sessionView,
 } from './sessions.mjs';
 import { talkTo } from './talk.mjs';
-import { listRuns, readConversation, readNotifications, readPending, readRun, readUsage, runDir, stepsOf } from './store.mjs';
+import { listRuns, readConversation, readNotifications, readPending, readRun, readUsage, runDir, runEnded, stepsOf } from './store.mjs';
 import { checkNow, updateInfo, updateMode, updateNow } from './update.mjs';
 import { isReading, loginState, openLogin, readerSettings, readerStatus, readUsagePage, signedIn, signInNeeded } from './usagepage.mjs';
 import { clip, now, ROOT, VERSION } from './util.mjs';
@@ -136,6 +137,8 @@ const summary = run => ({
   id: run.id, title: run.title, summary: run.summary ?? null, outcome: run.outcome ?? null, kind: run.kind, mission: run.mission, project: run.project, origin: run.origin, status: run.status,
   created: run.created, started: run.started, ended: run.ended, notBefore: run.notBefore, due: run.due ?? null, note: run.note, result: run.result,
   pullRequest: run.pullRequest, needsYou: (run.requests ?? []).filter(r => r.status === 'open').length,
+  // The run's speech bubble lines (src/speech.mjs), while it has not ended: a paused or waiting run shows its last ones.
+  speech: runEnded(run) ? null : speechView(run),
   steps: stepsOf(run).map(s => ({ agent: s.agent, status: s.status, review: s === run.review, role: s.role ?? null, task: s.task ?? null, tool: s.tool ?? null })),
   // Codex or Grok, when the run's crew steps ran (or were chosen to run) on them: the cards, the queue and the log show it.
   tools: runTools(run),
@@ -363,6 +366,8 @@ function buildState() {
   const running = going.map(({ l, run }) => ({
     ...summary(run), step: l.step, agent: l.agent, stepStarted: l.started, context: l.context, actions: l.actions.slice(-80), talking: !!l.talking,
     doing: doingNow(l),
+    // The agent's speech bubble and the run's latest lines (src/speech.mjs).
+    speech: speechView(run, liveSpeech(l)),
   }));
   const queue = queued();
   const conversation = readConversation();
@@ -640,6 +645,9 @@ export function startServer() {
           return reply(res, 200, { seen: markSeen(Array.isArray(body.ids) ? body.ids : [body.id]) });
         case '/api/run/talk':
           return reply(res, 200, talkTo(body.run, body.text));
+        case '/api/say':
+          // A line of the agent at work for its speech bubble (cli.mjs say, from its step; src/speech.mjs).
+          return reply(res, 200, stepSays(body.run, body.step, body.text));
         case '/api/session': {
           // With "dryRun": the folder and the first message it would open with, and nothing opens.
           if (body.dryRun) {
