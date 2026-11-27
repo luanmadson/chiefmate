@@ -271,12 +271,12 @@ export function codexGuard(log) {
 /**
  * Grok takes no hook from the command line, so its steps get deny rules instead (--deny), checked by Grok on every
  * part of a command (split at &&, ;, |), inside "bash -c" and on the whole line. They are wider than the guard on
- * purpose: they refuse every git push and change of remotes, any gh pr, gh repo or gh api, and any web request to
+ * purpose: they refuse every git push and change of remotes, any gh pr, gh repo, gh api, gh gist, gh release, gh workflow or gh secret, and any web request to
  * GitHub's API, however written; a refusal comes back to the agent as a failed action.
  */
 export const GROK_DENY = [
   'Bash(*git *push*)', 'Bash(*send-pack*)', 'Bash(*git *remote*)', 'Bash(*gh *pr*)', 'Bash(*gh *repo*)', 'Bash(*gh *api*)',
-  'Bash(*api.github.com*)', 'Bash(*uploads.github.com*)',
+  'Bash(*gh *gist*)', 'Bash(*gh *release*)', 'Bash(*gh *workflow*)', 'Bash(*gh *secret*)', 'Bash(*api.github.com*)', 'Bash(*uploads.github.com*)',
 ];
 
 // What Grok would otherwise read of the owner's own Claude Code and Cursor configuration: hooks, MCP servers, skills,

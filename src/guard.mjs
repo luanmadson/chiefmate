@@ -20,6 +20,11 @@ export const PR = 'Bash(gh pr:*)';
 export const REPO = 'Bash(gh repo:*)';
 // Changing something on GitHub through its API (gh api or a web request): opening a pull request, a comment, a release...
 export const API = 'Bash(gh api:*)';
+// A gist (maybe public), a release, a GitHub Actions workflow started, a secret stored in a repository.
+export const GIST = 'Bash(gh gist:*)';
+export const RELEASE = 'Bash(gh release:*)';
+export const WORKFLOW = 'Bash(gh workflow:*)';
+export const SECRET = 'Bash(gh secret:*)';
 
 // git's options before the command that take the next word as their value.
 const GIT_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix', '--exec-path', '--attr-source']);
@@ -100,17 +105,183 @@ function isMessage(command) {
     && MESSAGES.some(([a, b]) => words[2] === a && words[3] === b) && PLAIN_WORDS.test(String(command));
 }
 
+/** Where a simple command writes its standard output: the last file it is redirected to, or null (a stream, none). */
+function outputFile(words) {
+  let file = null;
+  for (let i = 0; i < words.length; i++) {
+    const m = /^(1|&)?(>>?|>\|)(.*)$/.exec(words[i]);
+    if (!m) continue;
+    const target = m[3] || words[++i] || '';
+    // "&1", "/dev/stdout" and the like are a stream, not a file.
+    file = target && !/^[&(]/.test(target) && !SPECIAL_FILE.test(target) ? target : null;
+  }
+  return file;
+}
+
+// Files that are a stream or a process, not a file.
+const SPECIAL_FILE = /^\/(dev|proc)\//i;
+
+/**
+ * The files a simple command writes a heredoc's text into, and nothing else: "cat > f <<'EOF'", "cat <<'EOF' >> f",
+ * "tee [-a] f... <<'EOF'", with cat or tee written plainly as its first word. [] for any other command.
+ */
+function heredocFiles(head) {
+  const program = /^\s*(cat|tee)\s/.exec(head)?.[1];
+  const words = tokens(head);
+  if (!program || words.includes('|')) return [];
+  const args = words.slice(1).filter(w => !w.startsWith('<<'));
+  if (program === 'cat') {
+    const file = outputFile(args);
+    return file ? [file] : [];
+  }
+  const files = [];
+  for (let j = 0; j < args.length; j++) {
+    if (/^\d?&?>/.test(args[j])) {
+      if (/^\d?&?>>?$/.test(args[j])) j++;
+    } else if (!args[j].startsWith('-')) files.push(args[j]);
+  }
+  return files.length && !files.some(f => SPECIAL_FILE.test(f)) ? files : [];
+}
+
+// The programs a command that writes heredocs into files may also run, for their texts to count as data: none of them
+// runs a file, a hook or a script, so nothing in the command can run what was written.
+const INERT = new Set(['cat', 'tee', 'mkdir', 'cd', 'pwd', 'ls', 'echo', 'printf', 'true', ':', 'chmod', 'touch', 'wc']);
+// What may stay around the texts: plain words, redirections, separators, and quotes with nothing inside that bash
+// expands. No variable, pattern, brace, parenthesis, escape or comment: each may name the file another way (bash *.sh,
+// $f, {t,}.sh) or be read by bash otherwise than here ("${x:-"<<EOF "}", $[1 << 2], a function made of cat).
+const PLAIN_AROUND = /^(?:[\w./:=@,+\s<>&|;-]|'[^'\u2018-\u201f]*'|"[^"\\$`!\u2018-\u201f]*")*$/;
+
+/**
+ * The command without its heredocs' texts when all it does is write them into files: each one by cat or tee
+ * ("cat > test.sh <<'EOF' ... EOF"), as written (a quoted delimiter, or nothing bash would expand), and nothing else
+ * run but INERT programs, in plain words. Those texts are data, not commands. Read as bash reads it (quotes,
+ * comments, "<<-"), and kept whole otherwise: any other program may run what was written (bash test.sh, a glob, a
+ * hook, a test runner), and so may a pipe, a substitution, a heredoc with no end or an unusual delimiter.
+ */
+function withoutWrittenText(command) {
+  const s = String(command ?? '');
+  if (!s.includes('<<')) return s;
+  const docs = [];
+  let line = []; // this line's heredocs, waiting for its end
+  let segment = 0; // where the simple command going on begins
+  const close = end => {
+    for (const d of line) if (d.end === undefined) d.end = end;
+    segment = end;
+  };
+  let word = true; // at a word's start: "#" begins a comment
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '`' || ((c === '$' || c === '<' || c === '>') && s[i + 1] === '(')) return s;
+    if (c === '\\') {
+      i++;
+      word = false;
+    } else if (c === "'" || (c === '$' && s[i + 1] === "'")) {
+      // '...' has no escapes; $'...' has.
+      let j = c === '$' ? i + 2 : i + 1;
+      if (c === '$') while (j < s.length && s[j] !== "'") j += s[j] === '\\' ? 2 : 1;
+      else j = s.indexOf("'", j);
+      if (j < 0 || j >= s.length) return s;
+      i = j;
+      word = false;
+    } else if (c === '"') {
+      let j = i + 1;
+      while (j < s.length && s[j] !== '"') j += s[j] === '\\' ? 2 : 1;
+      if (j >= s.length || /`|\$\(/.test(s.slice(i, j))) return s;
+      i = j;
+      word = false;
+    } else if (c === '#' && word) {
+      const e = s.indexOf('\n', i);
+      i = (e < 0 ? s.length : e) - 1;
+    } else if (c === '<' && s[i + 1] === '<') {
+      if (s[i + 2] === '<') {
+        i += 2;
+        word = true;
+        continue;
+      }
+      let j = i + 2;
+      const tabs = s[j] === '-';
+      if (tabs) j++;
+      while (s[j] === ' ' || s[j] === '\t') j++;
+      const from = j;
+      while (j < s.length && !/[\s;&|()<>]/.test(s[j])) j++;
+      const raw = s.slice(from, j);
+      const delim = raw.replace(/^(['"])(.*)\1$/, '$2');
+      // Only a plain delimiter, quoted whole or not at all: any other is read as bash may not.
+      if (!/^[\w.-]+$/.test(delim) || (raw !== delim && raw !== `'${delim}'` && raw !== `"${delim}"`)) return s;
+      line.push({ delim, tabs, quoted: raw !== delim, segment });
+      i = j - 1;
+      word = false;
+    } else if (c === '\n') {
+      close(i);
+      // The heredocs' texts follow this line, one after another, each up to its delimiter alone on a line.
+      let p = i + 1;
+      for (const d of line) {
+        d.from = p;
+        for (;;) {
+          const e = s.indexOf('\n', p);
+          const end = e < 0 ? s.length : e;
+          if ((d.tabs ? s.slice(p, end).replace(/^\t+/, '') : s.slice(p, end)) === d.delim) {
+            d.to = p;
+            d.after = end;
+            p = end;
+            break;
+          }
+          if (e < 0) return s;
+          p = e + 1;
+        }
+        docs.push(d);
+      }
+      line = [];
+      i = Math.max(i, p - 1);
+      segment = i + 1;
+      word = true;
+    } else if (/[;&|]/.test(c)) {
+      // ">&2", "<&0" and "&>" are redirections, not the end of a command.
+      if (c === '&' && (s[i - 1] === '>' || s[i - 1] === '<' || s[i + 1] === '>')) {
+        word = false;
+        continue;
+      }
+      close(i);
+      // What ends the command: a pipe sends its output to the next one.
+      for (const d of line) if (d.end === i) d.pipe = c === '|' && s[i + 1] !== '|';
+      if (['||', '&&', '|&', ';;'].includes(s.slice(i, i + 2))) {
+        if (s.slice(i, i + 2) === '|&') for (const d of line) if (d.end === i) d.pipe = true;
+        i++;
+      }
+      segment = i + 1;
+      word = true;
+    } else {
+      word = /[\s()<>]/.test(c);
+    }
+  }
+  if (line.length || !docs.length) return s;
+  // Each text goes into a file by cat or tee, as written: no pipe after it, nothing bash would expand in it.
+  if (docs.some(d => d.pipe || (!d.quoted && /[$`\\]/.test(s.slice(d.from, d.to))) || !heredocFiles(s.slice(d.segment, d.end)).length)) return s;
+  // The command around the texts (their delimiters taken out too) runs nothing but INERT programs, in plain words.
+  let rest = '';
+  let at = 0;
+  for (const d of docs) {
+    rest += s.slice(at, d.from);
+    at = d.after;
+  }
+  rest += s.slice(at);
+  const words = tokens(rest);
+  const programs = words.filter((w, i) => w !== '|' && (i === 0 || words[i - 1] === '|'));
+  return PLAIN_AROUND.test(rest) && programs.every(p => INERT.has(p)) ? rest : s;
+}
+
 /**
  * What a shell command would publish: [{ rule, part, dir }], one per finding. part: the command found, written plainly
  * ("git push origin main", with git's options before "push" taken out); dir: the folder it would run in, when the
  * command says (git -C, or a cd before it), relative to the folder of the session. The text of a message to the
  * manager (node .../cli.mjs chat say "...", when that is the whole command, in plain words) is not run, so it is not
- * looked at.
+ * looked at, nor the texts of heredocs written into files by a command that does nothing else (withoutWrittenText),
+ * judged on the whole command only: inside "bash -c" the rest of the line could run the file.
  */
 export function publishing(command, depth = 0) {
   const found = [];
   if (depth > 4 || (depth === 0 && isMessage(command))) return found;
-  const all = tokens(command);
+  const all = tokens(depth === 0 ? withoutWrittenText(command) : command);
   const commands = [];
   for (let i = 0, start = 0; i <= all.length; i++) {
     if (i === all.length || all[i] === '|') {
@@ -186,8 +357,12 @@ function inGit(args) {
   return [];
 }
 
-// What gh does that only looks: nothing is published.
-const GH_READ = { pr: new Set(['view', 'list', 'status', 'diff', 'checks']), repo: new Set(['view', 'list']) };
+// gh's groups that publish, with their rule, and what each does that only looks: nothing is published.
+const GH_RULES = { pr: PR, repo: REPO, gist: GIST, release: RELEASE, workflow: WORKFLOW, secret: SECRET };
+const GH_READ = {
+  pr: new Set(['view', 'list', 'status', 'diff', 'checks']), repo: new Set(['view', 'list']), gist: new Set(['view', 'list']),
+  release: new Set(['view', 'list', 'download']), workflow: new Set(['view', 'list']), secret: new Set(['list']),
+};
 
 function inGh(args) {
   let at = 0;
@@ -195,9 +370,9 @@ function inGh(args) {
   const [sub, ...rest] = args.slice(at);
   if (!sub) return [];
   const part = ['gh', sub, ...rest].join(' ');
-  if (sub === 'pr' || sub === 'repo') {
+  if (Object.hasOwn(GH_RULES, sub)) {
     const action = rest.find((a, i) => !a.startsWith('-') && rest[i - 1] !== '-R' && rest[i - 1] !== '--repo');
-    return GH_READ[sub].has(action) ? [] : [{ rule: sub === 'pr' ? PR : REPO, part, dir: null }];
+    return GH_READ[sub].has(action) ? [] : [{ rule: GH_RULES[sub], part, dir: null }];
   }
   if (sub !== 'api') return [];
   // gh api: a GET unless -X/--method says otherwise, or a POST when it sends fields or a body.
@@ -424,7 +599,7 @@ export function takeGrant(file, target, facts = target?.branch ? pushFacts(targe
 export function guardHooks({ log, allowed = [], grants = null, who = grants ? 'manager' : 'step', noMain = false }) {
   const q = s => `"${String(s).replace(/\\/g, '/')}"`;
   // Only the guard's own rules: any other text would go into a shell command line.
-  const rules = [PUSH, REMOTE, PR, REPO, API].filter(r => allowed.includes(r));
+  const rules = [PUSH, REMOTE, PR, REPO, API, GIST, RELEASE, WORKFLOW, SECRET].filter(r => allowed.includes(r));
   const by = ['step', 'manager', 'session'].includes(who) ? who : 'step';
   const command = [q(process.execPath), q(fileURLToPath(import.meta.url)), '--log', q(log), '--who', by, ...rules.flatMap(r => ['--allow', q(r)]), ...(grants ? ['--grants', q(grants)] : []), ...(noMain ? ['--no-main'] : [])].join(' ');
   return { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command, timeout: 30 }] }] };
