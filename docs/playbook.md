@@ -51,6 +51,8 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
 | `config/example.json` | The settings template. Each installation's `config/chiefmate.json` is private and never in git. |
 | `scripts/` | Installation on Windows, launchers, `check.mjs` and `smoke.mjs`. |
 
+The away notice (`drawAway` in `ui/app.js`) displays `state.autopilot` while the owner is away. Its selector and the spending mode buttons in Usage both save through `setAutopilotMode` and `/api/autopilot`.
+
 ## Rules
 
 1. **English everywhere**: code, comments, documentation and commit messages.

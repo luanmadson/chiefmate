@@ -595,9 +595,10 @@ The agents talk to the manager directly, without going through you, with the sam
 
 ### Away mode
 
-The **Away mode** button, at the top of every screen next to the manager's face, is for when you step out or go to sleep. One click and the manager is told (`away`), and answers in a line or two with what goes on alone meanwhile; the button turns brass and shows since when you are away.
+Use **Away mode** at the top of the app whenever you step away. The manager gets the `away` event and briefly explains what will carry on. The button turns brass and shows when you left on wider screens.
 
 - **The work goes on alone**: runs, the queue, missions and the autopilot carry on as usual.
+- **Set the pace.** The notice below the title bar shows the autopilot's spending mode on desktop and mobile. Use its selector to switch to **Save usage**, **Normal** or **Spend all**. If the autopilot is off, the notice says so, and changing the pace saves it for when you turn it on.
 - **What can wait, waits.** The news that only informs (a run finished, failed or paused, a pull request ready, an update, a memory or usage alert, a live session that ended, the autopilot's report) doesn't wake the manager; it is kept for later. The Windows notifications that aren't urgent don't show either (they stay in the records). A step that needs you, the watchdog, new proposals and the autopilot's empty queues still reach the manager, which does its own part (the triage, the next item) and asks you nothing that can wait.
 - **Back.** Click the button again: the manager gets everything kept meanwhile (`back`) and writes you one summary, the most important first, with what waits for you and the questions it kept. The app opens the conversation.
 

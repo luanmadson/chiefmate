@@ -797,7 +797,7 @@ export function startServer() {
           return reply(res, 200, { ui: uiSettings(config) });
         }
         case '/api/autopilot':
-          // The autopilot's switch, mode and limits, from the Usage section (src/autopilot.mjs), kept with who changed them.
+          // Save the autopilot's settings and record who changed them (src/autopilot.mjs).
           changeAutopilot(body, { by: remote ? `remote:${String(req.headers['tailscale-user-login'] ?? '').trim().toLowerCase()}` : 'app' });
           return reply(res, 200, autopilotStatus());
         case '/api/stop-project': {

@@ -26,6 +26,7 @@ import { parseLevel } from '../src/util.mjs';
 import { behindOrigin, checkoutBranch, fastForward, projectLibraries, sameRepository } from '../src/workspace.mjs';
 import { SAMPLE_CSV, sampleXlsx, zip } from './fixtures.mjs';
 import { compose, Dictation, nextState, recognizer, transcript } from '../ui/voice.js';
+import './away-ui.test.mjs';
 
 const windows = process.platform === 'win32';
 const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-unit-'));
