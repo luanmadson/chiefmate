@@ -818,8 +818,8 @@ button.tab { background: transparent; border-top: 0; border-left: 0; border-righ
   .live-ask-line { padding-right: 8px; }
   .ask-list .live-ask-line { padding-left: 4px; }
   .ask-details { padding: 0 10px 10px 16px; }
-  /* A single ask: the line is for what it asks; the label stays for screen readers, the brass band says it */
-  .live-asks-band > .live-ask:only-child .needs-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  /* The line is for what is asked, or how many: the label stays for screen readers, the brass band says it */
+  .live-asks-band .needs-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 }
 /* A permission asked, in plain words: the facts in two columns, the risk as a tag in its color, the command folded */
 .perm { margin-top: 6px; font-size: 12.5px; }

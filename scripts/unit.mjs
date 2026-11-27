@@ -791,12 +791,15 @@ test('Asks band: from two asks, one line with their number, unfolded into the li
   assert.doesNotMatch(html, /facts-of-a2/);
 });
 
-test("Asks band: the folds don't change in place, and an answered ask's details are forgotten", () => {
+test("Asks band: the folds don't change in place, and what was answered is forgotten", () => {
   const folds = newFolds('s1');
   const opened = toggleFold(toggleFold(folds, 'a1'), 'a2');
   assert.deepEqual(folds, { session: 's1', band: false, open: [] });
   assert.deepEqual(opened.open, ['a1', 'a2']);
   assert.deepEqual(keepFolds(opened, [ask('a2')]).open, ['a2']);
+  const group = toggleFold(folds, 'band');
+  assert.equal(keepFolds(group, [ask('a1')]).band, true, 'the group stays open while asks remain');
+  assert.equal(keepFolds(group, []).band, false, 'once all are answered, the next ones come folded');
   assert.match(asksHtml([ask('<x>', 'a "quoted" <b>')], folds, askUi), /data-ask-fold="&lt;x>"[^]*a &quot;quoted&quot; &lt;b>/);
 });
 

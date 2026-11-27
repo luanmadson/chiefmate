@@ -14,8 +14,9 @@ export function toggleFold(folds, key) {
   return { ...folds, open: folds.open.includes(key) ? folds.open.filter(id => id !== key) : [...folds.open, key] };
 }
 
-/** The folds kept for the asks still open (an answered ask's details don't come back with a new one). */
-export const keepFolds = (folds, asks) => ({ ...folds, open: folds.open.filter(id => asks.some(a => a.id === id)) });
+/** The folds kept for the asks still open: an answered ask's details don't come back with a new one, nor, once all are
+ *  answered, the open group with the next ones. */
+export const keepFolds = (folds, asks) => ({ ...folds, band: asks.length > 0 && folds.band, open: folds.open.filter(id => asks.some(a => a.id === id)) });
 
 /** The band's layout: grouped or not, the group open or not, and each ask's line with its details open or not. */
 export function asksLayout(asks, folds) {
