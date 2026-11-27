@@ -1,6 +1,6 @@
 // The plan's free resets, the week's pace, and the alerts about your account and this computer.
 // Alerts only warn (a band in the app and a Windows notification, once each): they never pause anything.
-import { LOGIN_RENEW, loginWarning } from './claude.mjs';
+import { LOGIN_RENEW, loginFrom, loginWarning } from './claude.mjs';
 import { loadConfig, saveConfig } from './config.mjs';
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
 import { computer, formatBytes, freeShare, processes } from './machine.mjs';
@@ -99,8 +99,8 @@ export function loginText(w = loginWarning()) {
   const renew = t('To renew it, run in a terminal: {command}', { command: LOGIN_RENEW });
   if (w.step === 'expired') return { title: t('Claude Code sign-in expired'), text: `${t('The sign-in of Claude Code on this computer expired {when}: the crew and the manager stop until you sign in again.', { when: formatDateTime(w.expires) })} ${renew}` };
   return {
-    title: w.step === '1d' ? t('Claude Code sign-in expires today') : t('Claude Code sign-in expiring'),
-    text: `${t('The sign-in of Claude Code on this computer expires {when}. Without it, the crew and the manager stop.', { when: formatDateTime(w.expires) })} ${renew}`,
+    title: w.step === '1d' ? t('Claude Code sign-in about to end') : t('Claude Code sign-in expiring'),
+    text: `${t('The sign-in of Claude Code on this computer may end from {from} on, and by {when} at the latest. Without it, the crew and the manager stop.', { from: formatDateTime(loginFrom(w.expires)), when: formatDateTime(w.expires) })} ${renew}`,
   };
 }
 
@@ -158,7 +158,7 @@ async function watch() {
     if (keys.map(fresh)[0]) send.push({ title: t('Free reset expiring'), text: expiryText(g), target: 'chiefmate:usage', event: 'usage_alert', urgent: step === '1d' });
   }
 
-  // Claude Code's sign-in: once 3 days before it expires, again on its last day, and once it expired.
+  // Claude Code's sign-in: once 3 days before its earliest end, again from the day before it, and once it expired.
   const login = loginWarning();
   if (login) {
     const steps = ['3d', '1d', 'expired'];

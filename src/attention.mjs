@@ -93,8 +93,8 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
       view: 'projects',
     });
   }
-  // Claude Code's sign-in on this computer (src/claude.mjs): important from 3 days before it expires; urgent, and
-  // until it is renewed, on its last day and once expired.
+  // Claude Code's sign-in on this computer (src/claude.mjs): important from 3 days before its earliest end (3 days
+  // before the expiry Claude Code reports); urgent, and until it is renewed, from the day before that and once expired.
   if (login) {
     add({ id: `login:${login.expires}:${login.step}`, level: login.step === '3d' ? 'important' : 'urgent', kind: 'login', ...loginText(login), view: 'usage', seenable: login.step === '3d' });
   }

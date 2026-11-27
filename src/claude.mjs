@@ -52,8 +52,11 @@ export function checkClaude() {
 // ---------- Claude Code's sign-in on this computer ----------
 
 const DAY = 86400_000;
-export const LOGIN_WARN = 3 * DAY; // the owner is warned 3 days before the sign-in expires...
-export const LOGIN_URGENT = DAY; // ...and strongly on its last day
+// Claude Code itself says a sign-in ends between 3 days before the expiry it reports and that expiry. The owner is
+// warned 3 days before that earliest end, and strongly from the day before it.
+export const LOGIN_EARLY = 3 * DAY;
+export const LOGIN_WARN = 3 * DAY;
+export const LOGIN_URGENT = DAY;
 export const LOGIN_RENEW = 'claude auth login';
 
 /** When the sign-in expires, as Claude Code itself reports it. Checked when Chiefmate starts and once a day. */
@@ -74,11 +77,23 @@ export function parseLoginStatus(text) {
   return Number.isNaN(at) ? null : new Date(at).toISOString();
 }
 
-/** Whether to ask Claude Code again: never asked, a day since, or within the warning, hourly (a renewal shows soon). */
+/**
+ * Whether to ask Claude Code again: never asked or the last read failed, a day since, or hourly within the warning
+ * (a renewal shows soon). Five minutes of slack: the hourly timer may tick just before a full hour since the last read.
+ */
 export function loginDue(info = loginInfo, at = Date.now()) {
-  if (!info.checked) return true;
-  const since = at - Date.parse(info.checked);
-  return since >= DAY || (!!info.expires && Date.parse(info.expires) - at <= LOGIN_WARN && since >= DAY / 24);
+  if (!info.checked || info.error) return true;
+  const since = at - Date.parse(info.checked) + 5 * 60_000;
+  return since >= DAY || (!!loginWarning(info, at) && since >= DAY / 24);
+}
+
+/**
+ * The sign-in's facts after a read. The command ends with an error when signed out, with its JSON still on stdout.
+ * A read that fails or finds no sign-in keeps the last expiry known, so the warning stays until a new sign-in shows its own.
+ */
+export function loginRead(info, error, stdout, at = now()) {
+  const expires = parseLoginStatus(stdout);
+  return { expires: expires ?? (error ? info.expires : null), checked: at, error: expires || !error ? null : error.message };
 }
 
 /** Asks Claude Code when its sign-in expires (`claude auth status --json`; it reads only, nothing changes). */
@@ -86,28 +101,29 @@ export function checkLogin({ force = false } = {}) {
   if (!force && !loginDue()) return;
   const [file, first] = command();
   execFile(file, [...first, 'auth', 'status', '--json'], { timeout: 30_000, windowsHide: true, env: environment() }, (error, stdout) => {
-    const expires = parseLoginStatus(stdout);
-    // The command ends with an error when signed out, with its JSON still on stdout.
-    Object.assign(loginInfo, { expires, checked: now(), error: expires || !error ? null : error.message });
+    Object.assign(loginInfo, loginRead(loginInfo, error, stdout));
   });
 }
 
+/** The earliest end of a sign-in, LOGIN_EARLY before the expiry Claude Code reports. */
+export const loginFrom = expires => new Date(Date.parse(expires) - LOGIN_EARLY).toISOString();
+
 /**
- * The warning the sign-in calls for now: null while more than 3 days are left (or the expiry is unknown);
- * else { expires, left (ms), step: "3d" | "1d" | "expired" }.
+ * The warning the sign-in calls for now: null until 3 days before its earliest end (or with no expiry known);
+ * else { expires, left (ms to the expiry), step: "3d" | "1d" (from the day before the earliest end) | "expired" }.
  */
 export function loginWarning(info = loginInfo, at = Date.now()) {
   if (!info?.expires) return null;
   const left = Date.parse(info.expires) - at;
-  if (left > LOGIN_WARN) return null;
-  return { expires: info.expires, left, step: left <= 0 ? 'expired' : left <= LOGIN_URGENT ? '1d' : '3d' };
+  if (left - LOGIN_EARLY > LOGIN_WARN) return null;
+  return { expires: info.expires, left, step: left <= 0 ? 'expired' : left - LOGIN_EARLY <= LOGIN_URGENT ? '1d' : '3d' };
 }
 
 /** One line for the manager's situation while the warning lasts, else null. */
 export function loginLine(owner = 'the owner', info = loginInfo, at = Date.now()) {
   const w = loginWarning(info, at);
   if (!w) return null;
-  const when = w.step === 'expired' ? `expired ${formatDateTime(w.expires)}` : `expires ${formatDateTime(w.expires)}`;
+  const when = w.step === 'expired' ? `expired ${formatDateTime(w.expires)}` : `may end from ${formatDateTime(loginFrom(w.expires))} on, by ${formatDateTime(w.expires)} at the latest`;
   return `Claude Code's sign-in on this computer ${when}: without it the crew and you stop. Only ${owner} can renew it, by running "${LOGIN_RENEW}" in a terminal; remind them${w.step === '3d' ? '' : ' now'}.`;
 }
 
