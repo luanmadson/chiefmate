@@ -2408,6 +2408,14 @@ test("the session's spare near its renewal: spent alone while the owner is away,
   const notes = [];
   const note = (by, changes) => notes.push([by, changes]);
   const check = (file, extra = {}) => checkSpending({ config, usage, at, runs, capacity: 3, file, report, note, away: false, ...extra });
+  // the plan's week at its pause holds the crew: nothing to spend, so nothing is offered nor spent (its pause stays)
+  const weekFile = path.join(temp, 'spending-week.json');
+  writeFileSync(weekFile, JSON.stringify({ samples }));
+  const atPause = { ...usage, seven_day: { used: 0.95, resets: '2026-11-30T08:00:00.000Z' } };
+  assert.deepEqual([check(weekFile, { usage: atPause }).offered, check(weekFile, { usage: atPause, away: true }).boosted], [false, false]);
+  const heldStatus = spendingStatus(config, { usage: atPause, runs, items: [], data: readSpending(weekFile), at });
+  assert.deepEqual([heldStatus.week_holds, heldStatus.offer], [true, null]);
+  assert.equal(told.length, 0);
   // present: offered once per window, with its button's time; "not now" until the renewal
   const present = path.join(temp, 'spending-present.json');
   writeFileSync(present, JSON.stringify({ samples }));

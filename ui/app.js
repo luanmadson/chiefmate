@@ -2860,9 +2860,11 @@ function sessionSentence(sp) {
 }
 
 /** What will be left of the session when it renews, roughly (src/spending.mjs, forecast). */
-function sessionEstimate(f) {
+function sessionEstimate(f, week) {
   if (!f) return t('The estimate of what will be left comes once the session is measured (every run reports it).');
   const at = { left: percent(f.left), time: clockTime(f.resets), all: percent(f.all.left) };
+  // the plan's week at its pause holds the crew: nothing more to spend
+  if (week) return t("At this pace, about {left} of the session will go unused when it renews at {time}. The plan's week is at its pause, so spending all would change nothing.", at);
   return f.all.runs
     ? t('At this pace, about {left} of the session will go unused when it renews at {time}; spending all, about {all}.', at)
     : t('At this pace, about {left} of the session will go unused when it renews at {time}. With no work queued, spending all would change nothing.', at);
@@ -2892,7 +2894,7 @@ function drawSpending() {
         </select></label>
       </div>
       <p class="autopilot-now">${esc(sessionSentence(sp))}${s.boost ? ` <button type="button" class="button secondary small" data-session-boost="off">${esc(t('End now'))}</button>` : ''}</p>
-      <p class="hint">${esc(sessionEstimate(sp.forecast))}</p>
+      <p class="hint">${esc(sessionEstimate(sp.forecast, sp.week_holds))}</p>
       ${sp.offer ? `<p class="hint state-warn">${esc(t('Little time is left and much of the session would go unused.'))}</p>
       <div class="actions left"><button type="button" class="button small" data-session-boost="on">${esc(t('Spend all until {time}', { time: clockTime(sp.offer.until) }))}</button><button type="button" class="button secondary small" data-spending-dismiss>${esc(t('Not now'))}</button></div>` : ''}
     </div>`;
@@ -5507,10 +5509,8 @@ $('#limits-form').addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.target;
   try {
-    await api('/api/limits', {
-      pause_at_5h_window: Number(form.window.value) / 100,
-      pause_at_plan_week: Number(form.week.value) / 100,
-    });
+    // only the week's: the session's pause is set in Spending (drawSpending)
+    await api('/api/limits', { pause_at_plan_week: Number(form.week.value) / 100 });
     toast(t('Limits saved.'));
     refresh();
   } catch (error) {

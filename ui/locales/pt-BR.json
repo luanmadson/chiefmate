@@ -2223,6 +2223,7 @@
   "The estimate of what will be left comes once the session is measured (every run reports it).": "A estimativa da sobra aparece quando a sessão for medida (cada tarefa informa o uso).",
   "At this pace, about {left} of the session will go unused when it renews at {time}; spending all, about {all}.": "Neste ritmo, cerca de {left} da sessão vai sobrar quando ela renovar, às {time}; gastando tudo, cerca de {all}.",
   "At this pace, about {left} of the session will go unused when it renews at {time}. With no work queued, spending all would change nothing.": "Neste ritmo, cerca de {left} da sessão vai sobrar quando ela renovar, às {time}. Sem trabalho na fila, gastar tudo não mudaria nada.",
+  "At this pace, about {left} of the session will go unused when it renews at {time}. The plan's week is at its pause, so spending all would change nothing.": "Neste ritmo, cerca de {left} da sessão vai sobrar quando ela renovar, às {time}. A semana do plano chegou à pausa, então gastar tudo não mudaria nada.",
   "Session (5 hours)": "Sessão (5 horas)",
   "Session mode": "Modo da sessão",
   "Runs at a time": "Tarefas por vez",

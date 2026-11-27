@@ -164,6 +164,15 @@ export function projectsWithWork(config = loadConfig(), runs = listRuns(), items
   return projects.size;
 }
 
+/**
+ * Whether the plan's week holds the crew now: at its pause (as checkLimits in src/runs.mjs reads it) or used up, with
+ * a reset ahead. The session's spare can't be spent then, and the week's pause never changes here.
+ */
+export function weekHolds(config = loadConfig(), usage = readUsage(), at = Date.now()) {
+  const w = usage?.seven_day;
+  return current(w, at) && !!w.resets && w.used >= Math.min(1, Number(config.limits?.pause_at_plan_week) || 1);
+}
+
 /** The offer still standing: once per window, until "not now", a boost or "all", and while something would be left. */
 const offerNow = (data, session, f) =>
   f && data.offer?.window === f.resets && !session.boost && session.configured.mode !== 'all' && data.dismissed !== f.resets && f.left >= GAIN_MIN
@@ -206,7 +215,9 @@ export function checkSpending({ config = loadConfig(), usage = readUsage(), at =
     delete data.boost;
   }
   const session = sessionNow(config, data, at);
-  const f = forecast({ usage, samples: data.samples, session, running, capacity: capacity ?? projectsWithWork(config, runs, items), runPace: data.run_pace ?? null, at });
+  // while the plan's week holds the crew, there is nothing more to spend: no offer, no boost
+  const week = weekHolds(config, usage, at);
+  const f = forecast({ usage, samples: data.samples, session, running, capacity: week ? 0 : (capacity ?? projectsWithWork(config, runs, items)), runPace: data.run_pace ?? null, at });
   if (f?.runPace != null) data.run_pace = Math.round(f.runPace * 1000) / 1000;
   const window = f?.resets ?? null;
   // a window gone takes its offer and its "not now" with it
@@ -304,11 +315,12 @@ export function changeSession(body = {}, { config = loadConfig(), by = 'owner', 
 export function spendingStatus(config = loadConfig(), { usage = readUsage(), runs = listRuns(), items = null, data = readSpending(), at = Date.now() } = {}) {
   const session = sessionNow(config, data, at);
   const running = runs.filter(r => r.status === 'running').length;
-  const f = forecast({ usage, samples: data.samples, session, running, capacity: projectsWithWork(config, runs, items), runPace: data.run_pace ?? null, at });
+  const week = weekHolds(config, usage, at);
+  const f = forecast({ usage, samples: data.samples, session, running, capacity: week ? 0 : projectsWithWork(config, runs, items), runPace: data.run_pace ?? null, at });
   return {
-    session, modes: SESSION_MODES, safety: SAFETY, spend_to: SPEND_TO, max: MAX_AT_ONCE,
+    session, modes: SESSION_MODES, safety: SAFETY, spend_to: SPEND_TO, max: MAX_AT_ONCE, week_holds: week,
     forecast: f && { used: f.used, resets: f.resets, minutes: f.minutes, pace: f.pace, left: f.left, all: f.all, near: f.near, worth: f.worth },
-    offer: offerNow(data, session, f),
+    offer: week ? null : offerNow(data, session, f),
   };
 }
 
@@ -321,7 +333,8 @@ export function sessionLine(config = loadConfig(), { usage = readUsage(), runs =
   const mode = s.boost
     ? `"all" until it renews at ${clock(s.boost.until)} (${s.boost.by === 'away' ? `set by Chiefmate while ${owner} was away` : `${owner}'s choice`}): ${s.parallel} run(s) at a time, pausing at ${pct(s.limit)}; then back to ${sessionWords(s.configured)}`
     : sessionWords(s);
-  const all = f?.all.runs ? `spending all (${f.all.runs} run(s) at once) would leave about ${pct(f.all.left)}` : 'spending all would change nothing now: the crew has no work queued';
+  const all = status.week_holds ? "the plan's week is at its pause, so spending all would change nothing until it resets"
+    : f?.all.runs ? `spending all (${f.all.runs} run(s) at once) would leave about ${pct(f.all.left)}` : 'spending all would change nothing now: the crew has no work queued';
   const estimate = f
     ? `Estimated: at ${pct(f.used)}${f.pace != null ? `, spending ${pct(f.pace)} an hour over the last hour,` : ''} with ${f.minutes} min to its renewal at ${clock(f.resets)}, about ${pct(f.left)} of it will be left unused; ${all}.`
     : 'Estimated: not measured yet (the next run reports it).';
