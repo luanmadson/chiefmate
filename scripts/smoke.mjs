@@ -1603,18 +1603,25 @@ try {
   expect(power.offOnPurpose(off, since - 60_000) && !power.offOnPurpose(off, since + 60_000) && power.offOnPurpose({ ...off, target: 'shutdown' }, since + 60_000)
     && !power.offOnPurpose(off, since - 60_000, late) && power.offOnPurpose({ ...off, target: 'shutdown' }, since - 60_000, late),
     'the watchdog would leave off a Chiefmate whose computer restarted (or never did), or bring back one the owner shut down');
-  // Back after the restart: on again, the windows of the live sessions open again, the log says so.
+  // Back after the restart: on again, the windows of the live sessions and the app's window open again, the log says so.
   let reopenedAt = null;
-  power.startPower({ ...hooks, boot: since + 30_000, reopenWindows: boot => ((reopenedAt = boot), ['smoke-window']) });
-  expect(!readState().power && power.powerInfo().mode === 'on' && reopenedAt === since + 30_000 && power.powerLog().at(-1)?.outcome === 'back' && power.powerLog().at(-1).by === 'manager',
-    `back from a restart, Chiefmate is not on, the windows did not open again or the log missed it: ${JSON.stringify(power.powerLog().at(-1))}`);
+  let appWindows = 0;
+  const openApp = () => appWindows++;
+  power.startPower({ ...hooks, boot: since + 30_000, reopenWindows: boot => ((reopenedAt = boot), ['smoke-window']), openApp });
+  expect(!readState().power && power.powerInfo().mode === 'on' && reopenedAt === since + 30_000 && appWindows === 1 && power.powerLog().at(-1)?.outcome === 'back' && power.powerLog().at(-1).by === 'manager',
+    `back from a restart, Chiefmate is not on, the windows did not open again or the log missed it: ${JSON.stringify([appWindows, power.powerLog().at(-1)])}`);
   // A restart Windows did not make (a program held it): on again once the watchdog brings Chiefmate back, no window
-  // opened again (none was closed), and the log says it did not restart.
+  // opened again (none was closed), the app's neither (a start after a recent note, as an update's), and the log says it
+  // did not restart.
   saveState({ ...readState(), power: off });
   let reopenedAgain = false;
-  power.startPower({ ...hooks, boot: since - 60_000, reopenWindows: () => ((reopenedAgain = true), []) });
-  expect(!readState().power && power.powerInfo().mode === 'on' && !reopenedAgain && power.powerLog().at(-1)?.outcome === 'not-restarted',
-    `a restart Windows did not make was taken for one, or its windows opened again: ${JSON.stringify(power.powerLog().at(-1))}`);
+  power.startPower({ ...hooks, boot: since - 60_000, reopenWindows: () => ((reopenedAgain = true), []), openApp });
+  expect(!readState().power && power.powerInfo().mode === 'on' && !reopenedAgain && appWindows === 1 && power.powerLog().at(-1)?.outcome === 'not-restarted',
+    `a restart Windows did not make was taken for one, or its windows opened again: ${JSON.stringify([appWindows, power.powerLog().at(-1)])}`);
+  // The app's window opens on the first start since the computer started only: never without a note of being alive
+  // (the first start of a version that keeps them, as through an update), nor after a note newer than the start.
+  expect(power.firstSinceBoot({ last: new Date(since - 1000).toISOString(), boot: since }) && !power.firstSinceBoot({ last: null, boot: since })
+    && !power.firstSinceBoot({ last: new Date(since + 1000).toISOString(), boot: since }), "the app's window would open on a start that is not the first since the computer started");
 
   // The computer went down without a stop (a power cut): Chiefmate's last note of being alive is older than the
   // computer's start. The runs it cut off (still running, or failed a moment before) go back to the front of the queue;
@@ -1636,11 +1643,11 @@ try {
     'a computer that went down without a stop was not found, or a stop or a plain restart of Chiefmate was taken for one');
   power.beat(last);
   let windowsBack = null;
-  power.startPower({ ...hooks, boot, reopenWindows: b => ((windowsBack = b), []) });
+  power.startPower({ ...hooks, boot, reopenWindows: b => ((windowsBack = b), []), openApp });
   const [running, failed, old] = ['smoke-cut-running', 'smoke-cut-failed', 'smoke-cut-old'].map(readRun);
   expect(running.status === 'queued' && running.resumeFirst && running.cutOff?.was === 'running' && running.steps.map(s => s.status).join() === 'failed,pending,pending'
     && failed.status === 'queued' && failed.resumeFirst && !failed.ended && !failed.result && failed.steps[0].status === 'pending' && !failed.steps[0].error
-    && old.status === 'failed' && windowsBack === boot && power.powerLog().at(-1)?.action === 'cut-off' && Date.parse(power.lastBeat()) > t0 - 1000,
+    && old.status === 'failed' && windowsBack === boot && appWindows === 2 && power.powerLog().at(-1)?.action === 'cut-off' && Date.parse(power.lastBeat()) > t0 - 1000,
     `the runs cut off by a power cut were not put back at the front of the queue, or an old failure was: ${JSON.stringify([running, failed, old].map(r => [r.status, r.resumeFirst, r.steps.map(s => s.status)]))}`);
   // Nothing of this check stays in the queue for a later one to start.
   for (const id of ['smoke-cut-running', 'smoke-cut-failed', 'smoke-cut-old']) rmSync(path.join(DATA, 'runs', `${id}.json`), { force: true });
