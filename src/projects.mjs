@@ -13,7 +13,7 @@ import { createInterface } from 'node:readline';
 import { stripVTControlCharacters } from 'node:util';
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
-import { computer, devIdOf, processes, refreshProcesses } from './machine.mjs';
+import { computer, devIdOf, processes, refreshProcesses, SUPPORTED } from './machine.mjs';
 import { openConsole, projectClone, tellProjectSessions, where } from './sessions.mjs';
 import { clip, DATA, now, readJson, writeJson } from './util.mjs';
 
@@ -157,7 +157,9 @@ export async function startDev(id, { dryRun = false, config = loadConfig(), open
     throw error;
   }
   const state = readDev(id);
-  if (windows.length || (state?.status === 'starting' && !state.pid && Date.now() - state.at < LAUNCH_TIMEOUT) || devAlive(state?.pid)) {
+  // A launch of the last minute may not be in the reading yet; past that, the reading decides (Windows reuses process ids).
+  const launching = state && Date.now() - state.at < LAUNCH_TIMEOUT && (state.pid ? devAlive(state.pid) : state.status === 'starting');
+  if (windows.length || launching || (!SUPPORTED && devAlive(state?.pid))) {
     throw new Error(t('The development environment of {name} is already running.', { name: plan.name }));
   }
   const token = randomUUID();
@@ -183,17 +185,16 @@ function stopDevTree(pid) {
 export async function stopDev(id, { dryRun = false, config = loadConfig(), readWindows = devWindows, stopTree = stopDevTree } = {}) {
   const project = projectOf(config, id);
   const name = project.name ?? id;
-  let state, stopped;
+  let stopped;
   try {
     const windows = await readWindows(id, 0);
     if (dryRun) return { dryRun: true, pids: windows.map(p => p.pid) };
-    state = readDev(id);
-    const pending = state?.status === 'starting';
+    const pending = readDev(id)?.status === 'starting';
     // A launch can make its way to the console while the process list is being read.
     if (pending && !windows.length) {
       windows.push(...await readWindows(id, 0));
     }
-    if (!windows.length && devAlive(readDev(id)?.pid)) throw new Error(t('The environment window could not be found.'));
+    // The fresh reading decides: with no window in it nothing runs, whatever the record's process id belongs to now.
     for (const { pid } of windows) stopTree(pid);
     stopped = windows.length || Number(pending);
   } catch (error) {
@@ -203,8 +204,9 @@ export async function stopDev(id, { dryRun = false, config = loadConfig(), readW
     throw new Error(message);
   }
   rmSync(devFile(id), { force: true });
+  // Without the services: what the command left running on its own (containers started with "-d") may still be up.
   devNotice(id, stopped
-    ? [t('The development environment for {name} stopped.', { name }), ...devFacts(state)].join(' ')
+    ? t('The development environment for {name} stopped.', { name })
     : t('The development environment for {name} was already stopped.', { name }));
   await refreshProcesses();
   return { stopped };
@@ -250,11 +252,13 @@ export function devState(id, project, machine) {
   if (!validId(id) || !project.dev_start) return null;
   const found = (machine.dev ?? []).find(d => d.project === id);
   const state = readDev(id);
-  if (state && devAlive(state.pid)) {
+  // Windows reuses process ids: once a reading of the processes is a minute newer than the launch, it must show the window.
+  const settled = machine.supported && Date.parse(machine.measured ?? '') - (state?.at ?? 0) >= LAUNCH_TIMEOUT;
+  if (state && devAlive(state.pid) && (!settled || found?.pids.includes(state.pid))) {
     return { status: state.status, ram: found?.ram ?? 0, pid: state.pid, url: state.status === 'running' ? webAddress(state.url)?.href ?? null : null };
   }
   if (state?.status === 'starting' && !state.pid && Date.now() - state.at < LAUNCH_TIMEOUT) return { status: 'starting', ram: 0, pid: null };
-  if (!state && found) return { status: 'running', ram: found.ram, pid: found.pids[0] ?? null, url: webAddress(project.dev_url)?.href ?? null };
+  if (found) return { status: 'running', ram: found.ram, pid: found.pids[0] ?? null, url: webAddress(project.dev_url)?.href ?? null };
   return { status: 'stopped', ram: 0, pid: null };
 }
 
@@ -287,6 +291,8 @@ export async function runDev(id, token, { config = loadConfig(), spawnCommand = 
   let reportedUnconfirmed = false;
   let shownUrl = null;
   let finished = false;
+  let interrupted = false;
+  let failure;
   const current = () => readDev(id)?.token === token;
   const facts = () => ({ services: [...services], addresses: [...addresses].map(address => {
     const url = new URL(address);
@@ -303,6 +309,13 @@ export async function runDev(id, token, { config = loadConfig(), spawnCommand = 
     shownUrl = url;
     save('running', url);
     devNotice(id, [message, ...devFacts(facts())].join(' '));
+  };
+  // The record goes when the window is done with it; a stop is told once.
+  const forget = () => current() && rmSync(devFile(id), { force: true });
+  const stopped = () => {
+    if (!current()) return;
+    forget();
+    devNotice(id, t('The development environment for {name} stopped.', { name: plan.name }));
   };
   function observe(text, stderr) {
     const line = stripVTControlCharacters(text).trim();
@@ -321,8 +334,16 @@ export async function runDev(id, token, { config = loadConfig(), spawnCommand = 
   save('starting');
   if (!current()) return;
   console.log(`Chiefmate: ${plan.name}, development environment\n> ${plan.command}\n  (in ${plan.cwd})\n`);
-  const onInterrupt = () => {}; // Ctrl+C belongs to the command.
+  // Ctrl+C belongs to the command: whatever its exit code then, the environment stopped (Windows reports no signal).
+  const onInterrupt = () => (interrupted = true);
+  // The window closed: the environment ends with it.
+  const onClose = () => {
+    if (failure) forget();
+    else stopped();
+    process.exit(0);
+  };
   process.on('SIGINT', onInterrupt);
+  process.on('SIGHUP', onClose);
   let timer;
   async function checkReady() {
     if (finished || !current()) return;
@@ -345,7 +366,7 @@ export async function runDev(id, token, { config = loadConfig(), spawnCommand = 
     }
     if (!shownUrl) timer = setTimeout(checkReady, 1000);
   }
-  let failure;
+  let wasRunning = false;
   try {
     const child = spawnCommand(plan.command, { cwd: plan.cwd, shell: true, stdio: ['inherit', 'pipe', 'pipe'] });
     const output = [
@@ -361,8 +382,11 @@ export async function runDev(id, token, { config = loadConfig(), spawnCommand = 
       child.once('error', reject);
       child.once('close', (code, signal) => resolve({ code, signal }));
     });
-    if (code === 0) ready(null, t('The development command for {name} completed successfully.', { name: plan.name }));
-    else if (signal !== 'SIGINT') failure = [t('Exit: {code}', { code: code ?? signal }), lastError || lastLine].filter(Boolean).join(' — ');
+    wasRunning = started;
+    if (signal === 'SIGINT') interrupted = true;
+    // A command that only starts things (such as "docker compose up -d") ends well once they are up.
+    if (!interrupted && code === 0) ready(null, t('The development command for {name} completed successfully.', { name: plan.name }));
+    else if (!interrupted) failure = [t('Exit: {code}', { code: code ?? signal }), lastError || lastLine].filter(Boolean).join(' — ');
   } catch (error) {
     failure = error.message;
   } finally {
@@ -370,20 +394,24 @@ export async function runDev(id, token, { config = loadConfig(), spawnCommand = 
     clearTimeout(timer);
     process.off('SIGINT', onInterrupt);
   }
-  if (!current()) return;
-  if (failure) {
-    save('failed');
-    const message = started ? t('The development environment for {name} failed: {error}', { name: plan.name, error: clip(failure, 300) })
-      : t('The development environment for {name} failed to start: {error}', { name: plan.name, error: clip(failure, 300) });
-    devNotice(id, message, true);
-    console.error(message);
-    if (keepFailedWindow) {
-      console.log(t('Press Enter to close.'));
-      await new Promise(resolve => process.stdin.once('data', resolve));
-      process.stdin.pause();
-    }
-  } else {
-    save('stopped');
+  try {
+    if (!current()) return;
+    if (failure) {
+      save('failed');
+      const message = started ? t('The development environment for {name} failed: {error}', { name: plan.name, error: clip(failure, 300) })
+        : t('The development environment for {name} failed to start: {error}', { name: plan.name, error: clip(failure, 300) });
+      devNotice(id, message, true);
+      console.error(message);
+      if (keepFailedWindow) {
+        console.log(t('Press Enter to close.'));
+        await new Promise(resolve => process.stdin.once('data', resolve));
+        process.stdin.pause();
+      }
+      forget();
+    } else if (wasRunning || interrupted) stopped();
+    else forget();
+  } finally {
+    process.off('SIGHUP', onClose);
   }
 }
 

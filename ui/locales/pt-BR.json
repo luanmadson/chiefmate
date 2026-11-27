@@ -641,7 +641,6 @@
   "The development environment for {name} was already stopped.": "O ambiente de desenvolvimento de {name} já estava parado.",
   "The development environment for {name} could not be stopped: {error}": "Não foi possível parar o ambiente de desenvolvimento de {name}: {error}",
   "The environment window did not start.": "A janela do ambiente não abriu.",
-  "The environment window could not be found.": "A janela do ambiente não foi encontrada.",
   "The development command for {name} is running and has not reported readiness.": "O comando de desenvolvimento de {name} está em execução e ainda não informou que o ambiente está pronto.",
   "The development command for {name} completed successfully.": "O comando de desenvolvimento de {name} terminou com sucesso.",
   "Services: {services}.": "Serviços: {services}.",

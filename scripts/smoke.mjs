@@ -2505,6 +2505,12 @@ try {
     writeFileSync(path.join(data, 'sessions', `${isolated}.json`), JSON.stringify({
       id: isolated, project: 'another-project', status: 'open', mode: 'app', tool: 'claude', cwd: liveDir,
     }));
+    // The conversation with the project's agent in charge reads only: no turn of its own for the environment.
+    const inCharge = 'smoke-dev-charge';
+    writeFileSync(path.join(data, 'sessions', `${inCharge}.json`), JSON.stringify({
+      id: inCharge, project: devProject, status: 'open', mode: 'app', tool: 'claude', cwd: null, charge: true, member: 'generalist',
+    }));
+    const devRecord = path.join(data, 'dev', `${devProject}.json`);
     const open = (_name, cwd, args) => {
       expect(cwd === devClone && args[0] === 'dev-run' && args[1] === devProject, 'the environment did not launch in its own clone');
       token = args[2];
@@ -2549,8 +2555,10 @@ try {
       await serving;
       deliverDevNotices();
       await Promise.all([idle(s.id), idle(c.id)]);
+      // The stop names no services: what the command started on its own (containers with "-d") may still be up.
       expect(stopped.stopped === 1 && pids.join() === '42' && !devState(devProject, projectConfig, machine).url
-        && notices(c.id).length === 2 && notices(c.id).at(-1).text.includes('sample-db'), 'stopping did not clear the system link and deliver the stop result');
+        && notices(c.id).length === 2 && !notices(c.id).at(-1).error && !notices(c.id).at(-1).text.includes('sample-db'),
+      'stopping did not clear the system link and deliver the stop result');
     } finally {
       if (!service.stdout.writableEnded) closeDev(service, null, 'SIGINT');
       await serving;
@@ -2565,9 +2573,49 @@ try {
     await Promise.all([idle(s.id), idle(c.id)]);
     expect(!devState(devProject, projectConfig, machine).url && notices(s.id).at(-1)?.error
       && notices(s.id).at(-1).text.includes('Sample port is already in use'), 'a failed startup did not reach the session with its short error');
-    expect(!notices(isolated).length && !sessions.readSession(isolated).queue?.length && !readdirSync(devClone).length,
-      'notices reached another project or wrote to the project clone');
-    await Promise.all([s, c, { id: isolated }].map(session => sessions.endSession(session.id)));
+    // Ctrl+C in the window: the command ends with an error code (Windows reports no signal), and that is a stop.
+    await launch();
+    const interrupted = devChild();
+    const running = runDev(devProject, token, { config: devConfig, spawnCommand: () => interrupted, probe: async url => url.href === address, keepFailedWindow: false });
+    try {
+      interrupted.stdout.write(`  Local: ${address}\n`);
+      for (let i = 0; i < 40 && !devState(devProject, projectConfig, machine).url; i++) await delay(50);
+      process.emit('SIGINT');
+      closeDev(interrupted, 3221225786);
+      await running;
+    } finally {
+      if (!interrupted.stdout.writableEnded) closeDev(interrupted, null, 'SIGINT');
+      await running;
+    }
+    deliverDevNotices();
+    await Promise.all([idle(s.id), idle(c.id)]);
+    const told = notices(s.id).slice(-2);
+    expect(told.length === 2 && told[0].text.includes(address) && told.every(n => !n.error) && !told[1].text.includes('3221225786') && !existsSync(devRecord),
+      'Ctrl+C in the window was told as a failure, or its stop was not told');
+    // A record left by a window that closed, its process id since given to another process (here, this one).
+    const reading = dev => ({ supported: true, measured: new Date().toISOString(), dev });
+    const leftOver = () => writeFileSync(devRecord, JSON.stringify({ token: 'old', at: Date.now() - 120_000, name: 'Sample dev', status: 'running', pid: process.pid, url: address }));
+    leftOver();
+    expect(devState(devProject, projectConfig, reading([])).status === 'stopped'
+      && devState(devProject, projectConfig, reading([{ project: devProject, pids: [process.pid], ram: 1 }])).url === address,
+    'a record whose process id belongs to another process still showed the environment running');
+    const toldBefore = notices(c.id).length;
+    const reused = await stopDev(devProject, { config: devConfig, readWindows: async () => [], stopTree: () => expect(false, 'a process that is not the window was stopped') })
+      .catch(error => ({ error: error.message }));
+    if (process.platform === 'win32') {
+      leftOver();
+      const refused = await launch().then(() => null, error => error.message);
+      expect(!refused, `a record whose process id belongs to another process blocked the start: ${refused}`);
+      await stopDev(devProject, { config: devConfig, readWindows: async () => [], stopTree: () => {} });
+    }
+    deliverDevNotices();
+    await Promise.all([idle(s.id), idle(c.id)]);
+    expect(reused.stopped === 0 && !existsSync(devRecord) && notices(c.id).length > toldBefore && notices(c.id).slice(toldBefore).every(n => !n.error),
+      `a record whose process id belongs to another process blocked the stop: ${reused.error ?? ''}`);
+    expect(!notices(isolated).length && !sessions.readSession(isolated).queue?.length && !notices(inCharge).length
+      && !sessions.readSession(inCharge).queue?.length && !readdirSync(devClone).length,
+    'notices reached another project or the agent in charge, or wrote to the project clone');
+    await Promise.all([s, c, { id: isolated }, { id: inCharge }].map(session => sessions.endSession(session.id)));
 
     // Read the actual stdin of a resumed turn after a manager answer and a subsequent run status change.
     const charge = await import('../src/charge.mjs');

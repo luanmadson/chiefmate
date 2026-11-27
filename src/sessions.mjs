@@ -517,10 +517,13 @@ function enqueue(session, item) {
   return { ...item, queued, position: queued ? (readSession(id)?.queue ?? []).length : 0 };
 }
 
-/** A system event goes to the project's app sessions that were open when it happened. */
+/**
+ * A system event goes to the project's live sessions in the app that were open when it happened. The conversation with
+ * the agent in charge is left out: it reads only, and a turn there would cost usage for nothing.
+ */
 export function tellProjectSessions(project, notice) {
   for (const s of listSessions()) {
-    if (s.project !== project || s.mode !== 'app' || s.status !== 'open' || (s.resumed ?? s.started) > notice.at) continue;
+    if (s.project !== project || s.mode !== 'app' || s.charge || s.status !== 'open' || (s.resumed ?? s.started) > notice.at) continue;
     if ((s.queue ?? []).some(m => m.id === notice.id) || sessionHistory(s.id, null, 60).items.some(m => m.notice === notice.id)) continue;
     enqueue(s, { ...notice, by: 'system' });
   }
