@@ -7,6 +7,8 @@
 // ("owner_decided"; a merge is "merged" news, src/merge.mjs). A project whose work someone else reviews
 // ("merge_by_owner": false) shows its pull requests as waiting for that review, with no Approve. A push the manager
 // tried and the guard refused becomes a card too: the owner allows that one push (src/guard.mjs, takeGrant) or refuses it.
+// In a project whose owner lets its main branch go through a card ("main_push": "card"), so does a push of the main
+// branch, by the manager or by a "Work now" session, with what goes at a glance (commits, files, migrations).
 // So does a private repository the manager asks to create (cli.mjs repo-create; see repoCreate).
 // Each card carries the approval level the manager gave its run, item or question ("approval": 1, the manager
 // decides and does it; 2, the owner approves; 3, never without the owner; null, not given). The app folds the level 1
@@ -15,16 +17,17 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { attentionArchive, markSeen } from './attention.mjs';
+import { attentionArchive, mainPushNotice, markSeen } from './attention.mjs';
 import { ownerAnswered } from './charge.mjs';
 import { loadConfig } from './config.mjs';
-import { GRANT_MINUTES, plainPush, pushFacts, readPushes, repoOf, samePath } from './guard.mjs';
+import { GRANT_MINUTES, logPush, mainPushTarget, mainPushTargets, plainPush, pushesFile, pushFacts, readPushes, repoOf, samePath } from './guard.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { discardRun, mergeRun, prNumber, verdict } from './merge.mjs';
 import { refuseWhileLocked } from './lockdown.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { decideItem } from './planning.mjs';
+import { sayToSession } from './sessions.mjs';
 import { readRun } from './store.mjs';
 import { localDeliveryClone } from './workspace.mjs';
 import { clip, DATA, ensureDir, now, parseLevel, readJson, ROOT, writeJson } from './util.mjs';
@@ -103,11 +106,16 @@ export function questionNews(q) {
 // The guard refuses the manager every push. One it tried that could be allowed (a plain push of one branch, not the
 // main one, not forced) becomes a request here: the owner allows it on its card, for that repository, branch, folder
 // and source, once, within GRANT_MINUTES, or refuses it. The hook and "cli.mjs push" take the grant (src/guard.mjs).
+// The main branch, only in a project with "main_push": "card": a plain push of it alone, by the manager or by a "Work
+// now" session ("session": its id; the session takes its own grant, src/sessions.mjs), is a request like the others,
+// shown with what it carries.
 
 const PUSHES_MAX = 100;
 const PUSH_OPEN_FOR = 24 * 3600_000; // a request not answered in a day leaves the cards
-export const pushesFile = () => path.join(ensureDir(path.join(DATA, 'manager')), 'pushes.json');
+export { pushesFile };
 const cliPush = p => `node src/cli.mjs push "${p.dir.replaceAll('\\', '/')}" ${p.branch}`;
+/** Whether a request still has its card: the main branch only while its project lets it go through one. */
+const mainCardOn = (config, p) => !p.main || config?.projects?.[p.project]?.main_push === 'card';
 
 /** The requests still waiting for the owner, oldest first. */
 export const openPushes = (list = readPushes(pushesFile())) => list.filter(p => p.status === 'open' && Date.now() - Date.parse(p.at) < PUSH_OPEN_FOR);
@@ -116,13 +124,14 @@ export const openPushes = (list = readPushes(pushesFile())) => list.filter(p => 
  * Turns what the guard refused in the manager's answer (its log, moved to "history" once read) into push requests: one
  * per push that could be allowed, unless the same one already waits. Returns the new requests.
  */
-export function pushRequestsFrom(log, history = null) {
+export function pushRequestsFrom(log, history = null, config = loadConfig()) {
   if (!existsSync(log)) return [];
   const text = readFileSync(log, 'utf8');
   // Every refusal stays on record, not only the pushes.
   if (history && text.trim()) appendFileSync(history, text.endsWith('\n') ? text : `${text}\n`);
   rmSync(log, { force: true });
   const lines = text.split('\n').filter(Boolean);
+  const targets = mainPushTargets(config);
   const made = [];
   for (const line of lines) {
     let entry;
@@ -132,30 +141,41 @@ export function pushRequestsFrom(log, history = null) {
       continue; // a line cut by a crash
     }
     const command = String(entry.tool_input?.command ?? '');
-    const target = plainPush(command, entry.cwd || ROOT);
+    // The main branch of a project that lets it go through a card.
+    const main = mainPushTarget(command, entry.cwd || ROOT, targets);
+    const target = main ?? plainPush(command, entry.cwd || ROOT);
     if (!target.branch) continue;
-    const facts = pushFacts(target);
-    if (!facts.repo || facts.main) continue;
-    const request = addPushRequest({ ...target, ...facts, command });
+    const facts = main?.facts ?? pushFacts(target);
+    if (!facts.repo || (facts.main && !main)) continue;
+    const request = addPushRequest({ ...target, ...facts, command, main: !!main });
     if (request) made.push(request);
   }
   return made;
 }
 
-/** A push request for the owner: { dir, remote, src, branch, repo, commits, count, command }. Null when the same one waits. */
-export function addPushRequest({ dir, remote, src, branch, repo, commits = [], count = 0, command = '' }) {
+/**
+ * A push request for the owner: { dir, remote, src, branch, repo, commits, count, files, fileCount, migrations,
+ * migrationCount, command }, and for the main branch main: true and its project; session (and sessionName): the "Work
+ * now" session that asks (none: the manager). Null when the same one waits.
+ */
+export function addPushRequest({ dir, remote, src, branch, repo, commits = [], count = 0, files = [], fileCount = 0, migrations = [], migrationCount = 0, command = '', main = false, project = null, session = null, sessionName = null }) {
   const list = readPushes(pushesFile());
-  const same = p => p.repo === repo && p.branch === branch && p.src === src && samePath(p.dir, dir);
+  const same = p => p.repo === repo && p.branch === branch && p.src === src && samePath(p.dir, dir) && (p.session ?? null) === (session ?? null);
+  const what = { commits: commits.slice(0, 20), count, files: files.slice(0, 20), fileCount, migrations: migrations.slice(0, 20), migrationCount, command: clip(command, 500) };
   const open = openPushes(list).find(same);
   if (open) {
     // Tried again: what it would send now.
-    Object.assign(open, { commits: commits.slice(0, 20), count, command: clip(command, 500) });
+    Object.assign(open, what);
     writeJson(pushesFile(), list);
     return null;
   }
-  const request = { id: randomUUID().slice(0, 8), status: 'open', repo, branch, dir, remote, src, commits: commits.slice(0, 20), count, command: clip(command, 500), at: now() };
+  const request = {
+    id: randomUUID().slice(0, 8), status: 'open', repo, branch, dir, remote, src, ...what,
+    ...(main ? { main: true, project } : {}), ...(session ? { session, sessionName: sessionName ?? session } : {}), at: now(),
+  };
   writeJson(pushesFile(), [...list, request].slice(-PUSHES_MAX));
-  notify(t('The manager asks to push'), t('Branch {branch} to {repo}', { branch, repo }), 'chiefmate:decisions', { urgent: true });
+  const notice = main ? mainPushNotice(request, loadConfig()) : null;
+  notify(notice?.title ?? t('The manager asks to push'), notice?.text ?? t('Branch {branch} to {repo}', { branch, repo }), 'chiefmate:decisions', { urgent: true });
   return request;
 }
 
@@ -176,12 +196,13 @@ export const answerPush = (id, allow) => answerRequest(pushesFile(), openPushes,
 
 /** The manager's line: its push requests waiting for the owner, and the pushes allowed and not used yet. */
 export function pushesLine() {
-  const list = readPushes(pushesFile());
+  const list = readPushes(pushesFile()).filter(p => !p.session);
   const open = openPushes(list);
   const allowed = list.filter(p => p.status === 'allowed' && Date.parse(p.expires) > Date.now());
+  const which = p => (p.main ? `the main branch ${p.branch}` : p.branch);
   const parts = [
-    open.length ? `waiting for the owner's card: ${open.map(p => `${p.branch} to ${p.repo}`).join('; ')}` : '',
-    allowed.length ? `allowed by the owner, once each: ${allowed.map(p => `${p.branch} to ${p.repo} from ${p.dir}, until ${formatDateTime(p.expires)} (${cliPush(p)})`).join('; ')}` : '',
+    open.length ? `waiting for the owner's card: ${open.map(p => `${which(p)} to ${p.repo}`).join('; ')}` : '',
+    allowed.length ? `allowed by the owner, once each: ${allowed.map(p => `${which(p)} to ${p.repo} from ${p.dir}, until ${formatDateTime(p.expires)} (${cliPush(p)})`).join('; ')}` : '',
   ].filter(Boolean);
   return parts.length ? `Your pushes: ${parts.join('. ')}.` : '';
 }
@@ -409,7 +430,32 @@ function questionCard(notice, q, config) {
   };
 }
 
+// A list for a card's details: up to its first items, and how many more.
+const listed = (title, items, total, code = false) => (items?.length
+  ? `${title}:\n- ${items.map(x => (code ? `\`${x}\`` : x)).join('\n- ')}${total > items.length ? `\n- ${t('and {count} more', { count: total - items.length })}` : ''}`
+  : '');
+
+// A push of the main branch: its title says at a glance what goes (commits, files, migrations).
+function mainPushCard(notice, p, config) {
+  const who = p.session ? t('the session "{name}"', { name: p.sessionName ?? p.session }) : t('the manager');
+  return {
+    id: notice.id, kind: 'push', level: notice.level, seen: false, at: p.at, project: p.project ?? null,
+    label: t('Main branch of {project}, asked by {who}', { project: projectName(config, p.project) || p.repo, who }),
+    title: t('Send the main branch ({branch}) to GitHub: {count} commit(s), {files} file(s), {migrations} migration(s)', { branch: p.branch, count: p.count ?? 0, files: p.fileCount ?? 0, migrations: p.migrationCount ?? 0 }),
+    what: t('From {folder} straight into the main branch {branch} of {repo}, with no pull request.', { folder: p.dir, branch: p.branch, repo: p.repo }),
+    change: t('Only this push is allowed: the main branch of this repository, from this folder, once, within {minutes} minutes; {who} then sends it. Never a forced push, never a deleted branch.', { minutes: GRANT_MINUTES, who }),
+    risk: [
+      t('Whoever uses the main branch gets these commits at once, and undoing them takes a new commit.'),
+      p.migrationCount ? t('It carries {count} migration(s): the database changes wherever this is applied.', { count: p.migrationCount }) : '',
+    ].filter(Boolean).join(' '),
+    recommend: '', recommendShort: '',
+    detail: [listed(t('Commits'), p.commits, p.count), listed(t('Migrations'), p.migrations, p.migrationCount, true), listed(t('Files'), p.files, p.fileCount, true), `${t('Command')}: \`${p.command}\``].filter(Boolean).join('\n\n'),
+    push: p.id, approve: true, main: true, session: p.session ?? null, approval: 3,
+  };
+}
+
 function pushCard(notice, p, config) {
+  if (p.main) return mainPushCard(notice, p, config);
   const project = Object.entries(config.projects ?? {}).find(([, x]) => x.repository && repoOf(x.repository) === p.repo)?.[0] ?? null;
   const more = p.count > (p.commits?.length ?? 0) ? `\n- ${t('and {count} more', { count: p.count - p.commits.length })}` : '';
   const commits = p.commits?.length ? `${t('Commits')}:\n- ${p.commits.join('\n- ')}${more}` : '';
@@ -455,7 +501,7 @@ export function decisionCards({ config = loadConfig(), attention = [], items = [
         if (r) cards.push(repoCard(n, r));
       } else if (n.kind === 'push') {
         const p = pushes.find(x => n.id === `push:${x.id}`);
-        if (p) cards.push(pushCard(n, p, config));
+        if (p && mainCardOn(config, p)) cards.push(pushCard(n, p, config));
       } else if (n.kind === 'question') {
         const q = questions.find(x => n.id === `question:${x.id}`);
         if (q) cards.push(questionCard(n, q, config));
@@ -521,10 +567,22 @@ export async function decide({ card, action, option, note, reason } = {}, cards 
     return { card: c.id, done: action === 'approve' ? 'approved' : 'discarded' };
   } else if (c.kind === 'push' && ['approve', 'discard'].includes(action)) {
     const p = answerPush(c.push, action === 'approve');
-    if (p.status === 'allowed') {
-      reportEvent('push_allowed', `The owner allowed, from the app, your push of branch ${p.branch} to ${p.repo} (from ${p.dir}), once, until ${formatDateTime(p.expires)}. Run it now: the same command (${p.command}) or ${cliPush(p)}.`, { urgent: true });
+    const what = p.main ? `push of the main branch ${p.branch} of ${p.project ?? p.repo} to ${p.repo}` : `push of branch ${p.branch} to ${p.repo}`;
+    if (p.status === 'allowed') logPush(pushesFile(), 'allowed', p);
+    // A "Work now" session hears it in its conversation, as a message from the app; the manager, as news.
+    if (p.session) {
+      const owner = loadConfig().owner || 'The owner';
+      try {
+        sayToSession(p.session, p.status === 'allowed'
+          ? `${owner} allowed, on its card in the Chiefmate app, your ${what} (from ${p.dir}), once, until ${formatDateTime(p.expires)}. Run the same command again now: ${p.command}`
+          : `${owner} refused, on its card in the Chiefmate app, your ${what} (from ${p.dir}). Don't try it again.`);
+      } catch (error) {
+        console.error(`Decisions: session ${p.session}:`, error.message); // the answer stands; the session is gone
+      }
+    } else if (p.status === 'allowed') {
+      reportEvent('push_allowed', `The owner allowed, from the app, your ${what} (from ${p.dir}), once, until ${formatDateTime(p.expires)}. Run it now: the same command (${p.command}) or ${cliPush(p)}.`, { urgent: true });
     } else {
-      tell(`The owner refused, from the app, your push of branch ${p.branch} to ${p.repo} (from ${p.dir}). Don't try it again.`);
+      tell(`The owner refused, from the app, your ${what} (from ${p.dir}). Don't try it again.`);
     }
     return { card: c.id, done: p.status };
   } else if (c.kind === 'repo' && ['approve', 'discard'].includes(action)) {

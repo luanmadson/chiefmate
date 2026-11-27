@@ -18,7 +18,7 @@ import { browserServers } from './browsers.mjs';
 import { addRequest, chargeFolder, chargeProfile, chargeProject, chargeTurn, takeRequest, turnChanges } from './charge.mjs';
 import { describeAction, environment, runClaude } from './claude.mjs';
 import { loadConfig } from './config.mjs';
-import { API, guardHooks, publishing } from './guard.mjs';
+import { API, guardHooks, mainPushTarget, mainPushTargets, PUSH, publishing, pushesFile, readPushes } from './guard.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { computer, formatBytes, processes, refreshProcesses } from './machine.mjs';
 import { reportEvent } from './news.mjs';
@@ -652,6 +652,11 @@ export function deliverSession(id) {
     }
   }
   const changes = projectChanges(config, session, turn);
+  // "Work now": a push of the main branch the owner allowed on its card (src/decisions.mjs) goes once through the
+  // guard, the only push it lets go without the session's permission to push.
+  const work = !!session.work && !charge;
+  const granted = work && readPushes(pushesFile()).some(g => g.status === 'allowed' && Date.parse(g.expires) > Date.now() && g.session === id);
+  const mainCard = work ? { grants: pushesFile(), session: id, mainCard: mainPushTargets(config) } : {};
   // News goes in the turn's own text: a resumed conversation reads nothing newer than its first instructions (see turnChanges).
   const withNews = (...lead) => (lead.some(Boolean) ? `${lead.filter(Boolean).join('\n\n')}\n\n## This turn\n\n${prompt}` : prompt);
   // One call of Claude Code; when its session is not where the turn count says (see SESSION_EXISTS), once more the other way.
@@ -661,8 +666,8 @@ export function deliverSession(id) {
       dir: session.cwd, prompt: withNews(charge && !resume ? charge.requests : '', changes),
       system: charge?.system ?? [appSystem(config.owner || 'the owner'), ...(session.work ? [workSystem(config, session)] : [])].join('\n'), model: charge?.model ?? session.model ?? config.default_model,
       tools: charge ? charge.tools : [...APP_TOOLS, ...mcp.tools, ...(session.allowed ?? []).filter(r => !ASK_FIRST.includes(r))],
-      disallowed: [...(charge ? [...charge.disallowed, ...ASK_FIRST] : ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r))), ...denyRules(ownerKeyFile(), false)], mcpServers: charge ? {} : browserServers(config, mcp.servers, sessionBrowser(session)),
-      addDirs: charge?.addDirs ?? [], hooks: guardHooks({ log: guardLog(id), allowed: charge ? [] : session.allowed ?? [], who: 'session', noMain: !!session.work }),
+      disallowed: [...(charge ? [...charge.disallowed, ...ASK_FIRST] : ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r) && !(granted && r === PUSH))), ...denyRules(ownerKeyFile(), false)], mcpServers: charge ? {} : browserServers(config, mcp.servers, sessionBrowser(session)),
+      addDirs: charge?.addDirs ?? [], hooks: guardHooks({ log: guardLog(id), allowed: charge ? [] : session.allowed ?? [], who: 'session', noMain: !!session.work, ...mainCard }),
       attribution: config.attribution !== false, maxMinutes: TURN_MINUTES, env: sessionEnv(id),
       session: { id: session.toolSession, resume }, log: rawLog(id), onEvent,
     });
@@ -775,8 +780,19 @@ function finishTurn(id, turn, r) {
     }
   }) : [];
   rmSync(guardLog(id), { force: true });
+  // "Work now": a push of the main branch of a project that lets it go through the owner's card ("main_push": "card")
+  // becomes that card in Decisions (src/decisions.mjs), never a permission request: the session's permission to push
+  // never lets the main branch go.
+  const all = [...(r.denials ?? []), ...guarded];
+  const targets = session.work && !session.charge ? mainPushTargets(loadConfig()) : [];
+  const mains = !targets.length ? [] : all.flatMap(d => {
+    const target = d?.tool_name === 'Bash' ? mainPushTarget(String(d.tool_input?.command ?? ''), d.cwd || session.cwd, targets) : null;
+    return target ? [{ d, target }] : [];
+  });
+  const carded = new Set(mains.map(m => m.d.tool_use_id).filter(Boolean));
+  if (mains.length) mainPushCards(id, session, mains);
   // The agent in charge has nothing to ask permission for: it only reads, and sends requests to the manager.
-  const refused = [...(r.denials ?? []), ...guarded];
+  const refused = all.filter(d => !mains.some(m => m.d === d) && !(d?.tool_use_id && carded.has(d.tool_use_id)));
   if (session.charge && refused.length) note(id, t('The agent in charge tried to change something, which it never does: what is to be done goes to the manager as a request.'));
   for (const d of session.charge ? [] : refused) {
     const ask = permissionOf(d, session.cwd);
@@ -790,6 +806,26 @@ function finishTurn(id, turn, r) {
   }
   saveSession(session);
   deliverSession(id);
+}
+
+/**
+ * The pushes of the main branch a "Work now" session tried, as cards for the owner (src/decisions.mjs, loaded when
+ * needed: it loads this module): a note in the conversation and a milestone for the manager, once per card.
+ */
+function mainPushCards(id, session, mains) {
+  import('./decisions.mjs').then(({ addPushRequest }) => {
+    const config = loadConfig();
+    const latest = readSession(id);
+    for (const { d, target } of mains) {
+      const request = addPushRequest({ ...target, ...target.facts, command: String(d.tool_input?.command ?? ''), main: true, session: id, sessionName: session.name });
+      if (!request) continue;
+      note(id, t('The push of the main branch ({branch}) waits for your card in Decisions: {count} commit(s), {files} file(s), {migrations} migration(s). Once you allow it, the agent is told and sends it.', {
+        branch: request.branch, count: request.count, files: request.fileCount, migrations: request.migrationCount,
+      }));
+      if (latest?.work) milestone(config, latest, `the agent asks the owner, on a card, to push the main branch ${request.branch} to ${request.repo} (${request.count} commit(s))`, { kind: 'ask:main-push' });
+    }
+    if (latest?.work) saveSession(latest);
+  }).catch(error => note(id, t('The push of the main branch could not become a card: {error}', { error: error.message }), { error: true }));
 }
 
 /** A refused tool use, as a request: what it would do and the rule that allows it. */

@@ -31,6 +31,17 @@ const WINDOWS = [
 const ago = (iso, span) => iso && Date.now() - Date.parse(iso) <= span;
 
 /**
+ * A push of the main branch as a notice: who asks ("title") and what it carries, at a glance ("text": "main of ATLAS:
+ * 3 commit(s), 12 file(s), 1 migration(s)").
+ */
+export const mainPushNotice = (p, config) => ({
+  title: p.session ? t('{session} asks to push the main branch', { session: p.sessionName ?? p.session }) : t('The manager asks to push the main branch'),
+  text: t('{branch} of {project}: {count} commit(s), {files} file(s), {migrations} migration(s)', {
+    branch: p.branch, project: config?.projects?.[p.project]?.name ?? p.project ?? p.repo, count: p.count ?? 0, files: p.fileCount ?? 0, migrations: p.migrationCount ?? 0,
+  }),
+});
+
+/**
  * The notices now, most urgent first: { id, level, kind, title, text, view, project, run, at, seen, seenable }.
  * "view" is the app's place that deals with it; a request of a step carries what its buttons need ("I did it", or a question's options).
  */
@@ -58,9 +69,12 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
       request: { id: n.id, kind: n.kind ?? null, run: n.run ?? null, session: n.session ?? null, url: n.url ?? null, openError: n.openError ?? null, agent: n.agent ?? null, explain: n.explain ?? null, options: n.options ?? null, recommend: n.recommend ?? null, why: n.why ?? null },
     });
   }
-  // Urgent: a push the manager tried, for the owner to allow once or refuse (its card, src/decisions.mjs).
+  // Urgent: a push the manager tried, for the owner to allow once or refuse (its card, src/decisions.mjs). The main
+  // branch, by the manager or a "Work now" session, only while its project lets it go through a card.
   for (const p of pushes) {
-    add({ id: `push:${p.id}`, level: 'urgent', kind: 'push', title: t('The manager asks to push'), text: t('Branch {branch} to {repo}', { branch: p.branch, repo: p.repo }), view: 'manager', at: p.at, seenable: false });
+    if (p.main && config?.projects?.[p.project]?.main_push !== 'card') continue;
+    const main = p.main ? mainPushNotice(p, config) : null;
+    add({ id: `push:${p.id}`, level: 'urgent', kind: 'push', title: main?.title ?? t('The manager asks to push'), text: main?.text ?? t('Branch {branch} to {repo}', { branch: p.branch, repo: p.repo }), view: 'manager', project: main ? p.project ?? null : null, at: p.at, seenable: false });
   }
   // Urgent: a private repository the manager asks to create from a folder (its card, src/decisions.mjs).
   for (const r of repos) {
