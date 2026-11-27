@@ -18,6 +18,10 @@ const lockFile = (dir = SECURITY_DIR) => path.join(dir, 'lockdown.json');
 const signalsFile = (dir = SECURITY_DIR) => path.join(dir, 'signals.jsonl');
 /** The owner's local key (src/owner.mjs): only the server and the owner's command line read it. */
 export const ownerKeyFile = (dir = SECURITY_DIR) => path.join(dir, 'owner-key');
+/** Chiefmate's secrets (src/escalation.mjs): like the owner's key, out of every agent's reach. */
+export const secretsFolder = (data = DATA) => path.join(data, 'secrets');
+const createdFile = (dir = SECURITY_DIR) => path.join(dir, 'created.jsonl');
+const incidentsFile = (dir = SECURITY_DIR) => path.join(dir, 'incidents.jsonl');
 
 // The signals the detection weighs, with how many within WINDOW_MINUTES warn the owner and how many lock Chiefmate.
 export const RULES = {
@@ -39,8 +43,12 @@ export const WINDOW_MINUTES = 15;
 const KEEP_SIGNALS = 1000; // lines kept when the file is trimmed
 const TRIM_AT = 512 * 1024;
 const KEEP_HISTORY = 20;
+const KEEP_NOTES = 20;
 
-/** The lockdown's state: { active, since, by, from, reason, evidence, stopped, warnings, warned, history }. */
+/**
+ * The lockdown's state: { active, since, by, from, reason, evidence, stopped, notes, sentinel, warnings, warned,
+ * history }. notes: the owner's notes on this alarm; sentinel: the emergency watch's review (src/sentinel.mjs).
+ */
 export const readLockdown = dir => readJson(lockFile(dir), {});
 export const isLocked = dir => readLockdown(dir).active === true;
 const saveLockdown = (state, dir) => writeJson(lockFile(dir), state);
@@ -53,20 +61,27 @@ export function refuseWhileLocked(what, dir) {
 
 /**
  * The folders no agent may reach: the owner's browser profile (data/browser-profile), the crew's browser profiles
- * (data/browsers), the owner's local key and those listed in "security.protected_folders" of the settings.
+ * (data/browsers), the owner's local key, Chiefmate's secrets (data/secrets: the Telegram bot's token, the PIN's hash,
+ * src/escalation.mjs) and those listed in "security.protected_folders" of the settings.
  */
 export function protectedFolders(config = loadConfig(), data = DATA) {
   const extra = [config?.security?.protected_folders ?? []].flat().map(x => String(x ?? '').trim()).filter(Boolean);
-  return [path.join(data, 'browser-profile'), path.join(data, 'browsers'), ownerKeyFile(path.join(data, 'security')), ...extra.map(p => path.resolve(p))];
+  return [path.join(data, 'browser-profile'), path.join(data, 'browsers'), ownerKeyFile(path.join(data, 'security')),
+    secretsFolder(data), ...extra.map(p => path.resolve(p))];
 }
 
 /**
- * Notes a signal for the detection: { at, kind, detail, who }. Never throws: a signal never gets in the way of the
- * command that raised it. who: 'step', 'manager', 'session', 'app', 'remote' or 'cli'.
+ * Notes a signal for the detection: { at, kind, detail, who, ...facts }. Never throws: a signal never gets in the way of
+ * the command that raised it. who: 'step', 'manager', 'session', 'app', 'remote' or 'cli'. facts, for the emergency
+ * watch (src/sentinel.mjs): run, step, session (who ran it), cwd, command (the whole command), refused (whether the
+ * guard refused it), target (a deletion's folder) and existed (whether that folder existed before the command).
  */
-export function recordSignal(kind, detail, { who = null, dir, at = new Date().toISOString() } = {}) {
+export function recordSignal(kind, detail, { who = null, dir, at = new Date().toISOString(), ...facts } = {}) {
   if (!RULES[kind]) return null;
   const signal = { at, kind, detail: clip(String(detail ?? ''), 300), who };
+  for (const key of ['run', 'step', 'session', 'cwd', 'target']) if (facts[key]) signal[key] = clip(String(facts[key]), 300);
+  if (facts.command) signal.command = clip(String(facts.command), 1000);
+  for (const key of ['refused', 'existed']) if (typeof facts[key] === 'boolean') signal[key] = facts[key];
   try {
     ensureDir(dir ?? SECURITY_DIR);
     appendFileSync(signalsFile(dir), `${JSON.stringify(signal)}\n`);
@@ -76,18 +91,51 @@ export function recordSignal(kind, detail, { who = null, dir, at = new Date().to
   return signal;
 }
 
+/**
+ * Notes the folders an agent's command creates outside its own folder ({ at, path, run, step, session, who }), so the
+ * emergency watch knows a folder deleted later was the same step's. Never throws.
+ */
+export function recordCreated(paths, { who = null, run = null, step = null, session = null, dir, at = new Date().toISOString() } = {}) {
+  if (!paths?.length) return;
+  try {
+    ensureDir(dir ?? SECURITY_DIR);
+    const file = createdFile(dir);
+    appendFileSync(file, paths.map(p => `${JSON.stringify({ at, path: String(p), run, step, session, who })}\n`).join(''));
+    if (statSync(file).size > TRIM_AT) writeFileSync(file, `${readLines(file).slice(-KEEP_SIGNALS).join('\n')}\n`);
+  } catch {
+    // noting never gets in the way of the command
+  }
+}
+
+const readLines = file => (existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter(Boolean) : []);
+const parseLines = lines => lines.flatMap(line => {
+  try {
+    return [JSON.parse(line)];
+  } catch {
+    return [];
+  }
+});
+
+/** The folders the agents' commands created (see recordCreated), oldest first. */
+export const readCreated = dir => parseLines(readLines(createdFile(dir)).slice(-KEEP_SIGNALS));
+
+/** The incidents, oldest first: one line per lockdown released, with its evidence, notes and the watch's review. */
+export const readIncidents = dir => parseLines(readLines(incidentsFile(dir)).slice(-200));
+
+function recordIncident(entry, dir) {
+  try {
+    ensureDir(dir ?? SECURITY_DIR);
+    appendFileSync(incidentsFile(dir), `${JSON.stringify(entry)}\n`);
+  } catch (error) {
+    console.error('Lockdown: the incident was not recorded:', error.message);
+  }
+}
+
 function readSignals(dir) {
   const file = signalsFile(dir);
-  if (!existsSync(file)) return [];
-  const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean);
-  if (statSync(file).size > TRIM_AT) writeFileSync(file, `${lines.slice(-KEEP_SIGNALS).join('\n')}\n`);
-  return lines.slice(-KEEP_SIGNALS).flatMap(line => {
-    try {
-      return [JSON.parse(line)];
-    } catch {
-      return [];
-    }
-  });
+  const lines = readLines(file);
+  if (lines.length && statSync(file).size > TRIM_AT) writeFileSync(file, `${lines.slice(-KEEP_SIGNALS).join('\n')}\n`);
+  return parseLines(lines.slice(-KEEP_SIGNALS));
 }
 
 /**
@@ -152,6 +200,8 @@ export async function engage({ reason = '', by = 'owner', from = 'app', evidence
     reason: again ? state.reason : clip(String(reason ?? '').trim(), 500) || t('Engaged by the owner'),
     evidence: [...(again ? state.evidence ?? [] : []), ...evidence].slice(-30),
     stopped: again ? state.stopped ?? {} : {},
+    // A person engaging it again while it is on: the emergency watch then leaves the release to the owner.
+    engagedAgain: again ? (by !== 'auto' ? { at, by, from } : state.engagedAgain ?? null) : null,
   }, dir);
   let stopped;
   try {
@@ -161,32 +211,85 @@ export async function engage({ reason = '', by = 'owner', from = 'app', evidence
   }
   const now = readLockdown(dir);
   const sum = { ...now.stopped };
-  for (const [k, v] of Object.entries(stopped)) sum[k] = typeof v === 'number' ? (sum[k] ?? 0) + v : v;
+  // Counts add up; lists (runIds: the runs stopped, which the emergency watch may resume) are joined.
+  for (const [k, v] of Object.entries(stopped)) {
+    sum[k] = typeof v === 'number' ? (sum[k] ?? 0) + v : Array.isArray(v) ? [...new Set([...(sum[k] ?? []), ...v])] : v;
+  }
   saveLockdown({ ...now, stopped: sum }, dir);
   if (!again) {
-    const text = t('Emergency lockdown: {reason}. Everything was stopped; pushes, merges, new repositories, external actions and the remote access are refused until you release it on this computer.', { reason: now.reason });
+    const automatic = now.by === 'auto' && now.from === 'detection';
+    const text = automatic
+      ? t('Emergency lockdown: {reason}. Everything was stopped. The emergency watch is checking whether it is a false alarm; if it is not sure, it stays locked for you.', { reason: now.reason })
+      : t('Emergency lockdown: {reason}. Everything was stopped; pushes, merges, new repositories, external actions and the remote access are refused until you release it on this computer.', { reason: now.reason });
     try {
-      const news = `Chiefmate is in emergency lockdown since ${now.since} (${now.by === 'auto' ? 'engaged by the detection' : `engaged by the ${now.by}`}): ${now.reason}. Everything was stopped. Don't queue or retry anything; tell the owner only what they need to review before releasing it on the computer.`;
+      const news = `Chiefmate is in emergency lockdown since ${now.since} (${now.by === 'auto' ? 'engaged by the detection' : `engaged by the ${now.by}`}): ${now.reason}. Everything was stopped. Don't queue or retry anything; tell the owner only what they need to review before releasing it on the computer.${automatic ? ' The emergency watch (Sentinel) is reviewing it now; you will get its report.' : ''}`;
       h.tell({ kind: 'lockdown', title: t('Emergency lockdown'), text, news });
     } catch {
       // telling never gets in the way of the lockdown
     }
+    // The emergency watch (src/sentinel.mjs) reviews what the detection engaged; never what a person engaged.
+    if (automatic) Promise.resolve().then(() => h.review?.(readLockdown(dir))).catch(error => console.error('Emergency watch:', error.message));
   }
   return readLockdown(dir);
 }
 
+/** The incident's entry for data/security/incidents.jsonl: its whole evidence, notes and review. */
+function incidentEntry(state, { until, releasedBy, releasedFrom }) {
+  return {
+    since: state.since, until, by: state.by, from: state.from, reason: state.reason,
+    evidence: state.evidence ?? [], stopped: state.stopped ?? {}, notes: state.notes ?? [], sentinel: state.sentinel ?? null,
+    escalation: state.escalation ?? null,
+    ...(state.engagedAgain ? { engagedAgain: state.engagedAgain } : {}),
+    releasedBy, releasedFrom,
+  };
+}
+
 /**
- * Releases the lockdown: only the owner, on this computer (from: 'app' or 'cli'; never 'remote'). The summary of what
- * triggered it goes to the history. Returns the state.
+ * The same, in short, for the history kept in lockdown.json (read before every agent's command): the evidence counted
+ * and the watch's decision; the whole record stays in incidents.jsonl.
  */
-export function release({ by = 'owner', from = 'app' } = {}, { dir, h = hooks } = {}) {
-  if (from === 'remote') throw new Error(t('The lockdown is released only on the computer where Chiefmate runs, not through the remote access.'));
-  if (by !== 'owner') throw new Error(t('Only the owner releases the lockdown.'));
+function historyEntry(entry) {
+  const s = entry.sentinel;
+  return { ...entry, evidence: entry.evidence.length, sentinel: s ? { status: s.status, at: s.at, decision: s.decision, actions: s.actions } : null };
+}
+
+/**
+ * The owner's note on the alarm going on (the field of the lockdown's screen, on this computer or the phone): kept in
+ * the alarm's record and handed to the manager as the owner's message, with the event. Only while it is on: when it is
+ * over, a note would no longer be about this alarm. Returns the state.
+ */
+export function addNote(text, { from = 'app' } = {}, { dir, h = hooks } = {}) {
+  const note = clip(String(text ?? '').trim(), 2000);
+  if (!note) throw new Error(t('Write a note.'));
   const state = readLockdown(dir);
   if (state.active !== true) throw new Error(t('Chiefmate is not locked down.'));
+  const entry = { at: new Date().toISOString(), text: note, from: from === 'remote' ? 'remote' : from === 'cli' ? 'cli' : 'app' };
+  const next = { ...state, notes: [...(state.notes ?? []), entry].slice(-KEEP_NOTES) };
+  saveLockdown(next, dir);
+  try {
+    h.ownerNote?.(note, next);
+  } catch {
+    // the note stays in the record
+  }
+  return next;
+}
+
+/**
+ * Releases the lockdown: only the owner, on this computer (from: 'app' or 'cli'; never 'remote'), or from their own
+ * Telegram chat with their PIN (from: 'telegram', only through src/escalation.mjs, once the PIN matched). The summary of
+ * what triggered it goes to the history. Returns the state.
+ */
+export function release({ by = 'owner', from = 'app', note = '' } = {}, { dir, h = hooks } = {}) {
+  if (from === 'remote') throw new Error(t('The lockdown is released only on the computer where Chiefmate runs, not through the remote access.'));
+  if (by !== 'owner') throw new Error(t('Only the owner releases the lockdown.'));
+  if (readLockdown(dir).active !== true) throw new Error(t('Chiefmate is not locked down.'));
+  // The owner's note that goes with the release: in the record, and to the manager as their message.
+  if (String(note ?? '').trim()) addNote(note, { from }, { dir, h });
+  const state = readLockdown(dir);
   const at = new Date().toISOString();
-  const entry = { since: state.since, until: at, by: state.by, from: state.from, reason: state.reason, evidence: (state.evidence ?? []).length, stopped: state.stopped ?? {}, releasedFrom: from };
-  const next = { ...state, active: false, released: at, evidence: [], stopped: {}, history: [...(state.history ?? []), entry].slice(-KEEP_HISTORY) };
+  const entry = incidentEntry(state, { until: at, releasedBy: 'owner', releasedFrom: from });
+  recordIncident(entry, dir);
+  const next = { ...state, active: false, released: at, evidence: [], stopped: {}, notes: [], sentinel: null, escalation: null, engagedAgain: null, history: [...(state.history ?? []), historyEntry(entry)].slice(-KEEP_HISTORY) };
   saveLockdown(next, dir);
   try {
     h.resume();
@@ -195,6 +298,54 @@ export function release({ by = 'owner', from = 'app' } = {}, { dir, h = hooks } 
       text: t('The owner released the emergency lockdown (it began {since}: {reason}). The queue goes on.', { since: formatDateTime(state.since), reason: state.reason }),
       news: `The owner released the emergency lockdown (it began ${state.since}: ${state.reason}). The queue goes on; the runs it stopped stay canceled until resumed.`,
     });
+  } catch {
+    // the release stands
+  }
+  return next;
+}
+
+/**
+ * Keeps the emergency watch's review (src/sentinel.mjs) in the alarm's state, for the app: { status: 'reviewing',
+ * 'escalated' or 'released', ... }. Only for the alarm it reviews (since). Returns the state, or null when that alarm
+ * is over.
+ */
+export function saveReview(since, review, dir) {
+  const state = readLockdown(dir);
+  if (state.active !== true || state.since !== since) return null;
+  const next = { ...state, sentinel: review };
+  saveLockdown(next, dir);
+  return next;
+}
+
+/**
+ * Keeps the call to the owner outside the app (src/escalation.mjs) in the alarm's state, for the app and the record:
+ * { at, channels, errors, decisions }. Only for that alarm (since). Returns the state, or null when it is over.
+ */
+export function saveEscalation(since, patch, dir) {
+  const state = readLockdown(dir);
+  if (state.active !== true || state.since !== since) return null;
+  const next = { ...state, escalation: { ...state.escalation, ...patch } };
+  saveLockdown(next, dir);
+  return next;
+}
+
+/**
+ * The emergency watch's release (src/sentinel.mjs), the one exception to the owner's: only the alarm it reviewed
+ * (since), engaged by the detection, and only when its review decided so. The app, the command line and the remote
+ * access never reach it. The incident is recorded with the review; the queue, the manager and the sessions go on
+ * (the runs to resume are the watch's). Returns the state, or null when that alarm is no longer the one on.
+ */
+export function sentinelRelease(since, review, { dir, h = hooks } = {}) {
+  const state = readLockdown(dir);
+  if (state.active !== true || state.since !== since || state.by !== 'auto' || state.from !== 'detection' || state.engagedAgain || review?.decision?.release !== true) return null;
+  const at = new Date().toISOString();
+  const reviewed = { ...state, sentinel: { ...review, status: 'released', at } };
+  const entry = incidentEntry(reviewed, { until: at, releasedBy: 'sentinel', releasedFrom: 'sentinel' });
+  recordIncident(entry, dir);
+  const next = { ...reviewed, active: false, released: at, evidence: [], stopped: {}, notes: [], sentinel: null, escalation: null, engagedAgain: null, history: [...(state.history ?? []), historyEntry(entry)].slice(-KEEP_HISTORY) };
+  saveLockdown(next, dir);
+  try {
+    h.resume();
   } catch {
     // the release stands
   }
@@ -262,7 +413,19 @@ export function lockdownView(state = readLockdown()) {
     reason: state.reason ?? null,
     evidence: (state.evidence ?? []).slice(-10).map(e => ({ ...e, what: signalName(e.kind) })),
     stopped: state.stopped ?? {},
+    notes: state.notes ?? [],
+    // The emergency watch's review of this alarm (src/sentinel.mjs): reviewing, or escalated to the owner with why.
+    sentinel: state.sentinel ?? null,
+    // The call to the owner outside the app (src/escalation.mjs): where it went, and what they chose there.
+    escalation: state.escalation ?? null,
     warnings: (state.warnings ?? []).filter(w => Date.parse(w.at) > day),
-    last: state.history?.at(-1) ?? null,
+    last: lastView(state.history?.at(-1)),
   };
+}
+
+/** The last alarm, as the app shows it: who released it, and the watch's report when it did. */
+function lastView(entry) {
+  if (!entry) return null;
+  const { evidence, stopped, notes, sentinel, escalation, ...rest } = entry;
+  return { ...rest, evidence: Array.isArray(evidence) ? evidence.length : evidence ?? 0, notes: notes ?? [], sentinel: sentinel ?? null };
 }

@@ -78,6 +78,7 @@
     "voice_input": true
   },
   "security": {
-    "protected_folders": []
+    "protected_folders": [],
+    "sentinel": true
   }
 }

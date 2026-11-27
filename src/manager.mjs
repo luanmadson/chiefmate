@@ -25,7 +25,7 @@ import { listSessions, readSession, sessionsLine } from './sessions.mjs';
 import { workLine } from './worknow.mjs';
 import { talkSituation } from './talk.mjs';
 import { addMessage, listRuns, readPending, readRun, readState, readUsage, savePending, saveState, stepsOf } from './store.mjs';
-import { isLocked, ownerKeyFile } from './lockdown.mjs';
+import { isLocked, ownerKeyFile, secretsFolder } from './lockdown.mjs';
 import { denyRules } from './access.mjs';
 import { updateInfo, updating } from './update.mjs';
 import { stopping } from './power.mjs';
@@ -56,8 +56,9 @@ const guardHistory = () => path.join(ensureDir(MANAGER_DIR), 'guard-history.json
 // In the conversation the manager works in Chiefmate's own folder: it never commits there, and never pushes (the guard,
 // guard.mjs, also refuses a publication written any other way; each refusal is kept in guard-history.jsonl). The one exception
 // is a push the owner allowed once on its card (src/decisions.mjs): while one is allowed, "git push" is left to the guard.
-// The owner's local key (src/owner.mjs) is out of its file tools' reach; the guard refuses a command that names it.
-const CHAT_DISALLOWED = ['Agent', 'WebSearch', 'WebFetch', 'Bash(git commit:*)', ...ALWAYS_DISALLOWED, ...denyRules(ownerKeyFile(), false)];
+// The owner's local key (src/owner.mjs) and Chiefmate's secrets (src/escalation.mjs) are out of its file tools' reach;
+// the guard refuses a command that names them.
+const CHAT_DISALLOWED = ['Agent', 'WebSearch', 'WebFetch', 'Bash(git commit:*)', ...ALWAYS_DISALLOWED, ...denyRules(ownerKeyFile(), false), ...denyRules(secretsFolder())];
 
 // The manager reads every reference library; the copies are refreshed at most every 10 minutes.
 let libraryCopies = [];
