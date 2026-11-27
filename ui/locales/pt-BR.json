@@ -2003,5 +2003,8 @@
   "File not found": "Arquivo não encontrado",
   "Path copied.": "Caminho copiado.",
   "Open on the computer": "Abrir no computador",
-  "Copy the path": "Copiar o caminho"
+  "Copy the path": "Copiar o caminho",
+  "Refused: this is the owner's, and the request doesn't carry the owner's key.": "Recusado: isto é do dono, e o pedido não traz a chave do dono.",
+  "This pairing code is not valid: open Chiefmate again from its shortcut.": "Este código de pareamento não vale: abra o Chiefmate de novo pelo atalho.",
+  "This is yours to do: Chiefmate is opening the app again to recognize you. Try again in the new window.": "Isto é seu: o Chiefmate está abrindo o app de novo para reconhecer você. Tente outra vez na nova janela."
 }
