@@ -75,9 +75,10 @@ export const ALWAYS_DISALLOWED = ['Bash(git push:*)', 'Bash(gh pr:*)', 'Bash(gh 
 
 /**
  * The guard of a crew step or of the manager: refuses any publication, noting each refusal in "log" (nothing is ever
- * allowed). grants: the manager's only, the pushes the owner allowed it once (src/decisions.mjs).
+ * allowed). grants: the manager's only, the pushes the owner allowed it once (src/decisions.mjs); mainCard: where the
+ * main branch may go through such a card (src/guard.mjs, mainPushTargets).
  */
-export const crewGuard = (log, grants = null) => guardHooks({ log, allowed: [], grants });
+export const crewGuard = (log, grants = null, mainCard = []) => guardHooks({ log, allowed: [], grants, mainCard });
 
 /** Chiefmate's command line, for a step: to ask for the owner (src/needs.mjs) and to propose items (src/planning.mjs). */
 function cliCommand() {

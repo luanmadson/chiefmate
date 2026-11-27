@@ -1259,13 +1259,16 @@ async function main() {
       (await import('./lockdown.mjs')).refuseWhileLocked('push');
       const [dir, branch] = words();
       if (!dir || !branch) throw new Error('Which folder and branch? node src/cli.mjs push <folder> <branch>');
-      const { pushesFile } = await import('./decisions.mjs');
-      const { grantFor, pushFacts, readPushes, samePath, takeGrant } = await import('./guard.mjs');
-      const asked = readPushes(pushesFile()).find(g => g.status === 'allowed' && Date.parse(g.expires) > Date.now() && g.branch === branch && samePath(g.dir, dir));
+      const { grantFor, mainCardProject, mainPushTargets, pushesFile, pushFacts, readPushes, samePath, takeGrant } = await import('./guard.mjs');
+      const asked = readPushes(pushesFile()).find(g => g.status === 'allowed' && Date.parse(g.expires) > Date.now() && !g.session && g.branch === branch && samePath(g.dir, dir));
       const target = asked && { dir: asked.dir, remote: asked.remote, src: asked.src, branch: asked.branch };
       // The facts again, now: the remote may point elsewhere since the card, or the branch have become the default one.
       const facts = target ? pushFacts(target) : null;
-      if (!target || !grantFor([asked], target, facts) || !takeGrant(pushesFile(), target, facts)) {
+      // The main branch, only while its project still lets it go through the owner's card ("main_push": "card").
+      if (asked?.main && mainCardProject(mainPushTargets(loadConfig()), target.dir, facts?.repo) == null) {
+        throw new Error(`The main branch of the project in ${dir} no longer goes to GitHub through the owner's card ("main_push": "card" is off): nothing was sent.`);
+      }
+      if (!target || !grantFor([asked], target, facts, 'manager', !!asked.main) || !takeGrant(pushesFile(), target, facts, 'manager', !!asked.main)) {
         throw new Error(`The owner has not allowed a push of ${branch} from ${dir} now (or it expired, or was used). Try the push itself (git -C <folder> push <remote> <branch>): the owner gets a card to allow it once.`);
       }
       const { spawnSync } = await import('node:child_process');

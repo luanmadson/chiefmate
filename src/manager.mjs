@@ -13,7 +13,7 @@ import { autopilotLine } from './autopilot.mjs';
 import { awayInfo, awayLine } from './news.mjs';
 import { computerLine, planLine } from './plan.mjs';
 import { pushesFile, pushesLine, pushRequestsFrom, questionsLine, reposLine } from './decisions.mjs';
-import { PUSH, readPushes } from './guard.mjs';
+import { mainPushTargets, PUSH, readPushes } from './guard.mjs';
 import { requestsLine } from './charge.mjs';
 import { defectsLine, senderLabel } from './defects.mjs';
 import { planningLine } from './planning.mjs';
@@ -178,7 +178,8 @@ export function situation(libraries = []) {
   if (away) lines.push(away);
   lines.push(contextLine());
   const delivery = p => (p.deliver === 'local' ? `, local delivery: the result is a branch in ${p.local_clone ?? 'the working copy'}, nothing goes to GitHub` : ', delivered as a pull request')
-    + (noTrace(p) ? ', no trace: others work on it, so its branch names (from the run titles), commits and files never name Chiefmate' : '');
+    + (noTrace(p) ? ', no trace: others work on it, so its branch names (from the run titles), commits and files never name Chiefmate' : '')
+    + (p.main_push === 'card' ? ', its main branch goes to GitHub through the owner\'s card (main_push): a plain "git -C <folder> push <remote> <main branch>" when the owner asks' : '');
   lines.push(`Projects: ${Object.entries(config.projects ?? {}).map(([id, p]) => `${id} (${p.name}, ${p.repository}${delivery(p)}${p.docs ? `, personal docs in ${p.docs}` : ''})`).join('; ') || 'none'}.`);
   for (const l of libraries) lines.push(`Reference library ${l.id} (${l.name}), read only, a copy refreshed from GitHub: ${l.dir}. ${l.about}`.trim());
   lines.push(`Crew: ${Object.values(agents).map(a => `${a.id} (${a.name}, ${a.model ?? config.default_model}, effort ${a.effort ?? 'default'}${a.id === 'manager' ? `, conversation ${a.chat_effort ?? a.effort ?? 'default'}` : ''})`).join(', ')}.`);
@@ -426,7 +427,7 @@ async function answer(items) {
     } catch (error) {
       console.error('Push requests:', error.message);
     }
-    const granted = readPushes(pushesFile()).some(g => g.status === 'allowed' && Date.parse(g.expires) > Date.now());
+    const granted = readPushes(pushesFile()).some(g => g.status === 'allowed' && Date.parse(g.expires) > Date.now() && !g.session);
     const attempt = session => {
       // Interrupted while the situation was being gathered: nothing to stop.
       if (chat.interrupting) return Promise.resolve({ ok: false, canceled: true, text: '', error: t('interrupted by you') });
@@ -439,7 +440,7 @@ async function answer(items) {
         effort: manager.chat_effort ?? manager.effort,
         tools: manager.tools ?? [],
         disallowed: granted ? CHAT_DISALLOWED.filter(r => r !== PUSH) : CHAT_DISALLOWED,
-        hooks: crewGuard(guardLog(), pushesFile()),
+        hooks: crewGuard(guardLog(), pushesFile(), mainPushTargets(config)),
         addDirs: libraries.map(l => l.dir),
         // The command line refuses to write to this conversation from inside it.
         env: { CHIEFMATE_MANAGER: '1' },
