@@ -878,13 +878,41 @@ function lockdownText(v) {
     const warnings = v.warnings.map(w => `\nWarning ${formatDateTime(w.at)}: ${w.text}`).join('');
     return `Chiefmate is not locked down.${last}${warnings}`;
   }
-  const stopped = Object.entries(v.stopped).map(([k, n]) => `${k} ${n}`).join(', ') || 'nothing';
+  const stopped = Object.entries(v.stopped).filter(([, n]) => !Array.isArray(n)).map(([k, n]) => `${k} ${n}`).join(', ') || 'nothing';
+  const watch = v.sentinel?.status === 'reviewing' ? 'Emergency watch: reviewing it now.'
+    : v.sentinel?.status === 'escalated' ? `Emergency watch: kept it locked for you (${v.sentinel.decision?.reasons?.join(', ') ?? ''}).` : null;
   return [
     `EMERGENCY LOCKDOWN since ${formatDateTime(v.since)} (by ${v.by}, from ${v.from})`,
     `Reason: ${v.reason}`,
     `Stopped: ${stopped}`,
-    ...v.evidence.map(e => `Evidence ${formatDateTime(e.at)} [${e.what}${e.who ? `, ${e.who}` : ''}]: ${e.detail}`),
+    ...(watch ? [watch] : []),
+    ...v.evidence.map(e => `Evidence ${formatDateTime(e.at)} [${e.what}${e.who ? `, ${e.who}` : ''}${e.refused === false ? ', it ran' : ''}]: ${e.command ?? e.detail}${e.cwd ? `  (in ${e.cwd})` : ''}`),
+    ...(v.notes ?? []).map(n => `Your note ${formatDateTime(n.at)}: ${n.text}`),
   ].join('\n');
+}
+
+/** Calling the owner outside the app (src/escalation.mjs), in a few lines: never a secret. */
+function escalationText(v) {
+  const tg = v.telegram ? `Telegram: bot @${v.telegram.bot}, ${v.telegram.chats} chat(s) linked${v.telegram.linking ? ', waiting for /start' : ''}` : 'Telegram: not set up';
+  const pin = v.pin.blocked ? `PIN: blocked since ${formatDateTime(v.pin.blocked)} after wrong PINs (set it again to unblock)` : v.pin.set ? 'PIN: set' : 'PIN: not set (releasing by Telegram needs it)';
+  const email = v.email ? `E-mail fallback: ${v.email.to} through ${v.email.host}:${v.email.port} (${v.email.security})` : 'E-mail fallback: not set up';
+  const last = v.last ? `\nLast call: ${formatDateTime(v.last.at)} by ${v.last.channels.join(', ') || 'nothing (failed)'}${v.last.decisions.length ? `; you chose ${v.last.decisions.map(d => d.action).join(', ')}` : ''}` : '';
+  return `${tg}\n${pin}\n${email}${v.ready ? '' : '\nNo channel is ready: an escalation reaches you only in the app.'}${last}`;
+}
+
+/** A line typed with nothing shown (a token, a PIN, a password). */
+async function askHidden(question) {
+  const { createInterface } = await import('node:readline');
+  return new Promise(resolve => {
+    const prompt = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    prompt.question(question, answer => {
+      prompt.close();
+      process.stdout.write('\n');
+      resolve(answer.trim());
+    });
+    // The question is on screen; what is typed after it is not echoed.
+    prompt._writeToOutput = () => {};
+  });
 }
 
 /** A command refused to a step of a run: noted for the emergency lockdown's detection (src/lockdown.mjs), then refused. */
@@ -989,7 +1017,7 @@ async function recordGapNow(what, example) {
 }
 
 async function crewRefused(what, message) {
-  (await import('./lockdown.mjs')).recordSignal('publish_refused', `cli.mjs ${what}`, { who: 'step' });
+  (await import('./lockdown.mjs')).recordSignal('publish_refused', `cli.mjs ${what}`, { who: 'step', run: process.env.CHIEFMATE_RUN, step: process.env.CHIEFMATE_STEP, cwd: process.cwd(), command: `cli.mjs ${what}`, refused: true });
   throw new Error(message);
 }
 
@@ -1015,7 +1043,7 @@ async function main() {
         const { startSchedule } = await import('./schedule.mjs');
         const { startUpdates } = await import('./update.mjs');
         const { doingNow, live, pauseAll } = await import('./runs.mjs');
-        const { nudgeQueue } = await import('./queue.mjs');
+        const { nudgeQueue, resume } = await import('./queue.mjs');
         const { pauseSessionTurns, resumeSessions, sessionTurnsGoingOn, startSessions } = await import('./sessions.mjs');
         const { chat, deliverPending, interruptManager, managerBusy } = await import('./manager.mjs');
         const { startWatch } = await import('./plan.mjs');
@@ -1074,12 +1102,15 @@ async function main() {
         const { processes } = await import('./machine.mjs');
         const { reportEvent } = await import('./news.mjs');
         const { t } = await import('./i18n.mjs');
+        const sentinel = await import('./sentinel.mjs');
+        const { sendToManager } = await import('./manager.mjs');
         lockdown.setLockdownHooks({
           stopAll: async () => {
-            const runs = [...live.keys()].filter(id => {
+            const runIds = [...live.keys()].filter(id => {
               live.get(id)?.preparing?.abort();
               return cancelLive(id, t('stopped by the emergency lockdown'));
-            }).length;
+            });
+            const runs = runIds.length;
             const manager = interruptManager() ? 1 : 0;
             const sessions = stopSessionTurns();
             let browsers = 0;
@@ -1092,7 +1123,7 @@ async function main() {
             } catch {
               // listed on Windows only
             }
-            return { runs, manager, sessions, browsers };
+            return { runs, runIds, manager, sessions, browsers };
           },
           resume: () => {
             nudgeQueue();
@@ -1103,8 +1134,32 @@ async function main() {
             notify(title, text, 'chiefmate:operations', { urgent: true });
             reportEvent(kind, news ?? text, { urgent: true });
           },
+          // The emergency watch (src/sentinel.mjs) reviews an alarm the detection engaged.
+          review: state => sentinel.reviewIncident(state),
+          // The owner's note on the alarm: to the manager as the owner's own message, with the event.
+          ownerNote: (note, state) => {
+            const head = `[About the emergency lockdown since ${state.since}: ${state.reason}${state.sentinel?.status === 'escalated' ? '; the emergency watch kept it locked' : ''}]`;
+            sendToManager(`${head}\n${note}`);
+          },
         });
+        sentinel.setSentinelHooks({
+          resumeRun: id => resume(id),
+          tell: ({ kind, title, text, news, release }) => {
+            notify(title, text, 'chiefmate:operations', { urgent: !release });
+            reportEvent(kind, news ?? text, { urgent: true });
+          },
+        });
+        sentinel.startSentinel();
         lockdown.startLockdownWatch();
+        // Calling the owner outside the app when the lockdown needs them (src/escalation.mjs): Telegram, then e-mail.
+        const escalation = await import('./escalation.mjs');
+        escalation.setEscalationHooks({
+          tell: ({ kind, title, text, news }) => {
+            notify(title, text, 'chiefmate:operations', { urgent: true });
+            reportEvent(kind, news ?? text, { urgent: true });
+          },
+        });
+        escalation.startEscalation();
         // A change of the owner's focus (src/steer.mjs), its automatic return included: the projects now free start
         // their queue and their approved board items.
         (await import('./steer.mjs')).onSteerChange(() => {
@@ -1473,6 +1528,108 @@ async function main() {
       if (typed !== 'UNLOCK') return console.log('Kept locked down.');
       await apiOr('/api/lockdown', { action: 'release', confirm: true, origin: 'cli' }, () => lockdown.release({ by: 'owner', from: 'cli' }));
       console.log('Released. The queue goes on; the runs the lockdown stopped stay canceled until you resume them.');
+      return;
+    }
+    case 'escalation': {
+      // Calling the owner outside the app when the lockdown needs them (src/escalation.mjs): set up by the owner only.
+      if (process.env.CHIEFMATE_RUN || process.env.CHIEFMATE_MANAGER || process.env.CHIEFMATE_RESCUER) throw new Error('Only the owner sets up Telegram, the PIN and the e-mail, in the app or in a terminal on this computer.');
+      const escalation = await import('./escalation.mjs');
+      // Through the running Chiefmate (its loop reads Telegram), or directly when it is off.
+      const act = body => apiOr('/api/escalation', body, () => escalation.changeEscalation(body));
+      const sub = words()[0] ?? 'status';
+      if (sub === 'status') return console.log(escalationText((await act({ action: 'status' })).escalation));
+      if (sub === 'test') {
+        const channel = words()[1] === 'email' ? 'email' : 'telegram';
+        await act({ action: 'test', channel });
+        return console.log(channel === 'email' ? 'Test e-mail sent.' : 'Test sent to the linked Telegram chat(s).');
+      }
+      if (sub === 'remove') {
+        const channel = words()[1];
+        if (!['telegram', 'email'].includes(channel)) throw new Error('Usage: escalation remove telegram|email');
+        return console.log(escalationText((await act({ action: 'remove', channel })).escalation));
+      }
+      if (!['setup', 'pin', 'email'].includes(sub)) throw new Error('Usage: escalation [status|setup|pin|email|test [email]|remove telegram|email]');
+      if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error(`Run "node src/cli.mjs escalation ${sub}" yourself, in a terminal on this computer: it asks for what only you know.`);
+      const { createInterface } = await import('node:readline/promises');
+      const ask = async (question, fallback = '') => {
+        const prompt = createInterface({ input: process.stdin, output: process.stdout });
+        const answer = (await prompt.question(question)).trim();
+        prompt.close();
+        return answer || fallback;
+      };
+      const yes = async question => /^y(es)?$|^s(im)?$/i.test(await ask(question));
+      const pinStep = async () => {
+        for (;;) {
+          const pin = await askHidden('Your PIN (6 to 12 digits, not shown): ');
+          const problem = escalation.pinProblem(pin);
+          if (problem) {
+            console.log(problem);
+            continue;
+          }
+          if ((await askHidden('The same PIN again: ')) !== pin) {
+            console.log('They differ. Again.');
+            continue;
+          }
+          await act({ action: 'pin', pin });
+          return console.log('PIN set: only its salted hash is kept. Releasing by Telegram works again if it was blocked.');
+        }
+      };
+      const emailStep = async () => {
+        const old = (await act({ action: 'status' })).escalation.email ?? {};
+        console.log('\nThe e-mail only warns you, when Telegram fails or is not set up. Use your provider\'s SMTP (an app password where it asks for one).');
+        const host = await ask(`SMTP server${old.host ? ` [${old.host}]` : ''}: `, old.host);
+        const security = await ask(`Security, starttls or tls [${old.security ?? 'starttls'}]: `, old.security ?? 'starttls');
+        const port = await ask(`Port [${old.port ?? (security === 'tls' ? 465 : 587)}]: `, String(old.port ?? (security === 'tls' ? 465 : 587)));
+        const user = await ask(`Login${old.user ? ` [${old.user}]` : ' (empty for none)'}: `, old.user ?? '');
+        const pass = user ? await askHidden(`Password${old.host ? ' (empty keeps the one kept)' : ''}, not shown: `) : '';
+        const from = await ask(`Sender${old.from ? ` [${old.from}]` : ''}: `, old.from);
+        const to = await ask(`Recipient, your address${old.to ? ` [${old.to}]` : ''}: `, old.to);
+        await act({ action: 'email', host, security, port, user, pass, from, to });
+        if (await yes('Send a test e-mail now? [y/N] ')) {
+          await act({ action: 'test', channel: 'email' });
+          console.log('Sent: check your inbox (and the spam folder).');
+        }
+      };
+      if (sub === 'pin') return pinStep();
+      if (sub === 'email') return emailStep();
+      // The whole setup, step by step.
+      let view = (await act({ action: 'status' })).escalation;
+      console.log('Calling you outside the app when the emergency lockdown needs you: your own Telegram bot, your PIN and, if you want, an e-mail.\n');
+      if (!view.telegram || !(await yes(`Keep the bot @${view.telegram.bot}? [y/N] `))) {
+        console.log('1. In Telegram, open @BotFather, send /newbot, choose a name and a username ending in "bot", and copy the token it gives.');
+        for (;;) {
+          try {
+            view = (await act({ action: 'token', token: await askHidden('2. Paste the token here (not shown): ') })).escalation;
+            console.log(`Bot @${view.telegram.bot} checked.`);
+            break;
+          } catch (error) {
+            console.log(error.message);
+          }
+        }
+      }
+      if (!view.telegram.chats || (await yes(`${view.telegram.chats} chat(s) linked. Link another one? [y/N] `))) {
+        const { link } = await act({ action: 'link' });
+        console.log(`3. Open ${link.link} on your phone and press Start (or send "${link.command}" to @${link.bot}). Waiting up to 15 minutes...`);
+        const before = view.telegram.chats;
+        const until = Date.parse(link.until);
+        while (Date.now() < until) {
+          // With Chiefmate off, the terminal reads Telegram itself.
+          if (!(await answers())) await escalation.pollOnce({}, { timeout: 5 }).catch(() => null);
+          else await sleep(2000);
+          view = (await act({ action: 'status' })).escalation;
+          if (view.telegram.chats > before) break;
+        }
+        if (view.telegram.chats <= before) throw new Error('No chat was linked in time. Run "escalation setup" again.');
+        console.log('Linked.');
+      }
+      if (!view.pin.set || (await yes('Change your PIN? [y/N] '))) {
+        console.log('4. Your PIN releases the lockdown from Telegram. Only its salted hash is kept; 3 wrong ones block the release by Telegram.');
+        await pinStep();
+      }
+      if (await yes(`Set up the e-mail fallback${view.email ? ` (now to ${view.email.to})` : ''}? [y/N] `)) await emailStep();
+      await act({ action: 'test', channel: 'telegram' });
+      console.log('\nA test went to your Telegram chat. Done.');
+      console.log(escalationText((await act({ action: 'status' })).escalation));
       return;
     }
     case 'update-now': {

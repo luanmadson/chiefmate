@@ -26,7 +26,7 @@ import { listSessions, readSession, sessionsLine } from './sessions.mjs';
 import { workLine } from './worknow.mjs';
 import { talkSituation } from './talk.mjs';
 import { addMessage, listRuns, readPending, readRun, readState, readUsage, savePending, saveState, stepsOf } from './store.mjs';
-import { isLocked, ownerKeyFile } from './lockdown.mjs';
+import { isLocked, ownerKeyFile, secretsFolder } from './lockdown.mjs';
 import { denyRules } from './access.mjs';
 import { updateInfo, updating } from './update.mjs';
 import { stopping } from './power.mjs';
@@ -64,8 +64,12 @@ const GH_WRITES = [
   ...['create', 'merge', 'close', 'reopen', 'edit', 'comment', 'review', 'ready', 'lock', 'unlock', 'update-branch', 'revert', 'checkout'].map(a => `Bash(gh pr ${a}:*)`),
   ...['create', 'delete', 'edit', 'rename', 'archive', 'unarchive', 'fork', 'sync', 'deploy-key', 'set-default', 'autolink', 'clone'].map(a => `Bash(gh repo ${a}:*)`),
 ];
-// The owner's local key (src/owner.mjs) is out of its file tools' reach; the guard refuses a command that names it.
-export const CHAT_DISALLOWED = ['Agent', 'WebSearch', 'WebFetch', 'Bash(git commit:*)', ...ALWAYS_DISALLOWED.filter(r => r !== PR && r !== REPO), ...GH_WRITES, ...denyRules(ownerKeyFile(), false)];
+// The owner's local key (src/owner.mjs) and Chiefmate's secrets (src/escalation.mjs) are out of its file tools' reach;
+// the guard refuses a command that names them.
+export const CHAT_DISALLOWED = [
+  'Agent', 'WebSearch', 'WebFetch', 'Bash(git commit:*)', ...ALWAYS_DISALLOWED.filter(r => r !== PR && r !== REPO), ...GH_WRITES,
+  ...denyRules(ownerKeyFile(), false), ...denyRules(secretsFolder()),
+];
 
 // The manager reads every reference library; the copies are refreshed at most every 10 minutes.
 let libraryCopies = [];
