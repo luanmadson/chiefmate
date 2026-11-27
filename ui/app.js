@@ -514,12 +514,8 @@ function drawSpeechDialog() {
 
 const nextMission = () => state.missions.filter(m => m.next).sort((x, y) => x.next.localeCompare(y.next))[0];
 
-/** The queue in the order it will run, as the server picks: the runs ready to start by age, then the others by start time. */
-function queueOrder() {
-  const ready = r => !r.notBefore || new Date(r.notBefore).getTime() <= Date.now() + skew;
-  const later = state.queue.filter(r => !ready(r)).sort((x, y) => x.notBefore.localeCompare(y.notBefore));
-  return [...state.queue.filter(ready), ...later];
-}
+/** The queue in the order it runs, as the server keeps it (the owner's moves included); a run waiting for a time says so. */
+const queueOrder = () => state.queue ?? [];
 
 const liveDot = () => '<span class="live-dot" aria-hidden="true"></span>';
 
@@ -1513,6 +1509,8 @@ function attnNotice(i, brief = false) {
     : r && brief && r.options?.length ? `<a class="button small" href="#${esc(i.view)}">${esc(t('Answer'))}</a>`
     : r ? needsButtons({ ...r, project: i.project }, ' small')
     : decide ? `<a class="button small" href="#decisions">${esc(t('Decide'))}</a>`
+    // the session renewing with usage to spare (src/spending.mjs): spend all until then, or not now
+    : i.kind === 'spare' ? `<button type="button" class="button small" data-session-boost="on">${esc(t('Spend all until {time}', { time: clockTime(i.until) }))}</button><button type="button" class="button secondary small" data-spending-dismiss>${esc(t('Not now'))}</button>`
     : `${i.kind === 'reader-login' ? `<button type="button" class="button small" data-reader="login">${esc(t('Open the sign-in window'))}</button>` : ''}${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
   return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
       <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
@@ -1667,7 +1665,7 @@ function drawStatusbar() {
   const left5h = spare(account.five_hour, now, t);
   const right = [
     `<span class="sb-desk">${claude.found ? `Claude Code <span class="num">${esc(claude.version ?? '')}</span>` : esc(claude.found === false ? t('Claude Code not found') : t('Checking Claude Code…'))}</span>`,
-    left5h ? `<span class="sb-spare">${esc(t('{free} spare, renews in {left}', { free: percent(left5h.free), left: left5h.left }))} · <a href="#usage" data-goto="autopilot-panel">${esc(t('Autopilot'))}</a></span>` : '',
+    left5h ? `<span class="sb-spare">${esc(t('{free} spare, renews in {left}', { free: percent(left5h.free), left: left5h.left }))} · <a href="#usage" data-goto="spending">${esc(t('Session'))}</a></span>` : '',
     usage('sb-five', t('5-hour window'), t('5 h'), account.five_hour),
     usage('sb-week', t("Plan's week"), t('Week'), account.seven_day),
     `<span class="sb-desk">${esc(t('Free memory'))} <span class="num">${percent(state.computer.memory.free / state.computer.memory.total)}</span></span>`,
@@ -1675,7 +1673,7 @@ function drawStatusbar() {
   const html = `<div class="group sb-run">${left}</div><div class="group">${right}</div>`;
   draw('#statusbar', html, html);
 }
-// The status bar's shortcut to the autopilot: to the Usage section, its panel in view. Not the browser's own jump to
+// The status bar's shortcut to the session's spending: to the Usage section, its panel in view. Not the browser's own jump to
 // #usage (the meters, at the top); a hidden section can't be scrolled, so the panel waits for showView's hashchange.
 $('#statusbar').addEventListener('click', e => {
   const link = e.target.closest('a[data-goto]');
@@ -1835,7 +1833,7 @@ const newsEvent = kind => ({
   idle: t('empty queue'), autopilot_report: t('autopilot report'), watchdog: t('watchdog'), lockdown: t('emergency lockdown'), security_warning: t('security warning'),
   away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'), power: t('power mode'),
   owner_working: t('you working now'), defect: t('defect reported'), agent_message: t('message from an agent'), focus: t('focus changed'),
-  run_parked: t('run parked'), quarantine: t('antivirus quarantine'),
+  run_parked: t('run parked'), quarantine: t('antivirus quarantine'), session_spare: t('session with usage to spare'),
 }[kind] ?? kind);
 
 // Who wrote an agent's message to the manager (a live session or a step of a run, from the command line).
@@ -2014,40 +2012,271 @@ function drawSituation() {
 
 // ---------- Operations ----------
 
-/** The queue, numbered in the order it will run, with the next run marked. */
+// ---------- The queue's controls: the owner moves, holds and releases runs, "Do now" and cancel (src/queue.mjs) ----------
+
+const CHEVRON = { up: 'M2.5 7.5 6 4l3.5 3.5', down: 'M2.5 4.5 6 8l3.5-3.5' };
+const chevron = dir => `<svg viewBox="0 0 12 12" aria-hidden="true"><path d="${CHEVRON[dir]}" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>`;
+
+/** Who holds a run and until when, in a tag: by you, by the manager, or by your "Do now" of another run. */
+const holdTag = h => `<span class="tag held" title="${esc(holdWhy(h))}">${esc(h.by === 'owner' ? t('Held by you') : t('Held by the manager'))}</span>`;
+
+/** Why a held run waits, in one line: the reason given, or the run to do now. */
+const holdWhy = h => (h.doNow ? t('Waits for “{title}” to end (Do now)', { title: h.doNow.title })
+  : h.reason ? t('Why: {reason}', { reason: h.reason }) : h.by === 'owner' ? t('No reason given') : t('Held by the manager, no reason given'));
+
+/** A run's marks in the queue: do now, held (by whom), resumes first. */
+const queueTags = r => `${r.doNow ? `<span class="tag do-now">${esc(t('Do now'))}</span>` : ''}${r.hold ? holdTag(r.hold) : ''}${r.first ? `<span class="tag first" title="${esc(t("It keeps its project's working copy as its step left it, so it goes first."))}">${esc(t('Resumes first'))}</span>` : ''}`;
+
+/**
+ * A queued run's controls: up and down (within the list shown: prev and next, or the whole queue), Release when held,
+ * and the menu with the rest (to the top, Do now, hold, cancel). list: the whole queue, for the place at the top.
+ */
+function queueControls(r, { prev = null, next = null, list = queueOrder(), key = 'all' } = {}) {
+  const id = esc(r.id);
+  const firsts = list.filter(x => x.first).length;
+  const top = !r.first && list.indexOf(r) > firsts;
+  const move = (dir, target) => {
+    const where = key === 'all' ? `data-where="${dir}"` : `data-where="${dir === 'up' ? 'before' : 'after'}" data-other="${esc(target?.id ?? '')}"`;
+    const label = dir === 'up' ? t('Move “{title}” up', { title: r.title }) : t('Move “{title}” down', { title: r.title });
+    const off = r.first || !target || target.first;
+    return `<button type="button" class="button secondary small queue-move" data-queue="move" data-id="${id}" ${where} aria-label="${esc(label)}" title="${esc(dir === 'up' ? t('Up one place') : t('Down one place'))}"${off ? ' disabled' : ''}>${chevron(dir)}</button>`;
+  };
+  const item = (action, label, extra = '') => `<button type="button" class="menu-item${action === 'cancel' ? ' danger' : ''}" data-queue="${action}" data-id="${id}" ${extra}>${esc(label)}</button>`;
+  const held = r.hold && !r.hold.doNow;
+  const items = [
+    top ? item('move', t('Move to the top'), 'data-where="top"') : '',
+    r.doNow ? item('do-now-end', t('Release the others')) : item('do-now', t('Do now…')),
+    held ? item('release', t('Release it')) : r.keepsCopy || r.doNow ? '' : item('hold', r.hold ? t('Hold until you release it…') : t('Hold…')),
+    item('cancel', t('Cancel…')),
+  ].join('');
+  return `${move('up', prev)}${move('down', next)}${held ? `<button type="button" class="button secondary small" data-queue="release" data-id="${id}">${esc(t('Release it'))}</button>` : ''}<details class="menu queue-menu" data-keep-open="queue-menu-${key}-${id}"><summary class="button secondary small" aria-label="${esc(t('Actions for “{title}”', { title: r.title }))}">${esc(t('Actions'))}</summary><div class="menu-list">${items}</div></details>`;
+}
+
+/** When a queued run is expected to start, given what holds it (the owner, the manager, a "Do now", the focus). */
+function queueStart(r, expected) {
+  const steer = state.steer?.projects.find(p => p.id === r.project)?.hold ?? null;
+  if (r.hold) return r.hold.doNow ? t('after the “Do now” run') : r.hold.by === 'owner' ? t('when you release it') : t('when the manager releases it');
+  if (steer) return { paused: t('when you resume its project'), all: t('when you resume the work'), focus: t('when the focus ends') }[steer];
+  if (r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew) return `${shortDate(r.notBefore)} (${relative(r.notBefore)})`;
+  return expected();
+}
+
+/** The owner's "Do now" in force: which run goes first, which wait, and the button that lets them go now. */
+function doNowBand() {
+  const d = state.queueControl?.doNow;
+  if (!d) return '';
+  const waits = d.scope === 'all' ? t('every other run waits until it ends') : t('the other runs of {project} wait until it ends', { project: projectName(d.project) });
+  return `<div class="do-now-band" role="status"><span class="tag do-now">${esc(t('Do now'))}</span>
+    <span class="do-now-text"><strong>${esc(d.title)}</strong> · ${esc(projectName(d.project))}: ${esc(waits)}, ${esc(t('then they go on by themselves.'))}</span>
+    <button type="button" class="button secondary small" data-queue="do-now-end">${esc(t('Release the others'))}</button></div>`;
+}
+
+/** A change to the queue, in words: who moved, held, released, chose to do now or canceled which run. */
+function queueChangeText(c) {
+  const who = c.by === 'owner' ? t('You') : c.by === 'manager' ? t('The manager') : 'Chiefmate';
+  const title = c.title ?? c.run;
+  switch (c.action) {
+    case 'move': return c.to === 'top' ? t('{who} moved “{title}” to the top', { who, title }) : c.to === 'up' ? t('{who} moved “{title}” up', { who, title })
+      : c.to === 'down' ? t('{who} moved “{title}” down', { who, title }) : t('{who} moved “{title}” to place {place}', { who, title, place: c.place });
+    case 'hold': return c.reason ? t('{who} held “{title}”: {reason}', { who, title, reason: c.reason }) : t('{who} held “{title}”', { who, title });
+    case 'release': return t('{who} released “{title}”', { who, title });
+    case 'do-now': return c.scope === 'all' ? t('{who} chose “{title}” to do now; every other run waits', { who, title }) : t('{who} chose “{title}” to do now; the others of its project wait', { who, title });
+    case 'do-now-end': return t('{who} released the runs held for “{title}”', { who, title });
+    case 'do-now-ended': return t('“{title}” ended: the runs it held went on by themselves', { title });
+    case 'cancel': return t('{who} canceled “{title}”', { who, title });
+    default: return `${who}: ${c.action} “${title}”`;
+  }
+}
+
+// A drag of a row of the queue going on (a mouse or a pen): the queue is not drawn again meanwhile (at most a minute, in
+// case the row went away with the drag).
+let queueDrag = null;
+
+/** The queue, numbered in the order it will run, with the next run marked, what holds each run and the controls. */
 function drawQueue() {
+  if (queueDrag && Date.now() - queueDrag.at < 60_000) return;
+  queueDrag = null;
   const list = queueOrder();
   // Runs of different projects go on at once, up to the limit; within a project, one at a time.
   const busy = new Set(going().map(a => a.project));
   let room = (state.parallel?.max ?? 1) - going().length;
-  // a project the owner's focus holds (src/steer.mjs) starts nothing: its runs wait, and none of them is next
-  const hold = id => state.steer?.projects.find(p => p.id === id)?.hold ?? null;
-  const held = { paused: t('when you resume its project'), all: t('when you resume the work'), focus: t('when the focus ends') };
-  const expected = r => {
+  // a project the owner's focus holds (src/steer.mjs) starts nothing: its runs wait, and none of them is next; nor a
+  // run held in the queue
+  const steerHold = id => state.steer?.projects.find(p => p.id === id)?.hold ?? null;
+  const expected = r => () => {
     if (busy.has(r.project)) return t('when the run of its project ends');
     busy.add(r.project);
     return room-- > 0 ? t('in a moment') : t('when a run ends');
   };
-  const start = r => {
-    if (hold(r.project)) return esc(held[hold(r.project)]);
-    // Held by the manager (cli.mjs queue hold): it keeps its place and starts once released.
-    if (r.onHold) return esc(t('on hold, until released'));
-    return r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? `${shortDate(r.notBefore)} (${esc(relative(r.notBefore))})` : esc(expected(r));
-  };
-  const next = list.find(r => !hold(r.project) && !r.onHold);
-  const rows = list.map((r, i) => `<tr class="${r === next ? 'next' : ''}">
-      <td class="num">${i + 1}</td>
-      <td>${r === next ? `<span class="tag">${esc(t('Next'))}</span>` : ''}${r.onHold ? `<span class="tag">${esc(t('On hold'))}</span>` : ''}${lateTag(r)}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span></td>
-      <td>${stateHtml(runState(r.status))}</td>
-      <td class="num">${start(r)}</td>
-      <td class="row-actions"><button type="button" class="button danger small" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button></td>
+  // the run the server starts next (focus in src/queue.mjs): the first free one ready now, else the one that waits the least
+  const startable = list.filter(r => !steerHold(r.project) && !r.hold);
+  const soon = r => !r.notBefore || new Date(r.notBefore).getTime() <= Date.now() + skew;
+  const next = startable.find(soon) ?? [...startable].sort((x, y) => x.notBefore.localeCompare(y.notBefore))[0];
+  const rows = list.map((r, i) => `<tr class="${r === next ? 'next' : ''}" data-queue-row="${esc(r.id)}"${r.hold ? ` data-held="${r.hold.doNow ? 'do-now' : r.hold.by}"` : ''}${r.first ? ' data-pinned' : ''}>
+      <td class="num queue-place"${r.first ? '' : ` draggable="true" title="${esc(t('Drag to change the order'))}"`}><span class="queue-grip" aria-hidden="true"></span>${i + 1}</td>
+      <td>${r === next ? `<span class="tag">${esc(t('Next'))}</span>` : ''}${lateTag(r)}${queueTags(r)}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span>${r.hold ? `<span class="queue-why">${esc(holdWhy(r.hold))}</span>` : ''}</td>
+      <td class="queue-start">${r.status !== 'queued' || r.needsYou ? `${stateHtml(runLabel(r))}<br>` : ''}${esc(queueStart(r, expected(r)))}</td>
+      <td class="row-actions queue-actions"><div class="queue-buttons">${queueControls(r, { prev: list[i - 1], next: list[i + 1], list })}</div></td>
     </tr>`);
-  const html = list.length
-    ? `<div class="label" style="margin-top:24px">${esc(t('Queue'))}</div>
-    <table class="table queue"><thead><tr><th>#</th><th>${esc(t('Run'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Expected start'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
+  const changes = state.queueControl?.changes ?? [];
+  const history = changes.length
+    ? `<details class="steer-history queue-history" data-keep-open="queue-history"><summary>${esc(t('Latest changes to the queue ({count})', { count: changes.length }))}</summary><ul>${changes.map(c => `<li><span class="hint">${esc(shortDate(c.at))}</span> ${esc(queueChangeText(c))}</li>`).join('')}</ul></details>`
     : '';
-  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools, r.due, hold(r.project), !!r.onHold]), Math.floor(Date.now() / 60000)]), html);
+  const html = list.length || state.queueControl?.doNow
+    ? `<div class="label" style="margin-top:24px">${esc(t('Queue'))}</div>${doNowBand()}
+    ${list.length ? `<table class="table queue"><thead><tr><th>#</th><th>${esc(t('Run'))}</th><th>${esc(t('Expected start'))}</th><th><span class="visually-hidden">${esc(t('Actions'))}</span></th></tr></thead><tbody>${rows.join('')}</tbody></table>` : ''}${history}`
+    : history ? `<div class="label" style="margin-top:24px">${esc(t('Queue'))}</div><div class="hint">${esc(t('Nothing in the queue'))}</div>${history}` : '';
+  const signature = [going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools, r.due, r.needsYou, steerHold(r.project), r.hold, r.first, r.keepsCopy, r.doNow]), state.queueControl, Math.floor(Date.now() / 60000)];
+  if (draw('#op-queue', JSON.stringify(signature), html)) restoreQueueFocus();
 }
+
+// After a move with ▲ or ▼, the focus stays on the same button of the run moved, so the keyboard can go on (for the
+// redraws of the next few seconds: the list is drawn again once the move is saved).
+let queueFocus = null;
+
+function restoreQueueFocus() {
+  if (!queueFocus) return;
+  if (Date.now() - queueFocus.at > 4000) {
+    queueFocus = null;
+    return;
+  }
+  // the same arrow, or the other one once the run reached the end of the list
+  const { id, where } = queueFocus;
+  const buttons = [...document.querySelectorAll('[data-queue="move"]')].filter(b => b.dataset.id === id && !b.disabled && b.dataset.where !== 'top');
+  const button = buttons.find(b => b.dataset.where === where) ?? buttons[0];
+  if (button && document.activeElement !== button) button.focus({ preventScroll: true });
+}
+
+/** "Do now": which runs wait until it ends (those of its project, or all the others), or null when the owner gives up. */
+function doNowChoice(r) {
+  const dialog = $('#do-now-dialog');
+  const name = projectName(r.project);
+  $('#do-now-text').textContent = t('“{title}” goes to the top of the queue. Which runs wait until it ends? Then they go on by themselves.', { title: r.title });
+  const notes = [];
+  if (going().some(a => a.project === r.project)) notes.push(t('{project} has a run going on now: it finishes first, then this one starts.', { project: name }));
+  if (state.steer?.projects.find(p => p.id === r.project)?.hold) notes.push(t('Its project is held in Focus: it starts only once you free it there.'));
+  const current = state.queueControl?.doNow;
+  if (current && current.run !== r.id) notes.push(t('It takes the place of “{title}” as the run to do now: the runs held for it go on.', { title: current.title }));
+  $('#do-now-note').textContent = notes.join(' ');
+  $('#do-now-note').hidden = !notes.length;
+  $('#do-now-project').textContent = t('Only those of {project}', { project: name });
+  dialog.returnValue = '';
+  dialog.showModal();
+  return new Promise(resolve => dialog.addEventListener('close', () => resolve(['project', 'all'].includes(dialog.returnValue) ? dialog.returnValue : null), { once: true }));
+}
+
+/** Hold: the reason the owner gives (it shows in the queue), '' for none, or null when they give up. */
+function holdChoice(r) {
+  const dialog = $('#hold-dialog');
+  const field = $('#hold-reason');
+  $('#hold-text').textContent = t('“{title}” keeps its place in the queue and doesn’t start until you release it.', { title: r.title });
+  field.value = r.hold?.reason ?? '';
+  dialog.returnValue = '';
+  dialog.showModal();
+  field.focus();
+  return new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue === 'hold' ? field.value.trim() : null), { once: true }));
+}
+
+// Enter in the reason holds (the form's first button is Cancel).
+document.addEventListener('keydown', event => {
+  if (event.key === 'Enter' && event.target.id === 'hold-reason') {
+    event.preventDefault();
+    $('#hold-dialog').close('hold');
+  }
+});
+
+/** Sends a change to the queue (the owner's key goes with it) and shows the queue as it is now. */
+async function changeQueue(body, done) {
+  await api('/api/queue', body);
+  if (done) toast(done);
+  await refresh();
+}
+
+document.addEventListener('click', async event => {
+  const button = event.target.closest('[data-queue]');
+  if (!button || button.disabled) return;
+  const { queue: action, id = '', where, other } = button.dataset;
+  const r = queueOrder().find(x => x.id === id);
+  try {
+    if (action === 'move') {
+      const body = { action: 'move', id, ...(where === 'before' || where === 'after' ? { [where]: other } : { [where]: true }) };
+      if (where !== 'top') queueFocus = { id, where, at: Date.now() };
+      await changeQueue(body, where === 'top' ? t('“{title}” is now at the top of the queue.', { title: r?.title ?? '' }) : '');
+    } else if (action === 'release') {
+      await changeQueue({ action: 'release', id }, t('Released: “{title}” waits for its turn again.', { title: r?.title ?? '' }));
+    } else if (action === 'hold' && r) {
+      const reason = await holdChoice(r);
+      if (reason === null) return;
+      await changeQueue({ action: 'hold', id, reason }, t('Held: “{title}” keeps its place until you release it.', { title: r.title }));
+    } else if (action === 'do-now' && r) {
+      const scope = await doNowChoice(r);
+      if (!scope) return;
+      await changeQueue({ action: 'do-now', id, scope }, t('Do now: “{title}” goes first.', { title: r.title }));
+    } else if (action === 'do-now-end') {
+      await changeQueue({ action: 'do-now-end' }, t('The runs held for “Do now” go on.'));
+    } else if (action === 'cancel' && r) {
+      const ok = await confirmDialog(t('Cancel run'), t('“{title}” leaves the queue without running. You can resume it later from its page in the Log.', { title: r.title }), t('Cancel run'));
+      if (!ok) return;
+      await changeQueue({ action: 'cancel', id }, t('Canceled.'));
+    }
+  } catch (error) {
+    queueFocus = null;
+    toast(error.message);
+  }
+});
+
+// Dragging a row of the queue by its place (a mouse or a pen): a brass line shows where it goes, and the drop moves it.
+const dropMarks = () => document.querySelectorAll('[data-queue-row][data-drop]');
+
+function endQueueDrag() {
+  for (const row of dropMarks()) delete row.dataset.drop;
+  document.querySelector('[data-queue-row].dragging')?.classList.remove('dragging');
+  queueDrag = null;
+}
+
+document.addEventListener('dragstart', event => {
+  const handle = event.target.closest?.('.queue-place[draggable="true"]');
+  const row = handle?.closest('[data-queue-row]');
+  if (!row) return;
+  queueDrag = { id: row.dataset.queueRow, at: Date.now() };
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', queueDrag.id);
+  event.dataTransfer.setDragImage(row, 16, 16);
+  row.classList.add('dragging');
+});
+
+document.addEventListener('dragover', event => {
+  if (!queueDrag) return;
+  const row = event.target.closest?.('[data-queue-row]');
+  for (const marked of dropMarks()) if (marked !== row) delete marked.dataset.drop;
+  if (!row || row.dataset.queueRow === queueDrag.id || row.hasAttribute('data-pinned')) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+  const box = row.getBoundingClientRect();
+  row.dataset.drop = event.clientY > box.top + box.height / 2 ? 'after' : 'before';
+});
+
+document.addEventListener('drop', async event => {
+  if (!queueDrag) return;
+  const row = event.target.closest?.('[data-queue-row][data-drop]');
+  const { id } = queueDrag;
+  const where = row?.dataset.drop;
+  const other = row?.dataset.queueRow;
+  endQueueDrag();
+  if (!row) return;
+  event.preventDefault();
+  try {
+    await changeQueue({ action: 'move', id, [where]: other }, '');
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+document.addEventListener('dragend', () => {
+  if (!queueDrag) return;
+  endQueueDrag();
+  drawQueue();
+});
 
 /** A run going on: who is at work, the step out of how many, the time counting and the last action, all live. */
 function liveCard(a, key) {
@@ -2826,18 +3055,118 @@ function drawUsage() {
     </div>
     <div class="panel">
       <div class="label">${esc(t('How Chiefmate looks after your plan'))}</div>
-      <p class="hint">${esc(t("Before every step, Chiefmate checks the current limits: {window} for the 5-hour window and {week} for the plan's week. A run paused by these limits returns to the queue after the reset or when you raise the limit enough for the current usage.", { window: percent(l.pause_at_5h_window), week: percent(l.pause_at_plan_week) }))}</p>
+      <p class="hint">${esc(t("Before every step, Chiefmate checks the current limits: {window} of the session (its mode, below) and {week} of the plan's week. A run paused by these limits returns to the queue after the reset or when you raise the limit enough for the current usage.", { window: percent(state.spending?.session?.limit ?? 0.85), week: l.pause_at_plan_week ? percent(l.pause_at_plan_week) : t('none') }))}</p>
       <p class="hint">${esc(t('If the account runs out in the middle of a step, that step starts over after the reset. Each step also has a time limit, in case an agent gets stuck.'))}</p>
     </div>
   </div>`;
   draw('#usage', html, html);
   const form = $('#limits-form');
   if (!form.contains(document.activeElement) && !form.dataset.filled) {
-    form.window.value = Math.round((l.pause_at_5h_window ?? 0.85) * 100);
     form.week.value = Math.round((l.pause_at_plan_week ?? 0.9) * 100);
     form.dataset.filled = '1';
   }
 }
+
+// ---------- Spending: the session and the week ----------
+
+// The session's modes (src/spending.mjs, SESSION_MODES): each one's sentence says what it does.
+const SESSION_MODES = () => [
+  ['save', t('Save usage'), t('One run at a time, with no early pause: the crew stops only at the {safety} safety margin, which leaves you room to work live.', { safety: percent(state.spending?.safety ?? 0.85) })],
+  ['normal', t('Normal'), t("The settings' defaults: {count} runs at a time, pausing at {pause} of the session.", { count: state.spending?.modes?.normal?.parallel ?? 3, pause: percent(state.spending?.modes?.normal?.pause ?? 0.85) })],
+  ['all', t('Spend all'), t('{count} runs at a time, pausing at {pause}: the session is spent almost to the end.', { count: state.spending?.modes?.all?.parallel ?? 4, pause: percent(state.spending?.modes?.all?.pause ?? 0.97) })],
+];
+const SESSION_PAUSES = [0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.97, 1];
+
+/** What holds in the session now, in one sentence (a boost, a mode, or the custom pair). */
+function sessionSentence(sp) {
+  const s = sp.session;
+  const pause = p => (p == null ? t('no early pause (only the {safety} safety margin)', { safety: percent(sp.safety) }) : t('pausing at {pause}', { pause: percent(p) }));
+  const mode = name => (name === 'custom' ? t('Custom') : SESSION_MODES().find(m => m[0] === name)?.[1] ?? name);
+  if (s.boost) {
+    return t('Spend all until {time} ({who}): {count} runs at a time, pausing at {pause}. Then back to {mode} by itself.', {
+      time: clockTime(s.boost.until), who: s.boost.by === 'away' ? t('Chiefmate, while you were away') : t('your choice'),
+      count: s.parallel, pause: percent(s.limit), mode: mode(s.configured.mode),
+    });
+  }
+  const own = SESSION_MODES().find(m => m[0] === s.mode);
+  return own ? own[2] : t('Custom: {count} run(s) at a time, {pause}.', { count: s.parallel, pause: pause(s.pause) });
+}
+
+/** What will be left of the session when it renews, roughly (src/spending.mjs, forecast). */
+function sessionEstimate(f, week) {
+  if (!f) return t('The estimate of what will be left comes once the session is measured (every run reports it).');
+  const at = { left: percent(f.left), time: clockTime(f.resets), all: percent(f.all.left) };
+  // the plan's week at its pause holds the crew: nothing more to spend
+  if (week) return t("At this pace, about {left} of the session will go unused when it renews at {time}. The plan's week is at its pause, so spending all would change nothing.", at);
+  return f.all.runs
+    ? t('At this pace, about {left} of the session will go unused when it renews at {time}; spending all, about {all}.', at)
+    : t('At this pace, about {left} of the session will go unused when it renews at {time}. With no work queued, spending all would change nothing.', at);
+}
+
+function drawSpending() {
+  const sp = state.spending;
+  const a = state.autopilot;
+  if (!sp || !a) return;
+  const s = sp.session;
+  const c = s.configured;
+  // the session: its shortcuts (and "Custom" when the pair is none of them), its two settings and what holds now
+  const tabs = (list, active, attr) => list.map(([key, label, about]) =>
+    `<button type="button" class="tab${key === active ? ' active' : ''}" aria-pressed="${key === active}" ${attr}="${key}" title="${esc(about)}">${esc(label)}</button>`).join('');
+  const custom = c.mode === 'custom' ? `<span class="tab active" aria-current="true">${esc(t('Custom'))}</span>` : '';
+  const counts = [...new Set([1, 2, 3, 4, c.parallel])].sort((x, y) => x - y);
+  const pauses = [...new Set([...SESSION_PAUSES, ...(c.pause == null ? [] : [c.pause])])].sort((x, y) => x - y);
+  const pauseValue = p => (p == null ? 'off' : String(p));
+  const session = `<div>
+      <div class="label">${esc(t('Session (5 hours)'))}</div>
+      <div class="tabs autopilot-modes" role="group" aria-label="${esc(t('Session mode'))}">${tabs(SESSION_MODES(), c.mode, 'data-session-mode')}${custom}</div>
+      <div class="fields">
+        <label><span>${esc(t('Runs at a time'))}</span><select data-session-parallel>${counts.map(n => `<option value="${n}"${n === c.parallel ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
+        <label><span>${esc(t('Pause the crew at'))}</span><select data-session-pause>
+          <option value="off"${c.pause == null ? ' selected' : ''}>${esc(t('Off (only the {safety} safety margin)', { safety: percent(sp.safety) }))}</option>
+          ${pauses.map(p => `<option value="${p}"${pauseValue(c.pause) === String(p) ? ' selected' : ''}>${esc(percent(p))}</option>`).join('')}
+        </select></label>
+      </div>
+      <p class="autopilot-now">${esc(sessionSentence(sp))}${s.boost ? ` <button type="button" class="button secondary small" data-session-boost="off">${esc(t('End now'))}</button>` : ''}</p>
+      <p class="hint">${esc(sessionEstimate(sp.forecast, sp.week_holds))}</p>
+      ${sp.offer ? `<p class="hint state-warn">${esc(t('Little time is left and much of the session would go unused.'))}</p>
+      <div class="actions left"><button type="button" class="button small" data-session-boost="on">${esc(t('Spend all until {time}', { time: clockTime(sp.offer.until) }))}</button><button type="button" class="button secondary small" data-spending-dismiss>${esc(t('Not now'))}</button></div>` : ''}
+    </div>`;
+  // the week: the autopilot's pace (src/autopilot.mjs, MODES)
+  const modes = AUTOPILOT_MODES();
+  const mode = modes.find(m => m[0] === a.mode);
+  const week = `<div>
+      <div class="label">${esc(t('Week'))}</div>
+      <div class="tabs autopilot-modes" role="group" aria-label="${esc(t('Spending mode'))}">${tabs(modes, a.mode, 'data-autopilot-mode')}${mode ? '' : `<span class="tab active" aria-current="true">${esc(t('Custom'))}</span>`}</div>
+      <p class="autopilot-now">${esc(mode ? mode[2] : t('Custom pace: it ends the week at {target} (set on the command line or in the settings).', { target: percent(a.week_pace) }))}</p>
+      <p class="hint">${esc(a.enabled ? t("The week's pace guides the autopilot: above it, nothing new goes on the queue by itself.") : t("The week's pace guides the autopilot, which is off: it holds once you turn it on."))}</p>
+      ${a.reset && a.mode !== 'all' ? `<p class="hint state-warn">${esc(a.reset.expires
+        ? t('You have a free reset of the plan until {when}: "Spend all" uses the whole week before it.', { when: shortDate(a.reset.expires) })
+        : t('You have a free reset of the plan: "Spend all" uses the whole week before it.'))}
+        <button type="button" class="button small" data-autopilot-mode="all">${esc(t('Use "Spend all"'))}</button></p>` : ''}
+    </div>`;
+  const html = `<div class="label">${esc(t('Spending'))}</div>
+    <p class="hint">${esc(t('Saving means going slower, not stopping. Each part has its shortcuts; change a value by hand and the mode shows as Custom.'))}</p>
+    <div class="usage-grid spending-grid">${session}${week}</div>`;
+  // not redrawn while one of its lists is open
+  if (!$('#spending').contains(document.activeElement) || document.activeElement.tagName !== 'SELECT') draw('#spending', html, html);
+}
+
+async function setSession(body, message) {
+  try {
+    await api('/api/spending', body);
+    toast(message);
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+$('#spending').addEventListener('change', event => {
+  const select = event.target.closest('select');
+  select?.blur(); // the panel is not redrawn under an open list
+  if (select?.hasAttribute('data-session-parallel')) setSession({ parallel: Number(select.value) }, t('Runs at a time: {count}.', { count: select.value }));
+  else if (select?.hasAttribute('data-session-pause')) setSession({ pause: select.value === 'off' ? 'off' : Number(select.value) }, select.value === 'off' ? t('No early pause: only the safety margin.') : t('The crew pauses at {pause} of the session.', { pause: percent(Number(select.value)) }));
+});
 
 // ---------- The autopilot ----------
 
@@ -2887,6 +3216,7 @@ function autopilotWho(by) {
   if (by?.startsWith('remote:')) return t('you, through the remote access ({login})', { login: by.slice(7) });
   if (by === 'cli') return t('the command line');
   if (by === 'manager') return t('the manager');
+  if (by === 'away') return t('Chiefmate, while you were away');
   if (by?.startsWith('step:')) return t('a step of run {run}', { run: by.slice(5) });
   return by ?? '';
 }
@@ -2901,7 +3231,17 @@ const autopilotValue = (key, v) => {
   if (key === 'stop_at_5h_window') return percent(Number(v));
   return String(v);
 };
-const AUTOPILOT_KEYS = () => ({ enabled: t('switch'), week_pace: t('mode'), stop_at_5h_window: t('5-hour window'), quiet_hours: t('quiet hours'), daily_report: t('daily report') });
+// the session's changes (src/spending.mjs, changeSession) share the list
+const sessionValue = (key, v) => {
+  if (key === 'pause_at_5h_window') return v == null ? t('off') : percent(Number(v));
+  if (key === 'session_boost') return v == null ? t('off') : t('until {time}', { time: clockTime(v) });
+  return String(v ?? '');
+};
+const changeValue = (key, v) => (['max_parallel', 'pause_at_5h_window', 'session_boost'].includes(key) ? sessionValue(key, v) : autopilotValue(key, v));
+const AUTOPILOT_KEYS = () => ({
+  enabled: t('switch'), week_pace: t('mode'), stop_at_5h_window: t('5-hour window'), quiet_hours: t('quiet hours'), daily_report: t('daily report'),
+  max_parallel: t('runs at a time'), pause_at_5h_window: t('session pause'), session_boost: t('spend all until the renewal'),
+});
 
 function autopilotItemState(status) {
   if (status === 'archived') return [t('Archived item'), 'neutral'];
@@ -2916,20 +3256,13 @@ function drawAutopilot() {
   const line = !a.enabled
     ? t('Nothing goes on the queue without you. Approved items still start by themselves, one per project at a time.')
     : t('When the queue of a project empties, the manager puts its next item triaged "do now" on the queue.');
-  const modes = AUTOPILOT_MODES();
-  const mode = modes.find(m => m[0] === a.mode);
-  const modeHtml = `<div class="label autopilot-today-label">${esc(t('Spending mode'))}</div>
-    <div class="tabs autopilot-modes" role="group" aria-label="${esc(t('Spending mode'))}">${modes.map(([key, label]) =>
-      `<button type="button" class="tab${key === a.mode ? ' active' : ''}" aria-pressed="${key === a.mode}" data-autopilot-mode="${key}">${esc(label)}</button>`).join('')}</div>
-    <p class="hint">${esc(mode ? mode[2] : t('Custom pace: it ends the week at {target} (set on the command line or in the settings).', { target: percent(a.week_pace) }))}</p>
-    ${a.reset && a.mode !== 'all' ? `<p class="hint state-warn">${esc(a.reset.expires
-      ? t('You have a free reset of the plan until {when}: "Spend all" uses the whole week before it.', { when: shortDate(a.reset.expires) })
-      : t('You have a free reset of the plan: "Spend all" uses the whole week before it.'))}
-      <button type="button" class="button small" data-autopilot-mode="all">${esc(t('Use "Spend all"'))}</button></p>` : ''}`;
+  // its pace for the week and the 5-hour stop are set in Spending, above (drawSpending)
+  const mode = AUTOPILOT_MODES().find(m => m[0] === a.mode);
+  const modeHtml = `<p class="hint">${esc(t('Its pace for the week: {mode} (Spending, above).', { mode: mode ? mode[1] : t('Custom') }))}${a.window_stop > a.stop_at_5h_window ? ` ${esc(t('With the session spending all, it stops at {limit} of the 5-hour window, not {own}.', { limit: percent(a.window_stop), own: percent(a.stop_at_5h_window) }))}` : ''}</p>`;
   const keys = AUTOPILOT_KEYS();
   const changes = (a.changes ?? []).map(c => `<li>
       <span>${clockTime(c.at)}</span>
-      <span><span class="primary">${esc(Object.entries(c.changes ?? {}).map(([k, [from, to]]) => `${keys[k] ?? k}: ${autopilotValue(k, from)} → ${autopilotValue(k, to)}`).join('; '))}</span><span class="secondary">${esc(autopilotWho(c.by))} · ${esc(shortDate(c.at))}</span></span>
+      <span><span class="primary">${esc(Object.entries(c.changes ?? {}).map(([k, [from, to]]) => `${keys[k] ?? k}: ${changeValue(k, from)} → ${changeValue(k, to)}`).join('; '))}</span><span class="secondary">${esc(autopilotWho(c.by))} · ${esc(shortDate(c.at))}</span></span>
       <span></span>
     </li>`);
   const items = a.queued.map(e => `<li>
@@ -3446,16 +3779,20 @@ function drawProjectRuns(id) {
       <div style="min-width:0"><div class="name">${liveDot()} ${esc(a.title)}</div><div class="hint">${esc(stepLine(a))} · ${ticking(a.started)}</div>${a.agent && a.speech?.now ? speechBubble({ run: a, line: a.speech.now, quiet: false }) : a.doing ? `<div class="hint">${esc(t('Now: {what}', { what: a.doing }))}</div>` : ''}</div>
       <button type="button" class="button danger small" data-cancel="${esc(a.id)}">${esc(t('Cancel run'))}</button>
     </div>`);
-  const waiting = queue.map(r => `<div class="project-run">
-      <span></span>
-      <div style="min-width:0"><div class="name" title="${esc(r.summary ?? '')}">${esc(r.title)}</div><div class="hint">${stateHtml(runLabel(r))}${r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? ` · ${esc(t('not before {when}', { when: shortDate(r.notBefore) }))}` : ''}</div></div>
-      <button type="button" class="button danger small" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button>
+  // Each with its place in the whole queue, what holds it and why, and the controls (▲ ▼ within the project's runs).
+  const all = online ? queueOrder() : [];
+  const waiting = queue.map((r, i) => `<div class="project-run queued-run"${r.hold ? ` data-held="${r.hold.doNow ? 'do-now' : r.hold.by}"` : ''}>
+      <span class="num queue-place" title="${esc(t('Place in the queue'))}">${all.indexOf(r) + 1}</span>
+      <div style="min-width:0"><div class="name" title="${esc(r.summary ?? '')}">${queueTags(r)}${esc(r.title)}</div><div class="hint">${stateHtml(runLabel(r))}${r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? ` · ${esc(t('not before {when}', { when: shortDate(r.notBefore) }))}` : ''}</div>${r.hold ? `<div class="queue-why">${esc(holdWhy(r.hold))}</div>` : ''}</div>
+      <div class="queue-actions">${queueControls(r, { prev: queue[i - 1], next: queue[i + 1], list: all, key: 'project' })}</div>
     </div>`);
   const html = `<div class="panel">
       <div class="label">${esc(t('Running now'))}</div>${live.join('') || `<div class="hint">${esc(t('Nothing running for this project.'))}</div>`}
       <div class="label" style="margin-top:16px">${esc(t('Queue'))}</div>${waiting.join('') || `<div class="hint">${esc(t('Nothing in the queue for this project.'))}</div>`}
     </div>`;
-  draw('#project-runs', JSON.stringify([online, runs.map(a => [a.id, a.title, a.step, a.agent, a.status, a.doing, a.speech?.now, member(a.agent ?? 'manager', a.project).status]), queue.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.needsYou])]), html);
+  const signature = [online, runs.map(a => [a.id, a.title, a.step, a.agent, a.status, a.doing, a.speech?.now, member(a.agent ?? 'manager', a.project).status]),
+    queue.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.needsYou, all.indexOf(r), r.hold, r.first, r.keepsCopy, r.doNow])];
+  if (draw('#project-runs', JSON.stringify(signature), html)) restoreQueueFocus();
 }
 
 /** The project's latest runs, each with its result and a link to its reports in the Log. */
@@ -5168,6 +5505,7 @@ async function refresh() {
   drawSpeechDialog();
   drawLog();
   drawUsage();
+  drawSpending();
   drawAutopilot();
   drawComputer();
   drawPlan();
@@ -5411,10 +5749,8 @@ $('#limits-form').addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.target;
   try {
-    await api('/api/limits', {
-      pause_at_5h_window: Number(form.window.value) / 100,
-      pause_at_plan_week: Number(form.week.value) / 100,
-    });
+    // only the week's: the session's pause is set in Spending (drawSpending)
+    await api('/api/limits', { pause_at_plan_week: Number(form.week.value) / 100 });
     toast(t('Limits saved.'));
     refresh();
   } catch (error) {
@@ -5427,7 +5763,7 @@ document.addEventListener('click', event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-autopilot-mode],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-work-now],[data-work-open],[data-work-release],[data-project-manager],[data-browser-focus],[data-browser-close]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-autopilot-mode],[data-session-mode],[data-session-boost],[data-spending-dismiss],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-work-now],[data-work-open],[data-work-release],[data-project-manager],[data-browser-focus],[data-browser-close]');
   if (!target) return;
   // A project's name inside a row that opens on a click (Projects) goes to its page, and nothing else.
   if (event.target.closest('a.project-link') && !target.matches('a')) return;
@@ -5629,6 +5965,17 @@ document.addEventListener('click', async event => {
       toast(on ? t('Autopilot turned on.') : t('Autopilot turned off.'));
     } else if (target.dataset.autopilotMode) {
       await setAutopilotMode(target.dataset.autopilotMode);
+    } else if (target.dataset.sessionMode) {
+      // the session's shortcuts fill both settings (src/spending.mjs)
+      await api('/api/spending', { mode: target.dataset.sessionMode });
+      toast(t('Session mode: {mode}.', { mode: SESSION_MODES().find(m => m[0] === target.dataset.sessionMode)?.[1] ?? target.dataset.sessionMode }));
+    } else if (target.dataset.sessionBoost) {
+      const on = target.dataset.sessionBoost === 'on';
+      await api('/api/spending', { boost: on });
+      toast(on ? t('Spending all until the session renews; then your mode holds again.') : t('Back to your mode now.'));
+    } else if (target.hasAttribute('data-spending-dismiss')) {
+      await api('/api/spending', { dismiss: true });
+      toast(t('Not now: no more offers until the session renews.'));
     } else if (target.dataset.reader) {
       const action = target.dataset.reader;
       await api('/api/usage-reader', action === 'now' ? { read: true } : action === 'login' ? { login: true } : { enabled: action === 'on' });

@@ -38,7 +38,8 @@ import { changeRadar, parseRadarStatus, RADAR_STATUSES, radarIdeas } from './rad
 import { deliverDevNotices, devState, openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
-import { cancel, editQueued, focus, holdRun, maxParallel, moveInQueue, nudgeQueue, queued, resume } from './queue.mjs';
+import { cancel, cancelQueued, doNow, editQueued, endDoNow, focus, holdRun, maxParallel, moveInQueue, nudgeQueue, queueControl, queueInTurn, queueMarks, resume } from './queue.mjs';
+import { changeSession, spendingStatus } from './spending.mjs';
 import { activeRun, createRun, describeLater, doingNow, liveRuns, liveSpeech, needsBrief, outcomeLater, pauseLive, retryRun, setRunLevel, stepSays } from './runs.mjs';
 import { speechView } from './speech.mjs';
 import { closeGap, recordGap } from './gaps.mjs';
@@ -376,7 +377,10 @@ function buildState() {
     // The agent's speech bubble and the run's latest lines (src/speech.mjs).
     speech: speechView(run, liveSpeech(l)),
   }));
-  const queue = queued();
+  // in the order the turns go: a fair turn among projects (src/queue.mjs)
+  const queue = queueInTurn(runs);
+  const control = queueControl(runs);
+  const doNowInForce = control.doNow;
   const conversation = readConversation();
   // The runs the app lists without a title and summary of their own (older ones) get them, one at a time.
   for (const r of [...queue, ...runs.slice(0, 30)]) if (needsBrief(r)) describeLater(r.id, r);
@@ -388,7 +392,8 @@ function buildState() {
   const pushes = openPushes();
   const repos = openRepoRequests();
   const security = lockdownView();
-  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo, questions, pushes, repos, lockdown: security, quarantine: quarantineList() });
+  const spending = spendingStatus(config, { usage, runs, items });
+  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo, questions, pushes, repos, lockdown: security, quarantine: quarantineList(), spare: spending.offer });
   const lastOf = id => runs.find(r => r.mission === id && !['queued', 'waiting'].includes(r.status));
   return {
     now: now(),
@@ -422,7 +427,10 @@ function buildState() {
     running,
     current: running[0] ?? null,
     parallel: { max: maxParallel(config) },
-    queue: queue.map(summary),
+    // In the order it runs, each run with what holds it and why, who placed it and whether it resumes first; and the
+    // owner's "Do now" in force with the latest changes to the queue (src/queue.mjs).
+    queue: queue.map(r => ({ ...summary(r), ...queueMarks(r, doNowInForce) })),
+    queueControl: control,
     history: runs.filter(r => !['queued', 'waiting'].includes(r.status) && !goingIds.has(r.id)).slice(0, 30).map(summary),
     usage: { limits: config.limits ?? {}, account: usage },
     computer: machine,
@@ -436,6 +444,8 @@ function buildState() {
     },
     // The autopilot (src/autopilot.mjs): its settings, whether it may act now and what it did today.
     autopilot: autopilotStatus(config, usage, new Date(), runs),
+    // The session's spending (src/spending.mjs): its mode now, a boost, the estimate of what will be left and the offer.
+    spending,
     alerts: alerts(config, usage, machine),
     // What needs the owner, in three levels (src/attention.mjs): the band at the top, the sections, the title and the icon.
     attention: { items: attention, ...attentionSummary(attention), archived: attentionArchive().length },
@@ -466,6 +476,8 @@ function buildState() {
 function validLimits(body) {
   const limits = {};
   for (const key of ['pause_at_5h_window', 'pause_at_plan_week']) if (body[key] !== undefined) limits[key] = Math.min(1, Math.max(0.05, Number(body[key]) || 0.9));
+  // the session's pause may be off: only the safety margin (src/spending.mjs)
+  if (body.pause_at_5h_window === null || String(body.pause_at_5h_window).trim().toLowerCase() === 'off') limits.pause_at_5h_window = null;
   return limits;
 }
 
@@ -861,13 +873,6 @@ export function startServer() {
         case '/api/say':
           // A line of the agent at work for its speech bubble (cli.mjs say, from its step; src/speech.mjs).
           return reply(res, 200, stepSays(body.run, body.step, body.text));
-        case '/api/queue': {
-          // The manager's (or the owner's) changes to the queue: move a run, hold it or release it (src/queue.mjs).
-          const id = String(body.id ?? '');
-          if (body.action === 'move') return reply(res, 200, { queue: moveInQueue(id, { before: body.before ?? null, top: !!body.top }).map(summary) });
-          if (body.action === 'hold' || body.action === 'release') return reply(res, 200, summary(holdRun(id, body.action === 'hold', body.by === 'owner' ? 'owner' : 'manager')));
-          return reply(res, 400, { error: t('Say "move", "hold" or "release".') });
-        }
         case '/api/run/edit':
           // A run still in the queue: more instructions, its title, summary, agent, tool or level (src/runs.mjs, editRun).
           return reply(res, 200, summary(editQueued(body.id, body.changes ?? {}, { by: body.by === 'owner' ? 'owner' : 'manager' })));
@@ -959,6 +964,30 @@ export function startServer() {
           return reply(res, 200, await syncPrompts());
         case '/api/cancel':
           return reply(res, 200, { status: cancel(body.id) });
+        case '/api/queue': {
+          // Changes to the queue (src/queue.mjs): move a run, hold it (with the reason) or release it, "Do now" and its
+          // end, cancel. The owner's, from the app with the owner's key; the manager's (cli.mjs queue, "by": "manager",
+          // without the key: ownerOnly) never undo the owner's changes.
+          const by = body.by === 'manager' ? 'manager' : 'owner';
+          const id = String(body.id ?? '');
+          switch (body.action) {
+            case 'move': {
+              const where = { before: body.before ?? null, after: body.after ?? null, top: !!body.top, up: !!body.up, down: !!body.down };
+              return reply(res, 200, { queue: moveInQueue(id, where, by).map(summary) });
+            }
+            case 'hold':
+            case 'release':
+              return reply(res, 200, summary(holdRun(id, body.action === 'hold', by, body.reason ?? null)));
+            case 'do-now':
+              return reply(res, 200, doNow(id, String(body.scope ?? ''), by));
+            case 'do-now-end':
+              return reply(res, 200, endDoNow(by));
+            case 'cancel':
+              return reply(res, 200, { status: cancelQueued(id, by) });
+            default:
+              return reply(res, 400, { error: t('Say "move", "hold", "release", "do-now", "do-now-end" or "cancel".') });
+          }
+        }
         case '/api/effort': {
           // An agent's effort, for the installation or one project (src/effort.mjs); it counts from the next step.
           const change = setEffort({ member: body.member, level: body.level, project: body.project || null, chat: !!body.chat, by: 'owner' });
@@ -1102,6 +1131,10 @@ export function startServer() {
           const { paused } = changeSteer(body, { by, live, pause: id => pauseLive(id, 'focus') });
           return reply(res, 200, { steer: steerView(), paused });
         }
+        case '/api/spending':
+          // The session's mode, runs at once and pause, "Spend all until" the renewal and "Not now" (src/spending.mjs).
+          changeSession(body, { by: remote ? `remote:${String(req.headers['tailscale-user-login'] ?? '').trim().toLowerCase()}` : 'app' });
+          return reply(res, 200, spendingStatus());
         case '/api/autopilot':
           // Save the autopilot's settings and record who changed them (src/autopilot.mjs).
           changeAutopilot(body, { by: remote ? `remote:${String(req.headers['tailscale-user-login'] ?? '').trim().toLowerCase()}` : 'app' });

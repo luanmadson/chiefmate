@@ -1,8 +1,9 @@
 // The autopilot ("autopilot" in the settings, off by default): when a project's queue empties, Chiefmate wakes the
 // manager (the "idle" news) to put the project's next item on the queue, the first one it triaged "now", which it then
 // approves for the owner, marked as the autopilot's. Approved items waiting their turn start at once, with no manager.
-// Only within limits: the 5-hour window, the week's pace (a target share of the plan's week by its end) and optional
-// quiet hours. Once a day, the manager gets what was done alone ("autopilot_report") and tells the owner in a few lines.
+// Only within limits: the 5-hour window (with the session in "all", src/spending.mjs, never below its pause), the
+// week's pace (a target share of the plan's week by its end) and optional quiet hours. Once a day, the manager gets
+// what was done alone ("autopilot_report") and tells the owner in a few lines.
 // The week's pace comes as a spending mode: "save" (ends the week at 90%), "normal" (100%) or "all" (no pace: only the
 // 5-hour window and a used-up week stop it); any other share, above 1 too, is kept as a custom pace.
 import { loadConfig, saveConfig } from './config.mjs';
@@ -13,6 +14,7 @@ import { byRank, CLOSED, decideItem, planItem, planItems, startApproved } from '
 import { listRuns, readState, readUsage, saveState } from './store.mjs';
 import { isLocked } from './lockdown.mjs';
 import { held } from './power.mjs';
+import { effectiveLimits, sessionNow } from './spending.mjs';
 import { holdReason, readSteer } from './steer.mjs';
 import { updating } from './update.mjs';
 import { clip, now } from './util.mjs';
@@ -59,17 +61,21 @@ export function inQuietHours(quiet, date = new Date()) {
 
 /**
  * The settings, with their defaults: { enabled (false), week_pace (1, "normal": the share of the plan's week to reach by
- * its end; null, "all": no pace), mode, stop_at_5h_window (0.85), quiet_hours ("23:00-07:00", none by default),
- * daily_report ("08:00"; false: none) }.
+ * its end; null, "all": no pace), mode, stop_at_5h_window (0.85), window_stop (where it stops now: with the session in
+ * "all", src/spending.mjs, a boost included, never below the session's pause), quiet_hours ("23:00-07:00", none by
+ * default), daily_report ("08:00"; false: none) }.
  */
 export function autopilotSettings(config = loadConfig()) {
   const a = config.autopilot ?? {};
   const week = pace(a.week_pace, MODES.normal);
+  const stop = share(a.stop_at_5h_window, 0.85);
+  const session = sessionNow(config);
   return {
     enabled: a.enabled === true,
     week_pace: week,
     mode: paceMode(week),
-    stop_at_5h_window: share(a.stop_at_5h_window, 0.85),
+    stop_at_5h_window: stop,
+    window_stop: session.mode === 'all' ? Math.max(stop, session.limit) : stop,
     quiet_hours: parseQuietHours(a.quiet_hours),
     daily_report: a.daily_report === false ? null : minutesOf(a.daily_report) != null ? String(a.daily_report).trim() : '08:00',
   };
@@ -86,7 +92,8 @@ export function blockInfo(settings, usage = readUsage(), at = new Date()) {
   if (updating()) return { reason: 'updating' };
   if (inQuietHours(settings.quiet_hours, at)) return { reason: 'quiet', quiet: settings.quiet_hours.text };
   const w = usage.five_hour;
-  if (current(w) && w.used >= settings.stop_at_5h_window) return { reason: 'window', used: w.used, limit: settings.stop_at_5h_window };
+  const stop = settings.window_stop ?? settings.stop_at_5h_window;
+  if (current(w) && w.used >= stop) return { reason: 'window', used: w.used, limit: stop };
   // A used-up week stops it in every mode, "all" included.
   const week = usage.seven_day;
   if (current(week) && week.used >= 1) return { reason: 'week_full', used: week.used, resets: week.resets ?? null };
@@ -178,7 +185,7 @@ export function autopilotNow(settings, { config = loadConfig(), usage = readUsag
   const blocked = blockInfo(settings, usage, at);
   if (blocked) return { state: 'stopped', running, ...blocked };
   // the queue's own limits, read as checkLimits in src/runs.mjs reads them (only with a known reset ahead)
-  const limits = config.limits ?? {};
+  const limits = effectiveLimits(config);
   for (const [which, w, ceiling] of [['5h', usage.five_hour, limits.pause_at_5h_window], ['week', usage.seven_day, limits.pause_at_plan_week]]) {
     if (ceiling && current(w) && w.resets && w.used >= ceiling) return { state: 'stopped', running, reason: 'limits', which, used: w.used, limit: ceiling };
   }
@@ -218,6 +225,7 @@ export function autopilotStatus(config = loadConfig(), usage = readUsage(), at =
     mode: s.mode,
     week_pace: s.week_pace,
     stop_at_5h_window: s.stop_at_5h_window,
+    window_stop: s.window_stop,
     quiet_hours: s.quiet_hours?.text ?? '',
     daily_report: s.daily_report,
     idle_news: news.enabled && news.events.has('idle'),
@@ -355,11 +363,19 @@ export function autopilotLine(config = loadConfig(), usage = readUsage()) {
   const blocked = blockReason(s, usage);
   const day = (readState().autopilot?.log ?? []).filter(e => Date.now() - Date.parse(e.at) < DAY);
   return [
-    `Autopilot: on. When a project's queue empties, you are woken ("idle") to put its next item triaged "now" on the queue (plan approve <n> --autopilot), while the 5-hour window is under ${formatPercent(s.stop_at_5h_window)} and ${s.week_pace == null ? 'the plan\'s week is not used up (mode "all": no week\'s pace)' : `the plan's week within the pace that ends it at ${formatPercent(s.week_pace)} (mode "${s.mode}")`}${s.quiet_hours ? `, outside the quiet hours ${s.quiet_hours.text}` : ''}${s.daily_report ? `; daily report at ${s.daily_report}` : ''}.`,
+    `Autopilot: on. When a project's queue empties, you are woken ("idle") to put its next item triaged "now" on the queue (plan approve <n> --autopilot), while the 5-hour window is under ${formatPercent(s.window_stop)}${s.window_stop > s.stop_at_5h_window ? ` (its own ${formatPercent(s.stop_at_5h_window)} raised to the session's pause while the session spends all)` : ''} and ${s.week_pace == null ? 'the plan\'s week is not used up (mode "all": no week\'s pace)' : `the plan's week within the pace that ends it at ${formatPercent(s.week_pace)} (mode "${s.mode}")`}${s.quiet_hours ? `, outside the quiet hours ${s.quiet_hours.text}` : ''}${s.daily_report ? `; daily report at ${s.daily_report}` : ''}.`,
     news.enabled && news.events.has('idle') ? '' : 'The "idle" news is off in manager_updates, so it never wakes you.',
     blocked ? `Now it waits: ${blocked}.` : 'Now it may act.',
     `In the last day it queued: ${day.map(e => `#${e.item} ${e.project}: ${clip(e.title, 60)}`).join('; ') || 'nothing'}.`,
   ].filter(Boolean).join(' ');
+}
+
+/** The week's line for the manager's situation and "cli.mjs autopilot": its mode (the autopilot's pace) and the queue's pause. */
+export function weekLine(config = loadConfig()) {
+  const s = autopilotSettings(config);
+  const pause = effectiveLimits(config).pause_at_plan_week;
+  const mode = s.week_pace == null ? 'mode "all": no week\'s pace' : `mode "${s.mode}": the autopilot paces the week to end it at ${formatPercent(s.week_pace)}`;
+  return `Week (the plan's week): ${mode}${s.enabled ? '' : ' (with the autopilot on)'}; ${pause ? `runs pause at ${formatPercent(pause)} of it` : 'no pause of runs set for it'}.`;
 }
 
 let checking = false;

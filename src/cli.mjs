@@ -303,12 +303,14 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs reset-grant used <n>         marks free reset number n as used (remove <n> deletes it)
   node src/cli.mjs claude-login                 opens a browser window to sign in to claude.ai, for the optional usage reading
   node src/cli.mjs autopilot [on|off] [--mode save|normal|all] [--week-pace 1.2|all] [--window-5h 0.85]
-                           [--quiet 23:00-07:00|off] [--report 08:00|off]
+                           [--quiet 23:00-07:00|off] [--report 08:00|off] [--session save|normal|all]
                                                 the autopilot: when a project's queue empties, the manager puts its next
                                                 item triaged "now" on the queue, within these limits (mode: the week's
                                                 pace, ending it at 90%, 100% or with no pace; --week-pace: any share,
-                                                above 1 too); with no option, its settings, whether it may act now and
-                                                what it did in the last day
+                                                above 1 too); --session: the session's mode (1 run at a time with no
+                                                early pause, the settings' defaults, or 4 at a time pausing at 97%);
+                                                with no option, its settings, whether it may act now, what it did in
+                                                the last day, both spending modes and what the session will leave unused
   node src/cli.mjs usage-reader on|off|now      turns the reading of claude.ai's usage page on or off, or reads it now
   node src/cli.mjs watch [--dry-run] [--json]   the watchdog's check, run every 10 minutes by the Windows task "Watchdog":
                                                 whether Chiefmate answers, a stuck queue, run or update, the live sessions,
@@ -1114,6 +1116,7 @@ async function main() {
         const { chat, deliverPending, interruptManager, managerBusy } = await import('./manager.mjs');
         const { startWatch } = await import('./plan.mjs');
         const { startAutopilot } = await import('./autopilot.mjs');
+        const { startSpending } = await import('./spending.mjs');
         const { powerOffCommand, startPower } = await import('./power.mjs');
         const { updating } = await import('./update.mjs');
         // In "pause" mode (and on "update now") the update pauses the runs and the live sessions' turns going on and
@@ -1166,6 +1169,7 @@ async function main() {
         startSchedule();
         startWatch();
         startAutopilot();
+        startSpending();
         startSessions();
         startUpdates({
           ...pausing,
@@ -1827,8 +1831,13 @@ The reading is off until you turn it on: node src/cli.mjs usage-reader on`);
       // validated, saved and kept with who changed it, as in the app (read again on every check: no restart needed)
       const by = process.env.CHIEFMATE_MANAGER ? 'manager' : process.env.CHIEFMATE_RUN ? `step:${process.env.CHIEFMATE_RUN}` : 'cli';
       autopilot.changeAutopilot(changes, { config, by });
+      // the session's mode (src/spending.mjs), beside the week's
+      const spending = await import('./spending.mjs');
+      if (option('--session') !== undefined) spending.changeSession({ mode: option('--session') }, { config, by });
       console.log(JSON.stringify(config.autopilot ?? {}, null, 2));
       console.log(autopilot.autopilotLine(config));
+      console.log(spending.sessionLine(config));
+      console.log(autopilot.weekLine(config));
       return;
     }
     case 'usage-reader': {
