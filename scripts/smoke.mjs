@@ -3271,6 +3271,11 @@ try {
   const back = steer.readSteer(at.getTime() + 3 * 3600_000);
   expect(back.mode === 'free' && !back.paused.length && !back.until && back.by === 'time' && back.changes.at(-1).by === 'time', `a timed change did not come back: ${JSON.stringify(back)}`);
   expect(steer.steerView(config).changes[0].who === t('back automatically'), 'the automatic return is not in the latest changes');
+  // a timed change over another still pending comes back to the state before both, never to the one in between
+  steer.changeSteer({ action: 'pause-all', until: new Date(at.getTime() + 3600_000).toISOString() }, { config, at });
+  steer.changeSteer({ action: 'focus', projects: ['shop'], until: new Date(at.getTime() + 2 * 3600_000).toISOString() }, { config, at: new Date(at.getTime() + 1800_000) });
+  const chained = steer.readSteer(at.getTime() + 3 * 3600_000);
+  expect(chained.mode === 'free' && !chained.paused.length && !chained.until, `a timed change over another came back to the one in between: ${JSON.stringify(chained)}`);
   // invalid changes are refused, and change nothing
   for (const body of [{ action: 'focus', projects: [] }, { action: 'focus', projects: ['nope'] }, { action: 'project', project: 'shop', to: 'gone' }, { action: 'free', until: at.toISOString() }]) {
     let refused = false;

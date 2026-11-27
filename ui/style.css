@@ -1334,7 +1334,8 @@ html.chat-focus #view-manager .chat-column { width: min(100%, 1000px); margin: 0
 .steer-options .steer-option { flex: 1 1 0; padding: 7px 8px; }
 .steer-history summary { color: var(--muted); font-size: 12.5px; cursor: pointer; }
 .steer-history ul { display: grid; gap: 4px; margin: 8px 0 0; padding: 0; list-style: none; font-size: 12.5px; }
-.steer-chip { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; margin-left: -2px; padding: 1px 7px; border: 1px solid currentColor; font-size: 11.5px; font-weight: 600; white-space: nowrap; }
+/* on a computer the mark keeps its words, whatever the run's line beside it; on a phone it gives way */
+.steer-chip { flex: none; max-width: 280px; min-width: 0; overflow: hidden; text-overflow: ellipsis; margin-left: -2px; padding: 1px 7px; border: 1px solid currentColor; font-size: 11.5px; font-weight: 600; white-space: nowrap; }
 .steer-chip:hover { background: var(--hover); text-decoration: none; }
 @media (max-width: 600px) {
   .steer { margin-bottom: 14px; }
@@ -1346,4 +1347,7 @@ html.chat-focus #view-manager .chat-column { width: min(100%, 1000px); margin: 0
   .steer-pick-item { min-height: 44px; }
 }
 /* On a phone the top bar is narrow: with the focus' mark, it takes the place of the run's line (the panel has it all) */
-@media (max-width: 600px) { .focus:has(.steer-chip) > :not(.label, .steer-chip) { display: none; } }
+@media (max-width: 600px) {
+  .focus:has(.steer-chip) > :not(.label, .steer-chip) { display: none; }
+  .steer-chip { flex: 0 1 auto; max-width: none; }
+}

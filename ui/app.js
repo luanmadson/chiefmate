@@ -893,12 +893,15 @@ function steerChip() {
   return m ? `<a class="steer-chip state-${m.level}" href="#operations" title="${esc(state.steer.line)}">${esc(m.text)}</a>` : '';
 }
 
-/** When a change ends by itself: in 1, 2 or 4 hours, or tomorrow at 8:00. */
+// Before 8:00 the next 8:00 is today's: a choice made after midnight lasts the night, not a day more.
+const beforeEight = () => new Date().getHours() < 8;
+
+/** When a change ends by itself: in 1, 2 or 4 hours, or at the next 8:00. */
 function steerUntilIso(choice = steerUntil) {
   if (!choice) return null;
   const d = new Date();
-  if (choice === 'tomorrow8') {
-    d.setDate(d.getDate() + 1);
+  if (choice === 'at8') {
+    if (!beforeEight()) d.setDate(d.getDate() + 1);
     d.setHours(8, 0, 0, 0);
     return d.toISOString();
   }
@@ -963,7 +966,7 @@ function drawSteer() {
     ['focus', t('Focus on…'), s.mode === 'focus' || steerPick.open],
     ['pause-all', t('Pause all'), s.mode === 'paused-all'],
   ].map(([action, text, on]) => `<button type="button" class="steer-mode" data-steer-mode="${action}" aria-pressed="${on}"${action === 'focus' ? ` aria-expanded="${steerPick.open}"` : ''}>${esc(text)}</button>`).join('');
-  const until = [['', t('No end')], ['1', t('For 1 hour')], ['2', t('For 2 hours')], ['4', t('For 4 hours')], ['tomorrow8', t('Until tomorrow at 8:00')]]
+  const until = [['', t('No end')], ['1', t('For 1 hour')], ['2', t('For 2 hours')], ['4', t('For 4 hours')], ['at8', beforeEight() ? t('Until today at 8:00') : t('Until tomorrow at 8:00')]]
     .map(([value, text]) => `<option value="${value}"${value === steerUntil ? ' selected' : ''}>${esc(text)}</option>`).join('');
   const pick = steerPick.open
     ? `<div class="steer-pick"><span class="hint">${esc(t('Only these start new work; the others wait, their missions kept for after the focus.'))}</span>
@@ -982,7 +985,7 @@ function drawSteer() {
   if (draw('#steer', 'on', '<div id="steer-top"></div><div id="steer-cards" class="steer-cards"></div><div id="steer-foot"></div>')) {
     for (const key of ['#steer-top', '#steer-cards', '#steer-foot']) delete signatures[key];
   }
-  draw('#steer-top', JSON.stringify([s.line, s.back, s.mode, s.only, s.paused, s.projects, steerPick.open, steerUntil]), top);
+  draw('#steer-top', JSON.stringify([s.line, s.back, s.mode, s.only, s.paused, s.projects, steerPick.open, steerUntil, beforeEight()]), top);
   const cards = s.projects.map(steerCard).join('');
   draw('#steer-cards', JSON.stringify([s.mode, s.projects, going().map(a => [a.id, a.project, a.agent, a.title]), (state.queue ?? []).map(r => r.project), state.computer?.projects.map(p => [p.id, Math.round((p.ram ?? 0) / 2 ** 20), p.session])]), cards);
   const foot = `<div class="hint steer-note">${esc(t('Your live sessions and the conversation with the manager are never held.'))}</div>${changes}`;
@@ -1715,23 +1718,31 @@ function drawQueue() {
   // Runs of different projects go on at once, up to the limit; within a project, one at a time.
   const busy = new Set(going().map(a => a.project));
   let room = (state.parallel?.max ?? 1) - going().length;
+  // a project the owner's focus holds (src/steer.mjs) starts nothing: its runs wait, and none of them is next
+  const hold = id => state.steer?.projects.find(p => p.id === id)?.hold ?? null;
+  const held = { paused: t('when you resume its project'), all: t('when you resume the work'), focus: t('when the focus ends') };
   const expected = r => {
     if (busy.has(r.project)) return t('when the run of its project ends');
     busy.add(r.project);
     return room-- > 0 ? t('in a moment') : t('when a run ends');
   };
-  const rows = list.map((r, i) => `<tr class="${i === 0 ? 'next' : ''}">
+  const start = r => {
+    if (hold(r.project)) return esc(held[hold(r.project)]);
+    return r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? `${shortDate(r.notBefore)} (${esc(relative(r.notBefore))})` : esc(expected(r));
+  };
+  const next = list.find(r => !hold(r.project));
+  const rows = list.map((r, i) => `<tr class="${r === next ? 'next' : ''}">
       <td class="num">${i + 1}</td>
-      <td>${i === 0 ? `<span class="tag">${esc(t('Next'))}</span>` : ''}${lateTag(r)}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span></td>
+      <td>${r === next ? `<span class="tag">${esc(t('Next'))}</span>` : ''}${lateTag(r)}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span></td>
       <td>${stateHtml(runState(r.status))}</td>
-      <td class="num">${r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? `${shortDate(r.notBefore)} (${esc(relative(r.notBefore))})` : esc(expected(r))}</td>
+      <td class="num">${start(r)}</td>
       <td class="row-actions"><button type="button" class="button danger small" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button></td>
     </tr>`);
   const html = list.length
     ? `<div class="label" style="margin-top:24px">${esc(t('Queue'))}</div>
     <table class="table queue"><thead><tr><th>#</th><th>${esc(t('Run'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Expected start'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
     : '';
-  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools, r.due]), Math.floor(Date.now() / 60000)]), html);
+  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools, r.due, hold(r.project)]), Math.floor(Date.now() / 60000)]), html);
 }
 
 /** A run going on: who is at work, the step out of how many, the time counting and the last action, all live. */

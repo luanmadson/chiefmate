@@ -89,8 +89,8 @@ export function parseUntil(text, at = new Date()) {
  * - "pause-all": nothing new starts;
  * - "project" with project and to ("active", "paused" or "focus"): that project alone. "focus" adds it to the focus
  *   (starting one if there was none); "active" takes it out of its pause and of the focus.
- * until: an ISO time when the state before this change comes back by itself (none: the change stays; a pending return
- * is dropped). running: "pause" pauses at a safe point the runs going on of the projects now held (pause(id), given by
+ * until: an ISO time when the state before this change comes back by itself (over a return still pending, the state
+ * before that one; none: the change stays and a pending return is dropped). running: "pause" pauses at a safe point the runs going on of the projects now held (pause(id), given by
  * the caller), "finish" (the default) lets them finish. live: the runs going on ({ run, project }).
  * Returns { steer, paused } with the runs asked to pause; with dryRun (or body.preview), nothing is saved and "held"
  * lists the runs going on whose project the change would hold, for the owner's choice.
@@ -129,11 +129,13 @@ export function changeSteer(body = {}, { config = loadConfig(), by = 'owner', at
     if (!(ms > 0) || ms > MAX_UNTIL_MS) throw new Error(t('The end of the focus must be a time ahead, within a month.'));
   }
   if (dryRun) return { steer: { ...next, until }, held: live.filter(l => holdReason(l.project, next)) };
+  // what a timed change comes back to: the state before it or, over a return still pending, the state before that one
+  const back = until ? (s.until ? core(s.previous ?? FREE) : before) : null;
   const who = clip(String(by || 'owner'), 120);
   const stamp = at.toISOString();
   const saved = {
     ...next, since: same(before, next) ? s.since ?? stamp : stamp, by: who, until,
-    previous: until ? before : null,
+    previous: back,
     changes: [...(s.changes ?? []), { at: stamp, by: who, ...next, until }].slice(-MAX_CHANGES),
   };
   saveState({ ...readState(), steer: saved });
@@ -144,7 +146,7 @@ export function changeSteer(body = {}, { config = loadConfig(), by = 'owner', at
   const name = id => config.projects?.[id]?.name ?? id;
   const actor = who === 'cli' ? 'A command in a terminal' : config.owner || 'The owner';
   // the manager knows its own change: the others reach it as news
-  if (who !== 'manager') reportEvent('focus', `${actor} changed the focus: ${managerHead(next, name)}${until ? `, until ${formatDateTime(until)} (then back to ${managerHead(before, name)})` : ''}.${asked.length ? ` ${asked.length} run(s) going on pause at a safe point and resume when their project is free.` : ''}`, { config });
+  if (who !== 'manager') reportEvent('focus', `${actor} changed the focus: ${managerHead(next, name)}${until ? `, until ${formatDateTime(until)} (then back to ${managerHead(back, name)})` : ''}.${asked.length ? ` ${asked.length} run(s) going on pause at a safe point and resume when their project is free.` : ''}`, { config });
   changed(saved);
   return { steer: saved, paused: asked };
 }
