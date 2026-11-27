@@ -15,7 +15,7 @@ import { EFFORTS, loadAgents, loadConfig, projectCrew, projectEfforts, projectLe
 import { effortHistory, effortSource, runEffortChanges, setEffort } from './effort.mjs';
 import { agentTool, runTools, toolModel } from './tools.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
-import { addQuestion, decide, decisionCards, openPushes, openQuestions, openRepoRequests } from './decisions.mjs';
+import { addQuestion, askReboot, decide, decisionCards, openPushes, openQuestions, openRepoRequests } from './decisions.mjs';
 import { listFolder, openOnComputer, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
@@ -30,7 +30,7 @@ import { closeReplaced, mergeRun, previewClose, previewMerge } from './merge.mjs
 import { awayInfo, reportEvent, setAway } from './news.mjs';
 import { askOwner, confirmByOwnerWords, finishRequest, openCalls, openRequests, parkRun, pollRequest } from './needs.mjs';
 import { quarantineList, releaseQuarantine } from './quarantine.mjs';
-import { cancelStop, powerInfo, powerPreview, setStandby, stopSystem } from './power.mjs';
+import { cancelStop, logPower, powerInfo, powerPreview, rebootRefusal, setStandby, stopSystem } from './power.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { isOwner, OWNER_HEADER, openAppWindow, redeemCode } from './owner.mjs';
 import { changePlan, parseStatus, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
@@ -636,6 +636,8 @@ const KEYLESS = {
   '/api/retry': b => b.by === 'manager',
   '/api/run/talk': b => b.by === 'manager',
   '/api/gap': b => b.by === 'manager',
+  // What a restart of the computer would stop, and the manager's restart (src/power.mjs); never the owner's own.
+  '/api/power': b => b.action === 'preview' || (b.action === 'reboot' && b.by === 'manager'),
   '/api/merge': b => !!b.preview || b.by === 'manager',
   '/api/close-pr': b => !!b.preview || b.by === 'manager',
   '/api/lockdown': b => b.action === 'engage' && ['manager', 'step'].includes(b.by),
@@ -1044,11 +1046,27 @@ export function startServer() {
           // The power modes (src/power.mjs). From another device, only standby: a Chiefmate stopped there could not be
           // started again from it.
           const action = String(body.action ?? '');
-          if (remote && ['stop', 'shutdown'].includes(action)) return reply(res, 403, { error: t('Shutting down is done on the computer itself: from another device, Chiefmate could not be started again.') });
-          if (action === 'preview') {
-            const runs = liveRuns().map(l => ({ run: l.run, title: l.title, project: l.project }));
-            const sessions = sessionsState().open.map(x => ({ id: x.id, name: x.name, cwd: x.cwd, mode: x.mode, tool: x.tool }));
-            return reply(res, 200, await powerPreview({ runs, sessions }));
+          if (remote && ['stop', 'shutdown', 'reboot'].includes(action)) return reply(res, 403, { error: t('Shutting down is done on the computer itself: from another device, Chiefmate could not be started again.') });
+          const runs = liveRuns().map(l => ({ run: l.run, title: l.title, project: l.project }));
+          const sessions = () => sessionsState().open.map(x => ({ id: x.id, name: x.name, cwd: x.cwd, mode: x.mode, tool: x.tool, phase: x.phase ?? null }));
+          if (action === 'preview') return reply(res, 200, { ...(await powerPreview({ runs, sessions: sessions() })), away: !!awayInfo() });
+          if (action === 'reboot') {
+            // A restart of the computer, the manager's or the owner's, always with a reason. Refused while a live
+            // session's turn goes on; the manager's, during an emergency lockdown, and outside away mode it waits for
+            // the owner's confirmation on a question card (askReboot in src/decisions.mjs).
+            const by = body.by === 'manager' ? 'manager' : 'owner';
+            const reason = clip(String(body.reason ?? '').trim(), 300);
+            const refusal = by === 'manager' && isLocked() ? t('The emergency lockdown is on: only the owner may restart the computer now.') : rebootRefusal({ reason });
+            if (refusal) {
+              logPower({ action: 'reboot', outcome: 'refused', by, reason, why: refusal });
+              return reply(res, 409, { error: refusal });
+            }
+            if (by === 'manager' && !awayInfo()) {
+              const q = askReboot({ by, reason, runs, sessions: sessions() });
+              logPower({ action: 'reboot', outcome: 'asked', by, reason, question: q.id });
+              return reply(res, 200, { ...powerInfo(), asked: q.id });
+            }
+            return reply(res, 200, stopSystem('reboot', { by, reason }));
           }
           if (action === 'standby') return reply(res, 200, setStandby(true));
           if (action === 'on') return reply(res, 200, setStandby(false));
