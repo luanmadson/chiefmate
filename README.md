@@ -595,7 +595,7 @@ The agents talk to the manager directly, without going through you, with the sam
 
 ### Away mode
 
-Use **Away mode** at the top of the app whenever you step away. The manager gets the `away` event and briefly explains what will carry on. The button turns brass and shows when you left on wider screens.
+Use **Away mode**, the clock at the top of the app, whenever you step away, for an hour or for the night. The manager gets the `away` event and briefly explains what will carry on. The button turns brass and, on wider screens, shows its name and since when you are away.
 
 - **The work goes on alone**: runs, the queue, missions and the autopilot carry on as usual.
 - **Set the pace.** The notice below the title bar shows the autopilot's spending mode on desktop and mobile. Use its selector to switch to **Save usage**, **Normal** or **Spend all**. If the autopilot is off, the notice says so, and changing the pace saves it for when you turn it on.

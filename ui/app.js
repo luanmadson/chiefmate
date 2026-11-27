@@ -586,8 +586,9 @@ function drawPresence() {
 
 // ---------- Away mode (src/news.mjs) ----------
 
-let pendingAwayPace = null;
+let pendingAwayPace = null; // the mode being saved from the notice's selector
 
+/** The away button and, while away, the notice with the autopilot's pace and a selector to change it. */
 function drawAway() {
   const button = $('#away');
   const notice = $('#away-notice');
@@ -602,6 +603,8 @@ function drawAway() {
     ? t('Away since {time}. Notices that can wait are held ({count} so far). Click when you are back to get a summary from the manager.', { time: clockTime(away.since), count: away.held })
     : t('Stepping away? The team keeps working as configured, and the manager summarizes notices that can wait when you return.');
   button.setAttribute('aria-pressed', String(!!away));
+  // the name stays when narrow screens show the icon only
+  button.setAttribute('aria-label', away ? `${t('Away mode')} · ${sinceText}` : t('Away mode'));
   button.title = help;
   since.hidden = !away;
   since.textContent = sinceText;

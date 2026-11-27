@@ -55,10 +55,11 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .brand { display: flex; align-items: center; gap: 10px; font-size: 12px; font-weight: 600; letter-spacing: 0.22em; color: var(--strong); }
 .titlebar-right { display: flex; align-items: center; gap: 18px; min-width: 0; }
 .clock { font: 12px var(--mono); color: var(--muted); white-space: nowrap; }
-/* Away mode uses brass while it is on. */
+/* Away mode: a clock (any time away, not only the night), brass while it is on */
 .away { appearance: none; display: inline-flex; align-items: center; gap: 6px; flex: none; background: transparent; border: 1px solid var(--line-strong); border-radius: 0; color: var(--muted); font: inherit; font-size: 12px; padding: 3px 9px; cursor: pointer; white-space: nowrap; }
 .away:hover { color: var(--text); border-color: var(--muted); background: var(--hover); }
 .away[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
+.away svg { width: 13px; height: 13px; flex: none; }
 .away:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 .away[hidden], .away-notice[hidden] { display: none; }
 .away-notice { display: flex; align-items: center; gap: 8px; padding: 4px 16px; background: var(--raised); border-bottom: 1px solid var(--line); color: var(--strong); }
@@ -620,7 +621,7 @@ button.tab { background: transparent; border-top: 0; border-left: 0; border-righ
   .view { padding: 16px; }
   .presence .state { display: none; }
   .away { padding: 4px 7px; }
-  #away-since { display: none; }
+  .away .away-label, #away-since { display: none; }
   .focus { margin: 0 12px; padding-left: 12px; }
   .focus .label { display: none; }
 }

@@ -51,14 +51,16 @@ function awayUi({ enabled = true, mode = 'normal', week_pace = 1 } = {}) {
 }
 
 test('away mode uses the general absence wording in Brazilian Portuguese', async () => {
-  assert.match(html, /id="away"[^>]*><span data-t="Away mode">/);
+  assert.match(html, /id="away"[^>]*><svg[^]*?<\/svg><span class="away-label" data-t="Away mode">/);
   assert.equal(pt['Away mode'], 'Não estou aqui');
   assert.doesNotMatch(Object.values(pt).join('\n'), /soneca/i);
   const { nodes, toggle, toasts, calls, location } = awayUi();
   assert.equal(nodes['away-notice'].hidden, true);
+  assert.equal(nodes.away['aria-label'], 'Não estou aqui');
   assert.match(nodes.away.title, /^Vai se ausentar\?/);
   await toggle();
   assert.equal(nodes.away['aria-pressed'], 'true');
+  assert.equal(nodes.away['aria-label'], 'Não estou aqui · Desde 21:26');
   assert.equal(nodes['away-since'].textContent, 'Desde 21:26');
   assert.match(nodes.away.title, /^Ausente desde 21:26\..*resumo/);
   assert.match(toasts.at(-1), /^Ausência ativada\./);
@@ -76,7 +78,7 @@ test('the away notice shows the configured pace and saves a change in place', as
   const { nodes, state, toggle, choose, calls, toasts, location, draw, failNextSave } = awayUi({ enabled: false, mode: 'custom', week_pace: 1.2 });
   const select = nodes['away-pace'];
   await toggle();
-  assert.equal(nodes['away-pace-label'].textContent, 'Ritmo (desligado)');
+  assert.equal(nodes['away-pace-label'].textContent, 'Ritmo do piloto (desligado)');
   assert.equal(select.value, 'custom');
   assert.equal(nodes['away-custom-pace'].textContent, 'Meta de 120%');
   for (const [mode, label, localized] of [['save', 'Save usage', 'Economizar'], ['all', 'Spend all', 'Gastar tudo'], ['normal', 'Normal', 'Normal']]) {
