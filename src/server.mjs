@@ -29,7 +29,7 @@ import { cancelStop, powerInfo, powerPreview, setStandby, stopSystem } from './p
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { changePlan, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
 import { changeRadar, RADAR_STATUSES, radarIdeas } from './radar.mjs';
-import { openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
+import { deliverDevNotices, devState, openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
@@ -386,7 +386,7 @@ function buildState() {
     ui: uiSettings(config),
     ai: { claude: { ...claudeInfo }, account: { status: usage.status ?? null, updated: usage.updated ?? null } },
     update: { ...updateInfo, mode: updateMode(config) },
-    projects: Object.entries(config.projects ?? {}).map(([id, p]) => ({ id, name: p.name, site: p.site })),
+    projects: Object.entries(config.projects ?? {}).map(([id, p]) => ({ id, name: p.name, site: p.site, devUrl: devState(id, p, machine)?.url ?? null })),
     // Each project's agent in charge (src/charge.mjs): who it is, its conversation and its requests to the manager.
     charge: chargeState(config, agents),
     missions: Object.entries(config.missions ?? {}).map(([id, m]) => ({
@@ -502,6 +502,13 @@ export function startServer() {
   const allowed = new Set([`localhost:${port}`, `127.0.0.1:${port}`]);
   checkClaude();
   setInterval(checkClaude, 10 * 60_000);
+  const devNotices = setInterval(() => {
+    try {
+      deliverDevNotices();
+    } catch (error) {
+      console.error(`Development environment notices: ${error.message}`);
+    }
+  }, 2000).unref();
   const handle = async (req, res, remote = null) => {
     try {
       // Guards against another website open in the browser trying to send commands here.
@@ -851,6 +858,7 @@ export function startServer() {
   }
   // Both listeners (such as before a restart for an update), so the next Chiefmate can open them.
   const close = () => {
+    clearInterval(devNotices);
     remoteServer?.close();
     remoteServer?.closeAllConnections();
     return new Promise(resolve => server.close(() => resolve()));

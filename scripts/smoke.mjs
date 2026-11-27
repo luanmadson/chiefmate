@@ -1,9 +1,12 @@
 // Starts a temporary Chiefmate on a spare port (only the app and the API: no queue, no schedule, no updates)
 // and checks that everything answers. Usage: npm run smoke
 import { execFileSync, spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { SAMPLE_CSV, SAMPLE_PNG, sampleXlsx } from './fixtures.mjs';
 
@@ -2336,7 +2339,8 @@ try {
     "    const run = command => execSync(hook, { input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't3', tool_input: { command } }), encoding: 'utf8' });",
     `    appendFileSync(${JSON.stringify(path.join(liveDir, 'guard.txt'))},JSON.stringify([run('cd x && gh api repos/a/b/pulls -f title=T -f head=h'), run('git -C sub push origin main'), run('git status')]));`,
     "  }",
-    "  setTimeout(() => say({ type: 'result', subtype: 'success', result: 'done', session_id: id, num_turns: 1, permission_denials: denials }), prompt.includes('take long') ? 20000 : 300);",
+    "  const wait = prompt.includes('waiting for the environment test') ? 750 : prompt.includes('take long') ? 20000 : 300;",
+    "  setTimeout(() => say({ type: 'result', subtype: 'success', result: 'done', session_id: id, num_turns: 1, permission_denials: denials }), wait);",
     "});",
   ].join('\n'));
   const fakeCodex = path.join(liveDir, 'fake-codex.mjs');
@@ -2485,6 +2489,133 @@ try {
     expect(sessions.sessionView(c.id).session.turns === 2, "a Codex session's view is wrong");
     expect(cx1.session === c.id && cx1.prompt.includes(`chat say --from ${c.id}`), "a Codex session lacks the manager's address, or doesn't know which session it is");
     await sessions.endSession(c.id);
+
+    // Environment notices use both real session queues with stand-in tools and a simulated launcher and stop.
+    const { deliverDevNotices, devState, runDev, startDev, stopDev } = await import('../src/projects.mjs');
+    const devProject = 'smoke-dev';
+    const devClone = path.join(liveDir, 'dev-clone');
+    mkdirSync(devClone);
+    const projectConfig = { name: 'Sample dev', local_clone: devClone, dev_start: 'sample dev command' };
+    const devConfig = { ...liveConfig, projects: { [devProject]: projectConfig } };
+    for (const session of [s, c]) {
+      const record = sessions.readSession(session.id);
+      writeFileSync(path.join(data, 'sessions', `${session.id}.json`), JSON.stringify({ ...record, project: devProject, status: 'open' }));
+    }
+    const isolated = 'smoke-dev-other';
+    writeFileSync(path.join(data, 'sessions', `${isolated}.json`), JSON.stringify({
+      id: isolated, project: 'another-project', status: 'open', mode: 'app', tool: 'claude', cwd: liveDir,
+    }));
+    // The conversation with the project's agent in charge reads only: no turn of its own for the environment.
+    const inCharge = 'smoke-dev-charge';
+    writeFileSync(path.join(data, 'sessions', `${inCharge}.json`), JSON.stringify({
+      id: inCharge, project: devProject, status: 'open', mode: 'app', tool: 'claude', cwd: null, charge: true, member: 'generalist',
+    }));
+    const devRecord = path.join(data, 'dev', `${devProject}.json`);
+    const open = (_name, cwd, args) => {
+      expect(cwd === devClone && args[0] === 'dev-run' && args[1] === devProject, 'the environment did not launch in its own clone');
+      token = args[2];
+      return 'terminal';
+    };
+    let token;
+    const launch = () => startDev(devProject, { config: devConfig, open, readWindows: async () => [] });
+    const machine = { dev: [] };
+    const address = 'http://localhost:5173/';
+    const devChild = () => Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough() });
+    const service = devChild();
+    const closeDev = (child, code, signal = null) => {
+      child.stdout.end();
+      child.stderr.end();
+      child.emit('close', code, signal);
+    };
+    const notices = id => sessions.sessionHistory(id).items.filter(m => m.by === 'system');
+    await launch();
+    const serving = runDev(devProject, token, { config: devConfig, spawnCommand: () => service, probe: async url => url.href === address });
+    try {
+      service.stderr.write('Container sample-db Started\n');
+      service.stdout.write(`  Local: ${address}\n`);
+      for (let i = 0; i < 40 && !devState(devProject, projectConfig, machine).url; i++) await delay(50);
+      expect(devState(devProject, projectConfig, machine).url === address, 'an address reported by the command and listening was not exposed while running');
+      sessions.sayToSession(s.id, 'Keep working while waiting for the environment test');
+      const turn = sessions.turnOf(s.id);
+      deliverDevNotices();
+      const queuedNotice = sessions.readSession(s.id).queue.find(m => m.by === 'system');
+      expect(turn && sessions.turnOf(s.id)?.since === turn.since && queuedNotice?.text.includes(address) && queuedNotice.text.includes('sample-db'),
+        'the startup notice did not wait for the current turn with the service and address');
+      deliverDevNotices();
+      expect(sessions.readSession(s.id).queue.filter(m => m.by === 'system').length === 1, 'the startup notice was queued twice');
+      await Promise.all([idle(s.id), idle(c.id)]);
+      for (const session of [s, c]) {
+        expect(notices(session.id).some(n => n.kind === 'note' && n.text.includes(address))
+          && called().some(call => call.session === session.id && call.prompt.includes('[Chiefmate system notice, informational,') && call.prompt.includes(address)),
+          `the environment notice did not reach ${session.tool} as a system message`);
+      }
+      const pids = [];
+      const stopped = await stopDev(devProject, { config: devConfig, readWindows: async () => [{ pid: 42 }], stopTree: pid => pids.push(pid) });
+      closeDev(service, null, 'SIGTERM');
+      await serving;
+      deliverDevNotices();
+      await Promise.all([idle(s.id), idle(c.id)]);
+      // The stop names no services: what the command started on its own (containers with "-d") may still be up.
+      expect(stopped.stopped === 1 && pids.join() === '42' && !devState(devProject, projectConfig, machine).url
+        && notices(c.id).length === 2 && !notices(c.id).at(-1).error && !notices(c.id).at(-1).text.includes('sample-db'),
+      'stopping did not clear the system link and deliver the stop result');
+    } finally {
+      if (!service.stdout.writableEnded) closeDev(service, null, 'SIGINT');
+      await serving;
+    }
+    await launch();
+    const failed = devChild();
+    const starting = runDev(devProject, token, { config: devConfig, spawnCommand: () => failed, keepFailedWindow: false });
+    failed.stderr.write('Sample port is already in use\n');
+    closeDev(failed, 7);
+    await starting;
+    deliverDevNotices();
+    await Promise.all([idle(s.id), idle(c.id)]);
+    expect(!devState(devProject, projectConfig, machine).url && notices(s.id).at(-1)?.error
+      && notices(s.id).at(-1).text.includes('Sample port is already in use'), 'a failed startup did not reach the session with its short error');
+    // Ctrl+C in the window: the command ends with an error code (Windows reports no signal), and that is a stop.
+    await launch();
+    const interrupted = devChild();
+    const running = runDev(devProject, token, { config: devConfig, spawnCommand: () => interrupted, probe: async url => url.href === address, keepFailedWindow: false });
+    try {
+      interrupted.stdout.write(`  Local: ${address}\n`);
+      for (let i = 0; i < 40 && !devState(devProject, projectConfig, machine).url; i++) await delay(50);
+      process.emit('SIGINT');
+      closeDev(interrupted, 3221225786);
+      await running;
+    } finally {
+      if (!interrupted.stdout.writableEnded) closeDev(interrupted, null, 'SIGINT');
+      await running;
+    }
+    deliverDevNotices();
+    await Promise.all([idle(s.id), idle(c.id)]);
+    const told = notices(s.id).slice(-2);
+    expect(told.length === 2 && told[0].text.includes(address) && told.every(n => !n.error) && !told[1].text.includes('3221225786') && !existsSync(devRecord),
+      'Ctrl+C in the window was told as a failure, or its stop was not told');
+    // A record left by a window that closed, its process id since given to another process (here, this one).
+    const reading = dev => ({ supported: true, measured: new Date().toISOString(), dev });
+    const leftOver = () => writeFileSync(devRecord, JSON.stringify({ token: 'old', at: Date.now() - 120_000, name: 'Sample dev', status: 'running', pid: process.pid, url: address }));
+    leftOver();
+    expect(devState(devProject, projectConfig, reading([])).status === 'stopped'
+      && devState(devProject, projectConfig, reading([{ project: devProject, pids: [process.pid], ram: 1 }])).url === address,
+    'a record whose process id belongs to another process still showed the environment running');
+    const toldBefore = notices(c.id).length;
+    const reused = await stopDev(devProject, { config: devConfig, readWindows: async () => [], stopTree: () => expect(false, 'a process that is not the window was stopped') })
+      .catch(error => ({ error: error.message }));
+    if (process.platform === 'win32') {
+      leftOver();
+      const refused = await launch().then(() => null, error => error.message);
+      expect(!refused, `a record whose process id belongs to another process blocked the start: ${refused}`);
+      await stopDev(devProject, { config: devConfig, readWindows: async () => [], stopTree: () => {} });
+    }
+    deliverDevNotices();
+    await Promise.all([idle(s.id), idle(c.id)]);
+    expect(reused.stopped === 0 && !existsSync(devRecord) && notices(c.id).length > toldBefore && notices(c.id).slice(toldBefore).every(n => !n.error),
+      `a record whose process id belongs to another process blocked the stop: ${reused.error ?? ''}`);
+    expect(!notices(isolated).length && !sessions.readSession(isolated).queue?.length && !notices(inCharge).length
+      && !sessions.readSession(inCharge).queue?.length && !readdirSync(devClone).length,
+    'notices reached another project or the agent in charge, or wrote to the project clone');
+    await Promise.all([s, c, { id: isolated }, { id: inCharge }].map(session => sessions.endSession(session.id)));
 
     // Read the actual stdin of a resumed turn after a manager answer and a subsequent run status change.
     const charge = await import('../src/charge.mjs');

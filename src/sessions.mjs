@@ -283,19 +283,19 @@ const codexSignedIn = () => signedIn('codex');
  * Opens a window of its own running "node src/cli.mjs <args>" in a folder: Windows Terminal when there is one, else
  * PowerShell. Returns which. The arguments are ids (letters, digits, "_", "." and "-"): they need no quoting.
  */
-export function openConsole(name, cwd, args) {
+export function openConsole(name, cwd, args, onError = error => console.error(error.message)) {
   const cli = path.join(ROOT, 'src', 'cli.mjs');
   const title = `Chiefmate: ${name}`.replace(/[^\p{L}\p{N} .:_()-]/gu, '').slice(0, 60);
   const options = { cwd, detached: true, stdio: 'ignore' };
   const terminal = process.platform === 'win32' ? where('wt')[0] : null;
   if (terminal) {
-    spawn(terminal, ['-w', 'new', 'new-tab', '--title', title, '-d', cwd, process.execPath, cli, ...args], options).unref();
+    spawn(terminal, ['-w', 'new', 'new-tab', '--title', title, '-d', cwd, process.execPath, cli, ...args], options).once('error', onError).unref();
     return 'terminal';
   }
   const quote = s => `'${String(s).replaceAll("'", "''")}'`;
   const command = `$Host.UI.RawUI.WindowTitle = ${quote(title)}; & ${quote(process.execPath)} ${quote(cli)} ${args.join(' ')}`;
   // "start" gives PowerShell a console window of its own. The line is written as cmd.exe reads it (no double quotes inside).
-  spawn('cmd.exe', [`/d /c start "" powershell.exe -NoLogo -NoProfile -Command "${command}"`], { ...options, windowsHide: true, windowsVerbatimArguments: true }).unref();
+  spawn('cmd.exe', [`/d /c start "" powershell.exe -NoLogo -NoProfile -Command "${command}"`], { ...options, windowsHide: true, windowsVerbatimArguments: true }).once('error', onError).unref();
   return 'powershell';
 }
 
@@ -507,10 +507,27 @@ export function sayToSession(id, text, { by = 'owner' } = {}) {
   let session = appSession(id);
   if (session.status === 'ended') session = resumeSession(id);
   const item = { id: randomUUID().slice(0, 8), text: message, at: now(), ...(by === 'manager' ? { by } : {}) };
+  return enqueue(session, item);
+}
+
+function enqueue(session, item) {
+  const { id } = session;
   const queued = live.has(id) || session.status !== 'open' || !!session.paused || held() || isLocked() || (session.queue ?? []).length > 0;
   saveSession({ ...session, queue: [...(session.queue ?? []), item] });
   deliverSession(id);
   return { ...item, queued, position: queued ? (readSession(id)?.queue ?? []).length : 0 };
+}
+
+/**
+ * A system event goes to the project's live sessions in the app that were open when it happened. The conversation with
+ * the agent in charge is left out: it reads only, and a turn there would cost usage for nothing.
+ */
+export function tellProjectSessions(project, notice) {
+  for (const s of listSessions()) {
+    if (s.project !== project || s.mode !== 'app' || s.charge || s.status !== 'open' || (s.resumed ?? s.started) > notice.at) continue;
+    if ((s.queue ?? []).some(m => m.id === notice.id) || sessionHistory(s.id, null, 60).items.some(m => m.notice === notice.id)) continue;
+    enqueue(s, { ...notice, by: 'system' });
+  }
 }
 
 /** Takes a message out of a session's queue. Returns the queue. */
@@ -569,7 +586,11 @@ function turnText(config, session, items) {
   // A session opened with no first message: the manager's address goes with the owner's first one.
   else if (!session.charge && !session.firstMessage && !(session.turns ?? 0)) parts.push(managerAddress(config, session.id));
   if (mine.length === 1 && !first && !mine[0].by) parts.push(mine[0].text);
-  else if (mine.length) parts.push(`${mine.length === 1 ? `A message from ${owner}` : `${mine.length} messages from ${owner}, oldest first`}:\n\n${mine.map(m => `[sent ${formatDateTime(m.at)}${by(m)}]\n${m.text}`).join('\n\n')}`);
+  else if (mine.some(m => m.by === 'system')) {
+    for (const m of mine) parts.push(m.by === 'system'
+      ? `[Chiefmate system notice, informational, ${formatDateTime(m.at)}]\n${m.text}`
+      : `[Message from ${owner}, sent ${formatDateTime(m.at)}${by(m)}]\n${m.text}`);
+  } else if (mine.length) parts.push(`${mine.length === 1 ? `A message from ${owner}` : `${mine.length} messages from ${owner}, oldest first`}:\n\n${mine.map(m => `[sent ${formatDateTime(m.at)}${by(m)}]\n${m.text}`).join('\n\n')}`);
   return parts.join('\n\n');
 }
 
@@ -598,7 +619,10 @@ export function deliverSession(id) {
   const config = loadConfig();
   const turn = { since: now(), last: null, pid: null, cancel: () => {}, interrupt: () => false, started: false, interrupted: false, ending: false, pausing: false };
   live.set(id, turn);
-  for (const m of items) remember(id, { kind: 'owner', text: m.text, ...(m.first ? { first: true } : {}), ...(m.by ? { by: m.by } : {}), sent: m.at });
+  for (const m of items) {
+    if (m.by === 'system') note(id, m.text, { by: m.by, notice: m.id, sent: m.at, error: m.error });
+    else remember(id, { kind: 'owner', text: m.text, ...(m.first ? { first: true } : {}), ...(m.by ? { by: m.by } : {}), sent: m.at });
+  }
   if (session.paused && !items.length) note(id, t('The agent carries on after the update of Chiefmate.'));
   const prompt = turnText(config, session, items);
   saveSession({ ...session, queue: [], working: turn.since, interrupted: null, paused: null });
