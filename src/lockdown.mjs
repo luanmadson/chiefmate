@@ -16,6 +16,8 @@ import { clip, DATA, ensureDir, readJson, writeJson } from './util.mjs';
 export const SECURITY_DIR = path.join(DATA, 'security');
 const lockFile = (dir = SECURITY_DIR) => path.join(dir, 'lockdown.json');
 const signalsFile = (dir = SECURITY_DIR) => path.join(dir, 'signals.jsonl');
+/** The owner's local key (src/owner.mjs): only the server and the owner's command line read it. */
+export const ownerKeyFile = (dir = SECURITY_DIR) => path.join(dir, 'owner-key');
 
 // The signals the detection weighs, with how many within WINDOW_MINUTES warn the owner and how many lock Chiefmate.
 export const RULES = {
@@ -51,11 +53,11 @@ export function refuseWhileLocked(what, dir) {
 
 /**
  * The folders no agent may reach: the owner's browser profile (data/browser-profile), the crew's browser profiles
- * (data/browsers) and those listed in "security.protected_folders" of the settings.
+ * (data/browsers), the owner's local key and those listed in "security.protected_folders" of the settings.
  */
 export function protectedFolders(config = loadConfig(), data = DATA) {
   const extra = [config?.security?.protected_folders ?? []].flat().map(x => String(x ?? '').trim()).filter(Boolean);
-  return [path.join(data, 'browser-profile'), path.join(data, 'browsers'), ...extra.map(p => path.resolve(p))];
+  return [path.join(data, 'browser-profile'), path.join(data, 'browsers'), ownerKeyFile(path.join(data, 'security')), ...extra.map(p => path.resolve(p))];
 }
 
 /**

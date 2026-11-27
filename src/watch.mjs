@@ -11,6 +11,7 @@ import path from 'node:path';
 import { denyRules } from './access.mjs';
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
+import { ownerKeyFile } from './lockdown.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { readState } from './store.mjs';
@@ -305,7 +306,7 @@ export async function callRescuer(found, config = loadConfig(), settings = watch
     log: file,
     attribution: false,
     tools: ['Read', 'Grep', 'Glob', cli('rescue:*'), cli('status'), cli('history:*'), cli('report:*'), cli('ram'), cli('watch --dry-run:*'), 'Bash(git status:*)', 'Bash(git log:*)'],
-    disallowed: [...denyRules(path.join(DATA, 'browser-profile')), 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Agent', 'Task'],
+    disallowed: [...denyRules(path.join(DATA, 'browser-profile')), ...denyRules(ownerKeyFile(), false), 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Agent', 'Task'],
     env: { CHIEFMATE_RESCUER: '1' },
     onEvent: e => {
       if (e.type === 'action' && /rescue\s/.test(e.text)) actions.push(clip(e.text, 160));

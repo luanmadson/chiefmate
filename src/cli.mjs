@@ -6,6 +6,7 @@ import { loadConfig, saveConfig } from './config.mjs';
 import { fullReport, outcomeMarkdown } from './digest.mjs';
 import { formatDateTime, formatDuration } from './i18n.mjs';
 import { notify } from './notify.mjs';
+import { ownerHeaders } from './owner.mjs';
 import { listRuns, readRun, stepsOf } from './store.mjs';
 import { DATA, ensureDir } from './util.mjs';
 
@@ -24,10 +25,11 @@ const brief = () => ({ title: option('--title'), summary: option('--summary'), l
 const port = () => Number(process.env.CHIEFMATE_PORT) || loadConfig().port || 4747;
 const work = run => formatDuration(stepsOf(run).reduce((sum, s) => sum + (s.durationMs ?? 0), 0));
 
+// The owner's terminal sends the owner's key (src/owner.mjs); an agent's command, never.
 async function api(route, body) {
   const r = await fetch(
     `http://localhost:${port()}${route}`,
-    body ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1' }, body: JSON.stringify(body) } : {},
+    body ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1', ...ownerHeaders() }, body: JSON.stringify(body) } : {},
   );
   const data = await r.json();
   if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);

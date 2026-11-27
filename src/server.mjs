@@ -27,7 +27,8 @@ import { awayInfo, reportEvent, setAway } from './news.mjs';
 import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
 import { cancelStop, powerInfo, powerPreview, setStandby, stopSystem } from './power.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
-import { changePlan, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
+import { isOwner, OWNER_HEADER, openAppWindow, redeemCode } from './owner.mjs';
+import { changePlan, parseStatus, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
 import { changeRadar, RADAR_STATUSES, radarIdeas } from './radar.mjs';
 import { deliverDevNotices, devState, openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
@@ -43,7 +44,7 @@ import {
 import { talkTo } from './talk.mjs';
 import { listRuns, readConversation, readNotifications, readPending, readRun, readUsage, runDir, stepsOf } from './store.mjs';
 import { checkNow, updateInfo, updateMode, updateNow } from './update.mjs';
-import { isReading, loginState, openLogin, readerSettings, readerStatus, readUsagePage, signedIn, signInNeeded } from './usagepage.mjs';
+import { browserPath, isReading, loginState, openLogin, readerSettings, readerStatus, readUsagePage, signedIn, signInNeeded } from './usagepage.mjs';
 import { clip, now, ROOT, VERSION } from './util.mjs';
 import { projectDir } from './workspace.mjs';
 
@@ -514,6 +515,61 @@ export function fromAfar(route, body) {
   }
 }
 
+// What a command without the owner's key may do on this computer: what the command line lets an agent (a step, a live
+// session, the manager, the watchdog and its rescuer) do, and never as the owner. Anything else is the owner's: the
+// app and the owner's terminal send the key (src/owner.mjs). A route missing here needs the key.
+const PLAN_DECISIONS = ['triage', 'approve', 'later', 'discard', 'restore', 'order'];
+const DECIDED = ['proposed', 'triaged', 'approved', 'discarded'];
+const statusOf = text => {
+  try {
+    return parseStatus(text);
+  } catch {
+    return null;
+  }
+};
+const KEYLESS = {
+  '/api/needs-you': true,
+  '/api/needs-you/poll': true,
+  '/api/needs-you/done': b => b.by === 'check' && !b.session && b.answer == null && b.note == null,
+  '/api/defect': true,
+  '/api/defect/close': b => b.by === 'manager',
+  '/api/manager': b => !!b.from && typeof b.from === 'object', // an agent's message, marked as the agent's
+  '/api/request': true,
+  '/api/ask-owner': true,
+  '/api/task': true,
+  '/api/ask': true,
+  '/api/mission': true,
+  '/api/level': true,
+  '/api/cancel': true,
+  '/api/resume': true,
+  '/api/planning': b => b.by === 'manager' || !(PLAN_DECISIONS.includes(b.action) || (b.status && DECIDED.includes(statusOf(b.status)))),
+  '/api/radar': b => ['manager', 'crew'].includes(b.by),
+  '/api/session': true,
+  '/api/session/end': true,
+  '/api/session/say': b => b.by === 'manager',
+  '/api/steer': b => b.by === 'manager',
+  '/api/merge': b => !!b.preview || b.by === 'manager',
+  '/api/close-pr': b => !!b.preview || b.by === 'manager',
+  '/api/lockdown': b => b.action === 'engage' && ['manager', 'step'].includes(b.by),
+  '/api/limits': true,
+  '/api/stop-project': true,
+  '/api/project/dev': true,
+  '/api/prompts-sync': true,
+  '/api/update-check': true,
+  '/api/update-now': b => !b.interruptManager,
+  '/api/usage-reader': b => b.read === true && b.enabled === undefined && !b.login,
+  '/api/watchdog': true,
+  // Opening the app's window, and the trade of its pairing code for the key.
+  '/api/owner/window': true,
+  '/api/owner/pair': true,
+};
+
+/** Whether a command (route and body) needs the owner's key on this computer. */
+export function ownerOnly(route, body = {}) {
+  const rule = KEYLESS[route];
+  return !(rule === true || (typeof rule === 'function' && rule(body ?? {})));
+}
+
 export function startServer() {
   const config = loadConfig();
   const port = Number(process.env.CHIEFMATE_PORT) || config.port || 4747;
@@ -608,6 +664,11 @@ export function startServer() {
         return reply(res, 403, { error: 'request refused' });
       }
       let body = await readBody(req);
+      // On this computer, what is the owner's needs the owner's key; the remote access keeps its own checks.
+      if (!remote && ownerOnly(url.pathname, body) && !isOwner(req.headers)) {
+        recordSignal('unknown_origin', `POST ${clip(String(req.url), 120)} (no owner key)`, { who: 'app' });
+        return reply(res, 403, { error: t("Refused: this is the owner's, and the request doesn't carry the owner's key."), owner: true });
+      }
       if (remote) {
         const afar = fromAfar(url.pathname, body);
         if (afar.refused && !body.dryRun) return reply(res, 403, { error: t('This opens on the computer where Chiefmate runs: do it there.') });
@@ -778,6 +839,19 @@ export function startServer() {
           const id = String(body.id ?? '');
           const pending = url.pathname.endsWith('/edit') ? editPending(id, body.message) : removePending(id);
           return pending ? reply(res, 200, { pending }) : reply(res, 404, { error: t('This message is no longer in the queue: it was delivered or removed.') });
+        }
+        case '/api/owner/window':
+          // The app's window, opened here with a pairing code (scripts/open.vbs, or the app without the key).
+          if (remote) return reply(res, 403, { error: t('This opens on the computer where Chiefmate runs: do it there.') });
+          return reply(res, 200, openAppWindow({ port, section: String(body.section ?? ''), browser: browserPath(loadConfig()) }));
+        case '/api/owner/pair': {
+          // The app trades its window's pairing code for the key, once.
+          const key = remote ? null : redeemCode(body.code);
+          if (!key) {
+            recordSignal('unknown_origin', 'POST /api/owner/pair (a pairing code unknown, spent or expired)', { who: remote ? 'remote' : 'app' });
+            return reply(res, 403, { error: t('This pairing code is not valid: open Chiefmate again from its shortcut.') });
+          }
+          return reply(res, 200, { key, header: OWNER_HEADER });
         }
         case '/api/watchdog':
           // The watchdog (src/watch.mjs), a process apart from Chiefmate, tells the manager what it found and did.
