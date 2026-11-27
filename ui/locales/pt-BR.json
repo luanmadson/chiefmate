@@ -1978,6 +1978,7 @@
   "I paused at a safe point: Chiefmate is on standby. I'll go on when it's back.": "Pausei num ponto seguro: o Chiefmate está em espera. Sigo quando ele voltar.",
   "I paused at a safe point: this project is out of your focus for now.": "Pausei num ponto seguro: este projeto está fora do seu foco por enquanto.",
   "I paused at a safe point: Chiefmate is shutting down. I'll go on at the next start.": "Pausei num ponto seguro: o Chiefmate está desligando. Sigo quando ele iniciar de novo.",
+  "I paused at a safe point: the computer is restarting. I'll go on once Chiefmate is back.": "Pausei num ponto seguro: o computador vai reiniciar. Sigo quando o Chiefmate voltar.",
   "I paused at a safe point for an update of Chiefmate; I'll go on right after it.": "Pausei num ponto seguro para uma atualização do Chiefmate; sigo logo depois dela.",
   "Stopped: the plan's usage limit was reached. I'll go on after {time}.": "Parei: o limite de uso do plano foi atingido. Sigo depois de {time}.",
   "My part is done: {change}": "Terminei minha parte: {change}",

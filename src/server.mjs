@@ -617,6 +617,8 @@ const KEYLESS = {
   // A step's line for its speech bubble, always kept as the agent's (stepSays), never as the owner's.
   '/api/say': b => typeof b.run === 'string' && !!b.run,
   '/api/steer': b => b.by === 'manager',
+  // What a restart of the computer would stop, and the manager's restart (src/power.mjs); never the owner's own.
+  '/api/power': b => b.action === 'preview' || (b.action === 'reboot' && b.by === 'manager'),
   '/api/merge': b => !!b.preview || b.by === 'manager',
   '/api/close-pr': b => !!b.preview || b.by === 'manager',
   '/api/lockdown': b => b.action === 'engage' && ['manager', 'step'].includes(b.by),

@@ -234,14 +234,16 @@ try {
     expect((await post('/api/power', { action: 'stop' })).status === 400 && (await post('/api/power', { action: 'nap' })).status === 400, 'a stop was tried in the smoke test, or an unknown power mode was accepted');
     const powerPreview = await (await post('/api/power', { action: 'preview' })).json();
     expect(Array.isArray(powerPreview.runs) && Array.isArray(powerPreview.sessions) && Array.isArray(powerPreview.unsaved) && typeof powerPreview.away === 'boolean', `the power preview lacks the runs, sessions, changes or away mode: ${JSON.stringify(powerPreview)}`);
-    // A restart: never without a reason; the manager's, outside away mode, becomes a question card for the owner; the
-    // owner's own would begin, which the smoke test can't (shutting down is off here): nothing restarts.
-    const noReason = await post('/api/power', { action: 'reboot', by: 'manager' });
-    const managerReboot = await (await post('/api/power', { action: 'reboot', by: 'manager', reason: 'a file locked by the antivirus' })).json();
+    // A restart: never without a reason; the manager's (without the owner's key, as the manager sends it), outside away
+    // mode, becomes a question card for the owner; the owner's own needs the key, and would begin, which the smoke test
+    // can't (shutting down is off here): nothing restarts.
+    const noReason = await keyless('/api/power', { action: 'reboot', by: 'manager' });
+    const managerReboot = await (await keyless('/api/power', { action: 'reboot', by: 'manager', reason: 'a file locked by the antivirus' })).json();
     const rebootQuestion = (await (await fetch(`${base}/api/state`)).json()).decisions?.find(c => c.question === managerReboot.asked);
     const ownerReboot = await post('/api/power', { action: 'reboot', by: 'owner', reason: 'test' });
-    expect(noReason.status === 409 && managerReboot.asked && managerReboot.mode === 'on' && rebootQuestion?.options?.length === 2 && ownerReboot.status === 400,
-      `a restart went without a reason, the manager's did not wait for the owner's card, or one began in the smoke test: ${JSON.stringify([noReason.status, managerReboot, rebootQuestion, ownerReboot.status])}`);
+    const ownerRebootKeyless = await keyless('/api/power', { action: 'reboot', by: 'owner', reason: 'test' });
+    expect(noReason.status === 409 && managerReboot.asked && managerReboot.mode === 'on' && rebootQuestion?.options?.length === 2 && ownerReboot.status === 400 && ownerRebootKeyless.status === 403,
+      `a restart went without a reason, the manager's did not wait for the owner's card, the owner's went without the key, or one began in the smoke test: ${JSON.stringify([noReason.status, managerReboot, rebootQuestion, ownerReboot.status, ownerRebootKeyless.status])}`);
     await post('/api/decide', { card: rebootQuestion?.id, action: 'discard' });
     expect(Array.isArray(state.teams) && state.teams.every(x => x.project && Array.isArray(x.members)), '/api/state has no crews by project');
     expect(Array.isArray(state.needs), "/api/state has no list of the owner's requests");

@@ -21,7 +21,7 @@ import { checkSignals, engage, isLocked, ownerKeyFile, protectedFolders, readLoc
 import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
 import { copyHolders, pickNext } from '../src/queue.mjs';
-import { askedTool, copyHolder, endLine, holdsCopy, limitWaitCleared, stepTool } from '../src/runs.mjs';
+import { askedTool, copyHolder, endLine, holdsCopy, limitWaitCleared, pausedLine, stepTool } from '../src/runs.mjs';
 import { addSpeech, askedBy, SPEECH_KEEP, SPEECH_MAX, SPEECH_SHOWN, speechLine, speechNow, speechRule, speechView } from '../src/speech.mjs';
 import {
   agentTool, availableTools, chooseTool, codexEnvironment, codexEvents, codexGuard, codexStepArgs, correctionLine, GROK_DENY, grokEvents, grokStepArgs, parseTool,
@@ -1483,6 +1483,10 @@ test('speech bubbles: the lines kept, who asked, the line shown now and its stat
   assert.match(endLine({ status: 'done', outcome: { change: 'The Decisions screen is clearer.' } }).text, /The Decisions screen is clearer\./);
   assert.deepEqual([endLine({ status: 'failed', error: 'time limit' }).state, /time limit/.test(endLine({ status: 'failed', error: 'time limit' }).text)], ['stuck', true]);
   assert.equal(endLine({ status: 'pending' }, at(300)).state, 'waiting');
+  // A pause says why: each reason its own line, a restart of the computer never an update's.
+  const reasons = ['update', 'owner', 'standby', 'focus', 'stop', 'reboot'];
+  assert.equal(new Set(reasons.map(pausedLine)).size, reasons.length);
+  assert.match(pausedLine('reboot'), /computer is restarting/);
 
   // Kept: at most SPEECH_KEEP lines; the app gets the last SPEECH_SHOWN, and the line now only for a run going on.
   for (let i = 0; i < SPEECH_KEEP + 20; i++) addSpeech(run, { step: 2, agent: 'designer', by: 'auto', text: `Line ${i}`, at: at(100 + i) });
@@ -1633,6 +1637,8 @@ test('without the key, a command may do only what an agent may, never as the own
     ['/api/planning', { action: 'triage', id: 1, recommend: 'now' }], ['/api/planning', { action: 'reorder', ids: [1] }], ['/api/planning', { action: 'restore', id: 1 }],
     ['/api/planning', { action: 'add', project: 'p', title: 't', status: 'triaged' }], ['/api/planning', { action: 'triage', id: 1, by: 'owner' }],
     ['/api/say', { text: 'x' }], ['/api/say', { run: '', text: 'x' }],
+    ['/api/power', { action: 'reboot', by: 'owner', reason: 'x' }], ['/api/power', { action: 'reboot', reason: 'x' }], ['/api/power', { action: 'cancel', by: 'manager' }],
+    ['/api/power', { action: 'stop', by: 'manager' }],
   ];
   for (const [route, body] of owners) assert.equal(ownerOnly(route, body), true, `${route} ${JSON.stringify(body)} goes without the key`);
   // What the command line sends for an agent (a step, a live session, the manager, the watchdog and its rescuer).
@@ -1653,6 +1659,8 @@ test('without the key, a command may do only what an agent may, never as the own
     ['/api/planning', { action: 'restore', id: 1, by: 'manager' }], ['/api/planning', { action: 'set', id: 1, status: 'triaged', by: 'manager' }],
     ['/api/planning', { action: 'add', project: 'p', title: 't', status: 'approved', by: 'manager' }], ['/api/planning', { action: 'set', id: 1, status: 'done' }],
     ['/api/say', { run: 'r', step: 1, text: 'x' }],
+    // The manager's restart of the computer, and what it would stop.
+    ['/api/power', { action: 'preview' }], ['/api/power', { action: 'reboot', by: 'manager', reason: 'x' }],
   ];
   for (const [route, body] of agents) assert.equal(ownerOnly(route, body), false, `${route} ${JSON.stringify(body)} needs the key`);
   // The app sends the key in the server's header.

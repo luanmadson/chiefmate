@@ -293,11 +293,12 @@ export function pauseLive(id, why = 'update', { holdWhile = null } = {}) {
 export const pauseAll = (why = 'update') => [...live.keys()].filter(id => pauseLive(id, why));
 
 /** The bubble's line of a step that paused (src/speech.mjs), in the first person. */
-function pausedLine(why) {
+export function pausedLine(why) {
   if (why === 'owner') return t("I paused at a safe point while you work on this project; I'll go on when your session ends.");
   if (why === 'standby') return t("I paused at a safe point: Chiefmate is on standby. I'll go on when it's back.");
   if (why === 'focus') return t('I paused at a safe point: this project is out of your focus for now.');
   if (why === 'stop') return t("I paused at a safe point: Chiefmate is shutting down. I'll go on at the next start.");
+  if (why === 'reboot') return t("I paused at a safe point: the computer is restarting. I'll go on once Chiefmate is back.");
   return t("I paused at a safe point for an update of Chiefmate; I'll go on right after it.");
 }
 
