@@ -1,7 +1,7 @@
 // The settings (config/chiefmate.json, created from config/example.json on the first run) and the crew (agents/*.md).
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { languageName, readJson, ROOT, writeJson } from './util.mjs';
+import { DATA, languageName, readJson, ROOT, writeJson } from './util.mjs';
 
 export const CONFIG_FILE = path.join(ROOT, 'config', 'chiefmate.json');
 const EXAMPLE_FILE = path.join(ROOT, 'config', 'example.json');
@@ -19,21 +19,80 @@ export function saveConfig(config) {
   backupConfig(config);
 }
 
+/** Where the full copy of the settings stays: Chiefmate's own data folder, on this computer only and never in git. */
+export const FULL_BACKUP_DIR = path.join(DATA, 'config-backup');
+
 /**
- * With "backup_dir" in the settings (a folder of your own, such as one in a private repository),
- * keeps an up-to-date copy of the settings there: on every save and whenever Chiefmate starts.
+ * With "backup_dir" in the settings (a folder of your own, such as one in a private repository), keeps an up-to-date
+ * copy of the settings there, on every save and whenever Chiefmate starts: a redacted one (redactConfig), since that
+ * folder is usually pushed somewhere. The full copy goes to FULL_BACKUP_DIR, on this computer only.
  */
-export function backupConfig(config = loadConfig()) {
+export function backupConfig(config = loadConfig(), { fullDir = FULL_BACKUP_DIR } = {}) {
   if (!config.backup_dir) return;
+  writeIfChanged(config.backup_dir, redactConfig(config));
+  writeIfChanged(fullDir, config);
+}
+
+function writeIfChanged(dir, value) {
   try {
-    const target = path.join(config.backup_dir, 'chiefmate.json');
-    const text = `${JSON.stringify(config, null, 2)}\n`;
+    const target = path.join(dir, 'chiefmate.json');
+    const text = `${JSON.stringify(value, null, 2)}\n`;
     if (existsSync(target) && readFileSync(target, 'utf8') === text) return;
-    mkdirSync(config.backup_dir, { recursive: true });
+    mkdirSync(dir, { recursive: true });
     writeFileSync(target, text);
   } catch (error) {
     console.error('Settings backup:', error.message);
   }
+}
+
+// Free text written by the owner (notes, instructions, descriptions): it is where personal data ends up, so the
+// redacted copy drops it whole, wherever it is (projects, their crews and leads, the crew, missions, libraries).
+const FREE_TEXT_KEYS = new Set(['about', 'notes', 'agent_notes', 'extra_instructions', 'description', 'part', 'note']);
+// What names a secret: a setting's key, a command's flag ("--api-key") or an address's parameter ("?token=").
+const SECRET = String.raw`token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|auth(?:orization)?(?![a-z])|cookie|credential|(?<![a-z])pin(?![a-z])`;
+const SECRET_KEY = new RegExp(SECRET, 'i');
+const SECRET_FLAG = new RegExp(String.raw`^--?[\w-]*(?:${SECRET})[\w-]*$`, 'i');
+const MARK = { text: '[removed from this copy]', secret: '[secret]', id: '[id]', login: '[login]' };
+// What is left in the other strings: secrets (a login inside an address, the value after a flag, parameter or header
+// named like one, known token formats), then e-mails (not "git@host" nor "package@1.2.3"), Brazilian documents,
+// phone numbers and amounts of money.
+const PATTERNS = [
+  [/(\/\/)[^\s/@:]+:[^\s/@]+@/g, '$1[secret]@'],
+  [new RegExp(String.raw`((?:(?:${SECRET})[\w-]*(?:=|:\s*)|--?[\w-]*(?:${SECRET})[\w-]*\s+(?!-))['"]?(?:(?:Bearer|Basic)\s+)?)[^\s&#"']+`, 'gi'), '$1[secret]'],
+  [/\b(?:(?:gh[pousr]|github_pat|sk_live|sk_test|rk_live|sbp)_|(?:sk|xai|glpat|xox[abprs])-)[\w-]{16,}|\bAKIA[0-9A-Z]{16}\b|\bAIza[\w-]{35}\b/g, '[secret]'],
+  [/(?<![\w.+-])(?!git@)[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}\b/gi, '[email]'],
+  [/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b|\b\d{3}\.\d{3}\.\d{3}-\d{2}\b/g, '[document]'],
+  [/(\+\d{2}\s?)?\(?\b\d{2}\)?\s?9?\d{4}-\d{4}\b/g, '[phone]'],
+  [/(R\$|US\$|U\$|€|£|\$)\s?\d[\d.,]*|\b\d[\d.]*,\d{2}\b|\b\d[\d.,]*\s?(mil\s)?(reais|real|d[oó]lares|euros)\b/gi, '[amount]'],
+];
+const scrub = text => PATTERNS.reduce((t, [re, mark]) => t.replace(re, mark), text);
+
+/**
+ * The settings without personal data, for a copy kept in a repository: the free text becomes a marker, secrets
+ * (in MCP servers' env and headers, under any key named like a secret, or after such a flag in a list of arguments),
+ * remote logins and document ids are masked, and what PATTERNS finds in the other strings is replaced. The structure
+ * stays, enough to rebuild the installation with the full local copy at hand.
+ */
+export function redactConfig(config) {
+  // "mark": what every string or number inside becomes, once a key on the way says it is free text or a secret.
+  const walk = (value, key = '', mark = null) => {
+    mark ??= FREE_TEXT_KEYS.has(key) ? MARK.text : SECRET_KEY.test(key) ? MARK.secret : null;
+    if (Array.isArray(value)) return value.map((v, i) => walk(v, key, mark ?? (i > 0 && SECRET_FLAG.test(value[i - 1]) ? MARK.secret : null)));
+    if (value && typeof value === 'object') {
+      const inner = mark ?? (key === 'env' || key === 'headers' ? MARK.secret : null);
+      return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, walk(v, k, inner)]));
+    }
+    if (value === '' || (typeof value !== 'string' && typeof value !== 'number')) return value;
+    if (mark) return mark;
+    if (typeof value === 'number') return value;
+    if (key === 'logins') return MARK.login;
+    if (key === 'doc_id') return MARK.id;
+    return scrub(value);
+  };
+  return {
+    backup_note: 'Redacted copy: notes, instructions, secrets and personal data are replaced by markers. The full copy stays on the computer, in data/config-backup/chiefmate.json of the installation.',
+    ...walk(config),
+  };
 }
 
 /** Reads an agent's header: "key: value", "key: [a, b]" or a list of "- item" lines. */
