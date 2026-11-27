@@ -596,6 +596,42 @@ try {
     expect(/^Changed #3 /.test(cli(['radar', 'set', '3', '--summary', 'Updated by a step.'], { CHIEFMATE_RUN: 'x' })), 'a step could not update a radar idea');
     expect(/^Changed #3 /.test(cli(['radar', 'set', '3', '--summary', 'Updated by the manager.'], { CHIEFMATE_MANAGER: '1' })), 'the manager could not update a radar idea');
 
+    // The commands the instructions give the manager, a step and a live session go without the owner's key, marked as
+    // theirs; what is the owner's stays refused (the server's answer, or the command line's own rule for a step).
+    const as = {
+      manager: { CHIEFMATE_MANAGER: '1', CHIEFMATE_RUN: '', CHIEFMATE_STEP: '', CHIEFMATE_SESSION: '' },
+      step: { CHIEFMATE_MANAGER: '', CHIEFMATE_RUN: 'smoke-feed', CHIEFMATE_STEP: '1', CHIEFMATE_SESSION: '' },
+      session: { CHIEFMATE_MANAGER: '', CHIEFMATE_RUN: '', CHIEFMATE_STEP: '', CHIEFMATE_SESSION: 'smoke-session' },
+    };
+    const refusal = (args, env) => {
+      try {
+        return { out: cli(args, env) };
+      } catch (error) {
+        return { error: String(error.stderr) };
+      }
+    };
+    const ownerRefused = /owner's key|chave do dono/;
+    const idOf = out => Number(/#(\d+)/.exec(out ?? '')?.[1]);
+    const fromStep = refusal(['plan', 'propose', 'Sample', 'Smoke keyless proposal', '--summary', 'From a step.', '--agent', 'generalist', '--priority', 'low'], as.step);
+    const keylessId = idOf(fromStep.out);
+    expect(keylessId > 0, `a step could not propose an item without the owner's key: ${fromStep.error}`);
+    for (const args of [['plan', 'triage', `${keylessId}`, '--recommend', 'now', '--priority', 'high', '--note', 'Keyless.'], ['plan', 'order', `${keylessId}`],
+      ['plan', 'set', `${keylessId}`, '--status', 'triaged'], ['plan', 'discard', `${keylessId}`, '--reason', 'Smoke.'], ['plan', 'restore', `${keylessId}`],
+      ['plan', 'add', 'Sample', 'Smoke manager item', '--status', 'proposed']]) {
+      const r = refusal(args, as.manager);
+      expect(r.out && !r.error, `the manager's "${args.slice(0, 2).join(' ')}" was refused without the owner's key: ${r.error}`);
+    }
+    for (const who of ['step', 'session']) {
+      const r = refusal(['plan', 'triage', `${keylessId}`, '--recommend', 'later'], as[who]);
+      expect(!r.out && (who === 'step' ? /only proposes/ : ownerRefused).test(r.error), `a ${who} triaged an item of the planning board: ${r.out ?? r.error}`);
+    }
+    expect(refusal(['plan', 'propose', 'Sample', 'Smoke session proposal', '--summary', 'From a session.'], as.session).out, "a live session could not propose an item without the owner's key");
+    // A step's line for its bubble: not refused as the owner's (this run is over, so the server says only that).
+    const said = refusal(['say', 'Comecei o teste'], as.step);
+    expect(said.error && !ownerRefused.test(said.error), `a step's line for its bubble was refused as the owner's: ${said.out ?? said.error}`);
+    expect((await keyless('/api/say', { text: 'As the owner' })).status === 403, "a line for a bubble without a run went without the owner's key");
+    for (const id of (await import('../src/planning.mjs')).planItems().filter(i => /^Smoke (keyless|session|manager) /.test(i.title)).map(i => i.id)) cli(['plan', 'discard', `${id}`, '--reason', 'Smoke.'], as.manager);
+
     // The CLI sends the destination options to the running API. The queue is held while the approval is tested, and
     // the run it queues (in a real project) is canceled: a later part of this test wakes the queue up.
     const charge = await import('../src/charge.mjs');

@@ -1600,6 +1600,9 @@ test('without the key, a command may do only what an agent may, never as the own
     ['/api/update-now', { interruptManager: true }], ['/api/usage-reader', { enabled: true }], ['/api/files/open', { path: 'x' }], ['/api/effort', {}],
     ['/api/autopilot', {}], ['/api/away', { on: true }], ['/api/attention/seen', { ids: [] }], ['/api/run/talk', {}], ['/api/new-conversation', {}],
     ['/api/session/permission', {}], ['/api/work-now', {}], ['/api/voice-input', {}], ['/api/no-such-route', {}],
+    ['/api/planning', { action: 'triage', id: 1, recommend: 'now' }], ['/api/planning', { action: 'reorder', ids: [1] }], ['/api/planning', { action: 'restore', id: 1 }],
+    ['/api/planning', { action: 'add', project: 'p', title: 't', status: 'triaged' }], ['/api/planning', { action: 'triage', id: 1, by: 'owner' }],
+    ['/api/say', { text: 'x' }], ['/api/say', { run: '', text: 'x' }],
   ];
   for (const [route, body] of owners) assert.equal(ownerOnly(route, body), true, `${route} ${JSON.stringify(body)} goes without the key`);
   // What the command line sends for an agent (a step, a live session, the manager, the watchdog and its rescuer).
@@ -1615,6 +1618,11 @@ test('without the key, a command may do only what an agent may, never as the own
     ['/api/lockdown', { action: 'engage', by: 'step' }], ['/api/limits', {}], ['/api/stop-project', { project: 'p', pids: [1] }], ['/api/project/dev', {}],
     ['/api/prompts-sync', {}], ['/api/update-check', {}], ['/api/update-now', {}], ['/api/usage-reader', { read: true }], ['/api/watchdog', { text: 'x' }],
     ['/api/owner/window', {}], ['/api/owner/pair', { code: 'x' }],
+    // The manager's triage and the board's order, and a step's line for its speech bubble.
+    ['/api/planning', { action: 'triage', id: 1, recommend: 'now', by: 'manager' }], ['/api/planning', { action: 'reorder', ids: [1], by: 'manager' }],
+    ['/api/planning', { action: 'restore', id: 1, by: 'manager' }], ['/api/planning', { action: 'set', id: 1, status: 'triaged', by: 'manager' }],
+    ['/api/planning', { action: 'add', project: 'p', title: 't', status: 'approved', by: 'manager' }], ['/api/planning', { action: 'set', id: 1, status: 'done' }],
+    ['/api/say', { run: 'r', step: 1, text: 'x' }],
   ];
   for (const [route, body] of agents) assert.equal(ownerOnly(route, body), false, `${route} ${JSON.stringify(body)} needs the key`);
   // The app sends the key in the server's header.
