@@ -82,6 +82,7 @@ function crewRules(config, project, projectId, reportLang = config.language || '
 - If you find work worth doing outside your part, don't do it: propose it for ${config.owner || 'the owner'}'s planning board, during the step or at its end, with \`${cliCommand()} plan propose ${projectId} "<short title, at most ${TITLE_MAX} characters: what will be done>" --summary "<1-2 sentences: what and why>" --agent <member who should do it> --priority high|medium|low\`. Propose only what has a clear gain, one item per idea, and check \`${cliCommand()} plan list --project ${projectId} --all\` first so you don't repeat an item. The manager triages the proposals and ${config.owner || 'the owner'} decides. Don't propose fixes within your own task or the next run of a mission already approved: those you just do.
 - Never read, list or copy Chiefmate's \`data/\` folder (including \`data/browser-profile\`, the browser profile Chiefmate uses for the owner), other projects' working copies or other projects' personal documentation. You only get the folders this step needs.
 - When you need ${config.owner || 'the owner'} to act (sign in somewhere, confirm something, do what only a person can do), don't stop and don't work around it: run \`${cliCommand()} needs-you "<what to do, in ${owner}>" [--url <address>] [--wait] [--check "<command that succeeds once it is done>"]\` with the Bash tool's timeout at 600000 ms. Chiefmate shows the request to the owner and opens the address in their browser. With --wait the command returns once the owner clicks "I did it" (or the check succeeds); if it says it is still waiting, run the command it prints. If it gives up waiting, finish what you can and say in your report what is left for the owner. Never type passwords or codes yourself.
+- When you notice an error or failure of Chiefmate or of the communication between agents (a notice that never came, outdated information on the board or in your opening context, a Chiefmate command or tool that failed, a missing instruction), report it on your own at once, without waiting for ${config.owner || 'the owner'} to ask: \`${cliCommand()} defect report "<what happened>. Expected: <what should have happened>."\`. One report per defect, then go on with your work, and mention it in your report. It reaches the manager marked as your step's, never as ${config.owner || 'the owner'}'s message, and writes nothing in the project's folder.
 - ${config.owner || 'The owner'} may write to you directly from the app while you work: the message arrives as your next turn, with your work kept as it was. Answer it in one short message, then go on. To ask ${config.owner || 'the owner'} to choose ("Resend or SES?"), run \`${cliCommand()} needs-you "<the question, in ${owner}>" --options "<option>|<option>" --recommend <option> --why "<one short sentence: why you recommend it>"\` (2 to 6 short options, in ${owner}): they get one button per option and a field to write, and the command waits and prints the answer: the option, their own words, or both. Keep needs-you without options for what they must do outside the app. For an open question, use needs-you with --wait: they can answer from the app, and the answer comes back as the command's output.
 - Your last message is the step's report, in ${languageName(reportLang)}: short markdown with what you did (and the files), the sources you used, what you left out and why, and what the reviewer should check. ${config.owner || 'The owner'} must understand it in seconds, so it starts with this final summary, in plain words and with these headings exactly, the full report under the last one ("Needs you?" says whether ${config.owner || 'the owner'} must do something besides reviewing the work, and what):
 ${fenced(outcomeTemplate(reportLang), 'markdown')}`;
@@ -104,8 +105,7 @@ function workOf(run, config = loadConfig()) {
 export function createRun({
   kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [], plan = null, prompt = null,
   title: givenTitle = null, summary: givenSummary = null, level = null, request = null, tool: givenTool = null, due = null,
-}) {
-  const config = loadConfig();
+}, config = loadConfig()) {
   // The tool chosen for the run's crew steps (--tool); none: each member's own (src/tools.mjs).
   const tool = parseTool(givenTool);
   let title, steps, finalReview, project;
@@ -249,13 +249,16 @@ export function cancelLive(id, reason) {
  * when it resumes; one running its checks or opening its pull request pauses only at its next step, or ends first.
  * Returns false when it is not going on, or was already asked.
  */
-export function pauseLive(id, why = 'update') {
+export function pauseLive(id, why = 'update', { holdWhile = null } = {}) {
   const l = live.get(id);
   if (!l || l.cancelRequest || l.pauseRequest) return false;
   l.pauseRequest = why;
+  // "owner": paused for the owner's "Work now" session (src/worknow.mjs), held while holdWhile() says so.
+  l.holdWhile = holdWhile;
   l.process?.interrupt?.();
   l.preparing?.abort();
-  const text = why === 'standby' ? t('Pausing at a safe point: Chiefmate is going on standby')
+  const text = why === 'owner' ? t('Pausing at a safe point: you are working on this project now')
+    : why === 'standby' ? t('Pausing at a safe point: Chiefmate is going on standby')
     : why === 'focus' ? t('Pausing at a safe point: you paused this project, or put another in focus')
     : why === 'stop' ? t('Pausing at a safe point: Chiefmate is shutting down')
       : t('Pausing at a safe point for an update of Chiefmate');
@@ -271,6 +274,7 @@ export const pauseAll = (why = 'update') => [...live.keys()].filter(id => pauseL
 
 /** The note of a run paused for an update or a power mode, until it resumes. */
 function pausedNote(why) {
+  if (why === 'owner') return t('Paused at a safe point while you work on this project. It resumes by itself when your session ends.');
   if (why === 'standby') return t('Paused at a safe point for standby. It resumes by itself when Chiefmate is turned back on.');
   if (why === 'focus') return t('Paused at a safe point by your focus. It resumes by itself when its project is free again.');
   if (why === 'stop') return t('Paused at a safe point because Chiefmate was shut down. It resumes by itself at the next start.');
@@ -281,24 +285,66 @@ function pausedNote(why) {
 export function updatedTurn(messages, config = loadConfig(), why = 'update', gitRecovery = '') {
   const lines = [
     why === 'update' ? 'Chiefmate was updated while you were working: your work was paused at a safe point so the new version could be installed, and this session now resumes.'
+      : why === 'owner' ? `${config.owner || 'The owner'} paused your work at a safe point to work on this project themselves, and this session now resumes. They may have changed the project meanwhile: check what changed on the main branch before you go on.`
       : why === 'focus' ? 'Your project was paused by its owner (or another project was put in focus) while you were working: your work was paused at a safe point, and this session now resumes.'
-        : `Chiefmate was ${why === 'standby' ? 'put on standby' : 'shut down'} by its owner while you were working: your work was paused at a safe point, and this session now resumes.`,
+      : `Chiefmate was ${why === 'standby' ? 'put on standby' : 'shut down'} by its owner while you were working: your work was paused at a safe point, and this session now resumes.`,
     gitRecovery || 'Continue from where you left off. The branch, the files and this session are as you left them. A command that was still running when you were paused may have been cut off: check its result before you go on.',
     "When you finish, your last message is still the step's full report.",
   ];
   return messages.length ? `${lines.join('\n')}\n\n${ownerTurn(messages, config)}` : lines.join('\n');
 }
 
-/** Before every step: your account's usage, in the plan's 5-hour window and week. */
-function checkLimits(config, run) {
+const usageLimits = { five_hour: 'pause_at_5h_window', seven_day: 'pause_at_plan_week' };
+
+/** The usage window at or over its limit with a reset ahead (the 5-hour one first), or undefined. */
+function blockingWindow(limits, usage, at = Date.now()) {
+  return Object.keys(usageLimits).find(window => {
+    const ceiling = limits[usageLimits[window]];
+    const w = usage[window];
+    return w && ceiling && w.used >= ceiling && w.resets && new Date(w.resets).getTime() > at;
+  });
+}
+
+function limitNote(window, percent, lang) {
+  const name = window === 'five_hour' ? t('the 5-hour window', {}, lang) : t("the plan's week", {}, lang);
+  return t('{window} of your account is at {percent}', { window: name, percent }, lang);
+}
+
+/**
+ * Before every step: the account's usage against the latest limits in the settings, so a change in Usage counts at
+ * once. If the settings can't be read now (a file being edited), the limits the run started with.
+ */
+function checkLimits(run, config) {
   if (run.ignoreLimits) return null;
-  const limits = config.limits ?? {};
+  let limits;
+  try {
+    limits = loadConfig().limits ?? {};
+  } catch {
+    limits = config.limits ?? {};
+  }
   const usage = readUsage();
-  const window = (w, ceiling, name) =>
-    w && ceiling && w.used >= ceiling && w.resets && new Date(w.resets).getTime() > Date.now()
-      ? { note: t('{window} of your account is at {percent}', { window: name, percent: formatPercent(w.used) }), waitUntil: w.resets }
-      : null;
-  return window(usage.five_hour, limits.pause_at_5h_window, t('the 5-hour window')) ?? window(usage.seven_day, limits.pause_at_plan_week, t("the plan's week"));
+  const window = blockingWindow(limits, usage);
+  if (!window) return null;
+  const w = usage[window];
+  const note = limitNote(window, formatPercent(w.used));
+  return { note, waitUntil: w.resets, limitWait: { window, ceiling: limits[usageLimits[window]] } };
+}
+
+/**
+ * Whether a run waiting for a configured limit goes back to the queue before the reset: its limit was raised (or taken
+ * out) above the current usage and no window blocks it. A wait for the account running out is never cleared here.
+ */
+export function limitWaitCleared(run, limits, usage) {
+  // Older runs only recorded the reason in the translated note.
+  const percent = run.limitWait ? null : run.note?.match(/-?\d+%/)?.[0];
+  const window = run.limitWait?.window ?? (percent && Object.keys(usageLimits).find(window =>
+    ['en', 'pt-BR'].some(lang => run.note === limitNote(window, percent, lang))));
+  if (!window) return false;
+  // No limit in the settings pauses nothing, as in checkLimits.
+  const ceiling = limits[usageLimits[window]] || Infinity;
+  const used = usage[window]?.used;
+  return ceiling > (run.limitWait?.ceiling ?? 0) && Number.isFinite(used) && used < ceiling
+    && !blockingWindow(limits, usage);
 }
 
 /** If the account ran out in the middle of a step, the step starts over once the limit resets. */
@@ -460,7 +506,9 @@ function toolLines(tool) {
       '',
       '## Working on Codex',
       "- You run on the Codex CLI, in its sandbox: you may write only inside the working copy, its `.git` folder is read-only and there is no network. So leave your changes uncommitted: Chiefmate commits them when your step ends. Don't install packages from the network; if the work truly needs it, say so in your report.",
-      "- Chiefmate's command line above (needs-you, plan) talks to Chiefmate on this computer and works from the sandbox.",
+      "- Chiefmate's command line above (needs-you, plan, defect) talks to Chiefmate on this computer and works from the sandbox.",
+      // Codex's unelevated sandbox on Windows: libuv's named pipes are refused (EPERM), the process itself is not.
+      ...(process.platform === 'win32' ? ["- On Windows, the sandbox refuses the pipes a program opens to read the output of another one it starts: Node.js's child_process with its default stdio fails with EPERM, so do most test runners (`node --test`, `npm test`) and scripts that call git that way. That is the sandbox, not your change: don't spend time on it, nor change the project to get around it. Chiefmate runs the project's checks itself after the crew's steps, outside the sandbox; say in your report which ones you couldn't run."] : []),
     ];
   }
   if (tool === 'grok') {
@@ -927,16 +975,20 @@ export async function execute(run) {
   const firstTime = !run.started;
   Object.assign(run, { status: 'running', started: run.started ?? now(), notBefore: null, note: null });
   delete run.resumeFirst;
+  delete run.limitWait;
   saveRun(run);
 
   // Paused for an update of Chiefmate: back to the front of the queue, to resume as soon as the update is over.
   const pauseForUpdate = () => {
-    Object.assign(run, { status: 'queued', resumeFirst: true, note: pausedNote(l.pauseRequest) });
+    // Paused for the owner's session: held (not in the queue) while it is open; it goes back to the queue when it ends.
+    const held = l.pauseRequest === 'owner' && l.holdWhile?.() !== false;
+    Object.assign(run, { status: held ? 'paused' : 'queued', resumeFirst: true, note: pausedNote(l.pauseRequest) });
     saveRun(run);
   };
 
-  const wait = (waitUntil, note) => {
+  const wait = (waitUntil, note, limitWait) => {
     Object.assign(run, { status: waitUntil ? 'waiting' : 'paused', notBefore: waitUntil ?? null, note });
+    if (limitWait) run.limitWait = limitWait;
     saveRun(run);
     notify(
       t('Chiefmate paused the run'),
@@ -950,8 +1002,8 @@ export async function execute(run) {
   try {
     if (!project) throw new Error(t('Unknown project: {id}', { id: run.project }));
     // Over the limits already: wait before touching the working copy.
-    const early = checkLimits(config, run);
-    if (early) return wait(early.waitUntil, early.note);
+    const early = checkLimits(run, config);
+    if (early) return wait(early.waitUntil, early.note, early.limitWait);
     if (firstTime) {
       // The title and summary from the quick model take a few seconds: the notice waits for them, briefly.
       const pending = describing.get(run.id);
@@ -1018,8 +1070,8 @@ export async function execute(run) {
       if (index < 0 || l.cancelRequest) break;
       if (l.pauseRequest) return pauseForUpdate();
       const { step, finalReview } = order[index];
-      const limit = checkLimits(config, run);
-      if (limit) return wait(limit.waitUntil, limit.note);
+      const limit = checkLimits(run, config);
+      if (limit) return wait(limit.waitUntil, limit.note, limit.limitWait);
       // What the final review commits tells whether it had to correct the crew's work (the tools' quality, src/tools.mjs).
       const reviewFrom = finalReview ? await headCommit(dir).catch(() => null) : null;
       const { waitUntil, paused } = await runStep({ l, run, step, index, dir, project, config, agents, libraries, base, finalReview });

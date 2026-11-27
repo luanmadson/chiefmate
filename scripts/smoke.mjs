@@ -1,9 +1,12 @@
 // Starts a temporary Chiefmate on a spare port (only the app and the API: no queue, no schedule, no updates)
 // and checks that everything answers. Usage: npm run smoke
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { SAMPLE_CSV, SAMPLE_PNG, sampleXlsx } from './fixtures.mjs';
 
@@ -91,9 +94,12 @@ try {
     const packed = await read({ 'accept-encoding': 'gzip' });
     expect(packed.status === 200 && packed.headers['content-encoding'] === 'gzip' && packed.size > 0, '/api/state is not compressed with gzip');
     let unchanged = false;
-    for (let i = 0; i < 5 && packed.headers.etag && !unchanged; i++) {
+    for (let i = 0, tag = packed.headers.etag; i < 5 && tag && !unchanged; i++) {
+      // A fresh tag after a miss: a new reading of this computer's processes (src/machine.mjs, in the background, at
+      // most every 15 s) may land between two requests, and it really changes the state.
       if (i) await new Promise(r => setTimeout(r, 200));
-      const again = await read({ 'if-none-match': packed.headers.etag });
+      if (i) tag = (await read({})).headers.etag;
+      const again = await read({ 'if-none-match': tag });
       unchanged = again.status === 304 && again.size === 0;
     }
     expect(unchanged, '/api/state has no tag, or an unchanged state did not answer 304');
@@ -140,7 +146,7 @@ try {
     // an urgent tab pulses, and stands still (lit) with reduced motion.
     expect(['view-decisions', 'decisions', 'focus-mode', 'focus-bar'].every(id => html.includes(`id="${id}"`)) && html.includes('href="#decisions"')
       && !/id="chat"[^]*?<\/section>/.exec(html)?.[0].includes('id="decisions"'), 'the app lacks the Decisions tab or the focus mode, or the decisions are still in the conversation');
-    expect(/html\.chat-focus \.titlebar, html\.chat-focus \.nav, html\.chat-focus \.alerts, html\.chat-focus \.statusbar/.test(styles)
+    expect(/html\.chat-focus \.app-header, html\.chat-focus \.nav, html\.chat-focus \.alerts, html\.chat-focus \.statusbar/.test(styles)
       && /prefers-reduced-motion: reduce\) \{ \.nav a\[data-level="urgent"\][^}]*animation: none/.test(styles), 'the focus mode leaves a bar or band on screen, or an urgent tab pulses with reduced motion');
     expect(['project-status', 'project-actions', 'project-more', 'project-needs', 'project-overview', 'project-crew', 'project-tasks', 'project-planning', 'project-context', 'project-builder', 'builder-body', 'builder-view', 'builder-edit']
       .every(id => html.includes(`id="${id}"`)), "the app's page lacks a part of the project's page or of the prompt builder");
@@ -243,6 +249,7 @@ try {
     expect((await post('/api/manager/remove', { id: 'smoke1' })).status === 404, 'removing a message twice did not answer 404');
     // Live sessions: an unknown profile or session is refused, and nothing opens.
     expect((await post('/api/session', { profile: 'no-such-profile' })).status === 400, 'opening a session of an unknown profile was not refused');
+    expect((await post('/api/work-now', { project: 'no-such-project' })).status === 400, '"Work now" on an unknown project was not refused');
     expect((await post('/api/session/end', { id: 'no-such-session' })).status === 400, 'ending a session that does not exist was not refused');
     expect((await post('/api/session/say', { id: 'no-such-session', text: 'Hello' })).status === 400, 'a message to a session that does not exist was not refused');
     expect((await fetch(`${base}/api/session/no-such-session`)).status >= 400, 'the conversation of a session that does not exist was given');
@@ -474,6 +481,32 @@ try {
     expect((await post('/api/level', { run: 'smoke-feed', level: '7' })).status !== 200, 'an unknown approval level was accepted');
     cli(['level', 'smoke-feed', 'none']);
     expect(runLevel() === null, "the run's approval level was not cleared");
+    // A defect a live session reports on its own, from the project's folder: recorded with the session as its sender
+    // (never the owner), a repeat joined to it, nothing written in that folder; only the manager or the owner closes it.
+    const projectDir = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-project-'));
+    try {
+      const fromSession = args => execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), ...args], {
+        cwd: projectDir, env: { ...process.env, CHIEFMATE_PORT: String(port), CHIEFMATE_SESSION: 'smoke-session', CHIEFMATE_RUN: '', CHIEFMATE_MANAGER: '' }, stdio: 'pipe', windowsHide: true, encoding: 'utf8',
+      });
+      const reported = fromSession(['defect', 'report', 'The notice of the finished run never came. Expected: a notice in the conversation.']);
+      const again = fromSession(['chat', 'say', '[Defeito] the notice of the finished run never came. Expected: a notice in the conversation!']);
+      const defects = JSON.parse(readFileSync(path.join(data, 'defects.json'), 'utf8'));
+      expect(/Defect #1 recorded/.test(reported) && /already open/.test(again) && defects.length === 1 && defects[0].count === 2 && defects[0].reporters.every(r => r.kind === 'session' && r.id === 'smoke-session'),
+        `a defect was not recorded with its session, or its repeat was not joined: ${reported} ${again} ${JSON.stringify(defects)}`);
+      expect(readdirSync(projectDir).length === 0, "reporting a defect wrote something in the project's folder");
+      let closedByAgent = true;
+      try {
+        fromSession(['defect', 'close', '1']);
+      } catch {
+        closedByAgent = false;
+      }
+      expect(!closedByAgent, 'a live session closed a defect');
+      cli(['defect', 'close', '1', '--note', 'Fixed'], { CHIEFMATE_RUN: '', CHIEFMATE_SESSION: '', CHIEFMATE_MANAGER: '' });
+      const closed = JSON.parse(readFileSync(path.join(data, 'defects.json'), 'utf8'))[0];
+      expect(closed.status === 'closed' && closed.note === 'Fixed' && closed.closedBy === 'owner', `the owner could not close a defect: ${JSON.stringify(closed)}`);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
     let askRefused = false;
     try {
       cli(['ask-owner', 'From a step?'], { CHIEFMATE_RUN: 'x' });
@@ -505,11 +538,133 @@ try {
       decisionRefused = /only adds and updates/.test(String(error.stderr));
     }
     expect(decisionRefused, "a step of a run made the owner's decision on a radar idea");
+
+    // The CLI sends the destination options to the running API. The queue is held while the approval is tested, and
+    // the run it queues (in a real project) is canceled: a later part of this test wakes the queue up.
+    const charge = await import('../src/charge.mjs');
+    const { readRun, readState, saveRun, saveState } = await import('../src/store.mjs');
+    const target = state.projects.find(p => state.charge?.[p.id])?.id;
+    if (target) {
+      const previous = readState();
+      let queuedRun = null;
+      try {
+        const held = await post('/api/power', { action: 'standby' });
+        if (!held.ok) throw new Error('Could not hold the smoke queue');
+        const answer = args => cli(['request', ...args], { CHIEFMATE_RUN: '' });
+        const source = { manager_updates: false, projects: { 'smoke-source': { name: 'Smoke source' } } };
+        const request = plan => charge.addRequest({ project: 'smoke-source', asked: plan, plan }, source);
+        const approve = request('Approve in another project');
+        answer([String(approve.id), 'approve', '--project', target, '--title', 'Smoke approval', '--summary', 'Made up.']);
+        const saved = charge.readRequests().find(r => r.id === approve.id);
+        queuedRun = saved?.run ?? null;
+        expect(saved?.project === 'smoke-source' && saved.status === 'approved' && readRun(saved.run)?.project === target,
+          'request approve --project did not queue in the destination project');
+        const forward = request('Forward to the project');
+        const progress = request('Already queued');
+        const forwarded = answer([String(forward.id), 'forward', '--project', target, '--note', 'Belongs to this project.']);
+        const linked = answer([String(progress.id), 'in-progress', '--run', saved.run, '--note', 'Covered by the queued run.']);
+        expect(forwarded.includes(`forwarded → project ${target}`) && linked.includes(`in-progress → run ${saved.run}`), 'the CLI did not send or show the request destinations');
+      } finally {
+        const left = queuedRun && readRun(queuedRun);
+        if (left) saveRun({ ...left, status: 'canceled', ended: new Date().toISOString() });
+        saveState(previous);
+      }
+    }
   }
 } catch (error) {
   failures.push(error.message);
 } finally {
   child.kill();
+}
+
+// Run two steps with a stand-in for Claude that changes the settings and reports 11% usage after the first step.
+{
+  const fixture = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-limits-'));
+  const env = { CHIEFMATE_DATA: process.env.CHIEFMATE_DATA, CHIEFMATE_SMOKE: process.env.CHIEFMATE_SMOKE, CHIEFMATE_CLAUDE: process.env.CHIEFMATE_CLAUDE };
+  try {
+    for (const entry of ['src', 'agents', 'ui/locales', 'package.json']) cpSync(path.join(root, entry), path.join(fixture, entry), { recursive: true });
+    const repo = path.join(fixture, 'repo');
+    mkdirSync(repo);
+    const git = (...args) => execFileSync('git', args, { cwd: repo, windowsHide: true, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'Start');
+    const fake = path.join(fixture, 'fake-claude.mjs');
+    Object.assign(process.env, { CHIEFMATE_DATA: path.join(fixture, 'records'), CHIEFMATE_SMOKE: '1', CHIEFMATE_CLAUDE: fake });
+    const load = name => import(pathToFileURL(path.join(fixture, 'src', `${name}.mjs`)).href);
+    const { CONFIG_FILE, saveConfig } = await load('config');
+    const { execute, live } = await load('runs');
+    const { recordUsage, readRun, saveRun } = await load('store');
+    const { nudgeQueue } = await load('queue');
+    const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+    const usage = utilization => ({ unifiedWindows: {
+      five_hour: { utilization, resetsAt }, seven_day: { utilization: 0.20, resetsAt: resetsAt + 86400 },
+    } });
+    writeFileSync(fake, [
+      "import { readFileSync, writeFileSync } from 'node:fs';",
+      `const file = ${JSON.stringify(CONFIG_FILE)};`,
+      "process.stdin.resume();",
+      "process.stdin.on('end', () => {",
+      "  const config = JSON.parse(readFileSync(file, 'utf8'));",
+      "  config.limits.pause_at_5h_window = config.nextLimit;",
+      "  writeFileSync(file, JSON.stringify(config));",
+      `  console.log(JSON.stringify({ type: 'rate_limit_event', rate_limit_info: ${JSON.stringify(usage(0.11))} }));`,
+      "  console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'Done', num_turns: 1 }));",
+      "});",
+    ].join('\n'));
+
+    const settings = (limit, nextLimit, week = 0.9) => saveConfig({
+      quick_model: false, max_parallel: 1, nextLimit, projects: { demo: { repository: repo, main_branch: 'main' } },
+      limits: { pause_at_5h_window: limit, pause_at_plan_week: week },
+    });
+    const makeRun = id => ({
+      id, kind: 'task', project: 'demo', title: id, created: new Date().toISOString(), status: 'queued',
+      branch: id, steps: Array.from({ length: 2 }, () => ({ agent: 'generalist', status: 'pending', instruction: 'Smoke test.' })),
+    });
+    settings(0.05, 0.70);
+    recordUsage(usage(0.03));
+    const raised = makeRun('raised');
+    await execute(raised);
+    expect(raised.status === 'done' && raised.steps.every(step => step.status === 'done'), `a run ignored the raised limit: ${raised.note ?? raised.result}`);
+
+    settings(0.70, 0.05);
+    recordUsage(usage(0.03));
+    const lowered = makeRun('lowered');
+    await execute(lowered);
+    const reset = new Date(resetsAt * 1000).toISOString();
+    expect(lowered.status === 'waiting' && lowered.notBefore === reset && lowered.steps.map(step => step.status).join() === 'done,pending',
+      `a run crossed the lowered limit: ${lowered.note ?? lowered.result}`);
+
+    // Keep the worker slot busy so the test can inspect the persisted return to the queue.
+    live.set('busy', { project: 'other' });
+    saveRun({ ...makeRun('legacy'), status: 'waiting', notBefore: reset, note: 'a janela de 5 horas da sua conta está em 11%' });
+    saveRun({ ...makeRun('exhausted'), status: 'waiting', notBefore: reset, note: 'Your account reached its limit in the middle of a step' });
+    saveRun({ ...makeRun('scheduled'), notBefore: reset });
+    settings(0.11, 0.70);
+    nudgeQueue();
+    expect(readRun(lowered.id).status === 'waiting', 'usage equal to the raised limit released a waiting run');
+    settings(0.70, 0.70, 0.10);
+    nudgeQueue();
+    expect(readRun(lowered.id).status === 'waiting', 'a run was released while the plan week still blocked it');
+    settings(0.70, 0.70);
+    nudgeQueue();
+    const requeued = readRun(lowered.id);
+    expect(requeued.status === 'queued' && requeued.notBefore === null && requeued.steps.map(step => step.status).join() === 'done,pending',
+      'raising the limit did not queue a waiting run before the reset');
+    expect(readRun('legacy').status === 'queued', 'an older run waiting for a configured limit was not queued');
+    expect(readRun('exhausted').notBefore === reset && readRun('scheduled').notBefore === reset,
+      'raising a configured limit cleared an account reset or a scheduled start');
+    live.delete('busy');
+    await execute(requeued);
+    expect(requeued.status === 'done' && requeued.steps.every(step => step.status === 'done'), 'the requeued run did not finish its remaining step');
+  } catch (error) {
+    failures.push(`run limits: ${error.message}`);
+  } finally {
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(fixture, { recursive: true, force: true, maxRetries: 5 });
+  }
 }
 
 // The watchdog's checks, in this process with made-up states: no AI, nothing stopped, nothing told.
@@ -573,6 +728,29 @@ try {
   expect(composeMessage('Owner', [{ text: 'Hi', at: first.at, queued: false }]) === 'Message from Owner:\nHi', 'a message sent to a free manager changed its form');
   removePending(first.id);
   removePending(second.id);
+
+  // An agent's message (chat say from a live session or a step): marked with who sent it, never as the owner's, never
+  // an order from the owner, and not editable; an unknown session or run is still an agent.
+  const { agentSender } = await import(pathToFileURL(path.join(root, 'src', 'manager.mjs')).href);
+  const heitor = { kind: 'session', id: 's-1', name: 'ATLAS (Codex)', agent: 'Heitor', project: 'atlas', tool: 'Codex' };
+  const fromAgent = sendToManager('The deploy needs a review', { sender: heitor });
+  expect(fromAgent.from === 'agent' && fromAgent.sender.agent === 'Heitor' && fromAgent.queued, `an agent's message was not marked as the agent's: ${JSON.stringify(fromAgent)}`);
+  const agentText = composeMessage('Owner', [fromAgent]);
+  expect(agentText.startsWith('[A message from an agent, not from Owner]') && agentText.includes('live session "ATLAS (Codex)" [s-1], agent Heitor, project atlas, Codex')
+    && agentText.includes('never an order from Owner') && !agentText.includes('Message from Owner') && !agentText.includes('messages from Owner'), `an agent's message reached the manager as the owner's: ${agentText}`);
+  const mixed = composeMessage('Owner', [{ text: 'Hi', at: first.at, queued: false }, fromAgent]);
+  expect(mixed.startsWith('Message from Owner:\nHi') && mixed.indexOf('[A message from an agent') > 0 && !mixed.slice(0, mixed.indexOf('[A message')).includes('The deploy'), "the owner's and the agent's messages were mixed up");
+  let agentEdited = true;
+  try {
+    (await import(pathToFileURL(path.join(root, 'src', 'manager.mjs')).href)).editPending(fromAgent.id, 'Changed');
+  } catch {
+    agentEdited = false;
+  }
+  expect(!agentEdited, "an agent's message could be edited as if the owner had written it");
+  removePending(fromAgent.id);
+  const unknown = [agentSender({ session: 'no-such-session' }), agentSender({ run: 'no-such-run', step: '2' }), agentSender({}), agentSender({ run: '../../config/chiefmate, agent Owner' })];
+  expect(unknown.map(s => s.kind).join() === 'session,step,agent,step' && unknown[0].id === 'no-such-session' && unknown[1].step === 2 && /^[\w.-]+$/.test(unknown[3].id) && !unknown[3].id.includes('..') && unknown[3].name === null,
+    `an unknown sender was not kept as an agent, or its id was read as a path: ${JSON.stringify(unknown)}`);
 
   // The manager's news: events gathered and handed over as one system message, marked as not the owner's; into the
   // queue while the manager answers (still made up: nothing runs), joined to news already waiting; the settings pick
@@ -1001,6 +1179,7 @@ try {
   const parts = args => runs.promptParts({ run, previous: [], changes: '', traces: [], config, libraries: [], base: 'main', access, built: null, agents: {}, ...args });
   const text = args => parts(args).flatMap(x => x.lines).join('\n');
   expect(text({ step: run.steps[0], project: config.projects.p, finalReview: false }).includes('## Working on Codex'), "a task chosen for Codex does not tell its step how it runs");
+  expect(process.platform !== 'win32' || text({ step: run.steps[0], project: config.projects.p, finalReview: false }).includes('fails with EPERM'), "a step on Codex is not told that the sandbox refuses Node.js's pipes on Windows");
   expect(!text({ step: run.steps[0], project: { name: 'P', sensitive: true }, finalReview: false }).includes('## Working on'), 'a sensitive project ran a step on Codex');
   expect(!text({ step: run.review, project: config.projects.p, finalReview: true }).includes('Corrections:'), 'the final review asked for corrections with no step on Codex or Grok');
   Object.assign(run.steps[0], { status: 'done', tool: 'codex', durationMs: 3 * 60000, report: 'Done.' });
@@ -1601,6 +1780,11 @@ try {
       && changes.some(c => c.what === 'blocks' && c.removed.join() === 'Browser access') && !changes.some(c => c.what === 'system' || c.name === 'Your part' || c.name === 'Office') && byId.designer.diff === null,
     `what changed since the last run is wrong: ${JSON.stringify(changes.map(c => [c.what, c.name, c.status]))}`);
     expect(context.sessions.length === 2 && context.sessions.every(s => s.error), "the project's live sessions without the owner's clone did not say why");
+    // With the clone: each first message as openSession writes it, the manager's address at its end.
+    const address = (await import(src('sessions.mjs'))).managerAddress(pageConfig, '<session id>');
+    const alphaSessions = ctx.projectContext(pageConfig, 'alpha').sessions;
+    expect(alphaSessions.length === 2 && alphaSessions.every(s => !s.error && s.text?.endsWith(address) && s.tokens === ctx.tokens(s.text)),
+      `the Context tab's live sessions lack the manager's address: ${JSON.stringify(alphaSessions.map(s => [s.profile, s.error, s.text?.slice(-80)]))}`);
     expect(ctx.contextText(context).includes('by a shared tag') && ctx.contextText(context, { full: false }).includes('# Context of Ctx'), 'the context as text is wrong');
     const applied = ctx.applyChanges(ctxConfig, 'ctx', { modules: ['Board', 'Unused module'], exclude: [], notes: 'N', extra: { generalist: 'G', lead: 'L', manager: 'M' }, agentNotes: { designer: '' } });
     const fields = applied.changed.map(c => c.field).join();
@@ -1802,6 +1986,92 @@ try {
   expect(urgent.includes('scenario="reminder"') && urgent.includes('activationType="system"') && !toastXml('Done', 'x').includes('scenario'), 'an urgent Windows notification does not stay until seen');
 } catch (error) {
   failures.push(`attention levels: ${error.message}`);
+}
+
+// The reading of claude.ai: a notice marked as seen stays seen while its cause lasts (once a day it reminds), and the
+// sign-in window closes by itself, leaving one "Sign in" card. Made-up records only: stand-ins for the browser and
+// Windows, a made-up empty profile folder in this test's data, and nothing opened or read.
+try {
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const { attentionItems, markSeen } = await import(src('attention.mjs'));
+  const { checkLogin, failed, LOGIN_MINUTES, loginState, openLogin, PROFILE_DIR, readingDue, signInNeeded } = await import(src('usagepage.mjs'));
+  const { readState, saveState } = await import(src('store.mjs'));
+  const { DATA } = await import(src('util.mjs'));
+  const statusFile = path.join(DATA, 'usage-page.json');
+  const setStatus = s => writeFileSync(statusFile, JSON.stringify(s));
+  mkdirSync(PROFILE_DIR, { recursive: true });
+  const config = { usage_reader: { enabled: true, browser: 'C:/made-up/msedge.exe' } };
+  const readerNotices = () => attentionItems({ config }).filter(i => i.id.startsWith('reader:'));
+  const minutes = m => new Date(Date.now() - m * 60_000).toISOString();
+  const open = Object.assign(new Error('The browser with the reading profile is open.'), { readerCause: 'profile_open' });
+
+  // The same cause, tried again and again (even with another wording): one notice, seen once.
+  let status = { attempted: minutes(300), ...failed({}, open, minutes(300)) };
+  setStatus(status);
+  const first = readerNotices();
+  expect(first.length === 1 && first[0].id === 'reader:profile_open' && !first[0].seen, `a failed reading is not one notice of its cause: ${JSON.stringify(first)}`);
+  markSeen(['reader:profile_open']);
+  for (const m of [240, 60]) {
+    status = { ...status, attempted: minutes(m), ...failed(status, m === 60 ? Object.assign(new Error('Still open.'), { readerCause: 'profile_open' }) : open, minutes(m)) };
+    setStatus(status);
+    const again = readerNotices();
+    expect(again.length === 1 && again[0].seen, `the same failure tried again came back as a new notice: ${JSON.stringify(again)}`);
+  }
+  expect(status.failing_since === first[0].at, 'the failure did not keep the time it started');
+  // A day after it was marked, it reminds once; marked again, it stays seen.
+  const state = readState();
+  saveState({ ...state, attention_seen: { ...state.attention_seen, 'reader:profile_open': new Date(Date.now() - 25 * 3600_000).toISOString() } });
+  expect(!readerNotices()[0].seen, 'a failure lasting for over a day did not remind the owner');
+  markSeen(['reader:profile_open']);
+  expect(readerNotices()[0].seen, 'a reminder marked as seen did not fade');
+  // Read again, then failing again: a new situation, a new notice.
+  setStatus({ ok: true, error: null, cause: null, failing_since: null, attempted: minutes(30), read_at: minutes(30) });
+  expect(!readerNotices().length, 'a reading that worked still shows a failure');
+  setStatus({ attempted: minutes(1), ...failed({ ok: true }, open, minutes(1)) });
+  expect(readerNotices()[0]?.seen === false, 'a failure back after a good reading did not come back as new');
+
+  // The sign-in window: opened once, noted, closed after LOGIN_MINUTES, and then a single card to open it again.
+  const started = [];
+  const start = (browser, args) => (started.push(args), 4242);
+  const opened = openLogin(config, { start, alive: () => false });
+  expect(opened.pid === 4242 && opened.image === 'msedge.exe' && loginState().pid === 4242 && started[0].includes('https://claude.ai/login'), `the sign-in window was not noted: ${JSON.stringify(loginState())}`);
+  expect(openLogin(config, { start: () => 5555, alive: () => true }).pid === 4242 && loginState().pid === 4242, 'a second sign-in window replaced the one open');
+  setStatus({ attempted: minutes(1), ...failed({}, Object.assign(new Error('Signed out.'), { readerCause: 'signed_out' }), minutes(1)) });
+  expect(!signInNeeded() && !readerNotices().some(i => i.kind === 'reader-login'), 'the sign-in card shows while its window is open');
+  const closedPids = [];
+  const close = async login => closedPids.push(login.pid);
+  const opening = Date.parse(loginState().opened);
+  expect(await checkLogin({ at: opening + (LOGIN_MINUTES - 1) * 60_000, alive: () => true, close }) === 'open' && !closedPids.length, 'the sign-in window closed before its time');
+  const atLimit = opening + LOGIN_MINUTES * 60_000;
+  expect(await checkLogin({ at: atLimit, alive: () => true, close }) === 'timed_out' && closedPids.join() === '4242' && loginState().timed_out, 'the sign-in window was left open past its time');
+  expect(await checkLogin({ at: atLimit + 60_000, alive: () => true, close }) === null && closedPids.length === 1, 'a closed sign-in window was closed again');
+  const cards = readerNotices();
+  expect(cards.length === 1 && cards[0].id === 'reader:login' && cards[0].kind === 'reader-login' && signInNeeded(), `there is not one "Sign in" card: ${JSON.stringify(cards)}`);
+  // Tried once a minute after it closed, away or not (it tells whether the owner signed in); after that, a failure only
+  // the owner can fix waits for their return.
+  const login = loginState();
+  const beforeClose = { attempted: new Date(atLimit - 60_000).toISOString(), ok: false, cause: 'signed_out' };
+  expect(!readingDue({ status: beforeClose, login, everyHours: 4, at: atLimit + 30_000 }) && readingDue({ status: beforeClose, login, everyHours: 4, at: atLimit + 61_000 }),
+    'the reading was not tried again a minute after the sign-in window closed');
+  expect(readingDue({ status: beforeClose, login, everyHours: 4, away: true, at: atLimit + 61_000 }), 'with the owner away, no reading told whether they signed in before the window closed');
+  const signedOut = { attempted: new Date(atLimit + 61_000).toISOString(), ok: false, cause: 'signed_out' };
+  const later = atLimit + 5 * 3600_000;
+  expect(!readingDue({ status: signedOut, login, everyHours: 4, away: true, at: later }) && readingDue({ status: signedOut, login, everyHours: 4, at: later }),
+    'a failure only the owner can fix was retried while away, or not once they were back');
+  expect(readingDue({ status: { ...signedOut, cause: 'other' }, login, everyHours: 4, away: true, at: later }), 'a passing failure was not retried while the owner was away');
+  // Closed by the owner: noted, with no forced close.
+  openLogin(config, { start: () => 6060, alive: () => false });
+  expect(await checkLogin({ alive: () => false, close }) === 'closed' && closedPids.length === 1 && loginState().timed_out === false, 'a sign-in window closed by the owner was not noted');
+  // A browser that never started is an error, never a window noted as open.
+  let refused = null;
+  try {
+    openLogin(config, { start: () => null, alive: () => false });
+  } catch (error) {
+    refused = error;
+  }
+  expect(refused?.readerCause === 'no_start' && loginState().pid === 6060, 'a sign-in window that never started was noted as open');
+} catch (error) {
+  failures.push(`usage reading notices and sign-in window: ${error.message}`);
 }
 
 // The owner's decision cards, in this process with made-up records (no gh, no git, nothing told to the manager): what
@@ -2147,7 +2417,7 @@ try {
     "const args = process.argv.slice(2);",
     "const id = args.includes('--resume') ? args[args.indexOf('--resume') + 1] : args[args.indexOf('--session-id') + 1];",
     "let prompt = ''; process.stdin.on('data', d => (prompt += d)); process.stdin.on('end', () => {",
-    `  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ tool: 'claude', args, prompt }) + '\\n');`,
+    `  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ tool: 'claude', args, prompt, session: process.env.CHIEFMATE_SESSION }) + '\\n');`,
     "  if (prompt.includes('already there') && args.includes('--session-id')) { process.stderr.write('Error: Session ID ' + id + ' is already in use.'); process.exit(1); }",
     "  const say = e => process.stdout.write(JSON.stringify(e) + '\\n');",
     "  say({ type: 'system', subtype: 'init', session_id: id, model: 'm' });",
@@ -2160,7 +2430,8 @@ try {
     "    const run = command => execSync(hook, { input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't3', tool_input: { command } }), encoding: 'utf8' });",
     `    appendFileSync(${JSON.stringify(path.join(liveDir, 'guard.txt'))},JSON.stringify([run('cd x && gh api repos/a/b/pulls -f title=T -f head=h'), run('git -C sub push origin main'), run('git status')]));`,
     "  }",
-    "  setTimeout(() => say({ type: 'result', subtype: 'success', result: 'done', session_id: id, num_turns: 1, permission_denials: denials }), prompt.includes('take long') ? 20000 : 300);",
+    "  const wait = prompt.includes('waiting for the environment test') ? 750 : prompt.includes('take long') ? 20000 : 300;",
+    "  setTimeout(() => say({ type: 'result', subtype: 'success', result: 'done', session_id: id, num_turns: 1, permission_denials: denials }), wait);",
     "});",
   ].join('\n'));
   const fakeCodex = path.join(liveDir, 'fake-codex.mjs');
@@ -2170,7 +2441,7 @@ try {
     "if (args[0] === 'login') process.exit(0);",
     "const thread = args.includes('resume') ? args[args.length - 2] : 'thread-1';",
     "let prompt = ''; process.stdin.on('data', d => (prompt += d)); process.stdin.on('end', () => {",
-    `  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ tool: 'codex', args, prompt }) + '\\n');`,
+    `  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ tool: 'codex', args, prompt, session: process.env.CHIEFMATE_SESSION }) + '\\n');`,
     "  const say = e => process.stdout.write(JSON.stringify(e) + '\\n');",
     "  say({ type: 'thread.started', thread_id: thread });",
     "  say({ type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'pwsh.exe -Command \"npm test\"', status: 'in_progress' } });",
@@ -2198,7 +2469,13 @@ try {
     await idle(s.id);
     const [first, second] = called();
     const sid = first.args[first.args.indexOf('--session-id') + 1];
-    expect(first.prompt === 'Start here' && second?.args[second.args.indexOf('--resume') + 1] === sid && second.prompt.includes('Second message'), 'the second turn did not resume the same Claude Code session with the queued message');
+    expect(first.prompt.startsWith('Start here\n\n') && second?.args[second.args.indexOf('--resume') + 1] === sid && second.prompt.includes('Second message'), 'the second turn did not resume the same Claude Code session with the queued message');
+    // The manager's fixed address: the full command, with this session's id, when to use it, and that it is not in Claude Code's list.
+    const cli = sessions.cliCommand();
+    expect(path.isAbsolute(cli.replace(/^node "?/, '').replace(/"$/, '')) && first.prompt.includes(`${cli} chat say --from ${s.id} "<message>"`) && first.prompt.includes('report a problem')
+      && first.prompt.includes("Claude Code's session list") && first.prompt.includes(`${cli} defect report --from ${s.id}`) && first.prompt.includes('without waiting for Owner to ask'),
+      `a live session's first message lacks the manager's address or the rule to report defects: ${first.prompt}`);
+    expect(first.session === s.id && second.session === s.id, "a live session's turns don't know which session they are, so a message to the manager would pass for the owner's");
     expect(first.args[first.args.indexOf('--setting-sources') + 1] === 'project,local' && first.args.includes('--strict-mcp-config') && first.args.includes('Bash') && first.args.includes('Bash(git push:*)'), "a session in the app would load the user's own configuration, lack the terminal, or push without asking");
     expect(kinds(s.id) === 'owner,say,action,owner,say,action', `the history of a session in the app is wrong: ${kinds(s.id)}`);
     const { items, next } = sessions.sessionHistory(s.id);
@@ -2301,7 +2578,191 @@ try {
     const said = sessions.sessionHistory(c.id).items;
     expect(said.some(e => e.kind === 'say' && e.text === 'Codex: Hi codex') && said.some(e => e.kind === 'action' && e.failed && e.text.includes('npm test')) && said.some(e => e.kind === 'action' && e.text.includes('a.txt')), "Codex's text and actions did not reach the history");
     expect(sessions.sessionView(c.id).session.turns === 2, "a Codex session's view is wrong");
+    expect(cx1.session === c.id && cx1.prompt.includes(`chat say --from ${c.id}`), "a Codex session lacks the manager's address, or doesn't know which session it is");
     await sessions.endSession(c.id);
+
+    // Environment notices use both real session queues with stand-in tools and a simulated launcher and stop.
+    const { deliverDevNotices, devState, runDev, startDev, stopDev } = await import('../src/projects.mjs');
+    const devProject = 'smoke-dev';
+    const devClone = path.join(liveDir, 'dev-clone');
+    mkdirSync(devClone);
+    const projectConfig = { name: 'Sample dev', local_clone: devClone, dev_start: 'sample dev command' };
+    const devConfig = { ...liveConfig, projects: { [devProject]: projectConfig } };
+    for (const session of [s, c]) {
+      const record = sessions.readSession(session.id);
+      writeFileSync(path.join(data, 'sessions', `${session.id}.json`), JSON.stringify({ ...record, project: devProject, status: 'open' }));
+    }
+    const isolated = 'smoke-dev-other';
+    writeFileSync(path.join(data, 'sessions', `${isolated}.json`), JSON.stringify({
+      id: isolated, project: 'another-project', status: 'open', mode: 'app', tool: 'claude', cwd: liveDir,
+    }));
+    // The conversation with the project's agent in charge reads only: no turn of its own for the environment.
+    const inCharge = 'smoke-dev-charge';
+    writeFileSync(path.join(data, 'sessions', `${inCharge}.json`), JSON.stringify({
+      id: inCharge, project: devProject, status: 'open', mode: 'app', tool: 'claude', cwd: null, charge: true, member: 'generalist',
+    }));
+    const devRecord = path.join(data, 'dev', `${devProject}.json`);
+    const open = (_name, cwd, args) => {
+      expect(cwd === devClone && args[0] === 'dev-run' && args[1] === devProject, 'the environment did not launch in its own clone');
+      token = args[2];
+      return 'terminal';
+    };
+    let token;
+    const launch = () => startDev(devProject, { config: devConfig, open, readWindows: async () => [] });
+    const machine = { dev: [] };
+    const address = 'http://localhost:5173/';
+    const devChild = () => Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough() });
+    const service = devChild();
+    const closeDev = (child, code, signal = null) => {
+      child.stdout.end();
+      child.stderr.end();
+      child.emit('close', code, signal);
+    };
+    const notices = id => sessions.sessionHistory(id).items.filter(m => m.by === 'system');
+    await launch();
+    const serving = runDev(devProject, token, { config: devConfig, spawnCommand: () => service, probe: async url => url.href === address });
+    try {
+      service.stderr.write('Container sample-db Started\n');
+      service.stdout.write(`  Local: ${address}\n`);
+      for (let i = 0; i < 40 && !devState(devProject, projectConfig, machine).url; i++) await delay(50);
+      expect(devState(devProject, projectConfig, machine).url === address, 'an address reported by the command and listening was not exposed while running');
+      sessions.sayToSession(s.id, 'Keep working while waiting for the environment test');
+      const turn = sessions.turnOf(s.id);
+      deliverDevNotices();
+      const queuedNotice = sessions.readSession(s.id).queue.find(m => m.by === 'system');
+      expect(turn && sessions.turnOf(s.id)?.since === turn.since && queuedNotice?.text.includes(address) && queuedNotice.text.includes('sample-db'),
+        'the startup notice did not wait for the current turn with the service and address');
+      deliverDevNotices();
+      expect(sessions.readSession(s.id).queue.filter(m => m.by === 'system').length === 1, 'the startup notice was queued twice');
+      await Promise.all([idle(s.id), idle(c.id)]);
+      for (const session of [s, c]) {
+        expect(notices(session.id).some(n => n.kind === 'note' && n.text.includes(address))
+          && called().some(call => call.session === session.id && call.prompt.includes('[Chiefmate system notice, informational,') && call.prompt.includes(address)),
+          `the environment notice did not reach ${session.tool} as a system message`);
+      }
+      const pids = [];
+      const stopped = await stopDev(devProject, { config: devConfig, readWindows: async () => [{ pid: 42 }], stopTree: pid => pids.push(pid) });
+      closeDev(service, null, 'SIGTERM');
+      await serving;
+      deliverDevNotices();
+      await Promise.all([idle(s.id), idle(c.id)]);
+      // The stop names no services: what the command started on its own (containers with "-d") may still be up.
+      expect(stopped.stopped === 1 && pids.join() === '42' && !devState(devProject, projectConfig, machine).url
+        && notices(c.id).length === 2 && !notices(c.id).at(-1).error && !notices(c.id).at(-1).text.includes('sample-db'),
+      'stopping did not clear the system link and deliver the stop result');
+    } finally {
+      if (!service.stdout.writableEnded) closeDev(service, null, 'SIGINT');
+      await serving;
+    }
+    await launch();
+    const failed = devChild();
+    const starting = runDev(devProject, token, { config: devConfig, spawnCommand: () => failed, keepFailedWindow: false });
+    failed.stderr.write('Sample port is already in use\n');
+    closeDev(failed, 7);
+    await starting;
+    deliverDevNotices();
+    await Promise.all([idle(s.id), idle(c.id)]);
+    expect(!devState(devProject, projectConfig, machine).url && notices(s.id).at(-1)?.error
+      && notices(s.id).at(-1).text.includes('Sample port is already in use'), 'a failed startup did not reach the session with its short error');
+    // Ctrl+C in the window: the command ends with an error code (Windows reports no signal), and that is a stop.
+    await launch();
+    const interrupted = devChild();
+    const running = runDev(devProject, token, { config: devConfig, spawnCommand: () => interrupted, probe: async url => url.href === address, keepFailedWindow: false });
+    try {
+      interrupted.stdout.write(`  Local: ${address}\n`);
+      for (let i = 0; i < 40 && !devState(devProject, projectConfig, machine).url; i++) await delay(50);
+      process.emit('SIGINT');
+      closeDev(interrupted, 3221225786);
+      await running;
+    } finally {
+      if (!interrupted.stdout.writableEnded) closeDev(interrupted, null, 'SIGINT');
+      await running;
+    }
+    deliverDevNotices();
+    await Promise.all([idle(s.id), idle(c.id)]);
+    const told = notices(s.id).slice(-2);
+    expect(told.length === 2 && told[0].text.includes(address) && told.every(n => !n.error) && !told[1].text.includes('3221225786') && !existsSync(devRecord),
+      'Ctrl+C in the window was told as a failure, or its stop was not told');
+    // A record left by a window that closed, its process id since given to another process (here, this one).
+    const reading = dev => ({ supported: true, measured: new Date().toISOString(), dev });
+    const leftOver = () => writeFileSync(devRecord, JSON.stringify({ token: 'old', at: Date.now() - 120_000, name: 'Sample dev', status: 'running', pid: process.pid, url: address }));
+    leftOver();
+    expect(devState(devProject, projectConfig, reading([])).status === 'stopped'
+      && devState(devProject, projectConfig, reading([{ project: devProject, pids: [process.pid], ram: 1 }])).url === address,
+    'a record whose process id belongs to another process still showed the environment running');
+    const toldBefore = notices(c.id).length;
+    const reused = await stopDev(devProject, { config: devConfig, readWindows: async () => [], stopTree: () => expect(false, 'a process that is not the window was stopped') })
+      .catch(error => ({ error: error.message }));
+    if (process.platform === 'win32') {
+      leftOver();
+      const refused = await launch().then(() => null, error => error.message);
+      expect(!refused, `a record whose process id belongs to another process blocked the start: ${refused}`);
+      await stopDev(devProject, { config: devConfig, readWindows: async () => [], stopTree: () => {} });
+    }
+    deliverDevNotices();
+    await Promise.all([idle(s.id), idle(c.id)]);
+    expect(reused.stopped === 0 && !existsSync(devRecord) && notices(c.id).length > toldBefore && notices(c.id).slice(toldBefore).every(n => !n.error),
+      `a record whose process id belongs to another process blocked the stop: ${reused.error ?? ''}`);
+    expect(!notices(isolated).length && !sessions.readSession(isolated).queue?.length && !notices(inCharge).length
+      && !sessions.readSession(inCharge).queue?.length && !readdirSync(devClone).length,
+    'notices reached another project or the agent in charge, or wrote to the project clone');
+    await Promise.all([s, c, { id: isolated }, { id: inCharge }].map(session => sessions.endSession(session.id)));
+
+    // Read the actual stdin of a resumed turn after a manager answer and a subsequent run status change.
+    const charge = await import('../src/charge.mjs');
+    const { loadConfig } = await import('../src/config.mjs');
+    const { saveRun } = await import('../src/store.mjs');
+    const config = loadConfig();
+    const project = Object.keys(config.projects).find(id => charge.inCharge(config, id));
+    if (project) {
+      const id = 'smoke-charge-live';
+      writeFileSync(path.join(data, 'sessions', `${id}.json`), JSON.stringify({
+        id, project, charge: true, status: 'open', mode: 'app', tool: 'claude', cwd: liveDir, toolSession: '11111111-1111-4111-8111-111111111111',
+      }));
+      // A "Work now" session on Codex of the same project: resumed with the message alone, it gets the news too.
+      const cxId = 'smoke-work-codex';
+      writeFileSync(path.join(data, 'sessions', `${cxId}.json`), JSON.stringify({
+        id: cxId, project, status: 'open', mode: 'app', tool: 'codex', cwd: liveDir, toolSession: null, turns: 0, work: { copy: false, held: [], crew: [] },
+      }));
+      sessions.sayToSession(id, 'First charge turn');
+      sessions.sayToSession(cxId, 'First work turn');
+      await idle(id);
+      await idle(cxId);
+      const firstPrompt = called().findLast(x => x.tool !== 'codex')?.prompt;
+      const request = charge.addRequest({ project, session: id, asked: 'Change the menu', plan: 'Fix the menu' }, config);
+      const { run } = await charge.answerRequest(request.id, 'approve', { note: 'Please keep the layout.', title: 'Smoke menu', summary: 'Made up.' }, config);
+      saveRun({ ...run, status: 'running' });
+      sessions.sayToSession(id, 'Where is my request?');
+      await idle(id);
+      const resumed = called().at(-1);
+      const news = 'What changed since your previous turn';
+      expect(firstPrompt?.includes('Your requests to the manager') && !firstPrompt.includes(`- #${request.id},`) && !firstPrompt.includes(news)
+        && resumed?.args.includes('--resume') && resumed.prompt.includes('Where is my request?') && resumed.prompt.includes(news) && resumed.prompt.includes(`- Request #${request.id},`)
+        && resumed.prompt.includes('approved; the manager: Please keep the layout.') && resumed.prompt.includes(`(#log/${run.id}) (running)`),
+      `the resumed charge turn did not receive the latest request, the manager note and the linked run state in its input: ${resumed?.prompt}`);
+      expect(sessions.sessionHistory(id).items.some(e => e.kind === 'request' && e.request === request.id && e.status === 'approved' && e.run === run.id),
+        'the original conversation did not receive the approval and its run link');
+      // Nothing new: the turn carries the message alone, without repeating the requests.
+      sessions.sayToSession(id, 'Thanks');
+      await idle(id);
+      const quiet = called().at(-1).prompt;
+      expect(!quiet.includes(news) && !quiet.includes('Your requests to the manager') && quiet.includes('Thanks'), `a resumed charge turn repeats what did not change: ${quiet}`);
+      // A notice from elsewhere in Chiefmate comes with the next turn, once.
+      sessions.noteSession(id, 'Smoke notice: the crew started.');
+      sessions.sayToSession(id, 'Any news?');
+      await idle(id);
+      const noticed = called().at(-1).prompt;
+      expect(noticed.includes(news) && noticed.includes('Smoke notice: the crew started.') && !noticed.includes(`- Request #${request.id},`), `a resumed charge turn did not get the notice alone: ${noticed}`);
+      sessions.sayToSession(cxId, 'Where do we stand?');
+      await idle(cxId);
+      const cxResumed = called().filter(x => x.tool === 'codex').at(-1);
+      expect(cxResumed?.args.slice(0, 2).join() === 'exec,resume' && cxResumed.prompt.includes(news) && cxResumed.prompt.includes(`- Request #${request.id},`)
+        && cxResumed.prompt.includes('Please keep the layout.') && cxResumed.prompt.includes('Where do we stand?'),
+      `the resumed Codex turn of a project's session did not receive what changed: ${cxResumed?.prompt}`);
+      saveRun({ ...run, status: 'done', ended: new Date().toISOString() });
+      await sessions.endSession(id);
+      writeFileSync(path.join(data, 'sessions', `${cxId}.json`), JSON.stringify({ ...sessions.readSession(cxId), work: undefined, status: 'ended' }));
+    }
   } finally {
     process.env.CHIEFMATE_CLAUDE = path.join(data, 'no-claude.exe');
     delete process.env.CHIEFMATE_CODEX;
@@ -2551,20 +3012,19 @@ try {
 
 // The project's agent in charge, in this process with made-up settings and records: who is in charge, a conversation
 // that only reads and sees only its project, a request sent from it (its block taken out of the text), the manager's
-// answers back in the conversation (hold, ask-owner decided on the owner's card, reject), what the manager, the agent
-// and the app see; and an approval that queues a run linked to the request, only with a project of this installation's
-// settings (read only). Nothing starts: the queue is never nudged here, and nothing is told to a manager.
+// answers back in the conversation, what the manager, the agent and the app see, and the linked runs and projects.
+// Nothing starts: the queue is never nudged here, and nothing is told to a manager.
 try {
   process.env.CHIEFMATE_SMOKE = '1';
   const src = file => pathToFileURL(path.join(root, 'src', file)).href;
   const charge = await import(src('charge.mjs'));
-  const { loadAgents, loadConfig } = await import(src('config.mjs'));
+  const { loadAgents } = await import(src('config.mjs'));
   const { saveMemory } = await import(src('leads.mjs'));
   const { openSession, planSession, sessionHistory } = await import(src('sessions.mjs'));
   const { decide } = await import(src('decisions.mjs'));
   const { rulePath } = await import(src('access.mjs'));
   const { NEWS_EVENTS } = await import(src('news.mjs'));
-  const { readRun } = await import(src('store.mjs'));
+  const { readRun, listRuns, saveRun } = await import(src('store.mjs'));
   const { WORKSPACES } = await import(src('util.mjs'));
   const { t } = await import(src('i18n.mjs'));
   const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-charge-'));
@@ -2640,6 +3100,17 @@ try {
     `the agent in charge does not read its open matters: ${mText}`);
   const crowded = charge.mattersText({ ...matters, recent: matters.recent.map(r => ({ ...r, outcome: 'x'.repeat(400) })), plan: Array(12).fill(matters.plan[1]) }, 'Owner');
   expect(crowded.length <= 9000, `the open matters have no ceiling: ${crowded.length} characters`);
+  // Between two turns of a project's session, an item that only moves past the board's ceiling of 12 (coming back up
+  // or pushed down) is told neither as closed nor as new; a resumed session with no state kept gets the whole state once.
+  const board = Array.from({ length: 13 }, (_, i) => ({ id: 70 + i, project: 'gamma', title: `Gamma item ${i}`, status: 'todo', priority: 'low' }));
+  const boardSeen = charge.turnChanges(made, 'gamma', null, { resumed: false, runs: mRuns, items: board }).seen;
+  const risen = charge.turnChanges(made, 'gamma', boardSeen, { runs: mRuns, items: [{ ...board[0], status: 'done' }, ...board.slice(1)] }).text;
+  const pushed = charge.turnChanges(made, 'gamma', boardSeen, { runs: mRuns, items: [{ id: 90, project: 'gamma', title: 'Gamma urgent', status: 'todo', priority: 'high' }, ...board] }).text;
+  expect(risen.includes('Board #70 Gamma item 0: off the open items (done)') && !risen.includes('Board #82') && pushed.includes('Board #90 Gamma urgent: new, todo') && !pushed.includes('Board #81'),
+    `an item that only moved past the board's ceiling was told as closed or new: ${risen} / ${pushed}`);
+  const whole = charge.turnChanges(made, 'gamma', null, { runs: mRuns, items: board }).text;
+  expect(whole.includes('## Your requests to the manager') && whole.includes("## The project's open matters, now") && whole.includes("## The project's memory now"),
+    `a resumed session with no state kept did not get the whole state once: ${whole}`);
   const { saveRun: saveMatterRun } = await import(src('store.mjs'));
   saveMatterRun({ id: 'm-saved', kind: 'task', project: 'gamma', title: 'Gamma saved delivery', status: 'done', created: hoursAgo(14), ended: hoursAgo(13), branch: 'cm/saved', delivered: temp, steps: [] });
   saveMatterRun({ id: 'm-saved-alpha', kind: 'task', project: 'alpha', title: 'Alpha saved delivery', status: 'done', created: hoursAgo(14), ended: hoursAgo(13), branch: 'cm/alpha', delivered: temp, steps: [] });
@@ -2663,7 +3134,8 @@ try {
   const held = (await charge.answerRequest(r1.id, 'hold', { note: 'The 5-hour window is at 80%.' }, made)).request;
   const answers = () => sessionHistory(sessionId).items.filter(e => e.kind === 'request').map(e => e.text);
   expect(noReason && held.status === 'waiting' && answers().some(x => x.includes(`#${r1.id}`) && x.includes('80%')), 'a hold without a reason was taken, or the hold did not reach the conversation');
-  expect(charge.chargeSystem(made, 'gamma').includes(`- #${r1.id}`) && charge.chargeSystem(made, 'gamma').includes(': waiting (the manager: The 5-hour window'), "the agent in charge does not see its request's state");
+  const requestContext = (project = 'gamma') => charge.chargeTurn(made, { project, cwd: temp }).requests;
+  expect(requestContext().includes(`- #${r1.id}`) && requestContext().includes(': waiting; the manager: The 5-hour window'), "the agent in charge does not see its request's state");
   const asked = await charge.answerRequest(r1.id, 'ask-owner', { note: 'Large and risky: your call.', recommend: 'hold', level: 3 }, made);
   const q = asked.question;
   expect(asked.request.status === 'owner' && q.options.join('|') === [t('Authorize'), t('Wait'), t('Refuse')].join('|') && q.recommend === t('Wait') && q.request === r1.id && q.project === 'gamma' && q.level === 3 && asked.request.level === 3,
@@ -2679,6 +3151,7 @@ try {
   const decided = await decide({ card: card.id, action: 'answer', option: t('Refuse') }, [card]);
   const after = charge.readRequests().find(x => x.id === r1.id);
   expect(decided.done === 'answered' && after.status === 'rejected' && after.by === 'owner' && !decided.run, `the owner's answer on the card did not decide the request: ${JSON.stringify(after)}`);
+  expect(requestContext().includes('rejected; the manager: Large and risky: your call.'), 'the owner decision hid the manager note from the agent');
   let again = false;
   try {
     await charge.answerRequest(r1.id, 'approve', {}, made);
@@ -2700,17 +3173,44 @@ try {
   }
   expect(stepRefused, 'a step of a run answered a request of an agent in charge');
 
-  // Approved: a run for the project, linked to the request: an "ask" for a team lead, else a task with the review.
-  const config = loadConfig();
-  const real = Object.keys(config.projects ?? {}).find(id => charge.inCharge(config, id));
-  if (real) {
-    const r3 = charge.addRequest({ asked: 'Smoke ask', plan: 'Smoke: change nothing', size: 'S', risk: 'low', project: real }, config);
-    const approved = await charge.answerRequest(r3.id, 'approve', { note: 'Small and safe.', title: 'Smoke request', summary: 'Made up.', level: '1' }, config);
-    const run = readRun(approved.run?.id);
-    const lead = charge.inCharge(config, real).lead;
-    expect(approved.request.status === 'approved' && approved.request.run === run?.id && run.ownerRequest === r3.id && run.status === 'queued' && run.kind === (lead ? 'ask' : 'task')
-      && (lead || run.review) && run.level === 1 && run.instruction.includes('Smoke ask') && run.instruction.includes('Small and safe.'), `an approved request did not queue its run: ${JSON.stringify(run)}`);
+  // Both approval paths select the destination's crew and keep the request in the original conversation.
+  const request = plan => charge.addRequest({ asked: plan, plan, project: 'gamma', session: sessionId }, made);
+  const approval = { note: 'Small and safe.', title: 'Smoke request', summary: 'Made up.', level: '1' };
+  const own = request('Use our team lead');
+  const askRun = readRun((await charge.answerRequest(own.id, 'approve', approval, made)).run.id);
+  expect(askRun.project === 'gamma' && askRun.kind === 'ask' && askRun.ownerRequest === own.id, 'default approval did not go to the source team lead');
+  const cross = request('Use the other crew');
+  const approve = () => charge.answerRequest(cross.id, 'approve', { ...approval, project: 'alpha' }, made);
+  const approvals = await Promise.allSettled([approve(), approve()]);
+  const run = approvals.find(a => a.status === 'fulfilled')?.value.run;
+  expect(approvals.filter(a => a.status === 'fulfilled').length === 1 && listRuns().filter(r => r.ownerRequest === cross.id).length === 1,
+    'simultaneous approvals created duplicate runs');
+  expect(run?.project === 'alpha' && run.kind === 'task' && run.steps[0].agent === 'builder' && run.review && run.level === 1
+    && run.instruction.includes(cross.asked) && run.instruction.includes(approval.note), 'cross-project approval did not use the destination crew and review');
+
+  const forwarded = request('Direct to a project');
+  const redirected = request('Direct to a specific run');
+  const ongoing = request('Covered by an active run');
+  const total = listRuns().length;
+  for (const options of [{}, { project: 'missing' }, { run: '../smoke-feed' }, { project: 'alpha', run: run.id }]) {
+    const [result] = await Promise.allSettled([charge.answerRequest(forwarded.id, 'forward', { ...approval, ...options }, made)]);
+    expect(result.status === 'rejected' && charge.readRequests().find(r => r.id === forwarded.id)?.status === 'pending', 'an invalid destination closed a request');
   }
+  const [finishedRun] = await Promise.allSettled([charge.answerRequest(ongoing.id, 'in-progress', { note: 'Already covered.', run: 'smoke-feed' }, made)]);
+  expect(finishedRun.status === 'rejected', 'a finished run was accepted as still in progress');
+  await charge.answerRequest(forwarded.id, 'forward', { note: 'Belongs to Alpha.', project: 'alpha' }, made);
+  await charge.answerRequest(redirected.id, 'forward', { note: 'See this delivery.', run: 'smoke-feed' }, made);
+  await charge.answerRequest(ongoing.id, 'in-progress', { note: 'Already covered.', run: run.id }, made);
+  const events = sessionHistory(sessionId).items;
+  expect(listRuns().length === total && events.some(e => e.request === forwarded.id && e.status === 'forwarded' && e.targetProject === 'alpha')
+    && events.some(e => e.request === redirected.id && e.status === 'forwarded' && e.run === 'smoke-feed')
+    && events.some(e => e.request === ongoing.id && e.status === 'in-progress' && e.run === run.id),
+  'the new outcomes did not return their destinations to the conversation, or queued extra work');
+  expect(requestContext().includes('forwarded; the manager: Belongs to Alpha.; project alpha [open project](#project/alpha)')
+    && requestContext().includes(`in-progress; the manager: Already covered.; run "Smoke request" [open run](#log/${run.id}) (queued)`)
+    && requestContext('alpha').endsWith('None yet.'), 'the request context did not show the new outcomes and links, or leaked across projects');
+  // The runs queued here never start: a later part of this test wakes the queue up.
+  for (const queued of [askRun, run]) saveRun({ ...readRun(queued.id), status: 'canceled', ended: new Date().toISOString() });
   rmSync(temp, { recursive: true, force: true, maxRetries: 5 });
 } catch (error) {
   failures.push(`agent in charge checks: ${error.message}`);
@@ -2807,6 +3307,132 @@ try {
   expect(refused.includes("A step doesn't change the owner's focus"), `a step could change the focus: ${refused}`);
 } catch (error) {
   failures.push(`focus checks: ${error.message}`);
+}
+
+// "Work now", in this process with made-up settings and records: the profile with the agent in charge's name, opened
+// only through the owner's button (never as a profile, in a window or with a prompt), the first message with the
+// project's context (the documentation's index, notes, memory, the earlier session's summary, the rules), the choice
+// when the crew is on the project (a made-up run going on), the summary kept for the next session, the idle check,
+// the manager's line and news, and the guard that never lets a push reach the main branch. Nothing opens or starts.
+try {
+  process.env.CHIEFMATE_SMOKE = '1';
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const work = await import(src('worknow.mjs'));
+  const { saveMemory } = await import(src('leads.mjs'));
+  const { checkIdleWork, openSession, planSession, planWork } = await import(src('sessions.mjs'));
+  const { live } = await import(src('runs.mjs'));
+  const { NEWS_EVENTS } = await import(src('news.mjs'));
+  const { guardHooks } = await import(src('guard.mjs'));
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-work-'));
+  const library = path.join(temp, 'library');
+  mkdirSync(path.join(library, 'Docs Delta'), { recursive: true });
+  writeFileSync(path.join(library, 'Docs Delta', 'INSTRUCOES_IA.md'), '# Index');
+  writeFileSync(path.join(library, 'Docs Delta', 'details.md'), '# Details');
+  const made = {
+    owner: 'Owner', language: 'en', default_model: 'some-model',
+    library: { notes: { local_clone: library } },
+    projects: { delta: { name: 'Delta', about: 'A made-up app.', notes: 'Delta notes.', local_clone: temp, docs: 'notes/Docs Delta', deliver: 'local', crew: { generalist: { name: 'Fixer' } } } },
+  };
+  expect(work.workProfileId('delta') === 'project-delta-work' && work.workProject('project-delta-work-codex') === 'delta' && work.workProject('project-delta-claude') === null, 'the "Work now" profile ids are wrong');
+  let refused = 0;
+  for (const open of [() => planSession(made, 'project-delta-work'), () => openSession('project-delta-work', { config: made }), () => openSession('project-delta-work', { config: made, window: true, work: { dir: temp } })]) {
+    try {
+      await open();
+    } catch {
+      refused++;
+    }
+  }
+  expect(refused === 3, '"Work now" opened as a plain profile, in a window, or without the owner\'s button');
+  saveMemory('delta', 'Delta memory line.');
+  work.saveWorkNote('delta', { session: 'earlier', tool: 'claude', done: 'Fixed the login.', open: 'The footer.' });
+  const planned = planWork(made, 'project-delta-work', { dir: temp, copy: false, crew: [] });
+  const text = planned.prompt.text;
+  expect(planned.profile.work && planned.profile.memberName === 'Fixer' && planned.profile.name.includes('Fixer') && planned.folder.dir === temp, `the "Work now" profile is not the agent in charge's, in the owner's clone: ${JSON.stringify(planned.profile)}`);
+  expect(text.includes(path.join(library, 'Docs Delta', 'INSTRUCOES_IA.md')) && text.includes('details.md') && text.includes('Delta notes.') && text.includes('Delta memory line.')
+    && text.includes('Fixed the login.') && text.includes('The footer.') && text.includes('main branch') && text.includes('no trace of Chiefmate'),
+  `the first message of "Work now" misses the project's context or its rules: ${text}`);
+  // The board, deliveries and runs come from the agent in charge's open matters (src/charge.mjs), not a list of its own.
+  expect(text.includes("## The project's open matters, as this session opens") && text.includes('### Deliveries waiting for Owner') && !text.includes("## Open items on"),
+    `"Work now" does not reuse the project's open matters: ${text.slice(0, 400)}`);
+  const dry = await work.openWork('delta', { dryRun: true, config: made });
+  expect(dry.dryRun && dry.cwd === temp && !dry.copy && dry.prompt.includes('## Now'), `"Work now" (dry run) does not open in the owner's clone: ${JSON.stringify(dry).slice(0, 300)}`);
+  live.set('smoke-work-run', { run: 'smoke-work-run', project: 'delta', title: 'A crew task', agent: 'generalist', since: new Date().toISOString() });
+  try {
+    // By default it opens at once in the owner's clone, the crew's task paused; "work_now_mode" may choose otherwise.
+    expect(work.workMode({}) === 'pause' && work.workMode({ work_now_mode: 'copy' }) === 'copy' && work.workMode({ work_now_mode: 'ask' }) === 'ask' && work.workMode({ work_now_mode: 'x' }) === 'pause',
+      '"work_now_mode" does not default to "pause", or "copy" and "ask" are not kept');
+    const paused = await work.openWork('delta', { dryRun: true, config: made });
+    expect(paused.dryRun && !paused.conflict && paused.cwd === temp && !paused.copy && paused.crew?.[0]?.paused && paused.prompt.includes("paused at Owner's click"),
+      `"Work now" with the crew on the project did not open at once in the owner's clone, its task paused: ${JSON.stringify(paused).slice(0, 300)}`);
+    const asked = await work.openWork('delta', { dryRun: true, config: { ...made, work_now_mode: 'ask' } });
+    expect(asked.conflict?.[0]?.title === 'A crew task' && !asked.dryRun, 'with "work_now_mode": "ask", the crew working on the project did not ask the owner to choose');
+    for (const copy of [await work.openWork('delta', { dryRun: true, choice: 'copy', config: made }), await work.openWork('delta', { dryRun: true, config: { ...made, work_now_mode: 'copy' } })]) {
+      expect(copy.copy && copy.cwd === work.copyFolder('delta') && copy.prompt.includes('separate copy') && !copy.crew[0].paused, `"Work in a separate copy" does not work elsewhere: ${copy.cwd}`);
+    }
+  } finally {
+    live.delete('smoke-work-run');
+  }
+  const summary = await work.summarize(made, { id: 's1', project: 'delta', tool: 'claude' }, [{ kind: 'owner', text: 'Fix the menu' }, { kind: 'say', text: 'Fixed it.' }], async () => 'Done: Fixed the menu in header.html.\nOpen: none');
+  expect(summary?.done === 'Fixed the menu in header.html.' && summary.open === '' && work.readWorkNotes('delta', 1)[0].done === summary.done, `the session's summary was not kept: ${JSON.stringify(summary)}`);
+  const sessions = path.join(data, 'sessions');
+  mkdirSync(sessions, { recursive: true });
+  const quiet = new Date(Date.now() - (work.IDLE_MINUTES + 5) * 60_000).toISOString();
+  const record = { id: 'smoke-work', profile: 'project-delta-work', name: 'Delta', tool: 'claude', project: 'delta', mode: 'app', status: 'open', memberName: 'Fixer', turns: 2, lastTurn: { at: quiet, ok: true }, cwd: temp, created: quiet, work: { copy: false, held: [] } };
+  writeFileSync(path.join(sessions, 'smoke-work.json'), JSON.stringify(record));
+  const closed = [];
+  expect(checkIdleWork(Date.now(), async id => closed.push(id)).includes('smoke-work') && closed.includes('smoke-work'), 'a quiet "Work now" session did not get its summary');
+  writeFileSync(path.join(sessions, 'smoke-work.json'), JSON.stringify({ ...record, work: { ...record.work, summarized: new Date().toISOString() } }));
+  expect(!checkIdleWork(Date.now(), async () => {}).includes('smoke-work'), 'a quiet session was summarized twice');
+  expect(work.workLine([record], made).includes('Delta with Fixer') && NEWS_EVENTS.includes('owner_working') && work.openedNews(made, record).includes('Nothing waits for your answer'), "the manager doesn't hear of the owner working now");
+  expect(work.isCommit('Ran: git -C "x y" commit -m "Fix"') && work.isCommit('Rodou: git commit -am x') && !work.isCommit('Ran: git status'), 'a commit is not recognized as a milestone');
+  const translated = work.parseSummary('**Feito:** Corrigi o menu.\n**Em aberto:** nada');
+  expect(translated?.done === 'Corrigi o menu.' && translated.open === '', `a summary with its labels in Portuguese was misread: ${JSON.stringify(translated)}`);
+  // Ending the session: a crew run it paused, but canceled meanwhile, stays canceled.
+  const { readRun, saveRun } = await import(src('store.mjs'));
+  const { readSession } = await import(src('sessions.mjs'));
+  saveRun({ id: 'smoke-held-run', kind: 'task', project: 'delta', title: 'A crew task', status: 'canceled', created: quiet, ended: quiet, steps: [] });
+  writeFileSync(path.join(sessions, 'smoke-work-held.json'), JSON.stringify({ ...record, id: 'smoke-work-held', status: 'ended', ended: new Date().toISOString(), work: { copy: false, held: ['smoke-held-run'] } }));
+  await work.closeWork('smoke-work-held');
+  expect(readRun('smoke-held-run')?.status === 'canceled' && !readSession('smoke-work-held')?.work?.held?.length, 'ending "Work now" brought back a crew run canceled while it was paused');
+  // A crew run it paused goes back to the queue when the session ends, or before, with "Let it go on". A made-up run
+  // going on in the project keeps the queue from starting them.
+  live.set('smoke-work-busy', { run: 'smoke-work-busy', project: 'delta', title: 'Busy', agent: 'generalist', since: quiet });
+  try {
+    saveRun({ id: 'smoke-paused-run', kind: 'task', project: 'delta', title: 'A paused task', status: 'paused', created: quiet, steps: [] });
+    writeFileSync(path.join(sessions, 'smoke-work-ends.json'), JSON.stringify({ ...record, id: 'smoke-work-ends', status: 'ended', ended: new Date().toISOString(), work: { copy: false, held: ['smoke-paused-run'] } }));
+    await work.closeWork('smoke-work-ends');
+    expect(readRun('smoke-paused-run')?.status === 'queued' && !readSession('smoke-work-ends')?.work?.held?.length, 'ending "Work now" did not bring back the crew run it paused');
+    saveRun({ ...readRun('smoke-paused-run'), status: 'paused' });
+    writeFileSync(path.join(sessions, 'smoke-work-goes.json'), JSON.stringify({ ...record, id: 'smoke-work-goes', work: { copy: false, held: ['smoke-paused-run'], titles: { 'smoke-paused-run': 'A paused task' } } }));
+    const { sessionsState } = await import(src('sessions.mjs'));
+    expect(sessionsState(made, { sessions: [], supported: false }).open.find(s => s.id === 'smoke-work-goes')?.heldTitles?.[0] === 'A paused task', "the session doesn't show the crew's task it paused");
+    const released = await work.releaseWork('smoke-work-goes');
+    expect(released[0] === 'smoke-paused-run' && readRun('smoke-paused-run')?.status === 'queued' && !readSession('smoke-work-goes')?.work?.held?.length,
+      '"Let it go on" did not let the crew run paused by "Work now" go back to the queue');
+  } finally {
+    live.delete('smoke-work-busy');
+    saveRun({ ...readRun('smoke-paused-run'), status: 'canceled', ended: quiet });
+  }
+  // The guard of a "Work now" session: with pushing allowed, a branch of the work goes; the main branch never does,
+  // however it is named (HEAD is the branch checked out). Before pushing is allowed, a push that could never go is
+  // refused at once, without a permission request for the owner (nothing in the log); a branch of the work asks.
+  const hookFor = (allowed, log) => guardHooks({ log, allowed, who: 'session', noMain: true }).PreToolUse[0].hooks[0].command;
+  const hook = hookFor(['Bash(git push:*)'], path.join(temp, 'guard.jsonl'));
+  const denies = (command, { cwd = temp, h = hook } = {}) => /"permissionDecision":"deny"/.test(execFileSync(h, { shell: true, encoding: 'utf8', cwd, input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', cwd, tool_input: { command } }) }));
+  expect(denies('git push origin main') && denies('git push') && denies('git push --force origin feature') && !denies('git push origin feature/menu'), 'a "Work now" session may push to the main branch, or may not push a branch of the work once allowed');
+  const repo = path.join(temp, 'repo');
+  execFileSync('git', ['init', '-q', repo], { windowsHide: true });
+  execFileSync('git', ['-C', repo, 'symbolic-ref', 'HEAD', 'refs/heads/main'], { windowsHide: true });
+  const mainAsHead = denies('git push origin HEAD', { cwd: repo }) && denies('git push -u origin heads/main', { cwd: repo });
+  execFileSync('git', ['-C', repo, 'symbolic-ref', 'HEAD', 'refs/heads/feature/menu'], { windowsHide: true });
+  expect(mainAsHead && !denies('git push -u origin HEAD', { cwd: repo }), 'a "Work now" session may push the main branch as HEAD, or may not push its own branch as HEAD');
+  const askLog = path.join(temp, 'asked.jsonl');
+  const asking = hookFor([], askLog);
+  const mainNotAsked = denies('git push origin main', { h: asking }) && !existsSync(askLog);
+  expect(mainNotAsked && denies('git push origin feature/menu', { h: asking }) && existsSync(askLog), 'before pushing is allowed, a push to the main branch became a permission request, or a branch of the work did not');
+  rmSync(temp, { recursive: true, force: true, maxRetries: 5 });
+} catch (error) {
+  failures.push(`work now checks: ${error.message}`);
 }
 
 try {

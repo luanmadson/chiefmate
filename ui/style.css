@@ -49,17 +49,21 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 ::-webkit-scrollbar-track { background: transparent; }
 
 /* Window frame */
-.app { display: grid; height: 100vh; height: 100dvh; grid-template: "title title" 40px "nav alerts" auto "nav content" 1fr "status status" 28px / 196px 1fr; }
-.titlebar { grid-area: title; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.app { display: grid; height: 100vh; height: 100dvh; grid-template: "title title" auto "nav alerts" auto "nav content" 1fr "status status" 28px / 196px 1fr; }
+.app-header { grid-area: title; min-width: 0; }
+.titlebar { height: 40px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .brand { display: flex; align-items: center; gap: 10px; font-size: 12px; font-weight: 600; letter-spacing: 0.22em; color: var(--strong); }
 .titlebar-right { display: flex; align-items: center; gap: 18px; min-width: 0; }
 .clock { font: 12px var(--mono); color: var(--muted); white-space: nowrap; }
-/* Away mode: the owner stepped out or went to sleep; brass while it is on */
+/* Away mode: a clock (any time away, not only the night), brass while it is on */
 .away { appearance: none; display: inline-flex; align-items: center; gap: 6px; flex: none; background: transparent; border: 1px solid var(--line-strong); border-radius: 0; color: var(--muted); font: inherit; font-size: 12px; padding: 3px 9px; cursor: pointer; white-space: nowrap; }
 .away:hover { color: var(--text); border-color: var(--muted); background: var(--hover); }
 .away[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
 .away svg { width: 13px; height: 13px; flex: none; }
 .away:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.away[hidden], .away-notice[hidden] { display: none; }
+.away-notice { display: flex; align-items: center; gap: 8px; padding: 4px 16px; background: var(--raised); border-bottom: 1px solid var(--line); color: var(--strong); }
+.away-notice select { width: auto; max-width: 55%; margin: 0; padding: 4px 8px; border-radius: 0; }
 /* Emergency lockdown: the red button in the title bar, the red band on every page and the release dialog */
 .lockdown-button { appearance: none; flex: none; background: transparent; border: 1px solid rgba(255, 92, 82, 0.55); border-radius: 0; color: var(--urgent); font: inherit; font-size: 12px; letter-spacing: 0.04em; padding: 3px 9px; cursor: pointer; white-space: nowrap; }
 .lockdown-button:hover { background: var(--urgent-bg); border-color: var(--urgent); }
@@ -606,7 +610,7 @@ button.tab { background: transparent; border-top: 0; border-left: 0; border-righ
 
 /* Narrow windows */
 @media (max-width: 900px) {
-  .app { grid-template: "title" 40px "nav" auto "alerts" auto "content" 1fr "status" 28px / 1fr; }
+  .app { grid-template: "title" auto "nav" auto "alerts" auto "content" 1fr "status" 28px / 1fr; }
   .nav { flex-direction: row; overflow-x: auto; padding: 0; border-right: 0; border-bottom: 1px solid var(--line); }
   .nav a { border-left: 0; border-bottom: 2px solid transparent; white-space: nowrap; }
   .nav a.active { border-bottom-color: var(--accent); }
@@ -617,7 +621,7 @@ button.tab { background: transparent; border-top: 0; border-left: 0; border-righ
   .view { padding: 16px; }
   .presence .state { display: none; }
   .away { padding: 4px 7px; }
-  .away .away-label { display: none; }
+  .away .away-label, #away-since { display: none; }
   .focus { margin: 0 12px; padding-left: 12px; }
   .focus .label { display: none; }
 }
@@ -701,6 +705,7 @@ button.tab { background: transparent; border-top: 0; border-left: 0; border-righ
 .project-head-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
 .project-head h1 { margin: 0; font-size: 19px; font-weight: 600; color: var(--strong); }
 .project-head-top p { margin: 3px 0 0; color: var(--muted); }
+#project-system:empty { display: none; }
 .project-status { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 10px; font-size: 12.5px; color: var(--muted); }
 .project-status .sep { color: var(--faint); }
 .project-status .num { color: var(--text); }
@@ -736,6 +741,12 @@ button.tab { background: transparent; border-top: 0; border-left: 0; border-righ
 .live-card.active { border-color: var(--accent); border-left-width: 3px; }
 .live-session[hidden] { display: none; }
 .live-session .chat-column { height: 62vh; min-height: 380px; }
+/* The manager's conversation borrowed by a project's Manager tab (placeChat in app.js) */
+#project-manager > .hint { margin: 0 0 10px; }
+.chat-column.in-project { height: 62vh; min-height: 380px; }
+/* "Work now" when the crew is on the project: its runs, before the choice */
+.work-runs { margin: 0 0 14px; padding-left: 18px; color: var(--text); }
+.work-runs li { margin: 2px 0; }
 /* The project's agent in charge: who it is, its requests to the manager (each with its state), then the conversation. */
 .action-big.accent { border-color: var(--accent); }
 .action-big.accent .action-title { color: var(--accent); }
@@ -785,6 +796,10 @@ button.tab { background: transparent; border-top: 0; border-left: 0; border-righ
 .msg.first summary::-webkit-details-marker { display: none; }
 .msg.first[open] summary { margin-bottom: 6px; }
 .msg.system.ask { color: var(--accent); }
+.msg.request-answer { border-inline-start: 2px solid currentColor; background: var(--raised); }
+.request-answer .msg-head { flex-wrap: wrap; }
+.request-answer .state { border: 1px solid currentColor; padding: 2px 6px; }
+.request-answer .msg-body { color: var(--text); overflow-wrap: anywhere; }
 .live-ask { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 16px; padding: 9px 18px; border-bottom: 1px solid var(--accent); }
 .live-ask .needs-text { flex: 1 1 320px; min-width: 0; }
 .live-ask .needs-label { display: block; color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }
@@ -1033,9 +1048,12 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
     height: var(--app-h, 100dvh);
     grid-template: "title" auto "alerts" auto "content" minmax(0, 1fr) "status" auto "nav" auto / minmax(0, 1fr);
   }
-  .titlebar { height: calc(48px + env(safe-area-inset-top)); padding: env(safe-area-inset-top) max(12px, env(safe-area-inset-right)) 0 max(12px, env(safe-area-inset-left)); }
+  .titlebar { height: auto; min-height: calc(48px + env(safe-area-inset-top)); padding: env(safe-area-inset-top) max(12px, env(safe-area-inset-right)) 0 max(12px, env(safe-area-inset-left)); }
+  .titlebar-right { flex-wrap: wrap; justify-content: flex-end; row-gap: 0; }
   .project-jump { display: none; }
   .away { min-width: 44px; justify-content: center; }
+  .away-notice { padding-inline: max(12px, env(safe-area-inset-left)) max(12px, env(safe-area-inset-right)); }
+  .away-notice select { font-size: 16px; }
   .statusbar { display: none; }
   .statusbar.offline { display: flex; height: 28px; }
 
@@ -1075,11 +1093,12 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   /* With the keyboard open, the bottom bar and the notices step aside; in a conversation, so do the title bar, the headers
      and the decisions: its last messages and the field take the whole visible area, Send always beside the field */
   html.typing .nav, html.typing .alerts, html.typing .suggestions { display: none; }
-  html.typing-chat .titlebar, html.typing-chat .view-header, html.typing-chat .focus-bar, html.typing-chat #session-page,
-  html.typing-chat #view-project > :not(#project-live), html.typing-chat #project-live-list, html.typing-chat .live-head { display: none; }
+  html.typing-chat .app-header, html.typing-chat .view-header, html.typing-chat .focus-bar, html.typing-chat #session-page,
+  html.typing-chat #view-project > :not(#project-live):not(#project-charge):not(#project-manager), html.typing-chat #project-live-list, html.typing-chat .live-head,
+  html.typing-chat #project-charge-top, html.typing-chat #project-manager > .hint { display: none; }
   html.typing-chat .app { padding-top: env(safe-area-inset-top); }
   html.typing-chat .view.active { padding-top: 0; padding-bottom: 0; overflow: hidden; } /* the same width: the messages don't reflow */
-  html.typing-chat #view-manager .chat-column, html.typing-chat .live-session .chat-column { height: var(--view-h, 60dvh); min-height: 0; border-top-width: 0; border-bottom-width: 0; }
+  html.typing-chat #view-manager .chat-column, html.typing-chat .live-session .chat-column, html.typing-chat .chat-column.in-project { height: var(--view-h, 60dvh); min-height: 0; border-top-width: 0; border-bottom-width: 0; }
   html.typing-chat .chat-queue { max-height: 22%; }
   html.typing-chat .compose { padding: 6px 8px; }
   html.typing-chat .compose textarea { min-height: 44px; height: 44px; } /* one line, growing with the text (fitField) */
@@ -1126,7 +1145,7 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   .compose-footer > :first-child:empty { display: none; }
   .suggestion { flex: none; }
   /* A live session: its conversation fills the screen once its header scrolls away */
-  .live-session .chat-column { height: calc(var(--view-h, 70dvh) - 20px); min-height: 200px; }
+  .live-session .chat-column, .chat-column.in-project { height: calc(var(--view-h, 70dvh) - 20px); min-height: 200px; }
 
   /* Tables become cards: the main cell on top, the others below it, the buttons to the right */
   .table:not(.inner) { display: block; overflow: visible; }
@@ -1188,7 +1207,7 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   .live-clock .label { display: none; }
 
   /* The manager's conversation from edge to edge, as in a messaging app */
-  #view-manager .chat-column, .live-session .chat-column { margin: 0 -12px; border-left: 0; border-right: 0; }
+  #view-manager .chat-column, .live-session .chat-column, .chat-column.in-project { margin: 0 -12px; border-left: 0; border-right: 0; }
   /* Long values (addresses, usage lines) wrap instead of widening the page */
   .facts dd, .project-facts dd { overflow-wrap: anywhere; }
   .meter-top .num { white-space: normal; text-align: right; }
@@ -1232,7 +1251,7 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
    and the way out. The messages in a centered column on wide screens. */
 .focus-bar { display: none; }
 html.chat-focus .app { grid-template: "content" minmax(0, 1fr) / minmax(0, 1fr); }
-html.chat-focus .titlebar, html.chat-focus .nav, html.chat-focus .alerts, html.chat-focus .statusbar, html.chat-focus #view-manager .view-header { display: none; }
+html.chat-focus .app-header, html.chat-focus .nav, html.chat-focus .alerts, html.chat-focus .statusbar, html.chat-focus #view-manager .view-header { display: none; }
 html.chat-focus #view-manager { padding: 0; }
 html.chat-focus .alerts:has(.lockdown-band) { display: block; position: fixed; top: 0; left: 0; right: 0; z-index: 40; }
 html.chat-focus .focus-bar {
@@ -1265,6 +1284,9 @@ html.chat-focus #view-manager .chat-column { width: min(100%, 1000px); margin: 0
   /* In the column of buttons beside the field: "Listening…" under the microphone, within the column's width */
   .compose .button.mic { flex-direction: column; gap: 2px; font-size: 11.5px; line-height: 1.2; }
 }
+/* An agent's message to the manager (a live session or a step): a plain rule on the left, never styled as yours. */
+.msg.agent { border-left: 2px solid var(--muted); }
+.msg.agent .msg-author { color: var(--strong); }
 
 /* The owner's focus (src/steer.mjs): the Focus panel at the top of Operations, a card per project, and the mark at the top */
 .steer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; margin-bottom: 20px; }

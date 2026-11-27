@@ -63,6 +63,7 @@ function inline(s) {
   const keep = html => `\u0000${kept.push(html) - 1}\u0000`;
   const text = String(s ?? '').replace(/\u0000/g, '')
     .replace(/`([^`]+)`/g, (m, c) => keep(ABS_PATH.test(c) || REL_PATH.test(c) || NAME_PATH.test(c) ? fileLink(c, `<code>${esc(c)}</code>`) : `<code>${esc(c)}</code>`))
+    .replace(/\[([^\]\n\u0000]+)\]\((#(?:log|project)\/(?:[\w.-]|%[\da-f]{2})+)\)/gi, (_, label, href) => keep(`<a href="${esc(href)}">${esc(label)}</a>`))
     .replace(ABS_IN_TEXT, (m, before, p) => {
       const tail = p.match(/[.,;:!?)\]]+$/)?.[0] ?? '';
       const file = p.slice(0, p.length - tail.length);
@@ -405,7 +406,7 @@ const toolName = tool => (tool === 'codex' ? 'Codex' : 'Claude Code');
 // or "#builder/<id>" for a project (also shown in the project's "builder" tab).
 const VIEWS = ['manager', 'decisions', 'operations', 'planning', 'radar', 'missions', 'crew', 'projects', 'builder', 'log', 'usage', 'project', 'session'];
 const pageProject = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length).split('/')[0]) : null);
-const PROJECT_TABS = ['overview', 'charge', 'live', 'crew', 'tasks', 'planning', 'files', 'context', 'builder'];
+const PROJECT_TABS = ['overview', 'charge', 'live', 'manager', 'crew', 'tasks', 'planning', 'files', 'context', 'builder'];
 const pageTab = () => {
   const tab = location.hash.startsWith('#project/') ? location.hash.slice('#project/'.length).split('/')[1] : null;
   return PROJECT_TABS.includes(tab) ? tab : 'overview';
@@ -417,7 +418,8 @@ const builderTarget = () => (builderHash() ? builderProjectOf() : pageProject() 
 // A live session's conversation: "#project/<id>/live/<session>" for a project's, "#session/<id>" for the others.
 const pageSession = () => (location.hash.startsWith('#session/') ? decodeURIComponent(location.hash.slice('#session/'.length)) : null);
 const pageLiveSession = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length).split('/')[2] ?? '') : '');
-const currentView = () => (pageProject() ? 'project' : pageSession() ? 'session' : builderHash() ? 'builder' : VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
+const pageRun = () => /^#log\/([\w-]+)$/.exec(location.hash)?.[1] ?? null;
+const currentView = () => (pageProject() ? 'project' : pageSession() ? 'session' : pageRun() ? 'log' : builderHash() ? 'builder' : VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
 const touchScreen = () => matchMedia('(pointer: coarse)').matches;
 const phoneQuery = matchMedia('(max-width: 600px)'); // the phone layout of ui/style.css
 /** In a message field, Enter sends and Shift+Enter starts a new line; on a touch screen, Enter starts a new line and the Send button sends. */
@@ -475,7 +477,16 @@ function drawFocusBar() {
 
 function showView() {
   const view = currentView();
+  const run = pageRun();
+  if (run && selectedRun !== run) {
+    selectedRun = run;
+    if (state) {
+      drawLog();
+      refreshDetail();
+    }
+  }
   if (view !== 'manager' && focusMode()) setFocusMode(false);
+  if (!(view === 'project' && pageTab() === 'manager')) placeChat();
   if (view !== 'session' && !(view === 'project' && ['live', 'charge'].includes(pageTab()))) stopLive();
   if (view === 'session' && state) drawSessionPage();
   for (const v of VIEWS) $(`#view-${v}`).classList.toggle('active', v === view);
@@ -499,26 +510,37 @@ function showView() {
     placeBuilder(false);
     openBuilder(builderProjectOf());
   }
-  // Coming into a project's In charge tab: its conversation is brought into view, ready to write.
-  const charge = view === 'project' && pageTab() === 'charge' && state ? pageProject() : null;
+  // Coming into a project's In charge, Live or Manager tab: its conversation is brought into view, ready to write.
+  const charge = view === 'project' && ['charge', 'live', 'manager'].includes(pageTab()) && state ? `${pageProject()}/${pageTab()}/${pageLiveSession() ?? ''}` : null;
   if (charge && charge !== chargeShown) showChargeChat();
   chargeShown = charge;
 }
 
-let chargeShown = null; // the project whose In charge tab is on screen, brought into view once
+let chargeShown = null; // the project's conversation on screen (project/tab/session), brought into view once
 
 /**
  * The conversation with the agent in charge in view and its field focused: with the tabs above it on a wide screen;
  * on a phone, the conversation's column (its height is the visible area's) down to its field.
  */
 function showChargeChat() {
-  const body = $('#live-body');
-  if (body.hidden || body.parentElement !== $('#project-charge')) return;
+  const manager = pageTab() === 'manager';
+  const body = manager ? $('#manager-form').closest('.chat-column') : $('#live-body');
+  if (manager ? body.parentElement !== $('#project-manager') : body.hidden || !['project-charge', 'project-live'].includes(body.parentElement?.id)) return;
   const behavior = calm() ? 'auto' : 'smooth';
-  if (phoneQuery.matches) body.querySelector('.chat-column').scrollIntoView({ block: 'end', behavior });
+  if (phoneQuery.matches) (manager ? body : body.querySelector('.chat-column')).scrollIntoView({ block: 'end', behavior });
   else $('#project-tabs').scrollIntoView({ block: 'start', behavior });
   // Not on a touch screen: the keyboard would cover the conversation it just brought up.
-  if (!touchScreen()) $('#live-text').focus({ preventScroll: true });
+  if (!touchScreen()) $(manager ? '#message' : '#live-text').focus({ preventScroll: true });
+}
+
+/**
+ * The conversation with the manager lives in the Conversation; a project's Manager tab borrows it, so the owner talks
+ * to the manager without leaving the project. home: where it goes (the Conversation when none).
+ */
+function placeChat(home = $('#view-manager')) {
+  const column = $('#manager-form').closest('.chat-column');
+  if (column.parentElement !== home) home.append(column);
+  column.classList.toggle('in-project', home.id !== 'view-manager');
 }
 window.addEventListener('hashchange', showView);
 phoneQuery.addEventListener('change', () => {
@@ -562,24 +584,75 @@ function drawPresence() {
   draw('#presence', html, html);
 }
 
-// A crescent moon in line art.
-const MOON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 10.2A6 6 0 0 1 5.8 2.5a6 6 0 1 0 7.7 7.7z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>';
+// ---------- Away mode (src/news.mjs) ----------
 
-/** The away mode's button (src/news.mjs): tells the manager the owner stepped out or is back. */
+let pendingAwayPace = null; // the mode being saved from the notice's selector
+
+/** The away button and, while away, the notice with the autopilot's pace and a selector to change it. */
 function drawAway() {
   const button = $('#away');
+  const notice = $('#away-notice');
+  const away = state?.away;
+  const autopilot = state?.autopilot;
   button.hidden = !online;
+  notice.hidden = !online || !away || !autopilot;
   if (!online) return;
-  const away = state.away;
-  const label = away ? t('Away since {time}', { time: clockTime(away.since) }) : t('Away mode');
+  const since = $('#away-since');
+  const sinceText = away ? t('Since {time}', { time: clockTime(away.since) }) : '';
   const help = away
-    ? t('Away mode is on: notices that can wait are kept for you ({count} so far). Click when you are back: the manager writes you a summary.', { count: away.held })
-    : t('Stepping out or going to sleep? The manager is told, the work goes on alone, and notices that can wait come as a summary when you are back.');
+    ? t('Away since {time}. Notices that can wait are held ({count} so far). Click when you are back to get a summary from the manager.', { time: clockTime(away.since), count: away.held })
+    : t('Stepping away? The team keeps working as configured, and the manager summarizes notices that can wait when you return.');
   button.setAttribute('aria-pressed', String(!!away));
+  // the name stays when narrow screens show the icon only
+  button.setAttribute('aria-label', away ? `${t('Away mode')} · ${sinceText}` : t('Away mode'));
   button.title = help;
-  button.setAttribute('aria-label', `${label}. ${help}`);
-  draw('#away', label, `${MOON}<span class="away-label">${esc(label)}</span>`);
+  since.hidden = !away;
+  since.textContent = sinceText;
+  if (notice.hidden) return;
+  $('#away-pace-label').textContent = autopilot.enabled ? t('Autopilot pace') : t('Autopilot pace (off)');
+  const custom = $('#away-custom-pace');
+  custom.hidden = autopilot.mode !== 'custom';
+  if (!custom.hidden) custom.textContent = t('Custom target {target}', { target: percent(autopilot.week_pace) });
+  const pace = pendingAwayPace ?? autopilot.mode;
+  const select = $('#away-pace');
+  if (select.value !== pace) select.value = pace;
 }
+
+$('#away').addEventListener('click', async () => {
+  const on = !state?.away;
+  const button = $('#away');
+  button.disabled = true;
+  try {
+    await api('/api/away', { on });
+    if (on) toast(t('You are away. The team keeps working as configured, and the manager holds notices for your return.'));
+    else {
+      toast(t('Welcome back: the manager is writing the summary of the time away.'));
+      location.hash = '#manager';
+    }
+    await refresh();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$('#away-pace').addEventListener('change', async event => {
+  if (pendingAwayPace) {
+    event.target.value = pendingAwayPace;
+    return;
+  }
+  pendingAwayPace = event.target.value;
+  try {
+    await setAutopilotMode(pendingAwayPace);
+    await refresh();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    pendingAwayPace = null;
+    drawAway();
+  }
+});
 
 // ---------- Emergency lockdown (src/lockdown.mjs) ----------
 
@@ -665,25 +738,6 @@ document.addEventListener('click', event => {
 });
 $('#lockdown-reviewed').addEventListener('change', event => {
   $('#lockdown-release').disabled = !event.target.checked;
-});
-
-$('#away').addEventListener('click', async () => {
-  const on = !state?.away;
-  const button = $('#away');
-  button.disabled = true;
-  try {
-    await api('/api/away', { on });
-    if (on) toast(t('Away mode on: the manager knows, and notices that can wait are kept for a summary.'));
-    else {
-      toast(t('Welcome back: the manager is writing the summary of the time away.'));
-      location.hash = '#manager';
-    }
-    refresh();
-  } catch (error) {
-    toast(error.message);
-  } finally {
-    button.disabled = false;
-  }
 });
 
 // ---------- Power modes (src/power.mjs): standby, stop Chiefmate, shut the computer down ----------
@@ -1178,7 +1232,7 @@ function attnNotice(i, brief = false) {
     : r && brief && r.options?.length ? `<a class="button small" href="#${esc(i.view)}">${esc(t('Answer'))}</a>`
     : r ? needsButtons({ ...r, project: i.project }, ' small')
     : decide ? `<a class="button small" href="#decisions">${esc(t('Decide'))}</a>`
-    : `${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
+    : `${i.kind === 'reader-login' ? `<button type="button" class="button small" data-reader="login">${esc(t('Open the sign-in window'))}</button>` : ''}${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
   return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
       <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
       <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}${brief ? '' : requestWhy(r)}${brief || !r?.run ? '' : requestReply(r.run, r, ' small')}${where || links.length ? `<span class="hint">${[esc(where), ...links].filter(Boolean).join(' · ')}</span>` : ''}${brief ? '' : permissionFacts(r?.explain, r?.id)}</div>
@@ -1475,8 +1529,17 @@ const newsEvent = kind => ({
   merge_failed: t('merge failed'), needs_you: t('needs you'), update_installed: t('update installed'), update_blocked: t('update blocked'),
   memory_alert: t('memory alert'), usage_alert: t('usage alert'), session_ended: t('live session ended'), plan_proposed: t('new proposal'),
   idle: t('empty queue'), autopilot_report: t('autopilot report'), watchdog: t('watchdog'), lockdown: t('emergency lockdown'), security_warning: t('security warning'),
-  away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'), power: t('power mode'), focus: t('focus changed'),
+  away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'), power: t('power mode'),
+  owner_working: t('you working now'), defect: t('defect reported'), agent_message: t('message from an agent'), focus: t('focus changed'),
 }[kind] ?? kind);
+
+// Who wrote an agent's message to the manager (a live session or a step of a run, from the command line).
+const senderName = s => {
+  const agent = s?.agent ?? t('An agent');
+  if (s?.kind === 'session') return t('{agent} · session {name}', { agent, name: s.name ?? s.id });
+  if (s?.kind === 'step') return t('{agent} · step {step} of {run}', { agent, step: s.step ?? '?', run: s.name ?? s.id });
+  return agent;
+};
 
 let chatScrolled = false;
 function drawChat() {
@@ -1488,6 +1551,12 @@ function drawChat() {
   for (const m of g.messages) {
     if (m.who === 'system') {
       html += `<div class="msg system">${esc(m.text)}</div>`;
+      continue;
+    }
+    // An agent's message (chat say from a session or a step): never shown as yours.
+    if (m.who === 'agent') {
+      const about = [clockTime(m.at), m.sender?.project ?? '', m.sender?.tool ?? ''].filter(Boolean).join(' · ');
+      html += `<div class="msg agent"><div class="msg-head"><span class="msg-author">${esc(senderName(m.sender))}</span><span class="msg-meta">${esc(about)}</span><span class="tag">${esc(t('agent, not you'))}</span></div><div class="msg-body">${md(m.text)}</div></div>`;
       continue;
     }
     const you = m.who === 'you';
@@ -1549,6 +1618,13 @@ function drawChatQueue() {
       <div class="msg-head"><span class="tag news">${esc(t('news for the manager'))}</span><span class="msg-meta">${esc(clockTime(m.at))}</span>
         <span class="queued-actions"><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
       <div class="msg-body">${(m.events ?? []).map(e => `<div class="news-event"><time>${esc(clockTime(e.at))}</time> ${esc(newsEvent(e.kind))}</div>`).join('')}</div>
+    </div>`
+    : m.from === 'agent'
+    // An agent's message: not yours, so it can't be edited (only removed).
+    ? `<div class="queued-msg agent" data-pending="${esc(m.id)}">
+      <div class="msg-head"><span class="tag">${esc(t('from an agent'))}</span><span class="msg-meta">${esc([clockTime(m.at), senderName(m.sender)].join(' · '))}</span>
+        <span class="queued-actions"><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
+      <div class="msg-body">${md(m.text)}</div>
     </div>`
     : `<div class="queued-msg" data-pending="${esc(m.id)}">
       <div class="msg-head"><span class="tag">${esc(t('queued'))}</span><span class="msg-meta">${esc([clockTime(m.at), m.edited ? t('edited') : ''].filter(Boolean).join(' · '))}</span>
@@ -1908,7 +1984,7 @@ function livePhaseLine(x) {
 }
 
 function liveFeedHtml(x) {
-  const agent = x.charge && state.charge?.[x.project] ? t(state.charge[x.project].name) : toolName(x.tool);
+  const agent = (x.charge || x.work) && state.charge?.[x.project] ? t(state.charge[x.project].name) : toolName(x.tool);
   let html = '';
   let actions = [];
   const flush = () => {
@@ -1928,10 +2004,12 @@ function liveFeedHtml(x) {
     } else if (e.kind === 'say') {
       html += `<div class="msg manager"><div class="msg-head"><span class="msg-author">${esc(agent)}</span><span class="msg-meta">${esc(clockTime(e.at))}</span></div><div class="msg-body">${md(e.text)}</div></div>`;
     } else if (e.kind === 'request') {
-      html += `<div class="msg system ask">${esc(e.text)}</div>`;
+      html += e.status && e.status !== 'pending' ? requestAnswerHtml(e, x.project) : `<div class="msg system ask">${esc(e.text)}</div>`;
     } else if (e.kind === 'permission') {
       const said = { open: t('The agent asked your permission: {what}', { what: e.text }), done: t('You allowed: {what}', { what: e.text }), refused: t('You refused: {what}', { what: e.text }) }[e.status] ?? e.text;
       html += `<div class="msg system ask">${esc(said)}</div>`;
+    } else if (e.by === 'system') {
+      html += `<div class="msg system${e.error ? ' error' : ''}">${esc(t('Chiefmate system notice'))} · ${esc(e.text)}</div>`;
     } else {
       html += `<div class="msg system${e.error ? ' error' : ''}">${esc(e.text)}</div>`;
     }
@@ -1957,14 +2035,19 @@ function drawLive() {
   const x = { ...(d?.session ?? {}), ...(allSessions().find(s => s.id === liveChat.id) ?? {}), ...(d?.session ? { phase: d.session.phase, turn: d.session.turn } : {}) };
   if (!x.id) return;
   const ended = x.status === 'ended';
+  const system = openSystem(state?.projects?.find(p => p.id === x.project)?.devUrl);
   const actions = [
+    system,
     ended && x.resumable ? `<button type="button" class="button small" data-live-resume="${esc(x.id)}">${esc(t('Resume'))}</button>` : '',
-    !ended ? `<button type="button" class="button danger small" data-session-end="${esc(x.id)}">${esc(t('End'))}</button>` : '',
+    !ended ? `<button type="button" class="button danger small" data-session-end="${esc(x.id)}">${esc(x.work ? t('End and summarize') : t('End'))}</button>` : '',
   ].join('');
-  const head = `<div class="live-title"><span class="primary">${esc(x.name)}</span><span class="secondary">${esc([toolName(x.tool), sessionWhere(x), x.cwd ?? '', x.model ?? ''].filter(Boolean).join(' · '))}</span></div>
+  const work = x.work ? ` <span class="tag">${esc(t('Work now'))}</span>${x.copy ? ` <span class="hint">${esc(t('In a separate copy: the crew goes on in the project.'))}</span>` : ''}` : '';
+  // The crew's task paused for this session: what it is, that it resumes at the end, and "Let it go on" meanwhile.
+  const paused = x.work && !ended && x.held?.length ? `<div class="live-phase">${esc(t('Paused while you work: {tasks}. It resumes by itself when you end.', { tasks: (x.heldTitles ?? x.held).map(v => `"${v}"`).join(', ') }))} <button type="button" class="button secondary small" data-work-release="${esc(x.id)}" title="${esc(t("The crew's task goes on now in its own working copy; you keep working in your clone."))}">${esc(t('Let it go on'))}</button></div>` : '';
+  const head = `<div class="live-title"><span class="primary">${esc(x.name)}${work}</span><span class="secondary">${esc([toolName(x.tool), sessionWhere(x), x.cwd ?? '', x.model ?? ''].filter(Boolean).join(' · '))}</span></div>
     <div class="live-facts">${stateHtml(sessionState(x))}<span>${esc(t('Memory'))} <span class="num">${x.ram ? bytes(x.ram) : '—'}</span></span><span>${esc(t('Open for'))} ${ended ? '—' : ticking(x.started)}</span><span>${esc(t('{count} turn(s)', { count: x.turns ?? 0 }))}</span><span class="compose-buttons">${actions}</span></div>
-    <div class="live-phase${['permission', 'login'].includes(x.phase) || x.status === 'login' ? ' warn' : ''}">${esc(livePhaseLine(x))}</div>`;
-  draw('#live-head', JSON.stringify([x.id, x.status, x.phase, x.ram, x.turns, x.resumable, language()]), head);
+    <div class="live-phase${['permission', 'login'].includes(x.phase) || x.status === 'login' ? ' warn' : ''}">${esc(livePhaseLine(x))}</div>${paused}`;
+  draw('#live-head', JSON.stringify([x.id, x.status, x.phase, x.ram, x.turns, x.resumable, x.work, x.copy, x.held, system, language()]), head);
 
   const box = $('#live-feed');
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
@@ -1985,9 +2068,9 @@ function drawLive() {
   const queue = d?.queue ?? [];
   $('#live-queue').hidden = !queue.length;
   const queued = `<div class="chat-queue-head"><span class="label">${esc(t('In the queue'))}</span><span class="hint">${esc(t('They go together, in order, when the agent finishes this turn.'))}</span></div>${queue.map(m => `<div class="queued-msg">
-      <div class="msg-head"><span class="tag">${esc(m.first ? t('first message') : t('queued'))}</span><span class="msg-meta">${esc(clockTime(m.at))}</span>
-        ${m.first ? '' : `<span class="queued-actions"><button type="button" class="button danger small" data-live-unqueue="${esc(m.id)}">${esc(t('Remove'))}</button></span>`}</div>
-      <div class="msg-body">${m.first ? esc(t('{count} characters', { count: m.text.length })) : md(m.text)}</div></div>`).join('')}`;
+      <div class="msg-head"><span class="tag">${esc(m.first ? t('first message') : m.by === 'system' ? t('Chiefmate system notice') : t('queued'))}</span><span class="msg-meta">${esc(clockTime(m.at))}</span>
+        ${m.first || m.by === 'system' ? '' : `<span class="queued-actions"><button type="button" class="button danger small" data-live-unqueue="${esc(m.id)}">${esc(t('Remove'))}</button></span>`}</div>
+      <div class="msg-body">${m.first ? esc(t('{count} characters', { count: m.text.length })) : m.by === 'system' ? esc(m.text) : md(m.text)}</div></div>`).join('')}`;
   draw('#live-queue', JSON.stringify([x.id, queue, language()]), queue.length ? queued : '');
 
   const working = x.phase === 'working';
@@ -2006,7 +2089,7 @@ function drawProjectLive(id) {
   const profiles = (state.sessions?.profiles ?? []).filter(p => p.project === id && !open.some(x => x.profile === p.id));
   const noClone = noCloneAttr(projectPage.data?.id === id ? projectPage.data : null);
   const card = x => `<a class="live-card${chosen?.id === x.id ? ' active' : ''}" href="${esc(sessionHash(x))}">
-      <span class="primary">${esc(toolName(x.tool))}</span>${stateHtml(sessionState(x))}
+      <span class="primary">${esc(x.work ? `${t('Work now')} · ${toolName(x.tool)}` : toolName(x.tool))}</span>${stateHtml(sessionState(x))}
       <span class="hint">${esc([x.status === 'ended' ? t('ended {when}', { when: relative(x.ended) }) : t('open since {time}', { time: clockTime(x.started) }), x.ram ? bytes(x.ram) : ''].filter(Boolean).join(' · '))}</span></a>`;
   const html = `<div class="live-list">
       ${open.map(card).join('')}
@@ -2278,7 +2361,7 @@ function drawUsage() {
     </div>
     <div class="panel">
       <div class="label">${esc(t('How Chiefmate looks after your plan'))}</div>
-      <p class="hint">${esc(t("Before every step, Chiefmate checks your account. If the 5-hour window is above {window} or the plan's week above {week}, the run waits for the reset and then carries on by itself.", { window: percent(l.pause_at_5h_window), week: percent(l.pause_at_plan_week) }))}</p>
+      <p class="hint">${esc(t("Before every step, Chiefmate checks the current limits: {window} for the 5-hour window and {week} for the plan's week. A run paused by these limits returns to the queue after the reset or when you raise the limit enough for the current usage.", { window: percent(l.pause_at_5h_window), week: percent(l.pause_at_plan_week) }))}</p>
       <p class="hint">${esc(t('If the account runs out in the middle of a step, that step starts over after the reset. Each step also has a time limit, in case an agent gets stuck.'))}</p>
     </div>
   </div>`;
@@ -2327,6 +2410,11 @@ const AUTOPILOT_MODES = () => [
   ['normal', t('Normal'), t('Paces the week to end it at 100% of the plan.')],
   ['all', t('Spend all'), t("No week's pace: only the 5-hour window and a used-up week stop it.")],
 ];
+
+async function setAutopilotMode(mode) {
+  await api('/api/autopilot', { mode });
+  toast(t('Spending mode: {mode}.', { mode: AUTOPILOT_MODES().find(m => m[0] === mode)?.[1] ?? mode }));
+}
 
 /** Who changed the autopilot ("by" in src/autopilot.mjs, recordChange). */
 function autopilotWho(by) {
@@ -2543,13 +2631,17 @@ async function refreshProjectPage() {
   if (pageProject() === id && state) drawProjectPage();
 }
 
-const PAGE_PARTS = ['#project-title', '#project-more', '#project-status', '#project-actions', '#project-needs', '#project-tabs', '#project-summary', '#project-open', '#project-facts', '#project-team', '#project-runs', '#project-history', '#project-planning', '#project-computer', '#project-sessions', '#project-live-list', '#project-charge-top'];
+const PAGE_PARTS = ['#project-title', '#project-system', '#project-more', '#project-status', '#project-actions', '#project-needs', '#project-tabs', '#project-summary', '#project-open', '#project-facts', '#project-team', '#project-runs', '#project-history', '#project-planning', '#project-computer', '#project-sessions', '#project-live-list', '#project-charge-top'];
 // Each tab and the part of the page it shows.
-const TAB_PARTS = { overview: '#project-overview', charge: '#project-charge', live: '#project-live', crew: '#project-crew', tasks: '#project-tasks', planning: '#project-planning', files: '#project-files', context: '#project-context', builder: '#project-builder' };
+const TAB_PARTS = { overview: '#project-overview', charge: '#project-charge', live: '#project-live', manager: '#project-manager', crew: '#project-crew', tasks: '#project-tasks', planning: '#project-planning', files: '#project-files', context: '#project-context', builder: '#project-builder' };
 
 const projectHash = (id, tab = 'overview') => `#project/${encodeURIComponent(id)}${tab === 'overview' ? '' : `/${tab}`}`;
 const projectOpenItems = (id, p) => planItemsNow().filter(i => openItem(i) && (i.project === id || i.project === p?.name));
 const noCloneAttr = info => (info && !info.clone ? ` disabled title="${esc(t('No clone of yours on this computer: set "local_clone" in its settings.'))}"` : '');
+
+function openSystem(url) {
+  return url ? `<a class="button secondary small" href="${esc(url)}" target="_blank" rel="noopener">${esc(t('Open the system'))}</a>` : '';
+}
 
 function drawProjectPage() {
   const id = pageProject();
@@ -2565,6 +2657,8 @@ function drawProjectPage() {
   const info = projectPage.data?.id === id ? projectPage.data : null;
   const title = `<h1>${esc(p.name ?? id)}</h1><p>${esc(info?.error ?? (info ? info.about || t('No sentence about this project in its settings ("about").') : t('Loading…')))}</p>`;
   draw('#project-title', title, title);
+  const system = openSystem(info ? info.dev?.url : p.devUrl);
+  draw('#project-system', system, system);
   drawProjectStatus(id, info);
   drawProjectActions(id, info);
   drawProjectMore(id, info);
@@ -2575,11 +2669,12 @@ function drawProjectPage() {
   const working = going().filter(a => a.project === id).length + (online ? queueOrder().filter(r => r.project === id).length : 0);
   const live = liveSessionsOf(id).filter(x => x.status !== 'ended');
   const tabs = [
-    ['overview', t('At a glance')], ...(state.charge?.[id] ? [['charge', t('In charge'), chargeOpen(id).length]] : []), ['live', t('Live'), live.length], ['crew', t('Crew')], ['tasks', t('Tasks and history'), working], ['planning', t('Planning'), projectOpenItems(id, p).length],
+    ['overview', t('At a glance')], ['live', t('Live'), live.length], ['manager', t('Manager')], ...(state.charge?.[id] ? [['charge', state.charge[id].lead ? t('Team lead') : t('In charge'), chargeOpen(id).length]] : []), ['crew', t('Crew')], ['tasks', t('Tasks and history'), working], ['planning', t('Planning'), projectOpenItems(id, p).length],
     ['files', t('Files')], ['context', t('Context')], ...(builderOn ? [['builder', t('Builder')]] : []),
   ].map(([key, label, n]) => `<a href="${projectHash(id, key)}" class="tab${key === tab ? ' active' : ''}"${key === tab ? ' aria-current="page"' : ''}>${esc(label)}${count(n)}</a>`).join('');
   draw('#project-tabs', tabs, tabs);
   for (const [key, part] of Object.entries(TAB_PARTS)) $(part).hidden = key !== tab;
+  if (tab !== 'manager') placeChat();
   $('#view-project').dataset.filesProject = id; // the paths on its page are looked for in its folders
   if (tab === 'files') drawProjectFiles(id);
   else if (tab === 'context') {
@@ -2591,6 +2686,9 @@ function drawProjectPage() {
     else drawBuilderTop();
   } else if (tab === 'charge') {
     drawProjectCharge(id);
+  } else if (tab === 'manager') {
+    placeChat($('#project-manager'));
+    drawChat();
   } else if (tab === 'live') {
     drawProjectLive(id);
   } else if (tab === 'crew') {
@@ -2618,7 +2716,9 @@ function drawProjectStatus(id, info) {
     : queued ? stateHtml([t('In the queue ({count})', { count: queued }), 'info'])
     : stateHtml([t('Stopped'), 'neutral']);
   const branch = info?.branch ? (info.branch === 'HEAD' ? t('no branch (detached)') : info.branch) : null;
+  const work = workSession(id);
   const html = [
+    ...(work ? [`<a class="project-status-run" href="${esc(sessionHash(work))}">${work.phase === 'working' ? liveDot() : ''} ${stateHtml([t('You: working now with {name}', { name: t(work.memberName ?? '') }), 'accent'])}</a>`] : []),
     `<span class="project-status-run">${status}</span>`,
     `<span>${esc(t('Memory'))} <span class="num">${c?.ram ? bytes(c.ram) : '—'}</span></span>`,
     `<span>${esc(t('Branch'))} ${branch ? `<code>${esc(branch)}</code>` : '—'}</span>`,
@@ -2626,23 +2726,30 @@ function drawProjectStatus(id, info) {
   draw('#project-status', html, html);
 }
 
-/** The three main actions: work live (the prompt builder with the usual blocks), a task for the crew, the environment. */
+/** The project's "Work now" session open, as the state lists it, or null. */
+const workSession = id => {
+  const sid = state.charge?.[id]?.work?.session;
+  return sid ? allSessions().find(x => x.id === sid) ?? null : null;
+};
+
+/**
+ * The main actions: work now (a live session with the agent in charge that acts, in your clone), talk to the manager
+ * and to the team lead (or the agent in charge) without leaving the page, and ask the crew (the queue's way).
+ */
 function drawProjectActions(id, info) {
   const noClone = noCloneAttr(info);
   const big = (attrs, title, hint, kind = '') => `<button type="button" class="action-big${kind}" ${attrs}><span class="action-title">${esc(title)}</span><span class="action-hint">${esc(hint)}</span></button>`;
-  const claude = (state.sessions?.profiles ?? []).find(x => x.project === id && x.tool === 'claude');
-  const live = state.prompts?.configured
-    ? big('data-project-live', t('Work live'), t('The prompt builder with the usual blocks, then a live session'), ' primary')
-    : claude ? big(`data-session-open="${esc(claude.id)}"${noClone}`, t('Work live'), t('Claude Code in your clone of the project'), ' primary') : '';
-  const dev = info?.dev;
-  const devAction = !info?.devStart
-    ? big(`disabled title="${esc(t('None: set "dev_start" in its settings to start it from here.'))}"`, t('Start environment'), t('No command set'))
-    : dev?.status === 'running' ? big('data-project-dev="stop"', t('Stop environment'), t('Running · {size}', { size: bytes(dev.ram) }), ' danger')
-    : dev?.status === 'starting' ? big('disabled', t('Starting…'), info.devStart)
-    : big(`data-project-dev="start"${noClone}`, t('Start environment'), info.devStart);
   const c = state.charge?.[id];
-  const charge = c ? big(`data-charge-open="${esc(id)}"`, t('Talk to the agent in charge'), t('{name} plans with you; the manager authorizes', { name: t(c.name) }), ' accent') : '';
-  const html = [charge, live, big('data-project-task', t('New task for the crew'), t('Someone of the crew does it, you approve')), devAction].join('');
+  const agent = c ? t(c.name) : t('The agent in charge');
+  const work = workSession(id);
+  const workNow = !c ? ''
+    : work ? big(`data-work-open="${esc(work.id)}"`, t('Back to your session'), `${agent} · ${sessionState(work)[0]}`, ' primary')
+      : big(`data-work-now="claude"${noClone}`, t('Work now'), t('{name} acts with you in your clone; the manager is told', { name: agent }), ' primary');
+  const manager = t(member('manager').name ?? 'Manager');
+  const talk = big('data-project-manager', t('Talk to {name} (manager)', { name: manager }), t('Here, without leaving the project'));
+  const lead = c ? big(`data-charge-open="${esc(id)}"`, c.lead ? t('Talk to the team lead') : t('Talk to the agent in charge'), t('{name} plans with you; the manager authorizes', { name: agent })) : '';
+  const crew = big('data-project-task', t('Ask the crew to do it'), t('It goes to the queue; you approve the result'));
+  const html = [workNow, talk, lead, crew].join('');
   draw('#project-actions', html, html);
 }
 
@@ -2653,21 +2760,39 @@ function requestState(r) {
   if (r.status === 'approved') return r.merged ? [t('Done'), 'ok'] : [t('Authorized'), 'ok'];
   return {
     pending: [t('With the manager'), 'info'], waiting: [t('Waiting'), 'warn'], owner: [t('With you'), 'accent'], rejected: [t('Refused'), 'neutral'],
+    forwarded: [t('Forwarded'), 'info'], 'in-progress': [t('Already in progress'), 'ok'],
   }[r.status] ?? [r.status, 'neutral'];
+}
+
+function requestTarget(r) {
+  if (r.run) return `<a href="#log/${encodeURIComponent(r.run)}">${esc(t('Run: {title}', { title: r.runTitle ?? r.run }))}</a>`;
+  if (r.targetProject) return `<a href="${esc(projectHash(r.targetProject))}">${esc(t('Project: {name}', { name: projectName(r.targetProject) }))}</a>`;
+  return '';
+}
+
+function requestAnswerHtml(entry, project) {
+  const outcome = requestState(entry);
+  const saved = state.charge?.[project]?.requests.find(r => r.id === entry.request && r.status === entry.status);
+  const target = requestTarget(entry.run || entry.targetProject ? entry : saved ?? entry);
+  const who = entry.by === 'owner' ? t('You') : entry.by === 'manager' ? t('Manager') : '';
+  return `<div class="msg request-answer state-${outcome[1]}">
+    <div class="msg-head">${who ? `<span class="msg-author">${esc(who)}</span>` : ''}${stateHtml(outcome)}<time class="msg-meta">${esc(clockTime(entry.at))}</time></div>
+    <div class="msg-body">${esc(entry.text)}${target ? `<div>${target}</div>` : ''}</div>
+  </div>`;
 }
 
 /** The requests still open (with the manager, waiting, or with you): the tab's counter. */
 const chargeOpen = id => (state.charge?.[id]?.requests ?? []).filter(r => ['pending', 'waiting', 'owner'].includes(r.status));
 
-function requestRow(id, r) {
+function requestRow(r) {
   const size = { S: t('Size S'), M: t('Size M'), L: t('Size L') }[r.size] ?? r.size;
   const risk = { low: t('Low risk'), medium: t('Medium risk'), high: t('High risk') }[r.risk] ?? r.risk;
   const who = r.by === 'owner' ? t('You') : t('Manager');
-  const run = r.run ? `<a href="${esc(projectHash(id, 'tasks'))}">${esc(t('Run: {title}', { title: r.runTitle ?? r.run }))}</a>${r.runStatus ? ` · ${esc(runState(r.runStatus)[0])}` : ''}` : '';
+  const target = requestTarget(r);
   return `<div class="charge-request">
       <div class="charge-request-main"><span class="primary">${esc(r.plan)}</span>
         <span class="hint">${esc([`#${r.id}`, size, risk, r.urgency ? t('you said: can be done now') : '', relative(r.at)].filter(Boolean).join(' · '))}</span>
-        ${r.note ? `<span class="hint">${esc(`${who}: ${r.note}`)}</span>` : ''}${run ? `<span class="hint">${run}</span>` : ''}</div>
+        ${r.note ? `<span class="hint">${esc(`${who}: ${r.note}`)}</span>` : ''}${target ? `<span class="hint">${target}${r.runStatus ? ` · ${esc(runState(r.runStatus)[0])}` : ''}</span>` : ''}</div>
       <div class="charge-request-state">${stateHtml(requestState(r))}${r.status === 'owner' ? ` <a class="button small" href="#decisions">${esc(t('Decide'))}</a>` : ''}</div>
     </div>`;
 }
@@ -2683,8 +2808,8 @@ function drawProjectCharge(id) {
       ${c.session ? '' : `<button type="button" class="button" data-charge-open="${esc(id)}">${esc(t('Start the conversation'))}</button>`}
     </div>
     ${open.length || closed.length ? `<div class="label">${esc(t('Requests to the manager'))}</div>` : ''}
-    ${open.length ? `<div class="charge-requests">${open.map(r => requestRow(id, r)).join('')}</div>` : ''}
-    ${closed.length ? `<details class="charge-earlier"${open.length ? '' : ' open'}><summary>${esc(t('Answered ({count})', { count: closed.length }))}</summary><div class="charge-requests">${closed.map(r => requestRow(id, r)).join('')}</div></details>` : ''}`;
+    ${open.length ? `<div class="charge-requests">${open.map(requestRow).join('')}</div>` : ''}
+    ${closed.length ? `<details class="charge-earlier"${open.length ? '' : ' open'}><summary>${esc(t('Answered ({count})', { count: closed.length }))}</summary><div class="charge-requests">${closed.map(requestRow).join('')}</div></details>` : ''}`;
   draw('#project-charge-top', JSON.stringify([id, c, language()]), html);
   if (!c?.session) {
     stopLive();
@@ -2708,7 +2833,15 @@ function drawProjectMore(id, info) {
       ? item(`data-session-open="${esc(profile.id)}" data-window="1"${noClone}`, t('Open in an external window: {tool}', { tool: toolName(tool) }))
       : item(`data-session-open="${esc(profile.id)}"${noClone}`, t('Live session: {tool}', { tool: toolName(tool) }));
   };
+  const dev = info?.dev;
+  const devItem = !info?.devStart ? ''
+    : dev?.status === 'running' ? item('data-project-dev="stop"', t('Stop environment ({size})', { size: bytes(dev.ram) }))
+      : ['starting', 'failed'].includes(dev?.status) ? item('data-project-dev="stop"', t('Stop environment'))
+        : item(`data-project-dev="start"${noClone}`, t('Start environment'));
   const items = [
+    state.charge?.[id] && !workSession(id) ? item(`data-work-now="codex"${noClone}`, t('Work now with Codex')) : '',
+    state.prompts?.configured ? item('data-project-live', t('Prompt builder, then a live session')) : '',
+    devItem,
     item(`data-project-open="folder"${noClone}`, t('Open folder')),
     info?.vscode ? item(`data-project-open="vscode"${noClone}`, t('Open in VS Code')) : '',
     session('claude'),
@@ -2745,7 +2878,10 @@ function drawProjectSummary(id, p, info) {
   const board = items.length
     ? `<span class="primary">${esc(t('{count} open item(s)', { count: items.length }))}</span><span class="hint">#${items[0].id} ${esc(items[0].title)}</span>`
     : `<span class="primary">${esc(t('Nothing open'))}</span>`;
-  const html = `<div class="project-summary">${card('tasks', t('Crew now'), crewNow)}${card('tasks', t('Last run'), result)}${card('planning', t('Planning'), board)}</div>`;
+  const note = state.charge?.[id]?.work?.notes?.[0];
+  const cut = (s, n) => (String(s ?? '').length > n ? `${String(s).slice(0, n - 1)}…` : String(s ?? ''));
+  const lastWork = note ? card('live', t('Your last session'), `<span class="primary">${esc(cut(note.done, 140))}</span><span class="hint">${esc(note.open ? t('Left open: {open}', { open: cut(note.open, 140) }) : relative(note.at))}</span>`) : '';
+  const html = `<div class="project-summary">${card('tasks', t('Crew now'), crewNow)}${card('tasks', t('Last run'), result)}${card('planning', t('Planning'), board)}${lastWork}</div>`;
   draw('#project-summary', html, html);
 }
 
@@ -2880,7 +3016,7 @@ function drawProjectComputer(id, info) {
   const canStop = c.processes.some(x => !x.crew && !x.guarded);
   const dev = info?.dev;
   const devLine = !info?.devStart ? ''
-    : `<div class="dev-line"><span class="label">${esc(t('Development environment'))}</span>${stateHtml(dev?.status === 'running' ? [t('Running'), 'ok'] : dev?.status === 'starting' ? [t('Starting…'), 'info'] : [t('Stopped'), 'neutral'])}${dev?.status === 'running' ? `<span class="num">${bytes(dev.ram)}</span><button type="button" class="button danger small" data-project-dev="stop">${esc(t('Stop'))}</button>` : dev?.status === 'starting' ? '' : `<button type="button" class="button secondary small" data-project-dev="start"${info.clone ? '' : ' disabled'}>${esc(t('Start'))}</button>`}</div>`;
+    : `<div class="dev-line"><span class="label">${esc(t('Development environment'))}</span>${stateHtml(dev?.status === 'running' ? [t('Running'), 'ok'] : dev?.status === 'starting' ? [t('Starting…'), 'info'] : dev?.status === 'failed' ? [t('Failed'), 'error'] : [t('Stopped'), 'neutral'])}${dev?.status === 'running' ? `<span class="num">${bytes(dev.ram)}</span>` : ''}${dev && dev.status !== 'stopped' ? `<button type="button" class="button danger small" data-project-dev="stop">${esc(t('Stop'))}</button>` : `<button type="button" class="button secondary small" data-project-dev="start"${info.clone ? '' : ' disabled'}>${esc(t('Start'))}</button>`}</div>`;
   const notes = [state.computer.supported ? '' : t("The projects' processes are read on Windows only."), state.computer.error ? t("Couldn't read the processes: {error}", { error: state.computer.error }) : ''].filter(Boolean);
   const html = `<h2 class="section-title">${esc(t('On this computer'))}</h2>
     <div class="panel">
@@ -3340,7 +3476,7 @@ async function openBuilder(project, { reload = false } = {}) {
     const data = await api(`/api/prompt-builder?project=${encodeURIComponent(project)}`);
     if (builderTarget() !== project) return;
     const keep = reload && builder.project === project;
-    // "Work live" on the project's page asks for its usual blocks, not the last choice.
+    // "Prompt builder, then a live session" on the project's page asks for its usual blocks, not the last choice.
     const usual = builder.usual === project;
     builder.usual = null;
     Object.assign(builder, { project, data, result: null, edited: false, editing: false });
@@ -3374,7 +3510,40 @@ function placeBuilder(inProject) {
   if (body.parentElement !== home) home.append(body);
 }
 
-/** "Work live": the project's prompt builder with its usual blocks (its block, the environment and its modules). */
+/**
+ * "Work now": opens (or brings back) the project's session with its agent in charge at once, in your clone. When the
+ * crew is working on the project, "work_now_mode" decides: its task pauses (the default) or you work in a separate
+ * copy; only with "ask" do you choose first.
+ */
+async function workNow(id, tool, button) {
+  button.disabled = true;
+  try {
+    let r = await api('/api/work-now', { project: id, tool });
+    if (r.conflict) {
+      const choice = await workChoice(r.conflict);
+      if (!choice) return;
+      r = await api('/api/work-now', { project: id, tool, choice });
+    }
+    const held = r.work?.held?.length ? ` ${t("The crew's task is paused and resumes when you end.")}` : '';
+    toast(r.existing ? t('Your session was already open: here it is.') : r.status === 'login' ? t('Codex is not signed in: see the request at the top.') : `${t('Session open: the agent reads the project and answers in a moment.')}${held}`);
+    await refresh();
+    location.hash = sessionHash(r);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/** The owner's choice when the crew is working on the project: "pause", "copy" or '' (cancel). */
+function workChoice(runs) {
+  const dialog = $('#work-dialog');
+  $('#work-dialog-text').textContent = t('A task of the crew is going on in this project. Pause it while you work (it resumes by itself when you end), or work in a separate copy of your clone while it goes on.');
+  $('#work-dialog-runs').innerHTML = runs.map(r => `<li>${esc(r.title)}${r.agent ? ` <span class="hint">· ${esc(agentName(r.agent, pageProject()))}</span>` : ''}</li>`).join('');
+  dialog.returnValue = '';
+  dialog.showModal();
+  return new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue), { once: true }));
+}
+
+/** "Prompt builder, then a live session" (the project's More): its prompt builder with its usual blocks (its block, the environment and its modules). */
 async function workLive(id) {
   const hash = `#project/${encodeURIComponent(id)}/builder`;
   if (builder.project === id && builder.data?.document) {
@@ -3717,7 +3886,9 @@ function paceText(p) {
 function readerPanel(reader) {
   const status = reader.status ?? {};
   let line = reader.enabled ? t('On, every {hours} h.', { hours: reader.everyHours }) : t('Off.');
-  if (!reader.signedIn) line += ` ${t('Not signed in yet: run node src/cli.mjs claude-login.')}`;
+  const login = reader.login ?? {};
+  if (login.pid && !login.closed) line += ` ${t('The sign-in window is open: it closes by itself in a few minutes.')}`;
+  else if (!reader.signedIn) line += ` ${t('Not signed in yet: open the sign-in window.')}`;
   if (reader.reading) line += ` ${t('Reading now…')}`;
   const read = [];
   if (status.read_at) read.push(t('Last read {when}: session {session}, week {week}.', { when: shortDate(status.read_at), session: percent(status.five_hour), week: percent(status.seven_day) }));
@@ -3732,6 +3903,7 @@ function readerPanel(reader) {
       <div class="actions left">
         <button type="button" class="button secondary small" data-reader="${reader.enabled ? 'off' : 'on'}">${esc(reader.enabled ? t('Turn off') : t('Turn on'))}</button>
         ${reader.signedIn ? `<button type="button" class="button secondary small" data-reader="now"${reader.reading ? ' disabled' : ''}>${esc(t('Read now'))}</button>` : ''}
+        ${reader.signIn || !reader.signedIn ? `<button type="button" class="button secondary small" data-reader="login">${esc(t('Open the sign-in window'))}</button>` : ''}
       </div>
     </div>`;
 }
@@ -4508,8 +4680,12 @@ async function refresh() {
 // ---------- Actions ----------
 
 async function sendMessage(text) {
-  const message = text.trim();
-  if (!message) return;
+  const typed = text.trim();
+  if (!typed) return;
+  // From a project's Manager tab, the message says which project it is about.
+  const about = $('#project-manager').contains($('#message')) ? pageProject() : null;
+  const message = about ? `${t('About the project {project}:', { project: projectName(about) })}
+${typed}` : typed;
   stopDictation($('#message'));
   try {
     const sent = await api('/api/manager', { message });
@@ -4732,7 +4908,7 @@ document.addEventListener('click', event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-autopilot-mode],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-browser-focus],[data-browser-close]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-autopilot-mode],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-work-now],[data-work-open],[data-work-release],[data-project-manager],[data-browser-focus],[data-browser-close]');
   if (!target) return;
   // A project's name inside a row that opens on a click (Projects) goes to its page, and nothing else.
   if (event.target.closest('a.project-link') && !target.matches('a')) return;
@@ -4746,6 +4922,25 @@ document.addEventListener('click', async event => {
       return;
     } else if (target.hasAttribute('data-project-live')) {
       await workLive(pageProject());
+      return;
+    } else if (target.dataset.workNow) {
+      await workNow(pageProject(), target.dataset.workNow, target);
+      return;
+    } else if (target.dataset.workRelease) {
+      target.disabled = true;
+      await api('/api/work-now/release', { id: target.dataset.workRelease });
+      toast(t("The crew's task goes on now in its own working copy."));
+      await refresh();
+      if (liveChat.id === target.dataset.workRelease) pollLive();
+      return;
+    } else if (target.dataset.workOpen) {
+      const x = allSessions().find(s => s.id === target.dataset.workOpen);
+      if (x) location.hash = sessionHash(x);
+      return;
+    } else if (target.hasAttribute('data-project-manager')) {
+      const hash = projectHash(pageProject(), 'manager');
+      if (location.hash !== hash) location.hash = hash;
+      else showChargeChat();
       return;
     } else if (target.dataset.chargeOpen) {
       // The conversation with the project's agent in charge: the one open (or the latest) carries on; else a new one.
@@ -4807,6 +5002,7 @@ document.addEventListener('click', async event => {
       $('#task-form').instruction.focus();
     } else if (target.dataset.select) {
       selectedRun = target.dataset.select;
+      if (pageRun()) history.replaceState(null, '', `#log/${encodeURIComponent(selectedRun)}`);
       drawLog();
       await refreshDetail(true);
     } else if (target.dataset.cancel) {
@@ -4887,7 +5083,9 @@ document.addEventListener('click', async event => {
       if (!window) location.hash = sessionHash(session);
     } else if (target.dataset.sessionEnd) {
       const x = allSessions().find(o => o.id === target.dataset.sessionEnd);
-      const text = x?.mode === 'app'
+      const text = x?.work
+        ? t('"{name}" ends, and anything the agent is doing stops. A summary of what was done and what is left open is kept for the next conversation, the manager is told, and a crew task you paused goes back to the queue.', { name: x?.name ?? '' })
+        : x?.mode === 'app'
         ? t('"{name}" ends, and anything the agent is doing stops. Its history stays here, and Resume carries on in the same conversation.', { name: x?.name ?? '' })
         : t('The window of "{name}" closes, and anything the agent is doing stops. The conversation itself stays in the history of the tool.', { name: x?.name ?? '' });
       const ok = await confirmDialog(t('End session'), text, t('End'));
@@ -4911,13 +5109,11 @@ document.addEventListener('click', async event => {
       await api('/api/autopilot', { enabled: on });
       toast(on ? t('Autopilot turned on.') : t('Autopilot turned off.'));
     } else if (target.dataset.autopilotMode) {
-      const mode = target.dataset.autopilotMode;
-      await api('/api/autopilot', { mode });
-      toast(t('Spending mode: {mode}.', { mode: AUTOPILOT_MODES().find(m => m[0] === mode)?.[1] ?? mode }));
+      await setAutopilotMode(target.dataset.autopilotMode);
     } else if (target.dataset.reader) {
       const action = target.dataset.reader;
-      await api('/api/usage-reader', action === 'now' ? { read: true } : { enabled: action === 'on' });
-      toast(action === 'now' ? t('Reading claude.ai…') : action === 'on' ? t('Reading of claude.ai turned on.') : t('Reading of claude.ai turned off.'));
+      await api('/api/usage-reader', action === 'now' ? { read: true } : action === 'login' ? { login: true } : { enabled: action === 'on' });
+      toast(action === 'now' ? t('Reading claude.ai…') : action === 'login' ? t('A window opened on this computer for you to sign in to claude.ai.') : action === 'on' ? t('Reading of claude.ai turned on.') : t('Reading of claude.ai turned off.'));
     }
     refresh();
   } catch (error) {

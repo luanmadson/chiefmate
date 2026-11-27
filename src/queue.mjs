@@ -2,9 +2,9 @@
 // project, one run at a time, in the order requested. This is what keeps agents from setting off other agents.
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
-import { activeRun, cancelLive, doingNow, execute, live, liveRuns } from './runs.mjs';
+import { activeRun, cancelLive, doingNow, execute, limitWaitCleared, live, liveRuns } from './runs.mjs';
 import { held } from './power.mjs';
-import { listRuns, readRun, saveRun, stepsOf } from './store.mjs';
+import { listRuns, readRun, readUsage, saveRun, stepsOf } from './store.mjs';
 import { isLocked } from './lockdown.mjs';
 import { holdReason, readSteer } from './steer.mjs';
 import { updating } from './update.mjs';
@@ -91,12 +91,23 @@ function tick() {
   // While an update of Chiefmate is being installed, on standby or while Chiefmate stops, nothing starts: the queue
   // goes on after it. Nor in an emergency lockdown (src/lockdown.mjs), until the owner releases it.
   if (updating() || held() || isLocked()) return;
-  const free = maxParallel() - live.size - starting.size;
+  const config = loadConfig();
+  const queue = queued().filter(r => !live.has(r.id) && !starting.has(r.id));
+  const waiting = queue.filter(run => run.status === 'waiting' && !ready(run));
+  if (waiting.length) {
+    const usage = readUsage();
+    for (const run of waiting) {
+      if (!limitWaitCleared(run, config.limits ?? {}, usage)) continue;
+      Object.assign(run, { status: 'queued', notBefore: null, note: null });
+      delete run.limitWait;
+      saveRun(run);
+    }
+  }
+  const free = maxParallel(config) - live.size - starting.size;
   if (free <= 0) return;
   // The owner's focus (src/steer.mjs): a paused project, or one out of the focus, starts nothing; its runs wait in order.
   const steer = readSteer();
-  const waiting = queued().filter(r => !live.has(r.id) && !starting.has(r.id) && !holdReason(r.project, steer));
-  for (const next of pickNext(waiting, busyProjects(), free)) {
+  for (const next of pickNext(queue.filter(r => !holdReason(r.project, steer)), busyProjects(), free)) {
     starting.add(next.id);
     // Each run goes on by itself; the queue looks again as soon as one ends.
     Promise.resolve()

@@ -7,6 +7,7 @@ import { gzipSync } from 'node:zlib';
 import { attentionArchive, attentionItems, attentionSummary, markSeen } from './attention.mjs';
 import { autopilotStatus, changeAutopilot } from './autopilot.mjs';
 import { answerRequest, chargeProfileId, inCharge, openMatters, projectRequests } from './charge.mjs';
+import { openWork, releaseWork, workNotesView } from './worknow.mjs';
 import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { EFFORTS, loadAgents, loadConfig, projectCrew, projectEfforts, projectLead, saveConfig } from './config.mjs';
 import { effortHistory, effortSource, runEffortChanges, setEffort } from './effort.mjs';
@@ -19,7 +20,8 @@ import { LEAD, memoryInfo } from './leads.mjs';
 import { engage, isLocked, lockdownView, recordSignal, release } from './lockdown.mjs';
 import { closeBrowser, focusBrowser, openBrowsers } from './browsers.mjs';
 import { computer, latestProcesses, processes, stoppable, stopProject } from './machine.mjs';
-import { chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
+import { agentSender, chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
+import { closeDefect, reportDefect } from './defects.mjs';
 import { closeReplaced, mergeRun, previewClose, previewMerge } from './merge.mjs';
 import { awayInfo, reportEvent, setAway } from './news.mjs';
 import { askOwner, finishRequest, openRequests, pollRequest } from './needs.mjs';
@@ -27,7 +29,7 @@ import { cancelStop, powerInfo, powerPreview, setStandby, stopSystem } from './p
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { changePlan, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
 import { changeRadar, RADAR_STATUSES, radarIdeas } from './radar.mjs';
-import { openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
+import { deliverDevNotices, devState, openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
@@ -35,13 +37,13 @@ import { activeRun, createRun, describeLater, doingNow, liveRuns, needsBrief, ou
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { changeSteer, steerView } from './steer.mjs';
 import {
-  answerPermission, endSession, finishSessionRequest, interruptSession, listSessions, openSession, planSession, profileFor, removeQueued, resumeSession, sayToSession,
+  answerPermission, endSession, finishSessionRequest, interruptSession, listSessions, openSession, planSession, profileFor, removeQueued, resumeSession, sayToSession, withManager,
   sessionRequests, sessionsState, sessionView,
 } from './sessions.mjs';
 import { talkTo } from './talk.mjs';
 import { listRuns, readConversation, readNotifications, readPending, readRun, readUsage, runDir, stepsOf } from './store.mjs';
 import { checkNow, updateInfo, updateMode, updateNow } from './update.mjs';
-import { isReading, readerSettings, readerStatus, readUsagePage, signedIn } from './usagepage.mjs';
+import { isReading, loginState, openLogin, readerSettings, readerStatus, readUsagePage, signedIn, signInNeeded } from './usagepage.mjs';
 import { clip, now, ROOT, VERSION } from './util.mjs';
 import { projectDir } from './workspace.mjs';
 
@@ -331,9 +333,13 @@ function crew(agents, config, runs, going, queue, conversation) {
 // When this Chiefmate started. The app loads itself again when it changes, after an update or a restart.
 const STARTED = now();
 
-/** Per project: { agent, name, lead, profile, session (its conversation: the open one, else the latest), requests }. */
+/**
+ * Per project: { agent, name, lead, profile, session (its conversation: the open one, else the latest), requests,
+ * work: { session (the "Work now" session open, else null), notes (the latest summaries) } }.
+ */
 function chargeState(config, agents) {
-  const sessions = listSessions().filter(s => s.charge && s.mode === 'app');
+  const all = listSessions();
+  const sessions = all.filter(s => s.charge && s.mode === 'app');
   return Object.fromEntries(Object.keys(config.projects ?? {}).map(id => {
     const who = inCharge(config, id, agents);
     const own = sessions.filter(s => s.project === id);
@@ -341,6 +347,7 @@ function chargeState(config, agents) {
     return [id, who ? {
       agent: who.member.id, name: who.member.name ?? who.member.id, base: who.member.base ?? who.member.id, lead: who.lead, profile: chargeProfileId(id),
       session: session?.id ?? null, requests: projectRequests(id, 8),
+      work: { session: all.find(s => s.work && s.project === id && s.mode === 'app' && s.status !== 'ended')?.id ?? null, notes: workNotesView(id) },
     } : null];
   }));
 }
@@ -380,7 +387,7 @@ function buildState() {
     ui: uiSettings(config),
     ai: { claude: { ...claudeInfo }, account: { status: usage.status ?? null, updated: usage.updated ?? null } },
     update: { ...updateInfo, mode: updateMode(config) },
-    projects: Object.entries(config.projects ?? {}).map(([id, p]) => ({ id, name: p.name, site: p.site })),
+    projects: Object.entries(config.projects ?? {}).map(([id, p]) => ({ id, name: p.name, site: p.site, devUrl: devState(id, p, machine)?.url ?? null })),
     // Each project's agent in charge (src/charge.mjs): who it is, its conversation and its requests to the manager.
     charge: chargeState(config, agents),
     missions: Object.entries(config.missions ?? {}).map(([id, m]) => ({
@@ -413,7 +420,7 @@ function buildState() {
     plan: {
       resets: planResets(config),
       pace: weekPace(usage),
-      reader: { ...readerSettings(config), signedIn: signedIn(), reading: isReading(), status: readerStatus() },
+      reader: { ...readerSettings(config), signedIn: signedIn(), reading: isReading(), status: readerStatus(), signIn: signInNeeded(), login: loginState() },
     },
     // The autopilot (src/autopilot.mjs): its settings, whether it may act now and what it did today.
     autopilot: autopilotStatus(config, usage, new Date(), runs),
@@ -498,6 +505,13 @@ export function startServer() {
   const allowed = new Set([`localhost:${port}`, `127.0.0.1:${port}`]);
   checkClaude();
   setInterval(checkClaude, 10 * 60_000);
+  const devNotices = setInterval(() => {
+    try {
+      deliverDevNotices();
+    } catch (error) {
+      console.error(`Development environment notices: ${error.message}`);
+    }
+  }, 2000).unref();
   const handle = async (req, res, remote = null) => {
     try {
       // Guards against another website open in the browser trying to send commands here.
@@ -613,8 +627,8 @@ export function startServer() {
           return reply(res, 200, decided);
         }
         case '/api/request': {
-          // The manager's answer to a request of a project's agent in charge (cli.mjs request <id> approve|hold|ask-owner|reject).
-          const answered = await answerRequest(body.id, String(body.action ?? ''), { note: body.note, recommend: body.recommend, ...brief(body) });
+          // The manager's answer to a request of a project's agent in charge (cli.mjs request <id> <answer>).
+          const answered = await answerRequest(body.id, String(body.action ?? ''), { note: body.note, recommend: body.recommend, project: body.project, run: body.run, ...brief(body) });
           if (answered.run) nudgeQueue();
           return reply(res, 200, answered);
         }
@@ -629,12 +643,24 @@ export function startServer() {
         case '/api/session': {
           // With "dryRun": the folder and the first message it would open with, and nothing opens.
           if (body.dryRun) {
-            const { profile, folder, prompt } = planSession(loadConfig(), String(body.profile ?? ''));
-            return reply(res, 200, { dryRun: true, profile: profile.id, tool: profile.tool, cwd: folder.dir, blocks: prompt.blocks, missing: prompt.missing, prompt: prompt.blocksGiven ? prompt.text : null });
+            const config = loadConfig();
+            const { profile, folder, prompt } = planSession(config, String(body.profile ?? ''));
+            const text = profile.charge ? prompt.text : withManager(prompt.text, config, '<session id>');
+            return reply(res, 200, { dryRun: true, profile: profile.id, tool: profile.tool, cwd: folder.dir, blocks: prompt.blocks, missing: prompt.missing, prompt: prompt.blocksGiven ? text : null });
           }
           // "window": in a window of its own (Windows Terminal), instead of the conversation in the app.
           return reply(res, 200, await openSession(String(body.profile ?? ''), { origin: body.origin ?? 'app', window: !!body.window }));
         }
+        case '/api/work-now': {
+          // "Work now", the owner's click on a project's page (src/worknow.mjs): the session, at once; { conflict } only
+          // with "work_now_mode": "ask" while a run of the crew goes on ("choice": "pause" or "copy" then). "dryRun" opens nothing.
+          const tool = body.tool === 'codex' ? 'codex' : 'claude';
+          const choice = ['pause', 'copy'].includes(body.choice) ? body.choice : null;
+          return reply(res, 200, await openWork(String(body.project ?? ''), { tool, choice, dryRun: !!body.dryRun }));
+        }
+        case '/api/work-now/release':
+          // "Let it go on": the crew's runs paused by a "Work now" session go on now, in their own working copy.
+          return reply(res, 200, { released: await releaseWork(String(body.id ?? '')) });
         case '/api/session/say':
           return reply(res, 200, sayToSession(String(body.id ?? ''), body.text, { by: body.by === 'manager' ? 'manager' : 'owner' }));
         case '/api/session/interrupt':
@@ -675,7 +701,7 @@ export function startServer() {
           if (!String(body.prompt ?? '').trim()) return reply(res, 400, { error: t('The prompt is empty.') });
           if (body.dryRun) {
             const { folder, prompt } = planSession(config, profile, { prompt: String(body.prompt) });
-            return reply(res, 200, { dryRun: true, profile, tool, cwd: folder.dir, prompt: prompt.text });
+            return reply(res, 200, { dryRun: true, profile, tool, cwd: folder.dir, prompt: withManager(prompt.text, config, '<session id>') });
           }
           return reply(res, 200, await openSession(profile, { origin: 'app', prompt: String(body.prompt), window: !!body.window }));
         }
@@ -704,8 +730,14 @@ export function startServer() {
           if (body.preview) return reply(res, 200, previewClose(body.run, body.replacedBy));
           return reply(res, 200, await closeReplaced(body.run, body.replacedBy, { by: body.by === 'manager' ? 'manager' : 'owner' }));
         case '/api/manager':
-          // Accepted at any time: while the manager answers, the message waits in the queue.
-          return reply(res, 202, { ok: true, ...sendToManager(body.message) });
+          // Accepted at any time: while the manager answers, the message waits in the queue. "from": an agent's
+          // (a live session or a step, from the command line), marked as the agent's, never as the owner's.
+          return reply(res, 202, { ok: true, ...sendToManager(body.message, { sender: body.from ? agentSender(body.from) : null }) });
+        case '/api/defect':
+          // A defect of Chiefmate an agent reports on its own (src/defects.mjs): recorded, and news for the manager.
+          return reply(res, 200, reportDefect(body.text, agentSender(body.from ?? {})));
+        case '/api/defect/close':
+          return reply(res, 200, { defect: closeDefect(body.id, body.note, body.by === 'manager' ? 'manager' : 'owner') });
         case '/api/manager/edit':
         case '/api/manager/remove': {
           const id = String(body.id ?? '');
@@ -784,7 +816,7 @@ export function startServer() {
           return reply(res, 200, { steer: steerView(), paused });
         }
         case '/api/autopilot':
-          // The autopilot's switch, mode and limits, from the Usage section (src/autopilot.mjs), kept with who changed them.
+          // Save the autopilot's settings and record who changed them (src/autopilot.mjs).
           changeAutopilot(body, { by: remote ? `remote:${String(req.headers['tailscale-user-login'] ?? '').trim().toLowerCase()}` : 'app' });
           return reply(res, 200, autopilotStatus());
         case '/api/stop-project': {
@@ -812,6 +844,8 @@ export function startServer() {
             config.usage_reader = { ...config.usage_reader, enabled: !!body.enabled };
             saveConfig(config);
           }
+          // The sign-in window, from the app's card (it closes by itself after a few minutes).
+          if (body.login) openLogin();
           if (body.read) {
             if (!signedIn()) return reply(res, 400, { error: t('Not signed in yet. Run: node src/cli.mjs claude-login') });
             readUsagePage().catch(() => {});
@@ -838,6 +872,7 @@ export function startServer() {
   }
   // Both listeners (such as before a restart for an update), so the next Chiefmate can open them.
   const close = () => {
+    clearInterval(devNotices);
     remoteServer?.close();
     remoteServer?.closeAllConnections();
     return new Promise(resolve => server.close(() => resolve()));

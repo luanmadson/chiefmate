@@ -362,12 +362,12 @@ export function takeGrant(file, target, facts = target?.branch ? pushFacts(targe
  * The settings that make Claude Code run this file before each command, refusing what is not in "allowed". grants:
  * the manager's push requests and grants (see takeGrant).
  */
-export function guardHooks({ log, allowed = [], grants = null, who = grants ? 'manager' : 'step' }) {
+export function guardHooks({ log, allowed = [], grants = null, who = grants ? 'manager' : 'step', noMain = false }) {
   const q = s => `"${String(s).replace(/\\/g, '/')}"`;
   // Only the guard's own rules: any other text would go into a shell command line.
   const rules = [PUSH, REMOTE, PR, REPO, API].filter(r => allowed.includes(r));
   const by = ['step', 'manager', 'session'].includes(who) ? who : 'step';
-  const command = [q(process.execPath), q(fileURLToPath(import.meta.url)), '--log', q(log), '--who', by, ...rules.flatMap(r => ['--allow', q(r)]), ...(grants ? ['--grants', q(grants)] : [])].join(' ');
+  const command = [q(process.execPath), q(fileURLToPath(import.meta.url)), '--log', q(log), '--who', by, ...rules.flatMap(r => ['--allow', q(r)]), ...(grants ? ['--grants', q(grants)] : []), ...(noMain ? ['--no-main'] : [])].join(' ');
   return { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command, timeout: 30 }] }] };
 }
 
@@ -400,9 +400,21 @@ async function hook(argv) {
   if (risky.some(r => r.kind !== 'mass_delete')) {
     return deny("Refused by Chiefmate: this reaches into Chiefmate's protected folders, or deletes a whole drive, a personal folder or Chiefmate. The owner was warned. Don't try it another way: say why you wanted it, and stop.");
   }
-  const refused = publishing(command).filter(f => !allowed.has(f.rule));
-  if (!refused.length) return;
+  const found = publishing(command);
   const cwd = call.cwd || process.cwd();
+  // A "Work now" session (src/worknow.mjs): only a plain push of one branch other than the main one may ever go, once
+  // the owner allows pushing; any other push is refused at once, so it never becomes a permission request. HEAD is
+  // the branch checked out, and "heads/<name>" that branch.
+  if (argv.includes('--no-main') && found.some(f => f.rule === PUSH)) {
+    const target = plainPush(command, cwd);
+    const named = /^head$/i.test(target.branch ?? '') ? git(target.dir, 'symbolic-ref', '--short', 'HEAD') : target.branch;
+    const branch = named?.replace(/^(refs\/)?heads\//i, '');
+    if (!branch || pushFacts({ ...target, branch }).main) {
+      return deny('Refused by Chiefmate, always: nothing goes straight to the main branch (main, master or the default one), and no push is forced. Only "git push <remote> <branch>" of a branch of the work goes, once the owner allowed pushing. Say what you wanted to send and why, and stop.');
+    }
+  }
+  const refused = found.filter(f => !allowed.has(f.rule));
+  if (!refused.length) return;
   // The manager's push the owner allowed on its card: it goes, once.
   const target = grants && refused.every(f => f.rule === PUSH) ? plainPush(command, cwd) : null;
   if (target?.branch && takeGrant(grants, target)) return;
