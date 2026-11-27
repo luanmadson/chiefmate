@@ -1203,19 +1203,37 @@ test("gh's gists, releases, workflows and secrets publish, each under its own ru
   assert.ok(hook.includes('--allow "Bash(gh release:*)"') && !hook.includes('rm:'), hook);
 });
 
-test("A heredoc's text that only goes into a file is data; one that bash runs, expands or sends on is looked at as before", () => {
+test("A heredoc's text written into a file by a command that does nothing else is data; any other is looked at as before", () => {
   const rules = command => publishing(command).map(f => f.rule);
-  // Only written: a test script that quotes gh and git, in any of the usual forms.
+  // Only written: a test script that quotes gh and git, in any of the usual forms, with commands that run nothing.
   for (const command of [
     "cat > .tmp/guard-test.mjs <<'EOF'\nassert.deepEqual(publishing('gh pr view 3'), []);\n// don't: gh pr create\ngh repo delete x\ngit push origin main\nEOF",
-    "cat <<'EOF' > t.sh\ngh pr merge 3\nEOF\nnpm test",
+    "mkdir -p .tmp && cat <<'EOF' > .tmp/t.sh\ngh pr merge 3\nEOF\nchmod +x .tmp/t.sh && ls -l .tmp",
     'cat <<EOF >> notes.txt\ngit push\nEOF',
     "tee -a log.txt <<'EOF'\ngh release create v1\nEOF",
+    "tee f.txt > /dev/null <<'EOF'\ngh release create v1\nEOF",
     "cat > a.txt <<'A' && cat > b.txt <<\"B\"\ngit push\nA\ngh pr create\nB",
     "cat > t.txt <<-'EOF'\n\tgit push\n\tEOF",
   ]) assert.deepEqual(rules(command), [], command);
-  // Run, expanded, piped, named again or not really a heredoc: still refused.
+  // Run, expanded, piped, named again or another way, or not really a heredoc: still refused. Anything but an INERT
+  // program may run the file (a glob, a variable, xargs, a hook, a test runner), and bash reads "${x:-"<<EOF "}",
+  // $[1 << 2] and an escaped "cat()" otherwise than a heredoc.
   for (const command of [
+    "cat <<'EOF' > t.sh\ngit push\nEOF\nnpm test",
+    "cat > t.sh <<'EOF'\ngit push\nEOF\nbash *.sh",
+    "cat > t.sh <<'EOF'\ngit push\nEOF\nbash<t.sh",
+    "cat > t <<'EOF'\ngit push\nEOF\nf=t; bash $f",
+    "cat > t.sh <<'EOF'\ngit push\nEOF\nbash {t,}.sh",
+    "cat > t.sh <<'EOF'\ngit push\nEOF\nls | xargs bash",
+    "cat > t.sh <<'EOF'\ngit push\nEOF\nbash \"\\\"\"; bash t.sh",
+    "cat > .git/hooks/pre-commit <<'EOF'\ngit push\nEOF\ngit commit -m x",
+    "cat > cat <<'EOF'\ngit push\nEOF\nchmod +x cat && ./cat",
+    "PATH=. cat > f <<'EOF'\ngit push\nEOF",
+    'cat > f.txt "${x:-"<<EOF "}"\ngit push\nEOF',
+    'cat > f.txt $[ 1 << 2 ]\ngit push\n2',
+    "cat\\\n() { bash; }; cat > f.txt <<'EOF'\ngit push\nEOF",
+    "eval cat\\(\\)\\{ bash\\;\\}; cat > f.txt <<'EOF'\ngit push\nEOF",
+    "bash -c \"cat > t.sh <<'EOF'\ngit push\nEOF\" && bash t.sh",
     "bash <<'EOF'\ngit push\nEOF",
     "cat <<'EOF' | bash\ngit push\nEOF",
     "cat > t.sh <<'EOF'\ngit push\nEOF\nbash t.sh",

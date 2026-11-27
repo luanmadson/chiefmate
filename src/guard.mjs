@@ -143,12 +143,20 @@ function heredocFiles(head) {
   return files.length && !files.some(f => SPECIAL_FILE.test(f)) ? files : [];
 }
 
+// The programs a command that writes heredocs into files may also run, for their texts to count as data: none of them
+// runs a file, a hook or a script, so nothing in the command can run what was written.
+const INERT = new Set(['cat', 'tee', 'mkdir', 'cd', 'pwd', 'ls', 'echo', 'printf', 'true', ':', 'chmod', 'touch', 'wc']);
+// What may stay around the texts: plain words, redirections, separators, and quotes with nothing inside that bash
+// expands. No variable, pattern, brace, parenthesis, escape or comment: each may name the file another way (bash *.sh,
+// $f, {t,}.sh) or be read by bash otherwise than here ("${x:-"<<EOF "}", $[1 << 2], a function made of cat).
+const PLAIN_AROUND = /^(?:[\w./:=@,+\s<>&|;-]|'[^'\u2018-\u201f]*'|"[^"\\$`!\u2018-\u201f]*")*$/;
+
 /**
- * The command with the text of each heredoc that only goes into a file taken out: that text is data, not a command
- * ("cat > test.sh <<'EOF' ... EOF"). Read as bash reads it (quotes, comments, "<<-"), and kept whole whenever in
- * doubt: a command substitution or process substitution anywhere, an unquoted heredoc whose text bash would expand,
- * a pipe after the command, a file named elsewhere in the command (bash test.sh, a fifo), cat or tee redefined, a
- * heredoc with no end or an unusual delimiter.
+ * The command without its heredocs' texts when all it does is write them into files: each one by cat or tee
+ * ("cat > test.sh <<'EOF' ... EOF"), as written (a quoted delimiter, or nothing bash would expand), and nothing else
+ * run but INERT programs, in plain words. Those texts are data, not commands. Read as bash reads it (quotes,
+ * comments, "<<-"), and kept whole otherwise: any other program may run what was written (bash test.sh, a glob, a
+ * hook, a test runner), and so may a pipe, a substitution, a heredoc with no end or an unusual delimiter.
  */
 function withoutWrittenText(command) {
   const s = String(command ?? '');
@@ -214,6 +222,7 @@ function withoutWrittenText(command) {
           const end = e < 0 ? s.length : e;
           if ((d.tabs ? s.slice(p, end).replace(/^\t+/, '') : s.slice(p, end)) === d.delim) {
             d.to = p;
+            d.after = end;
             p = end;
             break;
           }
@@ -245,36 +254,20 @@ function withoutWrittenText(command) {
       word = /[\s()<>]/.test(c);
     }
   }
-  if (line.length) return s;
+  if (line.length || !docs.length) return s;
+  // Each text goes into a file by cat or tee, as written: no pipe after it, nothing bash would expand in it.
+  if (docs.some(d => d.pipe || (!d.quoted && /[$`\\]/.test(s.slice(d.from, d.to))) || !heredocFiles(s.slice(d.segment, d.end)).length)) return s;
+  // The command around the texts (their delimiters taken out too) runs nothing but INERT programs, in plain words.
+  let rest = '';
+  let at = 0;
   for (const d of docs) {
-    d.head = s.slice(d.segment, d.end);
-    d.files = d.pipe || (!d.quoted && /[$`\\]/.test(s.slice(d.from, d.to))) ? [] : heredocFiles(d.head);
+    rest += s.slice(at, d.from);
+    at = d.after;
   }
-  // The command outside the texts taken out, with the heads of the heredocs whose text goes.
-  const outside = (skip = null) => {
-    let out = '';
-    let at = 0;
-    for (const d of docs.filter(x => x.files.length)) {
-      out += s.slice(at, d.from);
-      at = d.to;
-    }
-    out += s.slice(at);
-    return skip ? out.replace(skip.head, ' ') : out;
-  };
-  const name = f => path.basename(String(f).replace(/\\/g, '/')).toLowerCase();
-  for (let changed = true; changed;) {
-    changed = false;
-    for (const d of docs.filter(x => x.files.length)) {
-      const named = new Set(tokens(outside(d)).map(name));
-      if (d.files.some(f => named.has(name(f)))) {
-        d.files = [];
-        changed = true;
-      }
-    }
-  }
-  const out = outside();
-  // cat or tee made into something else (a function, an alias), or a PATH of the command's own.
-  return /\b(alias|function|hash|enable)\b|\b(cat|tee)\s*\(|\bPATH=/.test(out) ? s : out;
+  rest += s.slice(at);
+  const words = tokens(rest);
+  const programs = words.filter((w, i) => w !== '|' && (i === 0 || words[i - 1] === '|'));
+  return PLAIN_AROUND.test(rest) && programs.every(p => INERT.has(p)) ? rest : s;
 }
 
 /**
@@ -282,12 +275,13 @@ function withoutWrittenText(command) {
  * ("git push origin main", with git's options before "push" taken out); dir: the folder it would run in, when the
  * command says (git -C, or a cd before it), relative to the folder of the session. The text of a message to the
  * manager (node .../cli.mjs chat say "...", when that is the whole command, in plain words) is not run, so it is not
- * looked at, nor the text of a heredoc that only goes into a file (withoutWrittenText).
+ * looked at, nor the texts of heredocs written into files by a command that does nothing else (withoutWrittenText),
+ * judged on the whole command only: inside "bash -c" the rest of the line could run the file.
  */
 export function publishing(command, depth = 0) {
   const found = [];
   if (depth > 4 || (depth === 0 && isMessage(command))) return found;
-  const all = tokens(withoutWrittenText(command));
+  const all = tokens(depth === 0 ? withoutWrittenText(command) : command);
   const commands = [];
   for (let i = 0, start = 0; i <= all.length; i++) {
     if (i === all.length || all[i] === '|') {
