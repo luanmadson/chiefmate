@@ -1,7 +1,7 @@
 // Unit tests with no dependency (node:test): the file viewer's checks of paths, its choice among a project's copies and
 // its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation;
-// the band of what a live session asks; the emergency lockdown and its detection; each agent's effort; the redacted
-// backup of the settings; the usage resets' countdowns.
+// the band of what a live session asks; the emergency lockdown and its detection; the warning before Claude Code's
+// sign-in expires; each agent's effort; the redacted backup of the settings; the usage resets' countdowns.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -11,7 +11,8 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE, projectColor, shouldClose, themeManifest, windowName } from '../src/browsers.mjs';
-import { describeDoing, readFeed } from '../src/claude.mjs';
+import { describeDoing, LOGIN_RENEW, loginDue, loginLine, loginRead, loginWarning, parseLoginStatus, readFeed } from '../src/claude.mjs';
+import { loginText } from '../src/plan.mjs';
 import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, opening, openOnComputer, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
@@ -1664,4 +1665,50 @@ test('the status bar counts down to each usage reset and flags a spare 5-hour wi
   assert.equal(spare({ used: 0.2, resets: at(-1) }, now), null, 'already reset: the reading is old');
   assert.equal(spare({ used: 0.2 }, now), null, 'reset unknown');
   assert.equal(spare(undefined, now), null, 'not measured');
+});
+
+// ---------- The warning before Claude Code's sign-in expires ----------
+
+test("Claude Code's sign-in: only its expiry is read, warned 3 days before its earliest end and strongly from the day before", () => {
+  const status = { loggedIn: true, email: 'someone@example.com', orgName: 'Org', loginExpiresAt: '2026-12-04T23:08:36.905Z' };
+  assert.equal(parseLoginStatus(JSON.stringify(status)), '2026-12-04T23:08:36.905Z');
+  assert.equal(parseLoginStatus(JSON.stringify({ loggedIn: false })), null);
+  assert.equal(parseLoginStatus('not json'), null);
+
+  // Claude Code says a sign-in ends between 3 days before its expiry and the expiry: the warning counts from the earliest.
+  const expires = '2026-12-04T23:08:36.905Z';
+  const at = days => Date.parse(expires) - days * 86400_000;
+  const info = { expires, checked: new Date(at(10)).toISOString() };
+  assert.equal(loginWarning(info, at(6.5)), null, 'warned more than 3 days before the earliest end');
+  assert.equal(loginWarning({ expires: null }, at(1)), null, 'warned with no expiry known');
+  assert.equal(loginWarning(info, at(5)).step, '3d');
+  assert.equal(loginWarning(info, at(3.5)).step, '1d');
+  assert.equal(loginWarning(info, at(1)).step, '1d', 'the warning eased once the sign-in may already have ended');
+  assert.equal(loginWarning(info, at(-0.1)).step, 'expired');
+
+  // A read that fails, or finds the sign-in gone, keeps the expiry known; a sign-in with no expiry (an API key) clears it.
+  const failed = Object.assign(new Error('Command failed'), { code: 1 });
+  assert.deepEqual(loginRead(info, failed, '', 'now'), { expires, checked: 'now', error: 'Command failed' });
+  assert.equal(loginRead(info, failed, JSON.stringify({ loggedIn: false, loginExpiresAt: null }), 'now').expires, expires);
+  assert.equal(loginRead(info, null, JSON.stringify({ loggedIn: true, loginExpiresAt: null }), 'now').expires, null);
+  assert.deepEqual(loginRead(info, null, JSON.stringify({ ...status, loginExpiresAt: '2027-01-04T10:00:00.000Z' }), 'now'), { expires: '2027-01-04T10:00:00.000Z', checked: 'now', error: null });
+
+  // Asked again at the start, after a failed read, once a day, and hourly within the warning (so a renewal shows soon).
+  assert.equal(loginDue({ checked: null }), true);
+  const checkedAt = (since, days) => ({ expires, checked: new Date(at(days) - since).toISOString() });
+  assert.equal(loginDue({ ...checkedAt(10 * 60_000, 10), error: 'timed out' }, at(10)), true, 'a failed read waited a day');
+  assert.equal(loginDue(checkedAt(2 * 3600_000, 10), at(10)), false);
+  assert.equal(loginDue(checkedAt(24 * 3600_000, 10), at(10)), true);
+  assert.equal(loginDue(checkedAt(2 * 3600_000, 2), at(2)), true);
+  assert.equal(loginDue(checkedAt(59 * 60_000, 5), at(5)), true, 'the hourly timer, a moment early, skipped an hour');
+  assert.equal(loginDue(checkedAt(10 * 60_000, 2), at(2)), false);
+
+  // The owner's warning and the manager's line carry the command to renew it, and nothing of the account.
+  const strong = loginText(loginWarning(info, at(3.5)));
+  assert.ok(strong.title && strong.text.includes(LOGIN_RENEW) && !strong.text.includes('example.com'));
+  assert.notEqual(loginText(loginWarning(info, at(5))).title, strong.title, 'the day before the earliest end reads as the others');
+  assert.equal(loginText(null), null);
+  assert.equal(loginLine('the owner', info, at(7)), null);
+  assert.ok(loginLine('the owner', info, at(5)).includes(LOGIN_RENEW));
+  assert.ok(loginLine('the owner', info, at(0.5)).endsWith('remind them now.'));
 });

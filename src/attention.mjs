@@ -6,7 +6,8 @@
 // Nothing is lost: the archive keeps the last ARCHIVE_MAX. In data/state.json: the seen marks ("attention_seen"), the
 // notices shown last time ("attention_shown") and the archive ("attention_archive").
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
-import { RAM_LOW, availableResets, current } from './plan.mjs';
+import { loginWarning } from './claude.mjs';
+import { RAM_LOW, availableResets, current, loginText } from './plan.mjs';
 import { readState, saveState, settleRunOutside } from './store.mjs';
 import { LOGIN_MINUTES, readerSettings, readerStatus, signInNeeded } from './usagepage.mjs';
 import { ROOT } from './util.mjs';
@@ -33,7 +34,7 @@ const ago = (iso, span) => iso && Date.now() - Date.parse(iso) <= span;
  * The notices now, most urgent first: { id, level, kind, title, text, view, project, run, at, seen, seenable }.
  * "view" is the app's place that deals with it; a request of a step carries what its buttons need ("I did it", or a question's options).
  */
-export function attentionItems({ config, runs = [], needs = [], usage = {}, machine, items = [], update = {}, questions = [], pushes = [], repos = [], lockdown = null }) {
+export function attentionItems({ config, runs = [], needs = [], usage = {}, machine, items = [], update = {}, questions = [], pushes = [], repos = [], lockdown = null, login = loginWarning() }) {
   const list = [];
   const add = item => list.push({ project: null, run: null, at: null, seenable: true, ...item });
   // Urgent: the emergency lockdown (src/lockdown.mjs), until the owner releases it, and the security warnings of the day.
@@ -91,6 +92,11 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
       text: t('Only {percent} of the memory is free.', { percent: formatPercent(machine.memory.free / machine.memory.total) }) + (top.length ? ` ${t('Using the most: {list}.', { list: top.join(', ') })}` : ''),
       view: 'projects',
     });
+  }
+  // Claude Code's sign-in on this computer (src/claude.mjs): important from 3 days before its earliest end (3 days
+  // before the expiry Claude Code reports); urgent, and until it is renewed, from the day before that and once expired.
+  if (login) {
+    add({ id: `login:${login.expires}:${login.step}`, level: login.step === '3d' ? 'important' : 'urgent', kind: 'login', ...loginText(login), view: 'usage', seenable: login.step === '3d' });
   }
   // The plan's free resets: urgent when one expires within a day, important within 3 days or when it's time to use one.
   const resets = availableResets(config);
