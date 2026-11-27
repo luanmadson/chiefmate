@@ -2227,6 +2227,10 @@ try {
     'git push -u origin feature 2>&1': 'ok', 'cd x && git push --set-upstream origin feature 2>/dev/null': 'ok', 'git push -u origin main 2>&1': 'main', 'git push -f origin feature 2>&1': 'forced',
     'git push': 'shape', 'git push origin': 'shape', 'cd x; git push origin feature': 'shape', 'cd x | git push origin feature': 'shape', 'git -c a=b push origin feature': 'shape',
     'git push origin feature > out.txt': 'shape', 'git push origin feature 2>&1 | tail': 'shape', 'cd $X && git push origin feature': 'shape',
+    // Redirections count only unquoted at the end: a quoted "2>&1" or ">" is one more branch for git. A backquote runs a
+    // command for the folder.
+    'git push origin feature "2>&1"': 'shape', "git push origin feature '>' nul": 'shape', 'git push 2>&1 origin feature': 'shape',
+    'git -C "`echo x`" push origin feature': 'shape', 'cd "`echo x`" && git push origin feature': 'shape',
     'git push origin $B': 'shape', 'git push --tags origin feature': 'shape', 'git push origin a b': 'shape', 'bash -c "git push origin feature"': 'shape',
   };
   const misjudged = Object.entries(kinds).filter(([c, k]) => (plainPush(c, repo).branch ? 'ok' : plainPush(c, repo).refused) !== k);
@@ -2508,6 +2512,12 @@ try {
       'git remote -v': '', 'git -C x remote get-url origin': '', 'git remote show origin': '', 'echo "git remote -v"': '', 'gh pr list': '', 'gh pr -R a/b view 3': '', 'gh issue list': '', 'gh repo view': '',
       'node src/cli.mjs chat say "Refused: git push -u origin x 2>&1; git remote add y z"': '', "node src/cli.mjs chat say 'run `git push origin x`'": '',
       'node src/cli.mjs chat say "$(git push origin x)"': 'git push', 'node src/cli.mjs chat say "`git push origin x`"': 'git push', 'node src/cli.mjs chat say hi && git push origin x': 'git push',
+      'node C:/x/src/cli.mjs defect report "Refused: git push origin x; gh pr create.\nExpected: C:\\Users ok"': '',
+      // A message that bash or PowerShell would read another way (an escaped quote, $'...', a comment, $(...) after a
+      // backslash, curly quotes) is looked at whole: what runs after it is found.
+      'node src/cli.mjs chat say "x\\" "; git push origin x': 'git push', "node src/cli.mjs chat say $'x\\' '; git push origin x": 'git push',
+      'node src/cli.mjs chat say hi #"\ngit push origin x\n"': 'git push', 'node src/cli.mjs chat say "\\$(git push origin x)"': 'git push',
+      'node src/cli.mjs chat say "a\u201c; git push origin x;\u201d"': 'git push',
       'git remote add y z': 'git remote', 'gh pr merge 3': 'gh pr',
     };
     const misread = Object.entries(guarded).filter(([c, r]) => rules(c) !== r);

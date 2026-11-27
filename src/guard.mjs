@@ -87,38 +87,25 @@ const within = (base, next) => {
 // Chiefmate's own commands that only carry a text to the manager: the text is not run.
 const MESSAGES = [['chat', 'say'], ['defect', 'report']];
 
-/** Whether the shell would run something inside the text first: a $(...) or a backquote, outside single quotes. */
-function substitutes(s) {
-  let quote = null;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (quote === "'") {
-      if (c === "'") quote = null;
-    } else if (c === '\\') {
-      i++;
-    } else if (c === '`' || (c === '$' && s[i + 1] === '(')) {
-      return true;
-    } else if (c === '"') {
-      quote = quote ? null : '"';
-    } else if (c === "'" && !quote) {
-      quote = "'";
-    }
-  }
-  return false;
-}
+// A command that bash, PowerShell (Codex's shell on Windows) and tokens() all read as the same words, with nothing run
+// but its program: plain characters and spaces, or quoted text with nothing inside that one of them expands or reads
+// as the quote's end ($, a backquote, an escaped quote, curly quotes). No separator, comment or line break outside
+// quotes, no $'...'.
+const PLAIN_WORDS = /^(?:[\w./:=@,+ \t-]|'[^'\u2018-\u201f]*'|"(?:[^"\\$`\u2018-\u201f]|\\[^"\\$`\s\u2018-\u201f])*")*\s*$/;
 
-/** Whether the whole command is "node .../cli.mjs chat say <text>" (or defect report), alone and with nothing run inside. */
+/** Whether the whole command is "node .../cli.mjs chat say <text>" (or defect report), alone and in plain words. */
 function isMessage(command) {
   const words = tokens(command);
   return !words.includes('|') && programName(words[0] ?? '') === 'node' && programName(words[1] ?? '') === 'cli.mjs'
-    && MESSAGES.some(([a, b]) => words[2] === a && words[3] === b) && !substitutes(String(command));
+    && MESSAGES.some(([a, b]) => words[2] === a && words[3] === b) && PLAIN_WORDS.test(String(command));
 }
 
 /**
  * What a shell command would publish: [{ rule, part, dir }], one per finding. part: the command found, written plainly
  * ("git push origin main", with git's options before "push" taken out); dir: the folder it would run in, when the
  * command says (git -C, or a cd before it), relative to the folder of the session. The text of a message to the
- * manager (node .../cli.mjs chat say "...", when that is the whole command) is not run, so it is not looked at.
+ * manager (node .../cli.mjs chat say "...", when that is the whole command, in plain words) is not run, so it is not
+ * looked at.
  */
 export function publishing(command, depth = 0) {
   const found = [];
@@ -132,15 +119,16 @@ export function publishing(command, depth = 0) {
     }
   }
   let cd = null;
+  const at = f => (cd ? { ...f, dir: within(cd, f.dir ?? '.') } : f);
   for (const words of commands) {
     // A quoted word with a command in it (bash -c "...", cmd /c "...", eval "..."): looked at as a command too.
-    for (const w of words) if (/\s/.test(w)) found.push(...publishing(w, depth + 1));
+    for (const w of words) if (/\s/.test(w)) found.push(...publishing(w, depth + 1).map(at));
     if (CD.has(programName(words[0]))) {
       const to = words.slice(1).find(w => !w.startsWith('-'));
       if (to) cd = within(cd, to);
       continue;
     }
-    found.push(...inCommand(words, depth).map(f => (cd ? { ...f, dir: within(cd, f.dir ?? '.') } : f)));
+    found.push(...inCommand(words, depth).map(at));
   }
   const seen = new Set();
   return found.filter(f => !seen.has(`${f.rule} ${f.part}`) && seen.add(`${f.rule} ${f.part}`));
@@ -334,9 +322,9 @@ export const MAIN_BRANCHES = new Set(['main', 'master']);
 // The only options a push may carry to be allowed.
 const PLAIN_OPTIONS = new Set(['-u', '--set-upstream', '-q', '--quiet', '-v', '--verbose']);
 
-// Where a command's messages go ("2>&1", ">/dev/null", "2> $null"): nothing of what a push sends changes.
-const TO_STREAM = /^[12]?>&[12]$/;
-const TO_NOWHERE = /^[12]?>>?(\/dev\/null|\$null|nul)?$/i;
+// Where a push's messages go, written unquoted at its end ("2>&1", ">/dev/null", "2> $null"): nothing it sends changes.
+// Taken off the text itself, so a quoted "2>&1", which git would get as one more branch, is not taken for one.
+const TO_STREAMS = /(?:\s+[12]?>(?:&[12]|>?\s*(?:\/dev\/null|\$null|nul)))+\s*$/i;
 
 /**
  * A push the owner may allow the manager: { dir, remote, src, branch } for exactly
@@ -350,19 +338,12 @@ export function plainPush(command, cwd = process.cwd()) {
   // "cd <folder> && git push ...": the push runs there, and only if the cd worked.
   const into = /^\s*cd\s+("[^"]*"|'[^']*'|[^\s"';&|<>()`]+)\s*&&([\s\S]*)$/.exec(String(command ?? ''));
   const moved = into ? tokens(into[1]) : [];
-  if (into && (moved.length !== 1 || /^-|[$%*?[\]~<>]/.test(moved[0]))) return shape;
-  const words = [];
-  for (let k = 0, all = tokens(into ? into[2] : command); k < all.length; k++) {
-    if (TO_STREAM.test(all[k]) || (TO_NOWHERE.test(all[k]) && /[a-z]$/i.test(all[k]))) continue;
-    if (TO_NOWHERE.test(all[k]) && /^(\/dev\/null|\$null|nul)$/i.test(all[k + 1] ?? '')) {
-      k++;
-      continue;
-    }
-    words.push(all[k]);
-  }
+  if (into && (moved.length !== 1 || /^-|[$%*?[\]~<>`]/.test(moved[0]))) return shape;
+  const words = tokens((into ? into[2] : String(command ?? '')).replace(TO_STREAMS, ''));
   if (!words.length || words.includes('|') || programName(words[0]) !== 'git') return shape;
-  // Nothing the shell would turn into other words: variables, patterns, the home folder, other redirections.
-  if (words.some(w => /[$%*?[\]~<>]/.test(w))) return shape;
+  // Nothing the shell would turn into other words: variables, commands in backquotes, patterns, the home folder,
+  // other redirections.
+  if (words.some(w => /[$%*?[\]~<>`]/.test(w))) return shape;
   let i = 1;
   const dirs = into ? [shellPath(moved[0])] : [];
   for (; words[i] === '-C' && i + 1 < words.length; i += 2) dirs.push(shellPath(words[i + 1]));
