@@ -1706,11 +1706,13 @@ test("the settings' backup: a redacted copy in backup_dir, the full one only on 
   assert.ok(existsSync(path.join(temp, 'backup', 'v', 'chiefmate.json')), 'the local copy is still written');
   assert.deepEqual(['EACCES', 'EPERM', 'ENOENT', 'EEXIST', 'ENOSPC', 'EBUSY', undefined].map(code => backupCause({ code })), ['no_access', 'no_access', 'invalid', 'invalid', 'disk_full', 'failed', 'failed']);
 
-  // The owner is told once per cause (the watch, src/plan.mjs), still told after another failed save.
-  assert.deepEqual(causes(backupAlerts(failing, problems)), ['backup_dir:invalid', 'full_backup_dir:in_git']);
-  assert.deepEqual(backupAlerts(failing, problems), [], 'a cause already told is not told again');
+  // The owner is told once per cause (the watch, src/plan.mjs), still told after another failed save; its retry, when
+  // due, writes in this test's folders only.
+  const alerts = settings => backupAlerts(settings, { problems, fullDir: path.join(temp, 'backup', 'v') });
+  assert.deepEqual(causes(alerts(failing)), ['backup_dir:invalid', 'full_backup_dir:in_git']);
+  assert.deepEqual(alerts(failing), [], 'a cause already told is not told again');
   quietly(() => backup(failing, path.join(temp, 'backup', 'v')));
-  assert.ok(backupProblems(problems).every(p => p.told) && !backupAlerts(failing, problems).length, 'a cause that lasts is told once');
+  assert.ok(backupProblems(problems).every(p => p.told) && !alerts(failing).length, 'a cause that lasts is told once');
   // The notice and the manager's line name the setting and the cause, never the folder.
   const notices = backupProblems(problems).map(backupText);
   assert.ok(notices.every(n => n.title && n.text && !n.text.includes(blocker) && !n.text.includes(repo)), 'a notice names a folder');

@@ -1,7 +1,7 @@
 // The plan's free resets, the week's pace, and the alerts about your account, this computer and the settings' backup.
 // Alerts only warn (a band in the app and a Windows notification, once each): they never pause anything.
 import { LOGIN_RENEW, loginFrom, loginWarning } from './claude.mjs';
-import { BACKUP_PROBLEMS, backupConfig, backupProblems, loadConfig, markBackupTold, saveConfig } from './config.mjs';
+import { BACKUP_PROBLEMS, backupConfig, backupProblems, FULL_BACKUP_DIR, loadConfig, markBackupTold, saveConfig } from './config.mjs';
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
 import { computer, formatBytes, freeShare, processes } from './machine.mjs';
 import { reportEvent } from './news.mjs';
@@ -115,7 +115,7 @@ export function backupText(p) {
   const setting = p.target === 'local' ? 'data/config-backup' : p.target;
   const why = {
     invalid: () => t('The copy of the settings in {setting} was not written: the folder is not valid or cannot be reached (a missing drive, a name not allowed, or a file in its place).', { setting }),
-    no_access: () => t('The copy of the settings in {setting} was not written: Chiefmate may not write in that folder.', { setting }),
+    no_access: () => t('The copy of the settings in {setting} was not written: Chiefmate has no permission to write in that folder.', { setting }),
     disk_full: () => t('The copy of the settings in {setting} was not written: the disk is full.', { setting }),
     in_git: () => t('The full copy of the settings is not written in {setting}: the folder is inside a git repository, and that copy carries your notes and secrets.', { setting }),
     same_folder: () => t('The full copy of the settings is not written in {setting}: it is the same folder as backup_dir, which keeps the redacted copy.', { setting }),
@@ -189,8 +189,13 @@ async function watch() {
   if (JSON.stringify(a) !== before) saveState(state);
   readWhenDue(config);
 
-  // A copy of the settings failing: the manager has it in its situation (backupLine), so it isn't news.
-  for (const p of backupAlerts(config)) send.push({ ...backupText(p), target: 'chiefmate:operations' });
+  // A copy of the settings failing: the manager has it in its situation (backupLine), so it isn't news. Its trouble
+  // never holds back the alerts above, already marked as sent.
+  try {
+    for (const p of backupAlerts(config)) send.push({ ...backupText(p), target: 'chiefmate:operations' });
+  } catch (error) {
+    console.error('Settings backup:', error.message);
+  }
 
   if (lowMemory) {
     await processes(60_000).catch(() => {});
@@ -209,14 +214,14 @@ let backupTried = Date.now(); // the start has just made the copies
  * The settings' backup, for the watch: while a copy fails, tries again every BACKUP_RETRY_MINUTES (the notice leaves
  * once it works), then returns the problems the owner was not told of yet, marked as told: each cause once while it lasts.
  */
-export function backupAlerts(config, file = BACKUP_PROBLEMS) {
-  if (!backupProblems(file).length) return [];
+export function backupAlerts(config, { problems = BACKUP_PROBLEMS, fullDir = FULL_BACKUP_DIR } = {}) {
+  if (!backupProblems(problems).length) return [];
   if (Date.now() - backupTried >= BACKUP_RETRY_MINUTES * 60_000) {
     backupTried = Date.now();
-    backupConfig(config, { problems: file });
+    backupConfig(config, { fullDir, problems });
   }
-  const fresh = backupProblems(file).filter(p => !p.told);
-  if (fresh.length) markBackupTold(fresh, file);
+  const fresh = backupProblems(problems).filter(p => !p.told);
+  if (fresh.length) markBackupTold(fresh, problems);
   return fresh;
 }
 

@@ -2088,7 +2088,7 @@
   "To renew it, run in a terminal: {command}": "Para renovar, rode num terminal: {command}",
   "Settings backup failed": "A cópia da configuração falhou",
   "The copy of the settings in {setting} was not written: the folder is not valid or cannot be reached (a missing drive, a name not allowed, or a file in its place).": "A cópia da configuração em {setting} não foi gravada: a pasta não é válida ou não está acessível (unidade ausente, nome não permitido ou um arquivo no lugar dela).",
-  "The copy of the settings in {setting} was not written: Chiefmate may not write in that folder.": "A cópia da configuração em {setting} não foi gravada: o Chiefmate não tem permissão para gravar nessa pasta.",
+  "The copy of the settings in {setting} was not written: Chiefmate has no permission to write in that folder.": "A cópia da configuração em {setting} não foi gravada: o Chiefmate não tem permissão para gravar nessa pasta.",
   "The copy of the settings in {setting} was not written: the disk is full.": "A cópia da configuração em {setting} não foi gravada: o disco está cheio.",
   "The full copy of the settings is not written in {setting}: the folder is inside a git repository, and that copy carries your notes and secrets.": "A cópia completa da configuração não é gravada em {setting}: a pasta fica dentro de um repositório git, e essa cópia leva suas anotações e segredos.",
   "The full copy of the settings is not written in {setting}: it is the same folder as backup_dir, which keeps the redacted copy.": "A cópia completa da configuração não é gravada em {setting}: é a mesma pasta de backup_dir, que guarda a cópia sem dados pessoais.",
