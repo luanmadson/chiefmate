@@ -206,6 +206,15 @@ A finished run's work goes in only when you say so. Chiefmate merges it itself, 
 - **When it fails.** The error shows in the app, and the manager hears of it at once (`merge_failed`). A conflict with the main branch is the crew's to solve: the manager queues a task that brings the run's branch up to date and solves it, and tells you in one line; its new pull request (or branch) replaces the old one. A branch settles by itself once the new one is merged; the old pull request is closed by the manager (or by you) with `node src/cli.mjs close-pr <old run> --replaced-by <new run> --yes`, which comments on it naming the new one and records who asked. It refuses unless the new run, of the same project and with its pull request open or merged, works on the same board item or names the old run (its id, branch or pull request) in its instruction. Anything else (your clone on another branch or with changes, GitHub refusing for another reason), the manager tells you what to do.
 - **After it.** The run shows "Merged", by you or by the manager; its item on the board becomes done, and its pull request notice goes away. A merge from the app is news to the manager (`merged`). The crew can never merge: the command refuses to run inside a step.
 
+### Speech bubbles
+
+Each agent at work has a speech bubble beside its name: in Operations (on the run's card and in "Crew on board"), in the Crew section and on the project's page (the crew in **Crew**, the runs in **Tasks and history**). It says, in plain words and in the first person, what the agent is doing and why ("Just finishing the tests; one failed and I'm fixing it"), with the time and its state in a word and a color: working (blue), calling you (bright red, tinted, its mark pulsing: the step waits for you), waiting (amber: a pause or the plan's limit), stuck (red) or part done (green, quiet). A run in the queue shows its agent's last line as waiting.
+
+- **The agent speaks.** A step runs `node <chiefmate>/src/cli.mjs say "<one short line>"` when it starts, moves to another stage, hits a problem or changes course, gets a request from the manager or from you, and when it finishes: at most one line every few minutes, only when there is something new (at most 160 characters; a line said within a minute of its last one takes its place).
+- **Who asked.** The bubble opens with who asked for the task: the manager ("<manager> (Manager) asked: …") for a task it queued, the project's team lead for a task it planned, or you; your messages from the agent's panel go in it too.
+- **Chiefmate speaks for it.** When the agent has said nothing for ten minutes, the bubble shows what it is doing ("I'm running the tests."), marked **automatic**; Chiefmate also writes the lines it knows: a request for you ("I need you: …", calling you while the step waits for your answer), a pause, the plan's limit, the end of its part (with the sentence of its summary) or why it stopped. A step with no action for twenty minutes shows as stuck.
+- **Its history.** A click on a bubble opens what was said in that run, newest first (the latest 30 lines). The lines are kept in the run (`speech` in `data/runs/<id>.json`, at most 200).
+
 ### Talking to an agent at work
 
 A click on an agent at work (in Operations, the Crew section, the crews by project or the project in focus) opens a panel at the side of the app:
@@ -851,6 +860,7 @@ node src/cli.mjs needs-you "..." [--url <address>] [--wait] [--check "<command>"
                                               for a step: asks you to act and, with --wait, waits for "I did it"
 node src/cli.mjs needs-you "..." --options "A|B" [--recommend A] [--why "..."]
                                               for a step: asks you to choose, one button per option (or in your words), and waits
+node src/cli.mjs say "..."                     for a step: one short line for its speech bubble in the app
 node src/cli.mjs prompts-sync                 brings the prompt builder's document up to date (the library's copy, or Google Docs)
 node src/cli.mjs limits --window-5h 0.85 --plan-week 0.9
 node src/cli.mjs autopilot [on|off] [--mode save|normal|all] [--week-pace 1.2|all] [--window-5h 0.85] [--quiet 23:00-07:00|off] [--report 08:00|off]

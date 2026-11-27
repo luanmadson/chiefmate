@@ -244,6 +244,8 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 for a step of a run: asks the owner to choose, one button per option
                                                 (the recommended one marked) and a field to write, and waits for the
                                                 answer: the option, what the owner wrote, or both
+  node src/cli.mjs say "<one short line>"       for a step of a run: what the agent is doing and why, in the first
+                                                person, shown in its speech bubble in the app
   node src/cli.mjs prompts-sync                 brings the prompt builder's document up to date: the library's copy
                                                 (git), or a copy from Google Docs through your browser
   node src/cli.mjs limits [--window-5h 0.85] [--plan-week 0.9]
@@ -1130,6 +1132,13 @@ async function main() {
     case 'needs-you':
       await needsYou();
       return;
+    case 'say': {
+      // A line for the agent's speech bubble (src/speech.mjs): only a step of a run speaks.
+      if (!process.env.CHIEFMATE_RUN) throw new Error('say is for a step of a Chiefmate run (CHIEFMATE_RUN is not set).');
+      const said = await api('/api/say', { run: process.env.CHIEFMATE_RUN, step: process.env.CHIEFMATE_STEP, text: words().join(' ') });
+      console.log(`Shown in your speech bubble: "${said.text}"`);
+      return;
+    }
     case 'session':
       await sessionCommand();
       return;

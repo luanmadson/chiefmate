@@ -21,6 +21,7 @@ import {
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { builderSettings, projectInstructions, writtenInstructions } from './prompts.mjs';
+import { addSpeech, askedBy, speechRule } from './speech.mjs';
 import { listRuns, readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
 import { chooseTool, GROK_DENY, LOGIN_COMMAND, parseTool, qualityRecords, recordQuality, runTool, signedIn, TOOL_NAMES, toolEffort, toolModel } from './tools.mjs';
@@ -51,6 +52,21 @@ export const livePublic = l => ({
 
 /** What the agent of a run going on is doing now, in plain words (one short line). */
 export const doingNow = l => (Date.now() < (l.heldUntil ?? 0) ? t('waiting for you') : l.doing ?? null);
+
+/** What the bubble of a run going on needs (speechNow in src/speech.mjs). */
+export const liveSpeech = l => ({ step: l.step, agent: l.agent, doing: doingNow(l), held: Date.now() < (l.heldUntil ?? 0), lastAt: l.actions?.at(-1)?.at ?? null, since: l.started ?? null });
+
+/** A line said by the agent of a run going on (cli.mjs say), for its speech bubble. Returns the entry. */
+export function stepSays(runId, step, text) {
+  const l = liveOf(String(runId ?? ''));
+  const run = activeRun(String(runId ?? ''));
+  if (!l || !run || !l.agent) throw new Error(t('No agent is at work on this run now: only a step going on speaks.'));
+  if (step && Number(step) !== l.step) throw new Error(t('This step is no longer going on.'));
+  const entry = addSpeech(run, { step: l.step, agent: l.agent, by: 'agent', text });
+  if (!entry) throw new Error(t('Say something: one short line.'));
+  saveRun(run);
+  return entry;
+}
 
 // No agent pushes anything to GitHub or changes it: Chiefmate itself pushes the branch and opens the pull request.
 // These rules catch the commands that start with them; the guard (guard.mjs, see crewGuard) catches the rest, however
@@ -85,6 +101,7 @@ function crewRules(config, project, projectId, reportLang = config.language || '
 - When you need ${config.owner || 'the owner'} to act (sign in somewhere, confirm something, do what only a person can do), don't stop and don't work around it: run \`${cliCommand()} needs-you "<what to do, in ${owner}>" [--url <address>] [--wait] [--check "<command that succeeds once it is done>"]\` with the Bash tool's timeout at 600000 ms. Chiefmate shows the request to the owner and opens the address in their browser. With --wait the command returns once the owner clicks "I did it" (or the check succeeds); if it says it is still waiting, run the command it prints. If it gives up waiting, finish what you can and say in your report what is left for the owner. Never type passwords or codes yourself.
 - When you notice an error or failure of Chiefmate or of the communication between agents (a notice that never came, outdated information on the board or in your opening context, a Chiefmate command or tool that failed, a missing instruction), report it on your own at once, without waiting for ${config.owner || 'the owner'} to ask: \`${cliCommand()} defect report "<what happened>. Expected: <what should have happened>."\`. One report per defect, then go on with your work, and mention it in your report. It reaches the manager marked as your step's, never as ${config.owner || 'the owner'}'s message, and writes nothing in the project's folder.
 - ${config.owner || 'The owner'} may write to you directly from the app while you work: the message arrives as your next turn, with your work kept as it was. Answer it in one short message, then go on. To ask ${config.owner || 'the owner'} to choose ("Resend or SES?"), run \`${cliCommand()} needs-you "<the question, in ${owner}>" --options "<option>|<option>" --recommend <option> --why "<one short sentence: why you recommend it>"\` (2 to 6 short options, in ${owner}): they get one button per option and a field to write, and the command waits and prints the answer: the option, their own words, or both. Keep needs-you without options for what they must do outside the app. For an open question, use needs-you with --wait: they can answer from the app, and the answer comes back as the command's output.
+${speechRule(cliCommand(), owner, config.owner || 'the owner')}
 - Your last message is the step's report, in ${languageName(reportLang)}: short markdown with what you did (and the files), the sources you used, what you left out and why, and what the reviewer should check. ${config.owner || 'The owner'} must understand it in seconds, so it starts with this final summary, in plain words and with these headings exactly, the full report under the last one ("Needs you?" says whether ${config.owner || 'the owner'} must do something besides reviewing the work, and what):
 ${fenced(outcomeTemplate(reportLang), 'markdown')}`;
 }
@@ -272,6 +289,25 @@ export function pauseLive(id, why = 'update', { holdWhile = null } = {}) {
  * src/power.mjs); "focus" pauses one run alone (src/steer.mjs). Returns the ids it asked.
  */
 export const pauseAll = (why = 'update') => [...live.keys()].filter(id => pauseLive(id, why));
+
+/** The bubble's line of a step that paused (src/speech.mjs), in the first person. */
+function pausedLine(why) {
+  if (why === 'owner') return t("I paused at a safe point while you work on this project; I'll go on when your session ends.");
+  if (why === 'standby') return t("I paused at a safe point: Chiefmate is on standby. I'll go on when it's back.");
+  if (why === 'focus') return t('I paused at a safe point: this project is out of your focus for now.');
+  if (why === 'stop') return t("I paused at a safe point: Chiefmate is shutting down. I'll go on at the next start.");
+  return t("I paused at a safe point for an update of Chiefmate; I'll go on right after it.");
+}
+
+/** The bubble's line of a step that ended, or that waits for the plan's limit: { text, state }. */
+export function endLine(step, waitUntil = null) {
+  if (waitUntil) return { state: 'waiting', text: t("Stopped: the plan's usage limit was reached. I'll go on after {time}.", { time: formatDateTime(waitUntil) }) };
+  if (step.status === 'done') {
+    const change = String(step.outcome?.change ?? '').trim();
+    return { state: 'done', text: change ? t('My part is done: {change}', { change }) : t('My part is done.') };
+  }
+  return { state: 'stuck', text: t('Stopped: {error}', { error: step.error || t('the step failed') }) };
+}
 
 /** The note of a run paused for an update or a power mode, until it resumes. */
 function pausedNote(why) {
@@ -724,6 +760,9 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0, talking: false, reply: null, session: null,
     doing: finalReview ? t('reviewing the work') : step.role === 'plan' ? t('planning the request') : t('getting started'),
   });
+  // The bubble opens with who asked for the task (src/speech.mjs).
+  const asked = paused ? null : askedBy(run, step);
+  if (asked) addSpeech(run, { step: index + 1, agent: step.agent, ...asked });
   saveRun(run);
   if (['expired', 'off', 'unknown'].includes(choice.reason)) {
     logAction(l, { type: 'action', text: t('{tool} is not available to the crew now: this step runs on Claude Code', { tool: TOOL_NAMES[choice.asked] ?? choice.asked }) });
@@ -785,6 +824,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     for (const m of messages) Object.assign(m, { status: 'delivered', delivered: now(), via: 'resume' });
     if (messages.length) l.reply = messages.at(-1).id;
     turn = updatedTurn(messages, config, paused.why ?? 'update', [gitRecovery, freshNote].filter(Boolean).join(' '));
+    addSpeech(run, { step: index + 1, agent: step.agent, by: 'auto', state: 'working', text: t("I'm back from the pause and going on where I stopped.") });
     logAction(l, { type: 'action', text: (paused.why ?? 'update') === 'update' ? t('Chiefmate was updated: the agent goes on in the same session') : t('Back from the pause: the agent goes on in the same session') });
   }
   let r;
@@ -850,6 +890,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   l.reply = null;
   if (pausedNow) {
     Object.assign(step, { status: 'pending', paused: { session: r.session ?? l.session ?? session.id, spentMs, total, at: now(), why: l.pauseRequest } });
+    addSpeech(run, { step: index + 1, agent: step.agent, by: 'auto', state: 'waiting', text: pausedLine(l.pauseRequest) });
     logAction(l, { type: 'action', text: l.pauseRequest === 'update' ? t('Paused for the update: the step resumes in the same session afterwards') : t('Paused: the step resumes in the same session afterwards') });
     saveRun(run);
     return { paused: true };
@@ -866,6 +907,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     context: r.context ? { ...r.context, compactions: l.context?.compactions ?? r.context.compactions } : null,
     outcome: outcome ? { ...outcome, lang: reportLang } : null,
   });
+  addSpeech(run, { step: index + 1, agent: step.agent, by: 'auto', ...endLine(step, waitUntil) });
   if (r.context?.used) {
     logAction(l, { type: 'action', text: t('Context at the end of the step: {used} of {window} tokens ({percent}), {count} compaction(s)', {
       used: formatNumber(r.context.used), window: formatNumber(r.context.window), percent: formatPercent(r.context.used / r.context.window), count: step.context.compactions,

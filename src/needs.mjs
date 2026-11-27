@@ -13,6 +13,7 @@ import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { activeRun, liveOf } from './runs.mjs';
 import { listRuns, readRun, runEnded, saveRun, stepsOf } from './store.mjs';
+import { addSpeech } from './speech.mjs';
 import { agentSays } from './talk.mjs';
 import { openOwnerPage } from './usagepage.mjs';
 import { clip, now } from './util.mjs';
@@ -77,6 +78,10 @@ export async function askOwner({ run: runId, step, what, url, wait = false, chec
   (run.requests ??= []).push(request);
   // The request is also part of the direct conversation: the owner can answer it from the agent's panel.
   agentSays(run, { step: n, agent: request.agent, text: request.what, kind: 'request', request: request.id });
+  // And the agent's speech bubble calls the owner while the step waits for them (src/speech.mjs).
+  addSpeech(run, request.wait
+    ? { step: n, agent: request.agent, by: 'auto', state: 'calling', text: t('I need you: {what}', { what: request.what }) }
+    : { step: n, agent: request.agent, by: 'auto', text: t("I left you a request and I'm going on meanwhile: {what}", { what: request.what }) });
   saveRun(run);
   notify(t('Needs you: {title}', { title: run.title }), request.what, 'chiefmate:operations', { urgent: true });
   reportEvent('needs_you', `${request.agent ?? 'A step'} in run ${run.id} "${run.title}" (project ${run.project}) needs the owner: ${request.what}${request.options ? ` (options: ${request.options.join(' | ')}${request.recommend ? `; recommends ${request.recommend}` : ''})` : ''}${request.url ? ` (address: ${request.url}, opened in the owner's browser)` : ''}${request.wait ? (request.options ? '. The step waits for the owner to choose in the app.' : '. The step waits until the owner clicks "I did it" in the app.') : '. The step goes on meanwhile.'}`);
