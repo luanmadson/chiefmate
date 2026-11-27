@@ -191,6 +191,10 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .statusbar { grid-area: status; display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 0 14px; font-size: 12px; color: var(--muted); background: var(--panel); border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden; }
 .statusbar .group { display: flex; gap: 18px; align-items: center; overflow: hidden; }
 .statusbar .num { color: var(--text); }
+.statusbar .sb-short { display: none; }
+/* Little time left in the 5-hour window and much of it unused: a quiet brass mark with the way to the autopilot */
+.statusbar .sb-spare { color: var(--accent); background: var(--accent-bg); border: 1px solid var(--accent); padding: 1px 7px; }
+.statusbar .sb-spare a { text-decoration: underline; text-underline-offset: 2px; }
 
 /* Common parts */
 .panel { background: var(--panel); border: 1px solid var(--line); padding: 16px 18px; }
@@ -1046,8 +1050,10 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   .titlebar { height: calc(48px + env(safe-area-inset-top)); padding: env(safe-area-inset-top) max(12px, env(safe-area-inset-right)) 0 max(12px, env(safe-area-inset-left)); }
   .project-jump { display: none; }
   .away { min-width: 44px; justify-content: center; }
-  .statusbar { display: none; }
-  .statusbar.offline { display: flex; height: 28px; }
+  /* The status bar keeps only the account's usage, short (or the lost connection); the spare mark, while it lasts (under an hour), takes the whole bar */
+  .statusbar { height: 28px; }
+  .statusbar:not(.offline) .sb-run, .statusbar .sb-desk, .statusbar .sb-long, .statusbar:has(.sb-spare) :is(.sb-five, .sb-week) { display: none; }
+  .statusbar .sb-short { display: inline; }
 
   /* The bottom bar: Manager, Operations, Planning, Projects and More, each 56 px high, the marks on a line of their own */
   .nav { flex-wrap: wrap; overflow: visible; border-bottom: 0; border-top: 1px solid var(--line-strong); padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }

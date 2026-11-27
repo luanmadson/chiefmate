@@ -1825,5 +1825,13 @@
   "Your conversation with the manager, without leaving the project. What you send from here says which project it is about.": "Sua conversa com o gerente, sem sair do projeto. O que você envia daqui diz de qual projeto se trata.",
   "The crew is working on this project": "A equipe está trabalhando neste projeto",
   "Work in a separate copy": "Trabalhar numa cópia separada",
-  "Pause the crew's task": "Pausar a tarefa da equipe"
+  "Pause the crew's task": "Pausar a tarefa da equipe",
+  "renews in {left}": "renova em {left}",
+  "renews {when}": "renova {when}",
+  "renewed": "já renovou",
+  "{hours}h{minutes}": "{hours}h{minutes}",
+  "{days}d{hours}h": "{days}d{hours}h",
+  "5 h": "5 h",
+  "Week": "Semana",
+  "{free} spare, renews in {left}": "Sobra {free}, renova em {left}"
 }
