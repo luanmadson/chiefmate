@@ -842,7 +842,8 @@ node src/cli.mjs edit <run> [--instruction-append "..."] [--title ...] [--summar
                                               changes a run still in the queue
 node src/cli.mjs guide <run> "<message>"      the manager's guidance to the agent at work, delivered at a safe point
 node src/cli.mjs retry <run> [--step n] [--agent ...] [--tool ...]
-                                              redoes one step of a run that failed, was canceled or paused
+                                              redoes one step of a run that failed, was canceled or paused, and the
+                                              reviews after it
 node src/cli.mjs gap "<what was missing>"     for the manager: records a tool Chiefmate lacks (a command it doesn't
                                               know is recorded by itself); the second time, it becomes a proposal on
                                               the planning board. gap list; gap close <n>

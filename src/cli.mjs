@@ -188,7 +188,8 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 agent at a safe point, recorded as the manager's (the app shows it)
   node src/cli.mjs retry <run> [--step n] [--agent <member>] [--tool claude|codex|grok|""]
                                                 redoes one step of a run that failed, was canceled or paused (by
-                                                default the first one not done), with another agent or tool if given
+                                                default the first one not done), with another agent or tool if given;
+                                                the reviews after it run again
   node src/cli.mjs gap "<what was missing>" [--example "<command>"]
                                                 records a tool the manager needed and Chiefmate lacks; the second time,
                                                 it becomes a proposal on the planning board. gap list; gap close <n>

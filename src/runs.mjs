@@ -289,6 +289,9 @@ export function editRun(id, { append, title, summary, agent, tool, level } = {},
   if (agent != null) {
     const todo = run.steps.filter(s => s.status === 'pending' && s.agent !== LEAD);
     if (!todo.length) throw new Error(t('This run has no crew step to change the agent of: its team lead plans the tasks.'));
+    // Steps of different members are never all given to one: one of them changes with retry --step.
+    const members = [...new Set(todo.map(s => s.agent))];
+    if (members.length > 1) throw new Error(t('Its steps are for different members ({agents}): change one with retry <run> --step <n> --agent <member>.', { agents: members.join(', ') }));
     for (const s of todo) s.agent = stepAgent(run, s, agent, config);
     changes.push('agent');
   }
@@ -315,7 +318,8 @@ export function editRun(id, { append, title, summary, agent, tool, level } = {},
 /**
  * Redoes one step of a run that stopped (failed, canceled or paused), or of one still waiting: step (from 1; by default
  * the first one not done), with another agent or tool if given. The step and the ones after it that did not finish
- * run again; what is done stays done. Returns the run, queued again.
+ * run again, and so do the reviews after it (the team lead's and the final one), even when done: the work they judged
+ * changes. The other steps done stay done. Returns the run, queued again.
  */
 export function retryRun(id, { step, agent, tool } = {}, { by = 'manager', config = loadConfig() } = {}) {
   const run = readRun(String(id ?? ''));
@@ -325,7 +329,11 @@ export function retryRun(id, { step, agent, tool } = {}, { by = 'manager', confi
     throw new Error(t('Only a run that failed, was canceled or paused (or still waits) can redo a step (this one is {status}): queue a new task instead.', { status: run.status }));
   }
   const steps = run.steps;
-  const n = step != null && step !== '' ? Number(step) : steps.findIndex(s => s.status !== 'done') + 1;
+  const left = steps.findIndex(s => s.status !== 'done');
+  const asked = step != null && step !== '';
+  // Every step done: the run stopped at its review, checks or delivery, which resume does again.
+  if (!asked && left < 0) throw new Error(t('Every step of this run is done: resume it to redo what stopped after them, or choose a step with --step.'));
+  const n = asked ? Number(step) : left + 1;
   const target = steps[n - 1];
   if (!Number.isInteger(n) || !target) throw new Error(t('Step {n} does not exist: this run has {count} step(s).', { n: step ?? '-', count: steps.length }));
   if (agent != null && String(agent).trim()) target.agent = stepAgent(run, target, agent, config);
@@ -334,7 +342,8 @@ export function retryRun(id, { step, agent, tool } = {}, { by = 'manager', confi
     if (chosen) target.toolAsked = chosen;
     else delete target.toolAsked;
   }
-  for (const s of [target, ...steps.slice(n).filter(s => s.status !== 'done'), ...(run.review && run.review.status !== 'done' ? [run.review] : [])]) {
+  const reviewsAfter = steps.slice(n).filter(s => s.agent === LEAD && s.role === 'review');
+  for (const s of new Set([target, ...steps.slice(n).filter(s => s.status !== 'done'), ...reviewsAfter, ...(run.review ? [run.review] : [])])) {
     s.status = 'pending';
     delete s.paused;
   }

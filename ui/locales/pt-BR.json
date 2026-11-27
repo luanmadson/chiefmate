@@ -1806,6 +1806,8 @@
   "Step {n} does not exist: this run has {count} step(s).": "O passo {n} não existe: esta execução tem {count} passo(s).",
   "Step {n} runs again ({agent}).": "O passo {n} roda de novo ({agent}).",
   "The team lead's steps stay the team lead's: choose another member of the crew.": "Os passos do líder de equipe continuam com ele: escolha outro membro da equipe.",
+  "Its steps are for different members ({agents}): change one with retry <run> --step <n> --agent <member>.": "Os passos dela são de membros diferentes ({agents}): troque um com retry <execução> --step <n> --agent <membro>.",
+  "Every step of this run is done: resume it to redo what stopped after them, or choose a step with --step.": "Todos os passos desta execução estão feitos: retome-a (resume) para refazer o que parou depois deles, ou escolha um passo com --step.",
   "Say \"move\", \"hold\" or \"release\".": "Diga \"move\", \"hold\" ou \"release\".",
   "The manager guided: \"{text}\"": "O gerente orientou: \"{text}\"",
   "Guidance from the manager during this step": "Orientação do gerente durante este passo",

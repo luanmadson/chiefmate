@@ -711,12 +711,21 @@ try {
     const retried = readJson(path.join(data, 'runs', 'smoke-failed.json'));
     expect(retried.status === 'queued' && retried.steps[0].status === 'done' && retried.steps[1].status === 'pending' && retried.steps[1].agent === 'designer' && retried.retries?.[0]?.step === 2,
       `a failed step was not redone with another agent: ${JSON.stringify(retried)}`);
+    // A run stopped after its review: with every step done, retry points to resume and changes nothing; a step redone
+    // brings its review back. Steps of different members are never all given to one by edit.
+    queuedRun('smoke-delivery', 8, { status: 'failed', ended: at(4), steps: [{ agent: 'generalist', part: 'One.', status: 'done' }], review: { agent: 'manager', part: 'Review.', status: 'done' } });
+    expect(/Error/.test(refusedCli(['retry', 'smoke-delivery'], manager)) && readJson(path.join(data, 'runs', 'smoke-delivery.json')).status === 'failed', 'a run with every step done was retried with no step chosen');
+    cli(['retry', 'smoke-delivery', '--step', '1'], manager);
+    const redone = readJson(path.join(data, 'runs', 'smoke-delivery.json'));
+    expect(redone.status === 'queued' && redone.steps[0].status === 'pending' && redone.review?.status === 'pending', `a step redone after the review did not bring the review back: ${JSON.stringify(redone)}`);
+    queuedRun('smoke-q3', 15, { steps: [{ agent: 'generalist', part: 'One.', status: 'pending' }, { agent: 'designer', part: 'Two.', status: 'pending' }] });
+    expect(/Error/.test(refusedCli(['edit', 'smoke-q3', '--agent', 'generalist'], manager)) && readJson(path.join(data, 'runs', 'smoke-q3.json')).steps[1].agent === 'designer', 'the steps of different members were all given to one');
     expect(/Error/.test(refusedCli(['guide', 'smoke-q1', 'Look at the footer'], manager)) && !readJson(path.join(data, 'runs', 'smoke-q1.json')).talk, 'guidance went to a run with no agent at work');
     const firstGap = refusedCli(['frobnicate', 'x'], manager);
     const secondGap = refusedCli(['frobnicate', 'y'], manager);
     expect(/tool gap #\d+ \(1x\)/.test(firstGap) && /tool gap #\d+ \(2x\)/.test(secondGap) && /frobnicate/.test(cli(['gap', 'list'])), `a command the manager lacked was not recorded as a tool gap: ${firstGap} / ${secondGap}`);
     expect(!/tool gap/.test(refusedCli(['frobnicate'], { CHIEFMATE_MANAGER: '' })), "the owner's unknown command was recorded as the manager's gap");
-    for (const id of ['smoke-q1', 'smoke-q2', 'smoke-failed']) rmSync(path.join(data, 'runs', `${id}.json`), { force: true });
+    for (const id of ['smoke-q1', 'smoke-q2', 'smoke-q3', 'smoke-failed', 'smoke-delivery']) rmSync(path.join(data, 'runs', `${id}.json`), { force: true });
 
     // The CLI sends the destination options to the running API. The queue is held while the approval is tested, and
     // the run it queues (in a real project) is canceled: a later part of this test wakes the queue up.
