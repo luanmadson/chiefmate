@@ -827,10 +827,73 @@ function lockdownBand() {
   return `<div class="lockdown-band" role="alert">
       <strong>${esc(t('EMERGENCY LOCKDOWN'))}</strong>
       <span>${esc(t('Since {time}: {reason}', { time: shortDate(l.since), reason: l.reason ?? '' }))}</span>
-      <span class="lockdown-note">${esc(online ? t('Everything is stopped. Pushes, merges, new repositories, external actions and the remote access are refused.') : t('Everything is stopped, and the remote access shows nothing else until you release it.'))}</span>
+      <span class="lockdown-note">${esc(watchLine(l) || (online ? t('Everything is stopped. Pushes, merges, new repositories, external actions and the remote access are refused.') : t('Everything is stopped, and the remote access shows nothing else until you release it.')))}</span>
       ${action}
     </div>`;
 }
+
+/** What the emergency watch (src/sentinel.mjs) is doing about the alarm, in one line, or ''. */
+function watchLine(l) {
+  const s = l?.sentinel;
+  if (s?.status === 'reviewing') return t('Everything is stopped. Sentinel (Emergency watch) is checking whether it is a false alarm.');
+  if (s?.status === 'escalated') return t('Sentinel (Emergency watch) kept everything stopped: it needs you.');
+  return '';
+}
+
+const VERDICT_NAMES = () => ({ false_alarm: t('false alarm'), real: t('real'), uncertain: t('uncertain') });
+const yesNo = v => (v === null || v === undefined ? t("couldn't check") : v ? t('yes') : t('no'));
+
+/** The emergency watch's report: who, what ran or was refused, what was checked, each analyst's verdict and why it stays. */
+function watchReportHtml(s) {
+  if (!s || s.status === 'off') return '';
+  if (s.status === 'reviewing') return `<p class="lockdown-watch">${esc(t('Sentinel (Emergency watch) is checking it now: the checks in code, then two analysts. Everything stays stopped meanwhile.'))}</p>`;
+  const people = (s.incident?.involved ?? []).map(x => `<li>
+      <strong>${esc(x.agent ? `${t(x.agent.name)}${x.agent.title ? ` (${t(x.agent.title)})` : ''}` : x.who ?? '—')}</strong>
+      ${esc([x.projectName && t('project: {name}', { name: x.projectName }), x.task && t('task: {title}', { title: x.task }), x.step && t('step {n} of {total}', { n: x.step, total: x.steps ?? '?' })].filter(Boolean).join(' · '))}
+      <div><code>${esc(x.command)}</code></div>
+      <div class="muted">${esc([x.cwd && t('in {folder}', { folder: x.cwd }), x.refused ? t('refused by the guard') : t('it ran')].filter(Boolean).join(' · '))}</div>
+    </li>`).join('');
+  const c = s.checks ?? {};
+  const changes = c.protected === null || c.protected === undefined ? t("couldn't check") : c.protected.length ? c.protected.map(x => `${x.path} (${x.what})`).join('; ') : t('none');
+  const out = c.outbound === null || c.outbound === undefined ? t("couldn't check") : c.outbound.length ? c.outbound.map(x => x.command).join('; ') : t('none');
+  const types = { own_folder_delete: t('deleting a folder the same step created'), github_read: t('reading GitHub with a command taken for a publication') };
+  const checks = [
+    [t('Refused or harmless'), yesNo(c.refused || c.harmless)],
+    [t('Changes in protected places'), changes],
+    [t('Sent out'), out],
+    [t('Kind of alarm'), types[c.type] ?? t('not on the list the watch may release')],
+    [t('Second alarm in 24 h'), yesNo(c.repeat)],
+    [t('Involves the manager'), yesNo(c.manager)],
+  ].map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+  const tools = { claude: 'Claude Code', codex: 'Codex' };
+  const verdicts = (s.verdicts ?? []).map((v, i) => `<li><strong>${esc(t('Analyst {letter}', { letter: 'AB'[i] }))}</strong> (${esc(tools[v.tool] ?? v.tool)}): ${esc(VERDICT_NAMES()[v.verdict] ?? v.verdict)}, ${esc(t('confidence {n}%', { n: Math.round((v.confidence ?? 0) * 100) }))}${v.reason ? ` · ${esc(v.reason)}` : ''}${v.error ? ` <span class="muted">(${esc(v.error)})</span>` : ''}</li>`).join('');
+  const why = (s.decision?.reasons ?? []).map(r => reasonName(r)).join('; ');
+  return `<div class="lockdown-watch">
+      <div class="label">${esc(t('Sentinel (Emergency watch)'))}</div>
+      ${s.status === 'escalated' ? `<p><strong>${esc(t('Kept stopped for you'))}:</strong> ${esc(why)}</p>` : ''}
+      ${people ? `<ul class="lockdown-evidence">${people}</ul>` : ''}
+      <dl class="facts">${checks}</dl>
+      ${verdicts ? `<ul class="lockdown-evidence">${verdicts}</ul>` : ''}
+    </div>`;
+}
+
+/** Why the watch kept the lockdown, in words (src/sentinel.mjs, REASONS). */
+const reasonName = key => ({
+  ran: t('the command ran and is not known to be harmless'),
+  protected_unknown: t("the protected places couldn't be compared with their state before"),
+  protected_changed: t('something changed in a protected place'),
+  outbound_unknown: t("it couldn't check whether anything was sent out"),
+  outbound: t('something may have been sent out'),
+  type: t('this kind of alarm is not on the list the watch may release'),
+  analysts: t('the analysts did not both say false alarm'),
+  analysts_disagree: t('the analysts disagree'),
+  unsure: t('an analyst said false alarm without enough confidence'),
+  repeat: t('it is the second alarm within {hours} hours', { hours: 24 }),
+  manager: t('it involves the manager'),
+  new_evidence: t('more evidence came while it reviewed'),
+  engaged_again: t('someone engaged the lockdown again while it reviewed'),
+  error: t('its review failed'),
+}[key] ?? key);
 
 /** What triggered the lockdown and what it stopped, for the owner to read before releasing it. */
 function lockdownSummaryHtml(l) {
@@ -838,12 +901,34 @@ function lockdownSummaryHtml(l) {
   const where = { app: t('the app'), remote: t('the remote access'), cli: t('the command line'), detection: t('the detection') }[l.from] ?? l.from;
   const names = { runs: t('runs'), manager: t("manager's answer"), sessions: t('live session turns'), browsers: t('browsers') };
   const stopped = Object.entries(l.stopped ?? {}).filter(([k]) => names[k]).map(([k, n]) => `${names[k]}: ${n}`).join(' · ') || t('nothing was going on');
-  const evidence = (l.evidence ?? []).map(e => `<li><span class="muted">${esc(shortDate(e.at))}</span> ${esc(e.what)}${e.who ? ` (${esc(e.who)})` : ''}: <code>${esc(e.detail)}</code></li>`).join('');
+  const evidence = (l.evidence ?? []).map(e => `<li><span class="muted">${esc(shortDate(e.at))}</span> ${esc(e.what)}${e.who ? ` (${esc(e.who)})` : ''}: <code>${esc(e.command ?? e.detail)}</code>${e.cwd ? ` <span class="muted">${esc(t('in {folder}', { folder: e.cwd }))}</span>` : ''}</li>`).join('');
+  const notes = (l.notes ?? []).map(n => `<li><span class="muted">${esc(shortDate(n.at))}</span> ${esc(n.text)}</li>`).join('');
   return `<p>${esc(t('Since {time}, engaged by {who} from {where}.', { time: shortDate(l.since), who, where }))}</p>
     <p><strong>${esc(t('Reason'))}:</strong> ${esc(l.reason ?? '')}</p>
     <p><strong>${esc(t('What was stopped'))}:</strong> ${esc(stopped)}</p>
     ${evidence ? `<div class="label">${esc(t('Evidence'))}</div><ul class="lockdown-evidence">${evidence}</ul>` : ''}
+    ${watchReportHtml(l.sentinel)}
+    ${escalationSummaryHtml(l.escalation)}
+    ${notes ? `<div class="label">${esc(t('Your notes'))}</div><ul class="lockdown-evidence">${notes}</ul>` : ''}
     <p class="muted">${esc(t('After the release, the queue goes on. The runs it stopped stay canceled until you resume them.'))}</p>`;
+}
+
+/** Whether the owner was called outside the app (src/escalation.mjs), and what they chose on Telegram. */
+function escalationSummaryHtml(x) {
+  if (!x) return '';
+  const where = (x.channels ?? []).map(c => (c === 'telegram' ? 'Telegram' : t('e-mail'))).join(', ');
+  const errors = (x.errors ?? []).map(e => e.error).join('; ');
+  const lines = [where ? t('Called you on {where} at {time}.', { where, time: shortDate(x.at) })
+    : errors ? t("Couldn't reach you outside the app: {errors}", { errors }) : t('Not called outside the app: Telegram and the e-mail are not set up.')];
+  const names = { keep: t('Keep stopped'), release: t('Release'), pin_blocked: t('blocked after wrong PINs') };
+  for (const d of x.decisions ?? []) lines.push(t('On Telegram, {time}: {choice}.', { time: shortDate(d.at), choice: names[d.action] ?? d.action }));
+  return `<p class="muted">${lines.map(esc).join('<br>')}</p>`;
+}
+
+/** Sends the owner's note on the alarm: kept in its record, and told to the manager as the owner's message. */
+async function sendLockdownNote(note) {
+  await api('/api/lockdown', { action: 'note', note });
+  toast(t('Note sent: it is in the alarm record and goes to the manager.'));
 }
 
 document.addEventListener('click', event => {
@@ -854,13 +939,21 @@ document.addEventListener('click', event => {
   $('#lockdown-summary').innerHTML = lockdownSummaryHtml(l);
   $('#lockdown-reviewed').checked = false;
   $('#lockdown-release').disabled = true;
+  $('#lockdown-note').value = '';
   dialog.returnValue = '';
   dialog.showModal();
   dialog.addEventListener('close', async () => {
-    if (dialog.returnValue !== 'yes' || !$('#lockdown-reviewed').checked) return;
+    const note = $('#lockdown-note').value.trim();
     try {
-      await api('/api/lockdown', { action: 'release', confirm: true });
-      toast(t('Lockdown released: the queue goes on.'));
+      if (dialog.returnValue === 'note' && note) {
+        await sendLockdownNote(note);
+      } else if (dialog.returnValue === 'yes' && $('#lockdown-reviewed').checked) {
+        await api('/api/lockdown', { action: 'release', confirm: true, note });
+        toast(t('Lockdown released: the queue goes on.'));
+      } else if (note) {
+        // Kept locked, with a note: the note still goes.
+        await sendLockdownNote(note);
+      }
       refresh();
     } catch (error) {
       toast(error.message);
@@ -870,6 +963,60 @@ document.addEventListener('click', event => {
 $('#lockdown-reviewed').addEventListener('change', event => {
   $('#lockdown-release').disabled = !event.target.checked;
 });
+
+/**
+ * The phone's screen during a lockdown (the remote access answers 423 to everything else): what triggered it, the
+ * watch's report and a field for the owner's note; the release stays on the computer. Returns whether it was drawn.
+ */
+async function drawLockdownScreen() {
+  let data;
+  try {
+    const r = await fetch('/api/lockdown', { cache: 'no-store' });
+    if (!r.ok) return false;
+    data = await r.json();
+  } catch {
+    return false;
+  }
+  const l = data.lockdown;
+  if (!l?.active) return false;
+  // Opened during the lockdown: the owner's language, read once.
+  if (!started && language() !== (data.language || 'en')) {
+    await setLanguage(data.language);
+    translatePage();
+  }
+  let screen = $('#lockdown-screen');
+  if (!screen) {
+    screen = document.createElement('section');
+    screen.id = 'lockdown-screen';
+    screen.className = 'lockdown-screen';
+    screen.setAttribute('role', 'alert');
+    screen.innerHTML = `<div class="lockdown-band"><strong>${esc(t('EMERGENCY LOCKDOWN'))}</strong><span class="lockdown-note">${esc(t('Release it on the computer where Chiefmate runs.'))}</span></div>
+      <div class="lockdown-screen-body"><div data-lockdown-screen-summary></div>
+        <label class="label" for="lockdown-screen-note">${esc(t('Your note (it goes to the manager and stays in the alarm record)'))}</label>
+        <textarea id="lockdown-screen-note" rows="3"></textarea>
+        <div class="actions left"><button type="button" class="button" data-lockdown-screen-send>${esc(t('Send note'))}</button></div>
+      </div>`;
+    document.body.append(screen);
+    screen.querySelector('[data-lockdown-screen-send]').addEventListener('click', async () => {
+      const field = $('#lockdown-screen-note');
+      if (!field.value.trim()) return;
+      try {
+        await sendLockdownNote(field.value.trim());
+        field.value = '';
+        drawLockdownScreen();
+      } catch (error) {
+        toast(error.message);
+      }
+    });
+  }
+  const html = lockdownSummaryHtml(l);
+  const box = screen.querySelector('[data-lockdown-screen-summary]');
+  if (box.drawn !== html) {
+    box.innerHTML = html;
+    box.drawn = html;
+  }
+  return true;
+}
 
 // ---------- Power modes (src/power.mjs): standby, stop Chiefmate, shut the computer down ----------
 
@@ -2362,6 +2509,7 @@ function drawCrew() {
     <details class="effort-history" data-keep-open="effort-history"><summary>${esc(t('Effort changes ({count})', { count: changes.length }))}</summary>${changes.map(effortChangeHtml).join('') || `<div class="hint">${esc(t('No effort change recorded.'))}</div>`}<p class="hint">${esc(t('A change counts from the next step and shows in the report of the runs going on. Guide: docs/effort.md.'))}</p></details>`;
   if (!pickingEffort('#crew')) draw('#crew', html, html);
   drawTeams();
+  drawEscalation();
   drawPromptBuilder();
   if (!$('#task-project').options.length) {
     $('#task-project').innerHTML = state.projects.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
@@ -2402,9 +2550,143 @@ function drawTeams() {
     <div class="team">
       <div class="team-top"><h3>${projectLink(team.project, team.name)}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>
       ${teamBody(team)}
-    </div>`).join('')}</div>`;
+    </div>`).join('')}${watchTeamHtml(state.watch)}</div>`;
   if (!pickingEffort('#teams')) draw('#teams', html, html);
 }
+
+/** The emergency watch (src/sentinel.mjs), its own team: the Sentinel and its two analysts, each with name and role. */
+function watchTeamHtml(w) {
+  if (!w) return '';
+  const look = { sentinel: { color: '#c96a5d', face: 'cap' }, 'analyst-a': { color: '#8a93a0' }, 'analyst-b': { color: '#8a93a0' } };
+  const members = w.members.map(m => `<div class="team-member">${face({ ...m, ...look[m.id] }, online ? (m.status === 'working' ? 'working' : 'idle') : 'offline', 30)}<div><div class="name">${esc(`${m.name} (${m.title})`)}</div><div class="hint">${esc(m.role)}</div></div><div class="team-side">${stateHtml(m.status === 'working' ? [t('Reviewing an alarm'), 'warn'] : [t('On watch'), 'ok'])}</div></div>`).join('');
+  return `<div class="team">
+      <div class="team-top"><h3>${esc(t('Emergency watch'))}</h3><span class="hint">${esc(w.on ? t('Reviews every automatic alarm') : t('Off: every alarm waits for you'))}</span></div>
+      ${members}
+    </div>`;
+}
+
+// ---------- Calling you outside the app (src/escalation.mjs): Telegram, the PIN and the e-mail ----------
+
+let escalationLink = null; // the last link to the bot, while its code is good
+
+/** Where each part of the setup stands, in words. */
+function escalationStatus(e, key) {
+  if (key === 'telegram') return e.telegram ? t('Bot @{bot} checked.', { bot: e.telegram.bot }) : t('Not set up.');
+  if (key === 'link') return !e.telegram ? t('Save the token first.') : e.telegram.linking ? t('Waiting for your Start in Telegram…') : t('{count} chat(s) linked.', { count: e.telegram.chats });
+  if (key === 'pin') return e.pin.blocked ? t('Blocked after wrong PINs: set it again to use Telegram again.') : e.pin.set ? t('Set: only its salted hash is kept.') : t('Not set: releasing by Telegram needs it.');
+  if (key === 'email') return e.email ? t('To {to}, through {host}.', { to: e.email.to, host: e.email.host }) : t('Not set up (optional).');
+  return '';
+}
+
+function drawEscalation() {
+  const e = state.escalation;
+  if (!e) return draw('#escalation', '', '');
+  const facts = [['Telegram', 'telegram'], [t('Linked chat'), 'link'], ['PIN', 'pin'], [t('E-mail'), 'email']]
+    .map(([k, key]) => `<dt>${esc(k)}</dt><dd data-esc-status="${key}">${esc(escalationStatus(e, key))}</dd>`).join('');
+  const html = `<div class="panel">
+      <div class="label">${esc(t('Calling you outside the app'))}</div>
+      <p class="hint">${esc(t('When an emergency lockdown waits for you, Chiefmate writes to your own Telegram bot (Release with your PIN, Keep stopped, Details), or sends an e-mail when Telegram fails. Nothing else is sent: a false alarm the watch released stays here.'))}</p>
+      <dl class="facts">${facts}</dl>
+      ${e.ready ? '' : `<p>${stateHtml([t('Not set up: an escalation reaches you only in the app.'), 'warn'])}</p>`}
+      <div class="actions left"><button type="button" class="button small" data-escalation-open>${esc(e.ready ? t('Change') : t('Set up'))}</button></div>
+    </div>`;
+  draw('#escalation', JSON.stringify(e), html);
+  // The setup open: its statuses follow (a chat just linked), without touching what is being typed.
+  if ($('#escalation-dialog').open) for (const box of $('#escalation-steps').querySelectorAll('[data-esc-status]')) box.textContent = escalationStatus(e, box.dataset.escStatus);
+}
+
+/** The setup, step by step: the bot from BotFather, the chat linked with /start, the PIN, the e-mail and a test. */
+function fillEscalationDialog() {
+  const e = state.escalation;
+  const box = $('#escalation-steps');
+  // What was typed in the fields that are not secret stays.
+  const kept = Object.fromEntries([...box.querySelectorAll('input:not([type="password"]), select')].map(x => [x.id, x.value]));
+  const m = e.email ?? {};
+  const field = (id, label, value = '', type = 'text', extra = '') => `<label>${esc(label)}<input id="esc-${id}" type="${type}" value="${esc(value)}" autocomplete="off" ${extra}></label>`;
+  const link = escalationLink && Date.parse(escalationLink.until) > Date.now() && e.telegram?.linking
+    ? `<p><a href="${esc(escalationLink.link)}" target="_blank" rel="noopener noreferrer">${esc(escalationLink.link)}</a><br><span class="hint">${esc(t('Or send "{command}" to @{bot}.', { command: escalationLink.command, bot: escalationLink.bot }))}</span></p>` : '';
+  box.innerHTML = `
+    <div class="escalation-step">
+      <div class="label">${esc(t('1. Your bot'))}</div>
+      <p class="hint">${esc(t('In Telegram, open @BotFather, send /newbot, choose a name and a username ending in "bot", and paste the token it gives here. It stays on this computer, out of git.'))}</p>
+      <p data-esc-status="telegram">${esc(escalationStatus(e, 'telegram'))}</p>
+      ${field('token', t('Token'), '', 'password')}
+      <div class="actions left"><button type="button" class="button small" data-esc="token">${esc(t('Save the token'))}</button>${e.telegram ? `<button type="button" class="button secondary small" data-esc="remove-telegram">${esc(t('Remove Telegram'))}</button>` : ''}</div>
+    </div>
+    <div class="escalation-step">
+      <div class="label">${esc(t('2. Your chat'))}</div>
+      <p class="hint">${esc(t('Open the link on your phone and press Start: only the chats linked this way get the calls, and nobody else gets an answer.'))}</p>
+      <p data-esc-status="link">${esc(escalationStatus(e, 'link'))}</p>
+      ${link}
+      <div class="actions left"><button type="button" class="button small" data-esc="link" ${e.telegram ? '' : 'disabled'}>${esc(t('Get the link'))}</button></div>
+    </div>
+    <div class="escalation-step">
+      <div class="label">${esc(t('3. Your PIN'))}</div>
+      <p class="hint">${esc(t('Release on Telegram asks for it. 6 to 12 digits; only its salted hash is kept; each alarm has a single-use code that expires in 30 minutes; 3 wrong PINs block the release by Telegram.'))}</p>
+      <p data-esc-status="pin">${esc(escalationStatus(e, 'pin'))}</p>
+      <div class="fields">${field('pin', t('PIN'), '', 'password', 'inputmode="numeric"')}${field('pin2', t('The same PIN again'), '', 'password', 'inputmode="numeric"')}</div>
+      <div class="actions left"><button type="button" class="button small" data-esc="pin">${esc(t('Save the PIN'))}</button></div>
+    </div>
+    <div class="escalation-step">
+      <div class="label">${esc(t('4. E-mail, when Telegram fails (optional)'))}</div>
+      <p class="hint">${esc(t("It only warns you: the actions stay on Telegram and in the app. Use your provider's SMTP, with an app password where it asks for one."))}</p>
+      <p data-esc-status="email">${esc(escalationStatus(e, 'email'))}</p>
+      <div class="fields">
+        ${field('host', t('SMTP server'), m.host ?? '')}
+        <label>${esc(t('Security'))}<select id="esc-security">${['starttls', 'tls'].map(s => `<option value="${s}"${(m.security ?? 'starttls') === s ? ' selected' : ''}>${s === 'tls' ? 'TLS (465)' : 'STARTTLS (587)'}</option>`).join('')}</select></label>
+        ${field('port', t('Port'), m.port ?? '', 'text', 'inputmode="numeric"')}
+        ${field('user', t('Login'), m.user ?? '')}
+        ${field('pass', t('Password'), '', 'password', `placeholder="${esc(m.host ? t('Kept; type to change') : '')}"`)}
+        ${field('from', t('Sender'), m.from ?? '', 'email')}
+        ${field('to', t('Your address'), m.to ?? '', 'email')}
+      </div>
+      <div class="actions left"><button type="button" class="button small" data-esc="email">${esc(t('Save the e-mail'))}</button>${e.email ? `<button type="button" class="button secondary small" data-esc="remove-email">${esc(t('Remove the e-mail'))}</button>` : ''}</div>
+    </div>
+    <div class="escalation-step">
+      <div class="label">${esc(t('5. Test'))}</div>
+      <div class="actions left"><button type="button" class="button small" data-esc="test-telegram" ${e.telegram?.chats ? '' : 'disabled'}>${esc(t('Send a test to Telegram'))}</button><button type="button" class="button secondary small" data-esc="test-email" ${e.email ? '' : 'disabled'}>${esc(t('Send a test e-mail'))}</button></div>
+    </div>`;
+  for (const [id, value] of Object.entries(kept)) if (box.querySelector(`#${id}`)) box.querySelector(`#${id}`).value = value;
+}
+
+document.addEventListener('click', event => {
+  if (!event.target.closest('[data-escalation-open]') || !state?.escalation) return;
+  $('#escalation-steps').innerHTML = '';
+  fillEscalationDialog();
+  $('#escalation-dialog').showModal();
+});
+
+$('#escalation-dialog').addEventListener('click', async event => {
+  const button = event.target.closest('[data-esc]');
+  if (!button) return;
+  const action = button.dataset.esc;
+  const value = id => $(`#esc-${id}`)?.value.trim() ?? '';
+  let body;
+  if (action === 'token') body = { action: 'token', token: value('token') };
+  else if (action === 'link') body = { action: 'link' };
+  else if (action === 'pin') {
+    if (value('pin') !== value('pin2')) return toast(t('The two PINs differ.'));
+    body = { action: 'pin', pin: value('pin') };
+  } else if (action === 'email') body = { action: 'email', host: value('host'), security: value('security'), port: value('port'), user: value('user'), pass: $('#esc-pass').value, from: value('from'), to: value('to') };
+  else if (action.startsWith('test-')) body = { action: 'test', channel: action.slice(5) };
+  else if (action.startsWith('remove-')) {
+    const channel = action.slice(7);
+    if (!(await confirmDialog(t('Remove'), channel === 'telegram' ? t('Chiefmate forgets the token and the linked chats.') : t('Chiefmate forgets the e-mail settings and the password.'), t('Remove')))) return;
+    body = { action: 'remove', channel };
+  } else return;
+  button.disabled = true;
+  try {
+    const r = await api('/api/escalation', body);
+    state.escalation = r.escalation;
+    if (r.link) escalationLink = r.link;
+    toast(action.startsWith('test-') ? t('Test sent: check that it arrived.') : t('Saved.'));
+    fillEscalationDialog();
+    drawEscalation();
+  } catch (error) {
+    toast(error.message);
+    button.disabled = false;
+  }
+});
 
 function drawPromptBuilder() {
   const p = state.prompts ?? {};
@@ -4805,8 +5087,8 @@ async function fetchState() {
   if (r.status === 304) return state;
   const data = await r.json().catch(() => ({}));
   // Through the remote access, the lockdown refuses the state but says why (423).
-  if (r.status === 423 && data.lockdown) throw Object.assign(new Error(data.error), { lockdown: data.lockdown, language: data.language });
-  if (!r.ok) throw new Error(data.error || t('Error {code}', { code: r.status }));
+  if (r.status === 423 && data.lockdown) throw Object.assign(new Error(data.error), { lockdown: data.lockdown, language: data.language, status: r.status });
+  if (!r.ok) throw Object.assign(new Error(data.error || t('Error {code}', { code: r.status })), { status: r.status });
   stateTag = r.headers.get('etag');
   return data;
 }
@@ -4821,10 +5103,13 @@ async function refresh() {
       await setLanguage(error.language);
       translatePage();
     }
+    // Through the remote access, an emergency lockdown answers 423: the phone gets the lockdown's own screen.
+    if (error.status === 423 && await drawLockdownScreen()) return;
     drawOffline();
     return;
   }
   lockedAfar = null;
+  $('#lockdown-screen')?.remove();
   const fresh = next !== state;
   if (!started) {
     await setLanguage(next.language);
