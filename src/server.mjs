@@ -581,7 +581,7 @@ export function fromAfar(route, body) {
 // What a command without the owner's key may do on this computer: what the command line lets an agent (a step, a live
 // session, the manager, the watchdog and its rescuer) do, and never as the owner. Anything else is the owner's: the
 // app and the owner's terminal send the key (src/owner.mjs). A route missing here needs the key.
-const PLAN_DECISIONS = ['triage', 'approve', 'later', 'discard', 'restore', 'order'];
+const PLAN_DECISIONS = ['triage', 'approve', 'later', 'discard', 'restore', 'reorder'];
 const DECIDED = ['proposed', 'triaged', 'approved', 'discarded'];
 // The radar: the crew adds and updates ideas; deciding on one is the owner's (the manager's on the owner's word).
 const RADAR_DECISIONS = ['choose', 'later', 'discard', 'restore'];
@@ -614,6 +614,8 @@ const KEYLESS = {
   '/api/session': true,
   '/api/session/end': true,
   '/api/session/say': b => b.by === 'manager',
+  // A step's line for its speech bubble, always kept as the agent's (stepSays), never as the owner's.
+  '/api/say': b => typeof b.run === 'string' && !!b.run,
   '/api/steer': b => b.by === 'manager',
   '/api/merge': b => !!b.preview || b.by === 'manager',
   '/api/close-pr': b => !!b.preview || b.by === 'manager',

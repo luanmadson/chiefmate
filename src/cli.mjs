@@ -512,6 +512,7 @@ async function planCommand() {
     || (['add', 'set'].includes(action) && option('--status') && decided.includes(planning.parseStatus(option('--status')))))) {
     throw new Error('A step of a run only proposes items: node src/cli.mjs plan propose <project> "<title>" --summary "..." --agent <member>.');
   }
+  // Who decides, on every change: without the owner's key, the server takes a decision only from the manager.
   const by = process.env.CHIEFMATE_MANAGER ? 'manager' : option('--by');
   switch (action) {
     case 'propose': {
@@ -525,7 +526,7 @@ async function planCommand() {
       return;
     }
     case 'triage':
-      show('Triaged', await change({ action: 'triage', id: which(), priority: option('--priority'), agent: option('--agent'), recommend: option('--recommend'), note: option('--note'), risk: option('--risk'), order: option('--order'), level: option('--level'), tool: option('--tool') }));
+      show('Triaged', await change({ action: 'triage', id: which(), by, priority: option('--priority'), agent: option('--agent'), recommend: option('--recommend'), note: option('--note'), risk: option('--risk'), order: option('--order'), level: option('--level'), tool: option('--tool') }));
       return;
     case 'approve':
     case 'later':
@@ -538,12 +539,12 @@ async function planCommand() {
       return;
     }
     case 'restore':
-      show('Restored', await change({ action: 'restore', id: which() }));
+      show('Restored', await change({ action: 'restore', id: which(), by }));
       return;
     case 'order': {
       const ids = args.map(x => Number(x.replace(/^#/, '')));
       if (!ids.length) throw new Error('Which items, in which order? node src/cli.mjs plan order <n> <n> ...');
-      for (const i of await change({ action: 'reorder', ids })) show('Order', i);
+      for (const i of await change({ action: 'reorder', ids, by })) show('Order', i);
       return;
     }
     case 'list': {
@@ -559,19 +560,19 @@ async function planCommand() {
     }
     case 'add': {
       const [project, ...title] = args;
-      show('Added', await change({ action: 'add', ...fields(), project, title: title.join(' ') }));
+      show('Added', await change({ action: 'add', ...fields(), project, title: title.join(' '), by }));
       return;
     }
     case 'set': {
       if (!args[0]) throw new Error('Which item? node src/cli.mjs plan set <n> --status <s>');
-      let item = await change({ action: 'set', id: args[0], ...fields() });
+      let item = await change({ action: 'set', id: args[0], ...fields(), by });
       if (has('--archive') || has('--restore')) item = planning.archiveItem(args[0], has('--archive'));
       show('Changed', item);
       return;
     }
     case 'done':
       if (!args[0]) throw new Error('Which item? node src/cli.mjs plan done <n>');
-      show('Done', await change({ action: 'set', id: args[0], status: 'done' }));
+      show('Done', await change({ action: 'set', id: args[0], status: 'done', by }));
       return;
     default:
       throw new Error('Use: plan [list] | add <project> "<title>" | set <n> [--status ...] | done <n> | propose <project> "<title>" | triage <n> | approve|later|discard|restore <n> | order <n> <n> ...');
