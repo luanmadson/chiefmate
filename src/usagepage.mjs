@@ -81,11 +81,15 @@ function windowAlive({ pid, image }) {
   return String(r.stdout ?? '').toLowerCase().includes(`"${image}"`);
 }
 
-/** Closes the window as its close button does, and forces it only when it doesn't close within a few seconds. */
+/**
+ * Closes the window as its close button does, and forces it only when it doesn't close within a few seconds. Only while
+ * the reading profile is in use: once it isn't, the window is gone and its number may already be the owner's own browser.
+ */
 async function closeWindow(login) {
+  if (!profileInUse()) return;
   spawnSync('taskkill', ['/PID', String(login.pid), '/T'], { windowsHide: true });
   for (let i = 0; i < 20 && windowAlive(login); i++) await sleep(250);
-  if (windowAlive(login)) spawnSync('taskkill', ['/PID', String(login.pid), '/T', '/F'], { windowsHide: true });
+  if (windowAlive(login) && profileInUse()) spawnSync('taskkill', ['/PID', String(login.pid), '/T', '/F'], { windowsHide: true });
 }
 
 /**
@@ -97,8 +101,10 @@ export function openLogin(config = loadConfig(), { start = startWindow, alive = 
   const browser = needBrowser(config);
   ensureDir(PROFILE_DIR);
   const login = loginState();
+  const already = loginOpen(login) && alive(login);
   const pid = start(browser, [`--user-data-dir=${PROFILE_DIR}`, '--no-first-run', '--no-default-browser-check', LOGIN_PAGE]);
-  if (loginOpen(login) && alive(login)) return login;
+  if (already) return login;
+  if (!pid) throw failure('no_start', t("The browser didn't start."));
   const opened = { pid, image: path.basename(browser).toLowerCase(), opened: now() };
   writeJson(LOGIN_FILE, opened);
   return opened;
@@ -323,14 +329,14 @@ export function failed(before, error, at) {
 export const isReading = () => !!reading;
 
 /**
- * Whether a reading is due: every "everyHours"; a minute after the sign-in window closed (it tells whether you signed
- * in); and, while you are away, never after a failure only you can fix (it waits for your return).
+ * Whether a reading is due: every "everyHours"; once, a minute after the sign-in window closed, away or not (it tells
+ * whether you signed in); and, while you are away, never after a failure only you can fix (it waits for your return).
  */
 export function readingDue({ status = {}, login = {}, everyHours, away = false, at = Date.now() }) {
   const last = Date.parse(status.attempted ?? '') || 0;
   const closed = Date.parse(login.closed ?? '') || 0;
-  if (away && ((status.ok === false && OWNER_CAUSES.includes(status.cause)) || (login.timed_out && closed > last))) return false;
   if (closed > last) return at - closed >= 60_000;
+  if (away && status.ok === false && OWNER_CAUSES.includes(status.cause)) return false;
   return at - last >= everyHours * 3600_000;
 }
 

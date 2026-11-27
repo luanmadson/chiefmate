@@ -2039,12 +2039,13 @@ try {
   expect(await checkLogin({ at: atLimit + 60_000, alive: () => true, close }) === null && closedPids.length === 1, 'a closed sign-in window was closed again');
   const cards = readerNotices();
   expect(cards.length === 1 && cards[0].id === 'reader:login' && cards[0].kind === 'reader-login' && signInNeeded(), `there is not one "Sign in" card: ${JSON.stringify(cards)}`);
-  // Tried again later (a minute after it closed); while the owner is away, only once they are back.
+  // Tried once a minute after it closed, away or not (it tells whether the owner signed in); after that, a failure only
+  // the owner can fix waits for their return.
   const login = loginState();
   const beforeClose = { attempted: new Date(atLimit - 60_000).toISOString(), ok: false, cause: 'signed_out' };
   expect(!readingDue({ status: beforeClose, login, everyHours: 4, at: atLimit + 30_000 }) && readingDue({ status: beforeClose, login, everyHours: 4, at: atLimit + 61_000 }),
     'the reading was not tried again a minute after the sign-in window closed');
-  expect(!readingDue({ status: beforeClose, login, everyHours: 4, away: true, at: atLimit + 10 * 3600_000 }), 'the reading tried again while the owner was away');
+  expect(readingDue({ status: beforeClose, login, everyHours: 4, away: true, at: atLimit + 61_000 }), 'with the owner away, no reading told whether they signed in before the window closed');
   const signedOut = { attempted: new Date(atLimit + 61_000).toISOString(), ok: false, cause: 'signed_out' };
   const later = atLimit + 5 * 3600_000;
   expect(!readingDue({ status: signedOut, login, everyHours: 4, away: true, at: later }) && readingDue({ status: signedOut, login, everyHours: 4, at: later }),
@@ -2053,6 +2054,14 @@ try {
   // Closed by the owner: noted, with no forced close.
   openLogin(config, { start: () => 6060, alive: () => false });
   expect(await checkLogin({ alive: () => false, close }) === 'closed' && closedPids.length === 1 && loginState().timed_out === false, 'a sign-in window closed by the owner was not noted');
+  // A browser that never started is an error, never a window noted as open.
+  let refused = null;
+  try {
+    openLogin(config, { start: () => null, alive: () => false });
+  } catch (error) {
+    refused = error;
+  }
+  expect(refused?.readerCause === 'no_start' && loginState().pid === 6060, 'a sign-in window that never started was noted as open');
 } catch (error) {
   failures.push(`usage reading notices and sign-in window: ${error.message}`);
 }
