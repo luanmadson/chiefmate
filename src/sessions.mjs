@@ -898,6 +898,35 @@ function explainCommand(command, dir) {
     };
     return { where: repo, ...(of[action]?.() ?? { summary: t('Act on repositories on GitHub ({action})', { action }), ...unknownEffect() }) };
   }
+  if (program === 'gh' && ['gist', 'release', 'workflow', 'secret'].includes(group)) {
+    const [action = '', name = '?'] = plain;
+    const repo = ghRepo();
+    const account = t('Your GitHub account');
+    const visible = args.includes('--public') || args.includes('-p');
+    const of = {
+      gist: action === 'create' && {
+        summary: visible ? t('Publish a public gist on GitHub') : t('Publish a secret gist on GitHub'), where: account,
+        change: visible ? t('The files appear on your account, visible to anyone on the internet.') : t('The files appear on your account, hidden from listings but open to anyone with the address.'),
+        undo: t('Partly: it can be deleted, but it may have been read or copied.'), risk: visible ? 'high' : 'medium', why: t('Whatever goes into it may be read by others.'),
+      },
+      release: action === 'create' && {
+        summary: t('Publish a release of {repo} on GitHub', { repo }), where: repo,
+        change: t('A new version appears on the repository page, with its notes and files, and whoever follows the repository is notified.'),
+        undo: t('Partly: it can be deleted, but the notifications have already gone.'), risk: 'medium', why: t('Others may download it straight away.'),
+      },
+      workflow: action === 'run' && {
+        summary: t('Start the workflow {name} on {repo} (GitHub Actions)', { name, repo }), where: repo,
+        change: t('GitHub runs the automation as it is written: it may test, build, publish or deploy.'),
+        undo: t('It depends on the workflow: what it published or deployed stays.'), risk: 'high', why: t('What it does is in the workflow, not in this command.'),
+      },
+      secret: action === 'set' && {
+        summary: t('Store the secret {name} on GitHub ({repo})', { name, repo }), where: repo,
+        change: t('The workflows of the repository get this value from then on.'),
+        undo: t('Partly: it can be changed or removed, but the workflows may have used it already.'), risk: 'high', why: t('A secret sent to the wrong place can leak.'),
+      },
+    };
+    return of[group] || { summary: t('Act on GitHub ({what})', { what: `gh ${group} ${action}`.trim() }), where: group === 'gist' ? account : repo, ...unknownEffect() };
+  }
   if (program === 'git' && group === 'remote') {
     const [action, name = 'origin', url] = plain;
     const where = dir ?? '';

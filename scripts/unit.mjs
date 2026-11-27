@@ -15,7 +15,7 @@ import { describeDoing, readFeed } from '../src/claude.mjs';
 import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, opening, openOnComputer, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
-import { plainPush, publishing, riskyCommand } from '../src/guard.mjs';
+import { guardHooks, plainPush, publishing, riskyCommand } from '../src/guard.mjs';
 import { checkSignals, engage, isLocked, readLockdown, recordSignal, refuseWhileLocked, release, RULES, weigh, WINDOW_MINUTES } from '../src/lockdown.mjs';
 import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
@@ -901,7 +901,7 @@ test('Grok: deny rules for every publication, its own session, no Claude or Curs
   const glob = rule => new RegExp(`^${rule.slice(5, -1).replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
   const caught = command => GROK_DENY.some(rule => glob(rule).test(command));
   for (const c of ['git push', 'git -C x push origin main', 'bash -c "git push"', 'git remote set-url origin x', 'gh pr create', 'gh repo delete x', 'gh api -X POST repos/a/b/pulls',
-    'curl -X POST https://api.github.com/repos/a/b/pulls']) assert.ok(caught(c), `not refused: ${c}`);
+    'curl -X POST https://api.github.com/repos/a/b/pulls', 'gh gist create f --public', 'gh release create v1', 'gh workflow run ci', 'gh secret set T']) assert.ok(caught(c), `not refused: ${c}`);
   for (const c of ['git status', 'git commit -m "Fix"', 'npm test', 'node src/cli.mjs plan list', 'git log --oneline']) assert.ok(!caught(c), `refused: ${c}`);
 });
 
@@ -1183,6 +1183,58 @@ test("A push's folder is the command's own (a cd before it, git -C), so its card
   assert.deepEqual(plainPush(`cd "${temp}" && git push --set-upstream origin feature >/dev/null 2>&1`, os.tmpdir()), target);
   assert.equal(plainPush('git push -u origin main 2>&1', temp).refused, 'main');
   assert.equal(plainPush('git push --force-with-lease origin feature 2>&1', temp).refused, 'forced');
+});
+
+test("gh's gists, releases, workflows and secrets publish, each under its own rule; what only looks does not", () => {
+  const rules = command => publishing(command).map(f => f.rule);
+  for (const [command, rule] of [
+    ['gh gist create notes.md --public', 'Bash(gh gist:*)'], ['gh gist create notes.md', 'Bash(gh gist:*)'], ['gh gist edit 123', 'Bash(gh gist:*)'],
+    ['gh release create v1.0 --notes x', 'Bash(gh release:*)'], ['gh -R a/b release upload v1 f.zip', 'Bash(gh release:*)'],
+    ['gh workflow run ci.yml', 'Bash(gh workflow:*)'], ['gh workflow enable ci', 'Bash(gh workflow:*)'],
+    ['gh secret set TOKEN -b x', 'Bash(gh secret:*)'], ['gh secret delete TOKEN', 'Bash(gh secret:*)'],
+    ['bash -c "gh release create v2"', 'Bash(gh release:*)'], ['cd x && gh workflow run deploy', 'Bash(gh workflow:*)'],
+  ]) assert.deepEqual(rules(command), [rule], command);
+  for (const command of ['gh gist view 1', 'gh gist list', 'gh release view v1', 'gh release list', 'gh release download v1', 'gh workflow list', 'gh workflow view ci', 'gh secret list']) {
+    assert.deepEqual(rules(command), [], command);
+  }
+  // Allowed on its card, the rule goes to the hook like the others.
+  const hook = guardHooks({ log: 'g', allowed: ['Bash(gh release:*)', 'Bash(rm:*)'] }).PreToolUse[0].hooks[0].command;
+  assert.ok(hook.includes('--allow "Bash(gh release:*)"') && !hook.includes('rm:'), hook);
+});
+
+test("A heredoc's text that only goes into a file is data; one that bash runs, expands or sends on is looked at as before", () => {
+  const rules = command => publishing(command).map(f => f.rule);
+  // Only written: a test script that quotes gh and git, in any of the usual forms.
+  for (const command of [
+    "cat > .tmp/guard-test.mjs <<'EOF'\nassert.deepEqual(publishing('gh pr view 3'), []);\n// don't: gh pr create\ngh repo delete x\ngit push origin main\nEOF",
+    "cat <<'EOF' > t.sh\ngh pr merge 3\nEOF\nnpm test",
+    'cat <<EOF >> notes.txt\ngit push\nEOF',
+    "tee -a log.txt <<'EOF'\ngh release create v1\nEOF",
+    "cat > a.txt <<'A' && cat > b.txt <<\"B\"\ngit push\nA\ngh pr create\nB",
+    "cat > t.txt <<-'EOF'\n\tgit push\n\tEOF",
+  ]) assert.deepEqual(rules(command), [], command);
+  // Run, expanded, piped, named again or not really a heredoc: still refused.
+  for (const command of [
+    "bash <<'EOF'\ngit push\nEOF",
+    "cat <<'EOF' | bash\ngit push\nEOF",
+    "cat > t.sh <<'EOF'\ngit push\nEOF\nbash t.sh",
+    "cat > t.sh <<'EOF'\ngit push\nEOF\nchmod +x t.sh && ./t.sh",
+    'cat > t.txt <<EOF\n$(git push)\nEOF',
+    'cat > t.txt <<EOF\n`git push`\nEOF',
+    "cat > >(bash) <<'EOF'\ngit push\nEOF",
+    "tee /dev/stdout <<'EOF' | sh\ngit push\nEOF",
+    "mkfifo p; bash < p & cat > p <<'EOF'\ngit push\nEOF",
+    "cat() { bash -s; }; cat > f <<'EOF'\ngit push\nEOF",
+    "{bash,-s} cat > f <<'EOF'\ngit push\nEOF",
+    "$(echo bash -s) cat > f <<'EOF'\ngit push\nEOF",
+    "bash -s &> cat > f <<'EOF'\ngit push\nEOF",
+    "# cat > f <<'EOF'\ngit push\nEOF",
+    "echo 'cat > f <<EOF'\ngit push\nEOF",
+    "echo ${#y} 'a\ncat > f <<'EOF'\n'\ngit push\nEOF",
+    "cat > f <<'EOF'\ngit push",
+    "cat > f <<$'EOF'\ngit push\nEOF",
+    "cat > f <<'EOF'\nnotes\nEOF\ngit push origin x",
+  ]) assert.deepEqual(rules(command), ['Bash(git push:*)'], command);
 });
 
 test('effort: each level from its place, the project only, the history and the run report', () => {

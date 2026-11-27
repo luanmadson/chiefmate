@@ -1704,8 +1704,10 @@ try {
     const guarded = JSON.parse(claudeArgs({ model: 'm', hooks: crewGuard(guardLog) }).find((a, i, all) => all[i - 1] === '--settings'));
     const hook = guarded.hooks?.PreToolUse?.[0]?.hooks?.[0]?.command ?? '';
     const refuses = command => /"permissionDecision":"deny"/.test(execFileSync(hook, { shell: true, encoding: 'utf8', input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', tool_input: { command } }) }));
-    const publish = ['git -C . push origin main', 'gh api repos/a/b/pulls -f title=T -f head=h', 'cd x && git push', 'bash -c "gh pr create --fill"', 'git -c a=b remote add up u'];
-    const wrong = [...publish.filter(c => !refuses(c)), ...['git status', 'gh api repos/a/b/pulls', 'git commit -m "no git push here"'].filter(refuses)];
+    const publish = ['git -C . push origin main', 'gh api repos/a/b/pulls -f title=T -f head=h', 'cd x && git push', 'bash -c "gh pr create --fill"', 'git -c a=b remote add up u', 'gh gist create notes.md --public', 'gh release create v1'];
+    // A heredoc's text that only goes into a file is data, not a command.
+    const written = "cat > t.mjs <<'EOF'\ngh pr create\ngit push origin main\nEOF";
+    const wrong = [...publish.filter(c => !refuses(c)), ...['git status', 'gh api repos/a/b/pulls', 'git commit -m "no git push here"', 'gh release list', written].filter(refuses)];
     const noted = readFileSync(guardLog, 'utf8').trim().split('\n').length;
     expect(hook.includes('guard.mjs') && !hook.includes('--allow') && !wrong.length && noted === publish.length,
       `the guard of the crew and the manager misjudged what publishes: ${JSON.stringify({ hook, wrong, noted })}`);
