@@ -1,10 +1,12 @@
 // The file viewer, read only: the folders it may open (its roots), the files it never opens, a folder's list, a file's
 // facts and its content as bytes, text or a table, from the disk or from a run's branch. Nothing here writes, moves or
 // deletes a file.
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { closeSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { t } from './i18n.mjs';
+import { protectedFolders } from './lockdown.mjs';
 import { projectClone } from './sessions.mjs';
 import { decodeText, parseCsv, readXlsx } from './sheets.mjs';
 import { DATA, ROOT, WORKSPACES } from './util.mjs';
@@ -133,9 +135,10 @@ export function viewerRoots(config, { workspaces = WORKSPACES } = {}) {
 }
 
 class Refused extends Error {
-  constructor(message, code = 403) {
+  constructor(message, code = 403, reason = null) {
     super(message);
     this.code = code;
+    this.reason = reason; // 'outside' or 'protected', for the app's choice of what to do next
   }
 }
 
@@ -147,8 +150,8 @@ const holding = (roots, p, ...fields) => roots
   .sort((a, b) => b.at - a.at)
   .map(x => x.r);
 
-const outside = () => new Refused(t('This file is outside the folders the viewer may open.'));
-const guarded = () => new Refused(t('This file is protected: the viewer never opens it.'));
+const outside = () => new Refused(t('This file is outside the folders the viewer may open.'), 403, 'outside');
+const guarded = () => new Refused(t('This file is protected: the viewer never opens it.'), 403, 'protected');
 
 /** Whether a path (inside "root") goes through a protected name or place. */
 function protectedPath(p, root, blocked) {
@@ -464,4 +467,62 @@ export function rootsFor(config, project, { workspaces = WORKSPACES } = {}) {
   const local = config?.projects?.[project]?.deliver === 'local';
   const rank = r => (r.project !== project ? 2 : local && r.kind === 'clone' ? 0 : 1);
   return roots.sort((a, b) => rank(a) - rank(b)).map(r => ({ path: r.real, kind: r.kind, label: r.label, project: r.project }));
+}
+
+// ---------- Opening on the computer ----------
+
+// Opened with their own app: documents, pictures, sound and video. Anything else (a program, a script, a shortcut, a
+// document that may carry macros, an unknown type) is only shown in its folder, so a click never runs anything.
+const OPENS_WITH_APP = new Set([...EXTENSIONS.image, ...EXTENSIONS.pdf, ...EXTENSIONS.markdown, 'txt', 'log', 'csv', 'tsv', 'xlsx', 'docx', 'pptx', 'odt', 'ods',
+  'odp', 'rtf', 'html', 'htm', 'json', 'xml', 'yml', 'yaml', 'mp3', 'wav', 'm4a', 'ogg', 'mp4', 'webm', 'mov', 'mkv']);
+
+const outsideHome = () => new Refused(t('This file is outside your user folder: Chiefmate never opens it.'), 403, 'outside');
+
+/**
+ * The file a path names in your user folder: { real, dir }. The path may be absolute, start at the user folder (~\…,
+ * %USERPROFILE%\…) or be relative to it (Documents\…), with / or \ and an optional ":line". Refused: a device or network
+ * path, a stream, anything outside the user folder, before and after links and junctions are followed, a protected
+ * name (blockedName) and Chiefmate's protected places ("blocked"). Not found: says the path tried ("tried").
+ */
+export function homePath(input, { home = os.homedir(), blocked = [...blockedPlaces(), ...protectedFolders()] } = {}) {
+  const raw = String(input ?? '').trim().replace(/^["'`]+|["'`]+$/g, '').replace(/:\d+(?:[-:]\d+)?$/, '')
+    .replace(/^(~|%USERPROFILE%|\$HOME|\$env:USERPROFILE)(?=$|[\\/])/i, () => home);
+  if (!raw || raw.includes('\0') || /^[\\/]{2}/.test(raw) || (windows && raw.replace(/^[a-z]:/i, '').includes(':'))) throw outsideHome();
+  const lexical = path.resolve(home, raw);
+  const homes = [home, realOf(home)].filter(Boolean);
+  const inside = p => homes.find(h => within(p, h));
+  const hidden = p => protectedPath(p, inside(p), blocked);
+  if (!inside(lexical)) throw outsideHome();
+  if (hidden(lexical)) throw guarded();
+  const real = realOf(lexical);
+  if (!real) throw Object.assign(new Refused(t('File not found: {path}.', { path: lexical }), 404), { tried: lexical });
+  if (!inside(real)) throw outsideHome();
+  if (hidden(real)) throw guarded();
+  return { real, dir: !!statOf(real)?.isDirectory() };
+}
+
+/** How a file opens on this computer: { how: 'app' | 'folder' | 'reveal', command, args, verbatim }. */
+export function opening(real, dir, platform = process.platform) {
+  const how = dir ? 'folder' : OPENS_WITH_APP.has(extension(real)) ? 'app' : 'reveal';
+  // explorer.exe reads its own command line: a path goes in quotes, or a comma in it would cut it.
+  if (platform === 'win32') return { how, command: 'explorer.exe', args: [how === 'reveal' ? `/select,"${real}"` : `"${real}"`], verbatim: true };
+  if (how !== 'reveal') return { how, command: platform === 'darwin' ? 'open' : 'xdg-open', args: [real] };
+  return platform === 'darwin' ? { how, command: 'open', args: ['-R', real] } : { how, command: 'xdg-open', args: [path.dirname(real)] };
+}
+
+function launch({ command, args, verbatim }) {
+  const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsVerbatimArguments: !!verbatim });
+  child.on('error', error => console.error(`Opening on the computer: ${error.message}`));
+  child.unref();
+}
+
+/**
+ * Opens a file of your user folder on this computer (homePath): a document with its own app, a folder in the file
+ * manager, anything else shown in its folder. With "dryRun", only says which file it is and how it would open.
+ */
+export function openOnComputer(input, { dryRun = false, home, blocked, start = launch } = {}) {
+  const { real, dir } = homePath(input, { home, blocked });
+  const how = opening(real, dir);
+  if (!dryRun) start(how);
+  return { path: real, dir, how: how.how, ...(dryRun ? { dryRun: true } : {}) };
 }

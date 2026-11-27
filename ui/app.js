@@ -23,7 +23,7 @@ async function api(route, body) {
       : { cache: 'no-store' },
   );
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || t('Error {code}', { code: r.status }));
+  if (!r.ok) throw Object.assign(new Error(data.error || t('Error {code}', { code: r.status })), { status: r.status, data });
   return data;
 }
 
@@ -49,15 +49,18 @@ function confirmDialog(title, text, yes) {
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
-// A file's path in a text, which opens the viewer: absolute (C:\… or C:/…), or relative with a folder and a known
-// extension, with an optional ":line"; inside `code`, a file's name alone too.
+// A file's path in a text, which opens the viewer: absolute (C:\… or C:/…, with spaces inside `code`), or relative with
+// a folder and a known extension (from the project, or from your user folder: Documents\…, ~\…), with "/" or "\", any
+// letter (accents too) and an optional ":line"; inside `code`, a file's name alone too.
 const FILE_EXT = 'png|jpe?g|gif|webp|svg|bmp|avif|ico|pdf|md|markdown|txt|log|csv|tsv|xlsx|xlsm|json|jsonl|ya?ml|xml|html?|css|m?js|cjs|tsx?|jsx|py|ps1|sh|toml|ini|sql|docx?|pptx?|zip';
 const LINE = '(?::\\d+(?:-\\d+)?)?';
-const ABS_PATH = /^[A-Za-z]:[\\/](?![\\/])[^\s<>"'`|*?]*$/;
-const REL_PATH = new RegExp(`^(?:\\.[\\\\/])?(?:[\\w@.-]+[\\\\/])+[\\w@.-]+\\.(?:${FILE_EXT})${LINE}$`, 'i');
-const NAME_PATH = new RegExp(`^[\\w@.-]+\\.(?:${FILE_EXT})${LINE}$`, 'i');
+const PART = '[\\p{L}\\p{N}_@.-]+';
+const REL = `(?:[.~][\\\\/])?(?:${PART}[\\\\/])+${PART}\\.(?:${FILE_EXT})${LINE}`;
+const ABS_PATH = /^[A-Za-z]:[\\/](?![\\/])(?:[^<>"'`|*?\n]*[^\s<>"'`|*?])?$/;
+const REL_PATH = new RegExp(`^${REL}$`, 'iu');
+const NAME_PATH = new RegExp(`^${PART}\\.(?:${FILE_EXT})${LINE}$`, 'iu');
 const ABS_IN_TEXT = /(^|[\s(“"'])([A-Za-z]:[\\/](?![\\/])[^\s<>"'`|*?]+)/g;
-const REL_IN_TEXT = new RegExp(`(^|[\\s(“"'])((?:\\.[\\\\/])?(?:[\\w@.-]+[\\\\/])+[\\w@.-]+\\.(?:${FILE_EXT})${LINE})(?=$|[\\s),.;:!?”"'])`, 'gi');
+const REL_IN_TEXT = new RegExp(`(^|[\\s(“"'])(${REL})(?=$|[\\s),.;:!?”"'])`, 'giu');
 const fileLink = (p, label) => `<a class="file-link" role="button" tabindex="0" data-file="${esc(p)}">${label}</a>`;
 
 function inline(s) {
@@ -5222,6 +5225,8 @@ async function openFile(ref, { gallery = null } = {}) {
   try {
     info = await api(fileUrl('info', ref));
   } catch (error) {
+    // Outside the viewer's folders, or in none of the project's copies: perhaps a file of your user folder.
+    if (ref.path && !ref.file && (error.status === 404 || error.data?.reason === 'outside')) return openOnComputer(ref.path, error);
     toast(error.message);
     return;
   }
@@ -5232,6 +5237,42 @@ async function openFile(ref, { gallery = null } = {}) {
   if (!$('#viewer').open) $('#viewer').showModal();
   drawViewer(token);
 }
+
+/**
+ * A file of your user folder (src/files.mjs, openOnComputer): on this computer, opened with its own app; elsewhere (the
+ * phone), its path to copy, as it opens only on the computer. Not found: the path tried, with what the viewer said.
+ */
+async function openOnComputer(file, viewerError = null) {
+  const here = onThisComputer();
+  try {
+    const r = await api('/api/files/open', { path: file, dryRun: !here });
+    if (!here) pathDialog(t('Opens on the computer'), r.path, t('This file opens on the computer where Chiefmate runs, not here: copy its path to find it there.'));
+    else toast(r.how === 'reveal' ? t('Shown in its folder on the computer: {name}', { name: baseName(r.path) }) : t('Opened on the computer: {name}', { name: baseName(r.path) }));
+  } catch (error) {
+    if (error.status !== 404) return toast(error.message);
+    pathDialog(t('File not found'), error.data?.tried ?? file, [viewerError?.status === 404 ? viewerError.message : '', error.message].filter(Boolean).join('\n'));
+  }
+}
+
+/** A path to copy, with a line on it (#path-dialog). */
+function pathDialog(title, file, text) {
+  $('#path-dialog-title').textContent = title;
+  $('#path-dialog-text').textContent = text;
+  $('#path-dialog-path').textContent = file;
+  if (!$('#path-dialog').open) $('#path-dialog').showModal();
+}
+
+$('#path-dialog-copy').addEventListener('click', async () => {
+  const file = $('#path-dialog-path').textContent;
+  try {
+    await navigator.clipboard.writeText(file);
+  } catch {
+    // Without a secure context (http on the phone), the browser's own copy of the selected path.
+    getSelection().selectAllChildren($('#path-dialog-path'));
+    document.execCommand('copy');
+  }
+  toast(t('Path copied.'));
+});
 
 function stepGallery(by) {
   const { gallery, index } = viewer;
@@ -5251,6 +5292,8 @@ function drawViewer(token = viewer.token) {
   $('#viewer-tools').innerHTML = [
     info.kind === 'image' ? `<button type="button" class="button secondary small" data-viewer="zoom" aria-pressed="${viewer.zoom}">${esc(viewer.zoom ? t('Fit to screen') : t('Actual size'))}</button>` : '',
     info.dir ? '' : `<a class="button secondary small" href="${esc(raw)}" target="_blank" rel="noopener"${downloads(info) ? ' download' : ''}>${esc(downloads(info) ? t('Download') : t('Open in a tab'))}</a>`,
+    // With its own app (an HTML page shown as a page, not as its code), on this computer only.
+    info.ref.path && onThisComputer() ? `<button type="button" class="button secondary small" data-viewer="computer">${esc(t('Open on the computer'))}</button>` : '',
   ].join('');
   const body = $('#viewer-body');
   body.dataset.kind = info.kind;
@@ -5401,6 +5444,7 @@ document.addEventListener('click', event => {
   event.preventDefault();
   const inViewer = !!el.closest('#viewer');
   if (el.dataset.viewer === 'prev' || el.dataset.viewer === 'next') stepGallery(el.dataset.viewer === 'next' ? 1 : -1);
+  else if (el.dataset.viewer === 'computer') openOnComputer(viewer.info.ref.path);
   else if (el.dataset.viewer === 'zoom') {
     // Without drawing again: the image is not read a second time.
     viewer.zoom = !viewer.zoom;

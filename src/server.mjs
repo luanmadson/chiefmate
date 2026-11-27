@@ -14,7 +14,7 @@ import { effortHistory, effortSource, runEffortChanges, setEffort } from './effo
 import { agentTool, runTools, toolModel } from './tools.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
 import { addQuestion, decide, decisionCards, openPushes, openQuestions, openRepoRequests } from './decisions.mjs';
-import { listFolder, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
+import { listFolder, openOnComputer, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
 import { engage, isLocked, lockdownView, recordSignal, release } from './lockdown.mjs';
@@ -235,7 +235,7 @@ async function filesRoute(req, res, url) {
     }
     return reply(res, 404, { error: 'not found' });
   } catch (error) {
-    return reply(res, typeof error.code === 'number' ? error.code : 400, { error: error.message });
+    return reply(res, typeof error.code === 'number' ? error.code : 400, { error: error.message, ...(error.reason ? { reason: error.reason } : {}) });
   }
 }
 
@@ -493,8 +493,9 @@ export function remoteRefusal(req, remote) {
  * A command from another device (the remote access), where nobody would see a window open on the computer where
  * Chiefmate runs: { body } as it goes on, or { refused: true }. A session (the prompt builder's too) opens in the app
  * instead of a window, and the development environment runs in the background with no window. Opening the folder or
- * VS Code and bringing a browser to the front work only on the computer, so they are refused, and the app doesn't
- * offer them there (ui/afar.js). Their "dryRun" still answers.
+ * VS Code, a file of your user folder and bringing a browser to the front work only on the computer, so they are
+ * refused, and the app doesn't offer them there (ui/afar.js; a file's path is shown to copy). Their "dryRun" still
+ * answers.
  */
 export function fromAfar(route, body) {
   switch (route) {
@@ -504,6 +505,7 @@ export function fromAfar(route, body) {
     case '/api/project/dev':
       return { body: body.action === 'start' ? { ...body, background: true } : body };
     case '/api/project/open':
+    case '/api/files/open':
       return { body, refused: true };
     case '/api/browser':
       return { body, refused: body.action === 'focus' };
@@ -695,6 +697,14 @@ export function startServer() {
           return reply(res, 200, { queue: removeQueued(String(body.id ?? ''), String(body.item ?? '')) });
         case '/api/session/permission':
           return reply(res, 200, answerPermission(String(body.id ?? ''), String(body.request ?? ''), body.allow === true));
+        case '/api/files/open':
+          // A file of your user folder, opened on this computer (src/files.mjs); "dryRun" only finds it, as the phone does.
+          try {
+            return reply(res, 200, openOnComputer(body.path, { dryRun: !!body.dryRun }));
+          } catch (error) {
+            if (typeof error.code !== 'number') throw error;
+            return reply(res, error.code, { error: error.message, ...(error.reason ? { reason: error.reason } : {}), ...(error.tried ? { tried: error.tried } : {}) });
+          }
         case '/api/project/open':
           // "app": "folder" (the file manager) or "vscode", in your own clone of the project.
           return reply(res, 200, openProjectApp(String(body.project ?? ''), String(body.app ?? ''), { dryRun: !!body.dryRun }));
