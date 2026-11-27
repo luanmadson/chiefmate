@@ -2024,6 +2024,12 @@ try {
     let saved = null;
     ctx.saveChanges('ctx', { notes: 'Hello' }, { config: ctxConfig, save: c => (saved = c) });
     expect(saved?.projects.ctx.notes === 'Hello' && ctx.readHistory('ctx')[0]?.changes[0]?.field === 'projects.ctx.notes', "a saved change was not recorded in the project's history");
+    // The main branch through the owner's card ("main_push": "card", src/guard.mjs): turned on and off from the same form.
+    const mainOn = ctx.applyChanges(ctxConfig, 'ctx', { mainPush: true });
+    const mainOff = ctx.applyChanges(mainOn.config, 'ctx', { mainPush: false });
+    expect(mainOn.config.projects.ctx.main_push === 'card' && mainOn.changed.map(c => c.field).join() === 'projects.ctx.main_push' && !('main_push' in mainOff.config.projects.ctx)
+      && ctx.projectContext(mainOn.config, 'ctx').settings.mainPush === true && !ctx.applyChanges(mainOn.config, 'ctx', { mainPush: true }).changed.length && !ctxConfig.projects.ctx.main_push,
+      `the main branch's card was not turned on and off from the Context tab: ${JSON.stringify([mainOn.changed, mainOff.changed])}`);
   } finally {
     rmSync(sessionTemp, { recursive: true, force: true });
   }
@@ -2567,6 +2573,64 @@ try {
   const sent = cli([repo, 'feature']);
   expect(sent.ok && git(bare, 'rev-parse', 'refs/heads/feature') === git(repo, 'rev-parse', 'feature') && !cli([repo, 'feature']).ok,
     `cli.mjs push did not send the allowed push once: ${sent.out}`);
+
+  // The main branch (here "trunk", the remote's default) through the owner's card, only in a project with
+  // "main_push": "card": a plain push of it alone is refused and becomes a card with what goes (commits, files,
+  // migrations); allowed, it goes once. A forced push, a deleted branch, a push with an option, and any push of the
+  // main branch of a project without the setting are always refused, card or not.
+  const { guardHooks, mainPushTarget, mainPushTargets, pushLogFile } = await import(src('guard.mjs'));
+  mkdirSync(path.join(repo, 'db', 'migrations'), { recursive: true });
+  writeFileSync(path.join(repo, 'db', 'migrations', '001_init.sql'), 'create table t (id int);');
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-q', '-m', 'Add a migration');
+  const withCard = { projects: { sample: { name: 'Sample', main_push: 'card', local_clone: repo } } };
+  const withoutCard = { projects: { sample: { name: 'Sample', local_clone: repo } } };
+  const targets = mainPushTargets(withCard);
+  const mainLog = path.join(pushDir, 'main-guard.jsonl');
+  const commandOf = hooks => hooks.PreToolUse[0].hooks[0].command;
+  const passes = (h, command, cwd = repo) => !/"permissionDecision":"deny"/.test(execFileSync(h, { shell: true, encoding: 'utf8', input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', tool_input: { command }, cwd }) }));
+  const mainHook = commandOf(crewGuard(mainLog, pushesFile(), targets));
+  const noCardHook = commandOf(crewGuard(mainLog, pushesFile(), mainPushTargets(withoutCard)));
+  expect(targets.length === 1 && !passes(mainHook, 'git push origin trunk') && !passes(mainHook, 'git push --force origin trunk') && !passes(mainHook, 'git push origin --delete trunk') && !passes(mainHook, 'git push -u origin trunk'),
+    'a push of the main branch went before the owner allowed it on its card');
+  const mainMade = pushRequestsFrom(mainLog, null, withCard);
+  const mainAsked = mainMade[0];
+  expect(mainMade.length === 1 && mainAsked.main && mainAsked.branch === 'trunk' && mainAsked.project === 'sample' && mainAsked.count === 2 && mainAsked.fileCount === 2
+    && mainAsked.migrationCount === 1 && mainAsked.migrations[0] === 'db/migrations/001_init.sql', `a push of the main branch did not become one request with what goes: ${JSON.stringify(mainMade)}`);
+  passes(mainHook, 'git push origin trunk');
+  expect(!pushRequestsFrom(mainLog, null, withoutCard).length, 'a push of the main branch became a request in a project without the setting');
+  const mainPushes = openPushes();
+  const mainCards = decisionCards({ config: withCard, attention: attentionItems({ config: withCard, pushes: mainPushes }), pushes: mainPushes });
+  const mainCard = mainCards.find(c => c.main);
+  const hiddenCards = decisionCards({ config: withoutCard, attention: attentionItems({ config: withoutCard, pushes: mainPushes }), pushes: mainPushes });
+  expect(mainCard?.approve && mainCard.approval === 3 && mainCard.title.includes('trunk') && /\b2\b.*\b2\b.*\b1\b/.test(mainCard.title) && mainCard.detail.includes('db/migrations/001_init.sql') && !hiddenCards.length,
+    `the push of the main branch is not a card with what goes at a glance, or shows in a project without the setting: ${JSON.stringify(mainCards)}`);
+  expect((await decide({ card: mainCard.id, action: 'approve' }, mainCards)).done === 'allowed', 'the owner could not allow the push of the main branch from its card');
+  expect(!passes(mainHook, 'git push --force origin trunk') && !passes(mainHook, 'git push -u origin trunk') && !passes(mainHook, 'git push origin :trunk') && !passes(noCardHook, 'git push origin trunk'),
+    'an allowed push of the main branch let a forced push, an option, a deletion or a project without the setting through');
+  // The grant serves only the commits its card showed: one made after it needs a new card.
+  writeFileSync(path.join(repo, 'later.txt'), 'later');
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-q', '-m', 'Later');
+  expect(!passes(mainHook, 'git push origin trunk'), 'the main branch went with a commit its card did not show');
+  git(repo, 'reset', '-q', '--hard', 'HEAD~1');
+  expect(passes(mainHook, `cd ${JSON.stringify(repo)} && git push origin trunk 2>&1`, pushDir) && !passes(mainHook, 'git push origin trunk'), 'the allowed push of the main branch did not go once');
+  const written = readFileSync(pushLogFile(pushesFile()), 'utf8');
+  expect(/"event":"allowed"[^\n]*"main":true/.test(written) && /"event":"used"[^\n]*"main":true/.test(written), `the push of the main branch was not written down: ${written}`);
+  // A "Work now" session: its permission to push never lets the main branch go; it takes only its own grant, and the
+  // manager never takes it.
+  const sessionHook = commandOf(guardHooks({ log: mainLog, allowed: ['Bash(git push:*)'], who: 'session', noMain: true, grants: pushesFile(), session: 'smoke-work', mainCard: targets }));
+  const fromSession = mainPushTarget('git push origin trunk', repo, targets);
+  const sessionAsked = addPushRequest({ ...fromSession, ...fromSession.facts, command: 'git push origin trunk', main: true, session: 'smoke-work', sessionName: 'Work now' });
+  expect(!passes(sessionHook, 'git push origin trunk') && sessionAsked?.session === 'smoke-work' && answerPush(sessionAsked.id, true).status === 'allowed',
+    'a "Work now" session pushed the main branch on its permission to push, or its card could not be allowed');
+  expect(!passes(mainHook, 'git push origin trunk') && passes(sessionHook, 'git push origin trunk') && !passes(sessionHook, 'git push origin trunk'),
+    "the session's grant for the main branch went to the manager, or did not go once for the session");
+  // The command line: a grant for the main branch of a project without the setting (the settings in use here have
+  // none) sends nothing.
+  const viaCli = addPushRequest({ ...fromSession, ...fromSession.facts, command: 'git push origin trunk', main: true });
+  answerPush(viaCli.id, true);
+  expect(!cli([repo, 'trunk']).ok && readPushes(pushesFile()).find(p => p.id === viaCli.id)?.status === 'allowed', 'cli.mjs push sent the main branch of a project without the setting');
 } catch (error) {
   failures.push(`the manager's push: ${error.message}`);
 } finally {

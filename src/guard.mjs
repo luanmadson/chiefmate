@@ -3,15 +3,15 @@
 // command's first words, so a live session in the app also runs this file as a PreToolUse hook (see guardHooks): what
 // it finds and the owner has not allowed is refused, and written down for a permission request.
 // The manager is refused the same way, with one exception the owner gives on a card: one plain push (see takeGrant).
-// Run as a hook: node src/guard.mjs --log <file> [--allow <rule>]... [--grants <file>]  (the tool call comes as JSON on
-// standard input).
+// Run as a hook: node src/guard.mjs --log <file> [--allow <rule>]... [--grants <file> [--session <id>]
+// [--main-dir <folder>]... [--main-repo <owner/name>]...]  (the tool call comes as JSON on standard input).
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isLocked, protectedFolders, recordSignal } from './lockdown.mjs';
-import { ROOT } from './util.mjs';
+import { DATA, ensureDir, ROOT } from './util.mjs';
 
 // The rules a finding is filed under: the same as Claude Code's, so allowing one releases both.
 export const PUSH = 'Bash(git push:*)';
@@ -488,14 +488,22 @@ const clip = s => (s.length > 300 ? `${s.slice(0, 299)}…` : s);
 
 // ---------- The manager's push, allowed once by the owner ----------
 // The manager is refused every publication, like the crew. The one exception is the owner's: a plain push of one
-// branch (never the main one, never forced) that the manager tried, allowed on its card in the app (src/decisions.mjs),
-// for the same repository, branch, folder and source, within GRANT_MINUTES, once. The requests and the grants are one
-// file (data/manager/pushes.json), read by the hook (--grants) and by "cli.mjs push".
+// branch (never forced) that the manager tried, allowed on its card in the app (src/decisions.mjs), for the same
+// repository, branch, folder and source, within GRANT_MINUTES, once. Never the main branch, except in a project whose
+// owner lets it go that way ("main_push": "card", a project without pull requests): there, a push of the main branch
+// alone, by the manager or by a "Work now" session (src/worknow.mjs), gets the same card (see mainPushTarget). The
+// requests and the grants are one file (pushesFile), read by the hook (--grants) and by "cli.mjs push"; each grant
+// given and each one used is also written down for good (pushLogFile).
 
 export const GRANT_MINUTES = 30;
 export const MAIN_BRANCHES = new Set(['main', 'master']);
-// The only options a push may carry to be allowed.
+// The only options a push may carry to be allowed (a push of the main branch takes none).
 const PLAIN_OPTIONS = new Set(['-u', '--set-upstream', '-q', '--quiet', '-v', '--verbose']);
+
+/** The owner's push requests and grants (src/decisions.mjs). */
+export const pushesFile = () => path.join(ensureDir(path.join(DATA, 'manager')), 'pushes.json');
+/** The record of every push the owner allowed and of every push that went on such a grant, one line each. */
+export const pushLogFile = grants => path.join(path.dirname(grants), 'push-log.jsonl');
 
 // Where a push's messages go, written unquoted at its end ("2>&1", ">/dev/null", "2> $null"): nothing it sends changes.
 // Taken off the text itself, so a quoted "2>&1", which git would get as one more branch, is not taken for one.
@@ -509,6 +517,14 @@ const TO_STREAMS = /(?:\s+[12]?>(?:&[12]|>?\s*(?:\/dev\/null|\$null|nul)))+\s*$/
  * either way is the same push: one grant serves them all. cwd: the folder the command runs in.
  */
 export function plainPush(command, cwd = process.cwd()) {
+  const p = pushParts(command, cwd);
+  if (p.refused) return p;
+  if (MAIN_BRANCHES.has(p.branch.toLowerCase())) return { refused: 'main' };
+  return { dir: p.dir, remote: p.remote, src: p.src, branch: p.branch };
+}
+
+/** What plainPush reads, the main branch included, and whether it is bare: no option, the branch by its own name. */
+function pushParts(command, cwd) {
   const shape = { refused: 'shape' };
   // "cd <folder> && git push ...": the push runs there, and only if the cd worked.
   const into = /^\s*cd\s+("[^"]*"|'[^']*'|[^\s"';&|<>()`]+)\s*&&([\s\S]*)$/.exec(String(command ?? ''));
@@ -530,10 +546,13 @@ export function plainPush(command, cwd = process.cwd()) {
   const [remote, refspec] = args;
   const parts = refspec.split(':');
   const src = parts[0];
-  const branch = (parts[1] ?? parts[0]).replace(/^refs\/heads\//, '');
+  const dir = path.resolve(cwd, ...dirs);
+  // The branch it lands on, by its own name, so neither form hides the main branch: "heads/<name>" is that branch, and
+  // HEAD alone the one checked out (none when detached).
+  const named = (parts[1] ?? parts[0]).replace(/^(refs\/)?heads\//i, '');
+  const branch = /^head$/i.test(named) ? git(dir, 'symbolic-ref', '--short', '--quiet', 'HEAD') : named;
   if (parts.length > 2 || !src || !/^\w[\w./-]*$/.test(branch) || branch.includes('..') || branch.startsWith('refs/')) return shape;
-  if (MAIN_BRANCHES.has(branch.toLowerCase())) return { refused: 'main' };
-  return { dir: path.resolve(cwd, ...dirs), remote, src, branch };
+  return { dir, remote, src, branch, bare: rest.length === 2 && refspec === branch };
 }
 
 const git = (dir, ...args) => {
@@ -544,16 +563,78 @@ const git = (dir, ...args) => {
 /** "owner/name" (lowercase) for a GitHub address or "owner/name", the address itself otherwise. */
 export const repoOf = url => (/github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(url ?? '')?.[1] ?? String(url ?? '').trim()).toLowerCase();
 
+// Files that change a database's structure, by the usual conventions: a "migrations" (or "migration", "migrate")
+// folder, Alembic's "alembic/versions", or Flyway's "V<n>__<name>.sql".
+const MIGRATION = /(^|\/)(migrations?|migrate|alembic\/versions)\/|(^|\/)V\d+(_\d+)*__[^/]*\.sql$/i;
+const LISTED = 20;
+
 /**
  * What the push would send: { repo, main (the main branch: main, master or the remote's default), commits (up to 20,
- * "hash subject"), count }. The commits are those of the source not yet on the remote.
+ * "hash subject"), count, files (up to 20) and fileCount, migrations (up to 20) and migrationCount, tip (the commit the
+ * source is at) }. The commits are those of the source not yet on the remote; the files, what they change against the
+ * remote's branch (for a branch not there yet, what they touch).
  */
 export function pushFacts({ dir, remote, src, branch }) {
   const url = /[:/]/.test(remote) ? remote : git(dir, 'remote', 'get-url', '--push', remote);
   const head = git(dir, 'symbolic-ref', '--short', `refs/remotes/${remote}/HEAD`).replace(`${remote}/`, '');
-  const commits = git(dir, 'log', '--format=%h %s', '-n', '20', src, '--not', `--remotes=${remote}`).split('\n').filter(Boolean);
+  const commits = git(dir, 'log', '--format=%h %s', '-n', String(LISTED), src, '--not', `--remotes=${remote}`).split('\n').filter(Boolean);
   const count = Number(git(dir, 'rev-list', '--count', src, '--not', `--remotes=${remote}`)) || commits.length;
-  return { repo: repoOf(url), main: MAIN_BRANCHES.has(branch.toLowerCase()) || (!!head && head === branch), commits, count };
+  const base = /[:/]/.test(remote) ? '' : git(dir, 'rev-parse', '--verify', '--quiet', `refs/remotes/${remote}/${branch}`);
+  const names = !count ? '' : base
+    ? git(dir, '-c', 'core.quotePath=false', 'diff', '--name-only', `${base}...${src}`)
+    : git(dir, '-c', 'core.quotePath=false', 'log', '--format=', '--name-only', src, '--not', `--remotes=${remote}`);
+  const files = [...new Set(names.split('\n').map(f => f.trim()).filter(Boolean))];
+  const migrations = files.filter(f => MIGRATION.test(f));
+  return {
+    repo: repoOf(url), main: MAIN_BRANCHES.has(branch.toLowerCase()) || (!!head && head === branch), commits, count,
+    files: files.slice(0, LISTED), fileCount: files.length, migrations: migrations.slice(0, LISTED), migrationCount: migrations.length,
+    tip: git(dir, 'rev-parse', '--verify', '--quiet', `${src}^{commit}`),
+  };
+}
+
+/**
+ * Where the main branch may go through the owner's card: the folders (local_clone, and repository when it is a folder)
+ * and the GitHub repository of each project with "main_push": "card", as [{ project, dir } | { project, repo }].
+ */
+export function mainPushTargets(config) {
+  const all = Object.entries(config?.projects ?? {}).filter(([, p]) => p?.main_push === 'card').flatMap(([project, p]) => {
+    const repository = String(p.repository ?? '').trim();
+    const folder = path.isAbsolute(repository);
+    return [
+      ...(p.local_clone ? [{ project, dir: path.resolve(String(p.local_clone)) }] : []),
+      ...(repository && folder ? [{ project, dir: path.resolve(repository) }] : []),
+      ...(repository && !folder ? [{ project, repo: repoOf(repository) }] : []),
+    ];
+  });
+  // Once each: a project's clone is often its repository too.
+  return all.filter((x, i) => all.findIndex(y => (x.dir ? y.dir && samePath(y.dir, x.dir) : y.repo === x.repo)) === i);
+}
+
+/** The project of "targets" (mainPushTargets) that a push from this folder to this repository belongs to: its id, or null. */
+export function mainCardProject(targets, dir, repo) {
+  if (!targets?.length || !dir) return null;
+  // The folder itself, the top of its working tree and, for a worktree, the clone it belongs to.
+  const [top, common] = git(dir, 'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir').split('\n');
+  const folders = [dir, top, common && path.dirname(common)].filter(Boolean);
+  const hit = targets.find(x => (x.dir && folders.some(f => samePath(f, x.dir))) || (x.repo && repo && x.repo === repo));
+  return hit ? hit.project ?? '' : null;
+}
+
+/**
+ * A push of the main branch the owner may allow on a card: exactly "[cd <folder> &&] git [-C <folder>]... push
+ * <remote> <branch>", alone ("2>&1" at most), with no option and the branch by its own name, where <branch> is the
+ * main branch (main, master or the remote's default) of a project with "main_push": "card" (targets: mainPushTargets).
+ * Returns { dir, remote, src, branch, project, facts }, or null. A forced push or a deletion is never one.
+ */
+export function mainPushTarget(command, cwd, targets) {
+  if (!targets?.length) return null;
+  const p = pushParts(command, cwd);
+  if (!p.branch || !p.bare) return null;
+  const target = { dir: p.dir, remote: p.remote, src: p.src, branch: p.branch };
+  const facts = pushFacts(target);
+  if (!facts.main || !facts.repo) return null;
+  const project = mainCardProject(targets, target.dir, facts.repo);
+  return project == null ? null : { ...target, project: project || null, facts };
 }
 
 /** The manager's push requests and grants (a list), or [] when the file is missing or unreadable. */
@@ -572,36 +653,68 @@ export const samePath = (a, b) => {
   return !!a && !!b && norm(a) === norm(b);
 };
 
-/** The grant that lets this push go now: allowed, not expired nor used, for the same repository, branch, folder and source. */
-export function grantFor(list, target, facts) {
-  if (!target?.branch || !facts?.repo || facts.main || MAIN_BRANCHES.has(target.branch.toLowerCase())) return null;
-  return list.find(g => g.status === 'allowed' && Date.parse(g.expires) > Date.now() && g.repo === facts.repo
-    && g.branch === target.branch && g.src === target.src && samePath(g.dir, target.dir)) ?? null;
+/**
+ * The grant that lets this push go now: allowed, not expired nor used, given to the same asker (the manager, or the id
+ * of a "Work now" session) for the same repository, branch, folder and source. main: whether the push is one of the
+ * main branch the owner may allow (mainPushTarget): such a push takes only a grant given for the main branch, and only
+ * with the commits its card showed (the source still at the same commit); such a grant serves nothing else, and any
+ * other push of the main branch never goes.
+ */
+export function grantFor(list, target, facts, asker = 'manager', main = false) {
+  if (!target?.branch || !facts?.repo) return null;
+  if ((!!facts.main || MAIN_BRANCHES.has(target.branch.toLowerCase())) !== main) return null;
+  return list.find(g => g.status === 'allowed' && Date.parse(g.expires) > Date.now() && !!g.main === main && (g.session ?? 'manager') === asker
+    && g.repo === facts.repo && g.branch === target.branch && g.src === target.src && samePath(g.dir, target.dir)
+    && (!main || (!!g.tip && g.tip === facts.tip))) ?? null;
 }
 
-/** Takes the grant for this push, if there is one, and uses it up at once. Returns it, or null. */
-export function takeGrant(file, target, facts = target?.branch ? pushFacts(target) : null) {
+/** Takes the grant for this push, if there is one, and uses it up at once, written down (logPush). Returns it, or null. */
+export function takeGrant(file, target, facts = target?.branch ? pushFacts(target) : null, asker = 'manager', main = false) {
   if (!file) return null;
   const list = readPushes(file);
-  const grant = grantFor(list, target, facts);
+  const grant = grantFor(list, target, facts, asker, main);
   if (!grant) return null;
   Object.assign(grant, { status: 'used', used: new Date().toISOString() });
   const temporary = `${file}.${process.pid}.tmp`;
   writeFileSync(temporary, JSON.stringify(list, null, 2));
   renameSync(temporary, file);
+  logPush(file, 'used', grant);
   return grant;
 }
 
 /**
- * The settings that make Claude Code run this file before each command, refusing what is not in "allowed". grants:
- * the manager's push requests and grants (see takeGrant).
+ * Writes down for good, next to the grants file, a push the owner allowed ("allowed") or one that went on that grant
+ * ("used"): who asked, where to, what it carried and when. Never throws: the record never gets in the way of a push.
  */
-export function guardHooks({ log, allowed = [], grants = null, who = grants ? 'manager' : 'step', noMain = false }) {
+export function logPush(grants, event, p) {
+  try {
+    const entry = {
+      at: new Date().toISOString(), event, id: p.id, by: p.session ? `session ${p.session}` : 'manager', project: p.project ?? null,
+      repo: p.repo, branch: p.branch, main: !!p.main, dir: p.dir, remote: p.remote, src: p.src, tip: p.tip || null,
+      commits: p.count ?? 0, files: p.fileCount ?? null, migrations: p.migrationCount ?? null, expires: p.expires ?? null,
+    };
+    appendFileSync(pushLogFile(grants), `${JSON.stringify(entry)}\n`);
+  } catch {
+    // a record that could not be written is not a reason to stop
+  }
+}
+
+/**
+ * The settings that make Claude Code run this file before each command, refusing what is not in "allowed". grants:
+ * the owner's push requests and grants (see takeGrant), for the manager and a "Work now" session; session: that
+ * session's id, so it takes only its own grants; mainCard: where the main branch may go through a card
+ * (mainPushTargets).
+ */
+export function guardHooks({ log, allowed = [], grants = null, who = grants ? 'manager' : 'step', noMain = false, session = null, mainCard = [] }) {
   const q = s => `"${String(s).replace(/\\/g, '/')}"`;
-  // Only the guard's own rules: any other text would go into a shell command line.
+  // Only the guard's own rules: any other text would go into a shell command line. So would a folder, a repository
+  // or an id, which are passed only when nothing in them is read by a shell inside double quotes.
+  const plain = s => !!s && !/["%$`!\r\n]/.test(String(s));
   const rules = [PUSH, REMOTE, PR, REPO, API, GIST, RELEASE, WORKFLOW, SECRET].filter(r => allowed.includes(r));
   const by = ['step', 'manager', 'session'].includes(who) ? who : 'step';
-  const command = [q(process.execPath), q(fileURLToPath(import.meta.url)), '--log', q(log), '--who', by, ...rules.flatMap(r => ['--allow', q(r)]), ...(grants ? ['--grants', q(grants)] : []), ...(noMain ? ['--no-main'] : [])].join(' ');
+  const card = grants ? (mainCard ?? []).flatMap(x => (x.dir && plain(x.dir) ? ['--main-dir', q(x.dir)] : x.repo && plain(x.repo) ? ['--main-repo', q(x.repo)] : [])) : [];
+  const command = [q(process.execPath), q(fileURLToPath(import.meta.url)), '--log', q(log), '--who', by, ...rules.flatMap(r => ['--allow', q(r)]),
+    ...(grants ? ['--grants', q(grants)] : []), ...(grants && plain(session) ? ['--session', q(session)] : []), ...card, ...(noMain ? ['--no-main'] : [])].join(' ');
   return { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command, timeout: 30 }] }] };
 }
 
@@ -617,7 +730,12 @@ async function hook(argv) {
   const [log] = opt('--log');
   const [grants] = opt('--grants');
   const who = opt('--who')[0] ?? 'step';
+  // Whose grants this command may take: the manager's, or those of the "Work now" session it runs in.
+  const asker = opt('--session')[0] ?? 'manager';
   const allowed = new Set(opt('--allow'));
+  const mainCard = [...opt('--main-dir').map(dir => ({ dir })), ...opt('--main-repo').map(repo => ({ repo }))];
+  // Said when a push to the main branch is refused for good, where some project's main branch goes through a card.
+  const onlyCard = mainCard.length ? ` (In a project whose owner lets its main branch go through a card, only "git push <remote> <main branch>" goes that way: alone, with no option.)` : '';
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
   const call = JSON.parse(input || '{}');
@@ -636,32 +754,40 @@ async function hook(argv) {
   }
   const found = publishing(command);
   const cwd = call.cwd || process.cwd();
+  // The main branch of a project whose owner lets it go through a card ("main_push": "card"): it goes once they allow
+  // that push there, and only that way, never on a session's general permission to push. Until then it is refused and
+  // noted, and becomes the card (src/decisions.mjs).
+  const main = grants && found.length && found.every(f => f.rule === PUSH) ? mainPushTarget(command, cwd, mainCard) : null;
+  if (main) {
+    if (takeGrant(grants, main, main.facts, asker, true)) return;
+    if (log) appendFileSync(log, `${JSON.stringify({ tool_name: 'Bash', tool_use_id: call.tool_use_id, tool_input: { command }, cwd, card: 'main' })}\n`);
+    if (who !== 'session') recordSignal('publish_refused', found.map(f => f.part).join('; '), { who });
+    return deny(`Refused by Chiefmate for now: the main branch (${main.branch}) of this project goes to GitHub only once the owner allows this push on its card. The owner now gets the card in the app, with what goes (commits, files, migrations); you are told when they allow it, and may then run the same command again, once, within ${GRANT_MINUTES} minutes, with nothing committed meanwhile (the card allows exactly the commits it shows). Only "git push <remote> ${main.branch}" goes that way (alone, or after "cd <folder> &&" or with "-C <folder>", with "2>&1" at most), with no option; never a forced push or a deleted branch. Say what goes and why, and stop.`);
+  }
   // A "Work now" session (src/worknow.mjs): only a plain push of one branch other than the main one may ever go, once
   // the owner allows pushing; any other push is refused at once, so it never becomes a permission request. HEAD is
-  // the branch checked out, and "heads/<name>" that branch.
+  // the branch checked out, and "heads/<name>" that branch (pushParts).
   if (argv.includes('--no-main') && found.some(f => f.rule === PUSH)) {
     const target = plainPush(command, cwd);
-    const named = /^head$/i.test(target.branch ?? '') ? git(target.dir, 'symbolic-ref', '--short', 'HEAD') : target.branch;
-    const branch = named?.replace(/^(refs\/)?heads\//i, '');
-    if (!branch || pushFacts({ ...target, branch }).main) {
-      return deny('Refused by Chiefmate, always: nothing goes straight to the main branch (main, master or the default one), and no push is forced. Only "git push [-u] <remote> <branch>" of a branch of the work goes (alone, or after "cd <folder> &&", with "2>&1" at most), once the owner allowed pushing. Say what you wanted to send and why, and stop.');
+    if (!target.branch || pushFacts(target).main) {
+      return deny(`Refused by Chiefmate, always: nothing goes straight to the main branch (main, master or the default one), and no push is forced. Only "git push [-u] <remote> <branch>" of a branch of the work goes (alone, or after "cd <folder> &&", with "2>&1" at most), once the owner allowed pushing.${onlyCard} Say what you wanted to send and why, and stop.`);
     }
   }
   const refused = found.filter(f => !allowed.has(f.rule));
   if (!refused.length) return;
   // The manager's push the owner allowed on its card: it goes, once.
   const target = grants && refused.every(f => f.rule === PUSH) ? plainPush(command, cwd) : null;
-  if (target?.branch && takeGrant(grants, target)) return;
+  if (target?.branch && takeGrant(grants, target, undefined, asker)) return;
   if (log) appendFileSync(log, `${JSON.stringify({ tool_name: 'Bash', tool_use_id: call.tool_use_id, tool_input: { command }, cwd })}\n`);
   const rules = [...new Set(refused.map(f => f.rule))].join(', ');
   // The manager asks for a new repository through Chiefmate's command line, never through gh (src/decisions.mjs, repoCreate).
   const creating = refused.some(f => f.rule === REPO && /^gh repo create\b/.test(f.part));
-  const reason = !grants
+  const reason = who !== 'manager'
     ? `Refused by Chiefmate: this publishes (${rules}) and needs the owner's permission in the app. Say what you wanted to run and why, and stop.`
     : creating
       ? `Refused by Chiefmate: the manager never runs "gh repo create". To create a private repository in the owner's account from a local folder, run node src/cli.mjs repo-create <name> --private --from <folder> [--description "<text>"]: the owner gets a card to allow it once, and you run the same command again when they do. Never a public repository.`
       : target?.refused === 'main' || target?.refused === 'forced'
-        ? 'Refused by Chiefmate, always: the manager never pushes to the main branch (main, master or the default one) nor forces a push (--force, --force-with-lease, +refspec, --mirror, --delete). Tell the owner what you wanted to send and why.'
+        ? `Refused by Chiefmate, always: the manager never pushes to the main branch (main, master or the default one) nor forces a push (--force, --force-with-lease, +refspec, --mirror, --delete).${target.refused === 'main' ? onlyCard : ''} Tell the owner what you wanted to send and why.`
         : target
           ? `Refused by Chiefmate: this push needs the owner's permission. If it is a plain push of one branch, the owner now gets a card to allow it once (this repository and branch, for ${GRANT_MINUTES} minutes); you are told when they do, and may run the same command again. Only "git -C <folder> push [-u] <remote> <branch>" (or "cd <folder> && git push [-u] <remote> <branch>", with "2>&1" at most) can be allowed, alone and with no other option; the grant serves any of these forms of the same push. Say what you want to send and why, and stop.`
           : `Refused by Chiefmate: this publishes (${rules}), and the manager never does. Say what you wanted to run and why.`;

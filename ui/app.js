@@ -1652,8 +1652,8 @@ $('#decisions').addEventListener('click', async event => {
   if (c.kind === 'merge' && action === 'approve' && !(await confirmDialog(t('Approve and merge'), `${c.label}: ${c.title}. ${how}`, t('Approve')))) return;
   const closes = c.url ? t('The pull request is closed on GitHub; it can be reopened there.') : t('The branch stays in your clone, not merged.');
   if (c.kind === 'merge' && action === 'discard' && !(await confirmDialog(t('Discard this work'), `${c.label}: ${c.title}. ${closes}`, t('Discard')))) return;
-  // Allowing a push is confirmed too: it lets the manager send that branch to GitHub once.
-  if (c.kind === 'push' && action === 'approve' && !(await confirmDialog(t('Allow this push'), `${c.title}. ${c.what} ${c.change}`, t('Allow push')))) return;
+  // Allowing a push is confirmed too: it lets the manager send that branch to GitHub once (the main branch, with its risk).
+  if (c.kind === 'push' && action === 'approve' && !(await confirmDialog(t('Allow this push'), `${c.title}. ${c.what} ${c.change}${c.main ? ` ${c.risk}` : ''}`, t('Allow push')))) return;
   // And creating a repository: the manager may then create it, private, and send the folder once.
   if (c.kind === 'repo' && action === 'approve' && !(await confirmDialog(t('Allow this repository'), `${c.what} ${c.change}`, t('Allow creation')))) return;
   // What the owner wrote goes with the answer; "Send" needs something written.
@@ -1667,7 +1667,9 @@ $('#decisions').addEventListener('click', async event => {
     toast({
       merged: [t('Merged.'), r.merge?.copiesNote].filter(Boolean).join(' '), later: c.thirdParty ? t('Hidden: it is in the archive.') : t('Left for later: the card stays at the end, faded.'), discarded: t('Discarded.'),
       already_merged: t('Branch already merged'), branch_deleted: t('Local branch deleted'),
-      approved: t('Approved: it becomes a task for its agent, in its turn.'), allowed: t('Allowed: the manager may send it once now.'), refused: t('Refused: the manager is told.'), answered: t('Answer sent to the manager: {answer}', { answer: [r.answer, r.note].filter(Boolean).join(' — ') }),
+      approved: t('Approved: it becomes a task for its agent, in its turn.'),
+      allowed: c.session ? t('Allowed: the session is told and may send it once now.') : t('Allowed: the manager may send it once now.'),
+      refused: c.session ? t('Refused: the session is told.') : t('Refused: the manager is told.'), answered: t('Answer sent to the manager: {answer}', { answer: [r.answer, r.note].filter(Boolean).join(' — ') }),
     }[r.done] ?? '');
   } catch (error) {
     toast(error.message);
@@ -3465,6 +3467,10 @@ function contextFormHtml(d) {
       ${blocks}
       <label><span>${esc(t('Notes for the project'))} <code>projects.${esc(d.project.id)}.notes</code></span><textarea name="notes" rows="4">${esc(d.settings.notes)}</textarea></label>
       ${b.used ? `<p class="hint">${esc(t("The prompt builder is used for this project, so these notes don't go to the crew; each member's notes below do."))}</p>` : ''}
+      <fieldset><legend>${esc(t('Main branch to GitHub'))}</legend>
+        <label class="option"><input type="checkbox" name="mainPush"${d.settings.mainPush ? ' checked' : ''}> ${esc(t('Through a card: the manager or a "Work now" session sends it once you allow it in Decisions'))} <code>projects.${esc(d.project.id)}.main_push</code></label>
+        <p class="hint">${esc(t('For a project without pull requests. A plain push of the main branch becomes a card with what goes (commits, files, migrations); your click lets that push go once, within 30 minutes. Off, they never send it. A forced push or a deleted branch is always refused.'))}</p>
+      </fieldset>
       <div class="label" style="margin-top:12px">${esc(t('Each member'))}</div>
       ${members}
       <div class="actions left"><button type="button" class="button secondary" data-context-preview>${esc(t('Preview'))}</button><button type="button" class="button" data-context-save hidden>${esc(t('Save'))}</button></div>
@@ -3557,6 +3563,7 @@ function contextChanges() {
     if (!same([...off, ...keptOff], d.builder.exclude)) changes.exclude = [...keptOff, ...off];
   }
   if (form.notes.value.trim() !== d.settings.notes.trim()) changes.notes = form.notes.value;
+  if (form.mainPush.checked !== !!d.settings.mainPush) changes.mainPush = form.mainPush.checked;
   for (const area of form.querySelectorAll('textarea[data-extra]')) {
     const id = area.dataset.extra;
     if (area.value.trim() !== (d.settings.extra[id]?.text ?? '').trim()) (changes.extra ??= {})[id] = area.value;

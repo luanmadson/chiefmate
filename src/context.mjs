@@ -353,7 +353,7 @@ export function projectContext(config, id, { member = null, diffs = true, sent =
   return {
     project: { id, name: project.name ?? id }, generated: now(), tokensNote: 'about 4 characters per token',
     builder: builderInfo,
-    settings: { notes: project.notes ?? '', agentNotes: project.agent_notes ?? {}, extra: extraOf(config, id, team) },
+    settings: { notes: project.notes ?? '', agentNotes: project.agent_notes ?? {}, extra: extraOf(config, id, team), mainPush: project.main_push === 'card' },
     members, sessions: member ? [] : sessionsContext(config, id), history: member ? [] : readHistory(id),
   };
 }
@@ -435,7 +435,9 @@ const shown = v => (Array.isArray(v) ? v.join(', ') : v ?? '');
 
 /**
  * Applies the app's changes to a copy of the settings. changes: { modules: [...], exclude: [...], notes: "...",
- * agentNotes: { member: "..." }, extra: { member: "..." } } (only what is given changes). Returns { config, changed },
+ * agentNotes: { member: "..." }, extra: { member: "..." }, mainPush: true | false } (only what is given changes).
+ * mainPush is "main_push": "card", the project's main branch going to GitHub through the owner's card (src/guard.mjs):
+ * only the owner turns it on, since only the app and the owner's terminal reach this. Returns { config, changed },
  * "changed" listing each setting that really changes, with its value before and after.
  */
 export function applyChanges(config, id, changes = {}) {
@@ -466,6 +468,12 @@ export function applyChanges(config, id, changes = {}) {
     record(`projects.${id}.notes`, project.notes ?? '', v);
     if (v) project.notes = v;
     else delete project.notes;
+  }
+  if (changes.mainPush !== undefined) {
+    const on = changes.mainPush === true || changes.mainPush === 'card';
+    record(`projects.${id}.main_push`, project.main_push ?? '', on ? 'card' : '');
+    if (on) project.main_push = 'card';
+    else delete project.main_push;
   }
   for (const [memberId, value] of Object.entries(changes.agentNotes ?? {})) {
     if (!team[memberId]) throw new Error(t('{agent} is not in the crew of {project}.', { agent: memberId, project: id }));
