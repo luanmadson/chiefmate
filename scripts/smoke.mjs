@@ -201,7 +201,16 @@ try {
     expect(standby.mode === 'standby' && standbyState.power?.mode === 'standby' && backOn.mode === 'on', `standby did not go on and off: ${JSON.stringify([standby, standbyState.power, backOn])}`);
     expect((await post('/api/power', { action: 'stop' })).status === 400 && (await post('/api/power', { action: 'nap' })).status === 400, 'a stop was tried in the smoke test, or an unknown power mode was accepted');
     const powerPreview = await (await post('/api/power', { action: 'preview' })).json();
-    expect(Array.isArray(powerPreview.runs) && Array.isArray(powerPreview.sessions) && Array.isArray(powerPreview.unsaved), `the power preview lacks the runs, sessions or changes: ${JSON.stringify(powerPreview)}`);
+    expect(Array.isArray(powerPreview.runs) && Array.isArray(powerPreview.sessions) && Array.isArray(powerPreview.unsaved) && typeof powerPreview.away === 'boolean', `the power preview lacks the runs, sessions, changes or away mode: ${JSON.stringify(powerPreview)}`);
+    // A restart: never without a reason; the manager's, outside away mode, becomes a question card for the owner; the
+    // owner's own would begin, which the smoke test can't (shutting down is off here): nothing restarts.
+    const noReason = await post('/api/power', { action: 'reboot', by: 'manager' });
+    const managerReboot = await (await post('/api/power', { action: 'reboot', by: 'manager', reason: 'a file locked by the antivirus' })).json();
+    const rebootQuestion = (await (await fetch(`${base}/api/state`)).json()).decisions?.find(c => c.question === managerReboot.asked);
+    const ownerReboot = await post('/api/power', { action: 'reboot', by: 'owner', reason: 'test' });
+    expect(noReason.status === 409 && managerReboot.asked && managerReboot.mode === 'on' && rebootQuestion?.options?.length === 2 && ownerReboot.status === 400,
+      `a restart went without a reason, the manager's did not wait for the owner's card, or one began in the smoke test: ${JSON.stringify([noReason.status, managerReboot, rebootQuestion, ownerReboot.status])}`);
+    await post('/api/decide', { card: rebootQuestion?.id, action: 'discard' });
     expect(Array.isArray(state.teams) && state.teams.every(x => x.project && Array.isArray(x.members)), '/api/state has no crews by project');
     expect(Array.isArray(state.needs), "/api/state has no list of the owner's requests");
     expect((await post('/api/needs-you', { what: 'Sign in' })).status === 400, 'a request for the owner without a run was not refused');
@@ -408,6 +417,7 @@ try {
     expect((await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder', dryRun: true })).status !== 403, 'a dry run of opening a folder was refused through the remote access');
     const remoteStop = await ask(remote.port, '/api/power', command, { action: 'stop' });
     expect(remoteStop.status === 403 && JSON.parse(remoteStop.text).error?.includes('computer'), `stopping Chiefmate from another device was not refused: ${remoteStop.status}`);
+    expect((await ask(remote.port, '/api/power', command, { action: 'reboot', by: 'owner', reason: 'test' })).status === 403, 'restarting the computer from another device was not refused');
     expect((await ask(port, '/api/state', tailnet)).status === 403, "the app's own port answered the tailnet name");
 
     // The emergency lockdown (src/lockdown.mjs), engaged and released through the API. This server stops nothing for
@@ -1449,6 +1459,90 @@ try {
   busy = 0;
   expect(power.powerOffCommand({ dryRun: true }).args.join(' ') === '/s /t 0', "Windows' shutdown is forced or delayed");
 
+  // A restart, simulated (Windows' restart, the closing and the windows are made up): refused without a reason or while
+  // a live session's turn goes on; it pauses for "reboot", counts down, saves "off" with who asked and why, and restarts
+  // Windows, never forced. The watchdog brings back a Chiefmate restarted this way, never one shut down.
+  const { listRuns, readRun, saveRun } = await import(src('store.mjs'));
+  const { DATA, readJson, writeJson } = await import(src('util.mjs'));
+  expect(power.rebootRefusal({ reason: '' }, hooks) && power.rebootRefusal({ reason: 'x' }, { ...hooks, sessionsBusy: () => true }) && !power.rebootRefusal({ reason: 'x' }, hooks),
+    "a restart went without a reason, or in the middle of a live session's turn");
+  let noReason = '';
+  try {
+    power.stopSystem('reboot', { by: 'manager', reason: ' ' });
+  } catch (error) {
+    noReason = error.message;
+  }
+  expect(noReason && !power.stopping(), 'a restart with no reason began');
+  calls.length = 0;
+  busy = 1;
+  hooks.powerOff = async target => calls.push(`poweroff:${target}`);
+  const reason = 'a file of the working copy locked by the antivirus';
+  const rebootJob = { target: 'reboot', since: new Date().toISOString(), by: 'manager', reason, stage: 'pausing', paused: [], sessions: [], waitingFor: [], countdownUntil: null, canceled: false };
+  expect(await power.shutDown(rebootJob, hooks), 'a restart did not go to the end');
+  const off = readState().power;
+  expect(calls[0] === 'pause:reboot' && calls.at(-2) === 'poweroff:reboot' && calls.at(-1) === 'finish' && rebootJob.countdownUntil
+    && off?.mode === 'off' && off.target === 'reboot' && off.by === 'manager' && off.reason === reason && off.paused.join() === 'smoke-power-a',
+    `a restart did not pause, count down, save who asked and why, and restart Windows: ${calls} ${JSON.stringify(off)}`);
+  expect(power.powerOffCommand({ dryRun: true, target: 'reboot' }).args.join(' ') === '/r /t 0', "Windows' restart is forced or delayed");
+  const since = Date.parse(off.since);
+  expect(power.offOnPurpose(off, since - 60_000) && !power.offOnPurpose(off, since + 60_000) && power.offOnPurpose({ ...off, target: 'shutdown' }, since + 60_000),
+    'the watchdog would leave off a Chiefmate whose computer restarted, or bring back one the owner shut down');
+  // Back after the restart: on again, the windows of the live sessions open again, the log says so.
+  let reopenedAt = null;
+  power.startPower({ ...hooks, boot: since + 30_000, reopenWindows: boot => ((reopenedAt = boot), ['smoke-window']) });
+  expect(!readState().power && power.powerInfo().mode === 'on' && reopenedAt === since + 30_000 && power.powerLog().at(-1)?.outcome === 'back' && power.powerLog().at(-1).by === 'manager',
+    `back from a restart, Chiefmate is not on, the windows did not open again or the log missed it: ${JSON.stringify(power.powerLog().at(-1))}`);
+
+  // The computer went down without a stop (a power cut): Chiefmate's last note of being alive is older than the
+  // computer's start. The runs it cut off (still running, or failed a moment before) go back to the front of the queue;
+  // one that failed long before stays failed. The records already running or failed here are put back afterwards.
+  const t0 = Date.now();
+  const last = new Date(t0 - 10 * 60_000).toISOString();
+  const boot = t0 - 5 * 60_000;
+  const kept = listRuns().filter(r => ['running', 'failed'].includes(r.status));
+  const cutRun = (id, status, ended, steps) => saveRun({ id, kind: 'task', project: 'Sample', title: id, status, created: new Date(t0 - 3600_000).toISOString(), ended, steps });
+  cutRun('smoke-cut-running', 'running', null, [{ agent: 'generalist', status: 'done' }, { agent: 'designer', status: 'running' }]);
+  cutRun('smoke-cut-failed', 'failed', new Date(t0 - 11 * 60_000).toISOString(), [{ agent: 'generalist', status: 'failed', error: 'claude exited with code 1' }, { agent: 'designer', status: 'pending' }]);
+  cutRun('smoke-cut-old', 'failed', new Date(t0 - 60 * 60_000).toISOString(), [{ agent: 'generalist', status: 'failed', error: 'a real error' }]);
+  expect(power.cutOff({ power: null, last, boot }) && !power.cutOff({ power: { mode: 'off' }, last, boot }) && !power.cutOff({ power: null, last: new Date(boot + 1000).toISOString(), boot }),
+    'a computer that went down without a stop was not found, or a stop or a plain restart of Chiefmate was taken for one');
+  power.beat(last);
+  let windowsBack = null;
+  power.startPower({ ...hooks, boot, reopenWindows: b => ((windowsBack = b), []) });
+  const [running, failed, old] = ['smoke-cut-running', 'smoke-cut-failed', 'smoke-cut-old'].map(readRun);
+  expect(running.status === 'queued' && running.resumeFirst && running.cutOff?.was === 'running' && running.steps[1].status === 'pending'
+    && failed.status === 'queued' && failed.resumeFirst && !failed.ended && !failed.result && failed.steps[0].status === 'pending' && !failed.steps[0].error
+    && old.status === 'failed' && windowsBack === boot && power.powerLog().at(-1)?.action === 'cut-off' && Date.parse(power.lastBeat()) > t0 - 1000,
+    `the runs cut off by a power cut were not put back at the front of the queue, or an old failure was: ${JSON.stringify([running, failed, old].map(r => [r.status, r.resumeFirst, r.steps.map(s => s.status)]))}`);
+  // Nothing of this check stays in the queue for a later one to start.
+  for (const id of ['smoke-cut-running', 'smoke-cut-failed', 'smoke-cut-old']) rmSync(path.join(DATA, 'runs', `${id}.json`), { force: true });
+  for (const r of kept) saveRun(r);
+
+  // The manager's restart outside away mode waits for the owner's yes on a card: refused while a live session's turn
+  // goes on (the card stays), started with the yes (then canceled here), and an old yes does nothing.
+  const decisions = await import(src('decisions.mjs'));
+  const asked = decisions.askReboot({ by: 'manager', reason, runs: [{ title: 'A run', project: 'Sample' }], sessions: [] });
+  expect(decisions.askReboot({ by: 'manager', reason }).id === asked.id && asked.reboot?.yes && asked.options.length === 2, 'a second restart question was asked while one waits, or it has no yes');
+  const cardsNow = () => decisions.decisionCards({ attention: decisions.openQuestions().map(q => ({ id: `question:${q.id}`, kind: 'question', level: 'urgent' })), items: [] });
+  const card = `question:${asked.id}`;
+  power.startPower({ ...hooks, sessionsBusy: () => true });
+  const busyAnswer = await decisions.decide({ card, action: 'answer', option: asked.reboot.yes }, cardsNow()).then(() => '', error => error.message);
+  expect(busyAnswer && decisions.openQuestions().some(q => q.id === asked.id) && !power.stopping(), "a restart confirmed during a live session's turn began, or its card closed");
+  calls.length = 0;
+  power.startPower({ ...hooks, sessionsBusy: () => false, crewBusy: () => true, countdownMs: 60_000 });
+  const yes = await decisions.decide({ card, action: 'answer', option: asked.reboot.yes }, cardsNow());
+  const going = power.powerInfo();
+  expect(yes.reboot && going.mode === 'stopping' && going.target === 'reboot' && going.by === 'manager' && going.reason === reason && power.powerLog().at(-1)?.confirmedBy === 'owner',
+    `the owner's yes did not start the manager's restart: ${JSON.stringify([yes, going])}`);
+  expect(power.cancelStop().mode === 'on' && power.powerLog().at(-1)?.outcome === 'canceled', 'a restart could not be canceled');
+  await new Promise(resolve => setTimeout(resolve, 40));
+  const stale = decisions.askReboot({ by: 'manager', reason });
+  const questionsPath = path.join(DATA, 'manager', 'questions.json');
+  writeJson(questionsPath, readJson(questionsPath, []).map(q => (q.id === stale.id ? { ...q, at: new Date(t0 - 31 * 60_000).toISOString() } : q)));
+  const staleAnswer = await decisions.decide({ card: `question:${stale.id}`, action: 'answer', option: stale.reboot.yes }, cardsNow()).then(() => '', error => error.message);
+  expect(staleAnswer && !power.stopping() && !decisions.openQuestions().some(q => q.id === stale.id), 'a restart confirmed over 30 minutes late began, or its card stayed');
+  busy = 0;
+
   const at = Date.now();
   expect(schedule.isLate(new Date(at - 30 * 60_000), at) && !schedule.isLate(new Date(at - 10 * 60_000), at), 'a mission missed for 30 minutes is not late, or one 10 minutes behind is');
 } catch (error) {
@@ -1538,7 +1632,7 @@ try {
   const { claudeArgs } = await import(src('claude.mjs'));
   const { assemble, assembleBlocks, parseBlocks } = await import(src('prompts.mjs'));
   const { pickNext } = await import(src('queue.mjs'));
-  const { planSession, sessionArgs, sessionIdOf } = await import(src('sessions.mjs'));
+  const { planSession, reopenWindows, savedConversation, sessionArgs, sessionIdOf } = await import(src('sessions.mjs'));
 
   // The queue: runs of different projects at once, up to the limit; one per project, in order; not before their time.
   const later = new Date(Date.now() + 3600_000).toISOString();
@@ -1756,6 +1850,30 @@ try {
     expect(JSON.parse(claude[claude.indexOf('--settings') + 1]).claudeMdExcludes?.includes(userFolder), "a Claude Code session would read the user's ~/.claude/CLAUDE.md");
     const codex = sessionArgs({ tool: 'codex', cwd: sessionTemp, model: null }, sessionConfig, 'Hello');
     expect(codex.join() === `-C,${sessionTemp},Hello`, `a Codex session's command line is wrong: ${codex.join(' ')}`);
+    // A Claude Code window keeps its own conversation id: it starts it, and after a restart of the computer carries it on
+    // when Claude Code saved it (a made-up ~/.claude here); Codex has none to carry on.
+    const own = { tool: 'claude', cwd: sessionTemp, toolSession: 'smoke-conversation-1' };
+    const started = sessionArgs(own, sessionConfig, 'Hello');
+    const resumed = sessionArgs(own, sessionConfig, null, undefined, { resume: true });
+    const claudeHome = path.join(sessionTemp, 'claude-home');
+    mkdirSync(path.join(claudeHome, 'projects', 'C--some-folder'), { recursive: true });
+    writeFileSync(path.join(claudeHome, 'projects', 'C--some-folder', 'smoke-conversation-1.jsonl'), '{}\n');
+    expect(started[started.indexOf('--session-id') + 1] === 'smoke-conversation-1' && started.at(-1) === 'Hello' && resumed[resumed.indexOf('--resume') + 1] === 'smoke-conversation-1' && !resumed.includes('--session-id')
+      && savedConversation(own, claudeHome) && !savedConversation({ ...own, toolSession: 'smoke-conversation-2' }, claudeHome) && !savedConversation({ ...own, tool: 'codex' }, claudeHome)
+      && !savedConversation({ ...own, toolSession: '../x' }, claudeHome),
+      `a Claude Code window can't start or carry on its own conversation: ${started.join(' ')} | ${resumed.join(' ')}`);
+    // After the computer restarted, the windows still open before it are the ones to open again (listed only here).
+    const sessionsDir = path.join((await import(src('util.mjs'))).DATA, 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    const old = new Date(Date.now() - 3600_000).toISOString();
+    const windowRecord = (id, extra) => writeFileSync(path.join(sessionsDir, `${id}.json`), JSON.stringify({ id, name: id, tool: 'claude', cwd: sessionTemp, mode: 'window', status: 'open', created: old, started: old, opened: old, ...extra }));
+    windowRecord('smoke-window-lost', {});
+    windowRecord('smoke-window-new', { opened: new Date().toISOString() });
+    windowRecord('smoke-window-ended', { status: 'ended' });
+    windowRecord('smoke-app-open', { mode: 'app' });
+    const lost = reopenWindows(Date.now() - 60_000, { dryRun: true });
+    expect(lost.includes('smoke-window-lost') && !lost.some(id => ['smoke-window-new', 'smoke-window-ended', 'smoke-app-open'].includes(id)), `the windows to open again after a restart are wrong: ${lost}`);
+    for (const id of ['smoke-window-lost', 'smoke-window-new', 'smoke-window-ended', 'smoke-app-open']) rmSync(path.join(sessionsDir, `${id}.json`), { force: true });
     let refused = false;
     try {
       planSession({ ...sessionConfig, sessions: { x: { tool: 'other', cwd: sessionTemp } } }, 'x');
