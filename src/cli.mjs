@@ -17,7 +17,7 @@ const option = name => {
 };
 const has = name => rest.includes(name);
 // The words of a command that are not options nor their values ("--title <text>").
-const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--level', '--note', '--recommend', '--project', '--run', '--tool', '--from', '--description', '--for', '--until'];
+const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--level', '--note', '--recommend', '--project', '--run', '--tool', '--from', '--description', '--for', '--until', '--before', '--instruction-append', '--agent', '--step', '--example'];
 const words = () => rest.filter((x, i) => !x.startsWith('--') && !VALUED.includes(rest[i - 1]));
 /** The title and summary given with --title and --summary: nothing is generated for them. */
 const brief = () => ({ title: option('--title'), summary: option('--summary'), level: option('--level'), tool: option('--tool') });
@@ -175,6 +175,23 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs cancel <id>                  cancels a run
   node src/cli.mjs resume <id> [--ignore-limits]
                                                 resumes a paused, failed or canceled run
+  node src/cli.mjs queue [list]                 the queue in the order it runs, numbered, with the runs on hold
+  node src/cli.mjs queue move <run> --before <run> | --top
+                                                moves a run in the queue (one per project still runs at a time)
+  node src/cli.mjs queue hold <run>             holds a run in the queue without canceling it; queue release <run>
+                                                lets it go again, in the same place
+  node src/cli.mjs edit <run> [--instruction-append "<text>"] [--title "..."] [--summary "..."] [--agent <member>]
+                            [--tool claude|codex|grok|""] [--level 1|2|3|none]
+                                                changes a run still in the queue: more instructions for its steps, its
+                                                title, summary, agent (of its crew steps), tool or approval level
+  node src/cli.mjs guide <run> "<message>"      the manager's guidance to the agent at work on a run: it reaches the
+                                                agent at a safe point, recorded as the manager's (the app shows it)
+  node src/cli.mjs retry <run> [--step n] [--agent <member>] [--tool claude|codex|grok|""]
+                                                redoes one step of a run that failed, was canceled or paused (by
+                                                default the first one not done), with another agent or tool if given
+  node src/cli.mjs gap "<what was missing>" [--example "<command>"]
+                                                records a tool the manager needed and Chiefmate lacks; the second time,
+                                                it becomes a proposal on the planning board. gap list; gap close <n>
   node src/cli.mjs ask-owner "<question>" [--context "<explanation>"] [--options "Yes|No|Wait"] [--recommend <option>] [--project <id>]
                             [--level 1|2|3]
                                                 the manager's question for the owner: a card in the app with one button
@@ -575,7 +592,7 @@ async function planCommand() {
       show('Done', await change({ action: 'set', id: args[0], status: 'done', by }));
       return;
     default:
-      throw new Error('Use: plan [list] | add <project> "<title>" | set <n> [--status ...] | done <n> | propose <project> "<title>" | triage <n> | approve|later|discard|restore <n> | order <n> <n> ...');
+      throw missing(`plan ${action}`, 'Use: plan [list] | add <project> "<title>" | set <n> [--status ...] | done <n> | propose <project> "<title>" | triage <n> | approve|later|discard|restore <n> | order <n> <n> ...');
   }
 }
 
@@ -650,7 +667,7 @@ async function radarCommand() {
       return;
     }
     default:
-      throw new Error('Use: radar [list] | show <n> | add "<title>" --summary ... | set <n> ... | choose|later|discard|restore <n>');
+      throw missing(`radar ${action}`, 'Use: radar [list] | show <n> | add "<title>" --summary ... | set <n> ... | choose|later|discard|restore <n>');
   }
 }
 
@@ -871,6 +888,106 @@ function lockdownText(v) {
 }
 
 /** A command refused to a step of a run: noted for the emergency lockdown's detection (src/lockdown.mjs), then refused. */
+// ---------- The manager's tools on the queue, the runs and its own gaps ----------
+
+/** An error for a command or action Chiefmate lacks: when the manager runs it, it is recorded as a tool gap (src/gaps.mjs). */
+function missing(what, usage) {
+  const error = new Error(usage);
+  error.gap = what;
+  return error;
+}
+
+/** The commands that steer the queue and the crew: the manager's (or the owner's), never a step's. */
+function notInStep(name) {
+  if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error(`A step of a run cannot use "${name}": only the manager steers the queue and the crew.`);
+}
+
+/** A run of the queue in one line, with its position. */
+function queueLine(r, i) {
+  const agents = [...new Set((r.steps ?? []).filter(s => s.status === 'pending' && !s.review).map(s => s.agent))];
+  const facts = [r.project, agents.join(', '), r.status === 'waiting' ? 'waiting for the limit' : '', r.onHold ? 'ON HOLD' : '', r.notBefore && Date.parse(r.notBefore) > Date.now() ? `not before ${formatDateTime(r.notBefore)}` : ''];
+  return `${String(i + 1).padStart(2)}. ${r.title} [${r.id}] (${facts.filter(Boolean).join('; ')})`;
+}
+
+async function queueCommand() {
+  const [action = 'list', id] = words();
+  const by = process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner';
+  const print = queue => {
+    if (!queue.length) return console.log('The queue is empty.');
+    queue.forEach((r, i) => console.log(queueLine(r, i)));
+  };
+  if (action === 'list') return print((await api('/api/state')).queue);
+  notInStep(`queue ${action}`);
+  if (!id) throw new Error(`Which run? node src/cli.mjs queue ${action} <run>`);
+  switch (action) {
+    case 'move': {
+      if (!option('--before') && !has('--top')) throw new Error('Where to? node src/cli.mjs queue move <run> --before <run> | --top');
+      print((await api('/api/queue', { action: 'move', id, before: option('--before'), top: has('--top'), by })).queue);
+      return;
+    }
+    case 'hold':
+    case 'release': {
+      const r = await api('/api/queue', { action, id, by });
+      console.log(action === 'hold' ? `On hold: ${r.title} [${r.id}]. It keeps its place and starts only after "queue release ${r.id}".` : `Released: ${r.title} [${r.id}]. It starts in its turn.`);
+      return;
+    }
+    default:
+      throw missing(`queue ${action}`, 'Use: queue [list] | move <run> --before <run> | move <run> --top | hold <run> | release <run>');
+  }
+}
+
+async function editCommand() {
+  notInStep('edit');
+  const [id] = words();
+  if (!id) throw new Error('Which run? node src/cli.mjs edit <run> --instruction-append "<text>" | --title ... | --summary ... | --agent ... | --tool ... | --level ...');
+  const changes = { append: option('--instruction-append'), title: option('--title'), summary: option('--summary'), agent: option('--agent'), tool: option('--tool'), level: option('--level') };
+  const r = await api('/api/run/edit', { id, changes, by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' });
+  console.log(`Changed: ${r.title} [${r.id}] (${r.steps.map(s => s.agent).join(', ')}${r.tools?.length ? `; on ${r.tools.join(', ')}` : ''}).`);
+}
+
+async function guideCommand() {
+  notInStep('guide');
+  const [id, message] = words();
+  if (!id || !message) throw new Error('Use: node src/cli.mjs guide <run> "<message>"');
+  const m = await api('/api/run/talk', { run: id, text: message, by: 'manager' });
+  console.log(`Sent to ${m.agent} (step ${m.step}) as the manager's guidance: it reaches the agent at a safe point, and its answer shows in the run.`);
+}
+
+async function retryCommand() {
+  notInStep('retry');
+  const [id] = words();
+  if (!id) throw new Error('Use: node src/cli.mjs retry <run> [--step n] [--agent <member>] [--tool claude|codex|grok]');
+  const r = await api('/api/retry', { id, step: option('--step'), agent: option('--agent'), tool: option('--tool'), by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' });
+  console.log(`Queued again: ${r.title} [${r.id}]. ${r.note ?? ''}`.trim());
+}
+
+async function gapCommand() {
+  const gaps = await import('./gaps.mjs');
+  const [first = 'list', ...more] = words();
+  if (first === 'list') {
+    const list = gaps.readGaps().filter(g => has('--all') || g.status !== 'closed');
+    if (!list.length) console.log(has('--all') ? 'No gaps recorded.' : 'No open gap.');
+    for (const g of list) console.log(`#${String(g.id).padEnd(3)} ${g.status.padEnd(8)} ${g.what} (${g.count}x, last ${formatDateTime(g.last)}${g.plan ? `, board item #${g.plan}` : ''})`);
+    return;
+  }
+  if (first === 'close') {
+    const body = { action: 'close', id: more[0], note: option('--note'), by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' };
+    const g = (await apiOr('/api/gap', body, async () => ({ gap: gaps.closeGap(more[0], option('--note')) }))).gap;
+    console.log(`Closed: #${g.id} ${g.what}`);
+    return;
+  }
+  // "gap <what was missing>": one more case.
+  const what = [first, ...more].join(' ');
+  const g = await recordGapNow(what, option('--example'));
+  console.log(`Recorded: #${g.id} ${g.what} (${g.count}x)${g.plan ? `. Proposed on the planning board as #${g.plan}.` : g.count < gaps.PROPOSE_AT ? '. If it comes up again, it becomes a proposal.' : ''}`);
+}
+
+/** Records a tool gap through the running Chiefmate, else here. */
+async function recordGapNow(what, example) {
+  const body = { action: 'record', what, example, by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' };
+  return (await apiOr('/api/gap', body, async () => ({ gap: await (await import('./gaps.mjs')).recordGap(body) }))).gap;
+}
+
 async function crewRefused(what, message) {
   (await import('./lockdown.mjs')).recordSignal('publish_refused', `cli.mjs ${what}`, { who: 'step' });
   throw new Error(message);
@@ -1090,6 +1207,22 @@ async function main() {
       return;
     case 'cancel':
       console.log((await api('/api/cancel', { id: rest[0] })).status);
+      return;
+    case 'queue':
+      await queueCommand();
+      return;
+    case 'edit':
+      await editCommand();
+      return;
+    case 'guide':
+      await guideCommand();
+      return;
+    case 'retry':
+      await retryCommand();
+      return;
+    case 'gap':
+    case 'gaps':
+      await gapCommand();
       return;
     case 'resume':
       console.log((await api('/api/resume', { id: rest[0], ignoreLimits: has('--ignore-limits') })).status);
@@ -1475,12 +1608,26 @@ The reading is off until you turn it on: node src/cli.mjs usage-reader on`);
     case 'notify':
       notify(rest[0] ?? 'Chiefmate', rest[1] ?? 'Test notification.');
       return;
+    case 'help':
+    case '--help':
+    case '-h':
+      console.log(HELP);
+      return;
     default:
+      // A command Chiefmate lacks, run by the manager: a tool gap.
+      if (command && process.env.CHIEFMATE_MANAGER) throw missing(`command "${command}"`, `Chiefmate has no command "${command}". See node src/cli.mjs help.`);
       console.log(HELP);
   }
 }
 
-main().catch(error => {
+main().catch(async error => {
   console.error(`Error: ${error.message}`);
   process.exitCode = 1;
+  if (!error.gap || !process.env.CHIEFMATE_MANAGER) return;
+  try {
+    const gap = await recordGapNow(error.gap, ['node src/cli.mjs', command, ...rest].filter(Boolean).join(' '));
+    console.error(`Recorded as tool gap #${gap.id} (${gap.count}x)${gap.plan ? `, proposed on the planning board as #${gap.plan}` : ''}. Work around it within the rules, or say what you need.`);
+  } catch (e) {
+    console.error(`The tool gap could not be recorded: ${e.message}`);
+  }
 });
