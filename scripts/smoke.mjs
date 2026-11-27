@@ -2878,6 +2878,17 @@ try {
     `the agent in charge does not read its open matters: ${mText}`);
   const crowded = charge.mattersText({ ...matters, recent: matters.recent.map(r => ({ ...r, outcome: 'x'.repeat(400) })), plan: Array(12).fill(matters.plan[1]) }, 'Owner');
   expect(crowded.length <= 9000, `the open matters have no ceiling: ${crowded.length} characters`);
+  // Between two turns of a project's session, an item that only moves past the board's ceiling of 12 (coming back up
+  // or pushed down) is told neither as closed nor as new; a resumed session with no state kept gets the whole state once.
+  const board = Array.from({ length: 13 }, (_, i) => ({ id: 70 + i, project: 'gamma', title: `Gamma item ${i}`, status: 'todo', priority: 'low' }));
+  const boardSeen = charge.turnChanges(made, 'gamma', null, { resumed: false, runs: mRuns, items: board }).seen;
+  const risen = charge.turnChanges(made, 'gamma', boardSeen, { runs: mRuns, items: [{ ...board[0], status: 'done' }, ...board.slice(1)] }).text;
+  const pushed = charge.turnChanges(made, 'gamma', boardSeen, { runs: mRuns, items: [{ id: 90, project: 'gamma', title: 'Gamma urgent', status: 'todo', priority: 'high' }, ...board] }).text;
+  expect(risen.includes('Board #70 Gamma item 0: off the open items (done)') && !risen.includes('Board #82') && pushed.includes('Board #90 Gamma urgent: new, todo') && !pushed.includes('Board #81'),
+    `an item that only moved past the board's ceiling was told as closed or new: ${risen} / ${pushed}`);
+  const whole = charge.turnChanges(made, 'gamma', null, { runs: mRuns, items: board }).text;
+  expect(whole.includes('## Your requests to the manager') && whole.includes("## The project's open matters, now") && whole.includes("## The project's memory now"),
+    `a resumed session with no state kept did not get the whole state once: ${whole}`);
   const { saveRun: saveMatterRun } = await import(src('store.mjs'));
   saveMatterRun({ id: 'm-saved', kind: 'task', project: 'gamma', title: 'Gamma saved delivery', status: 'done', created: hoursAgo(14), ended: hoursAgo(13), branch: 'cm/saved', delivered: temp, steps: [] });
   saveMatterRun({ id: 'm-saved-alpha', kind: 'task', project: 'alpha', title: 'Alpha saved delivery', status: 'done', created: hoursAgo(14), ended: hoursAgo(13), branch: 'cm/alpha', delivered: temp, steps: [] });

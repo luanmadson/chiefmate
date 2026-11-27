@@ -265,16 +265,22 @@ export const NEXT_STEP = {
   waiting_owner: 'waits for the owner: approve its delivery or act',
 };
 
+/** Whether a record's "project" is projectId: its id, or its name. */
+function ofProject(config, projectId) {
+  const name = config.projects?.[projectId]?.name;
+  return p => p === projectId || (!!name && p === name);
+}
+/** The board's open items of the project "ours" matches, in the board's order, with no ceiling. */
+const openItems = (items, ours) => items.filter(i => ours(i.project) && !i.archived && !['done', 'discarded'].includes(i.status));
+
 /**
  * A project's open matters, only of "projectId": { plan (the board's order), recent (newest first), deliveries
  * (oldest first), sessions }. The sessions are given by the caller (src/sessions.mjs imports this module).
  */
 export function openMatters(config, projectId, { runs = listRuns(), items = planItems(), sessions = [] } = {}) {
-  const name = config.projects?.[projectId]?.name;
-  const ours = p => p === projectId || (!!name && p === name);
-  const closed = ['done', 'discarded'];
+  const ours = ofProject(config, projectId);
   const outcome = r => (r.outcome ? [r.outcome.done?.join('; '), r.outcome.change, r.outcome.needs ? `needs the owner: ${r.outcome.needs}` : ''].filter(Boolean).join(' ') : '');
-  const plan = items.filter(i => ours(i.project) && !i.archived && !closed.includes(i.status)).slice(0, MAX.plan)
+  const plan = openItems(items, ours).slice(0, MAX.plan)
     .map(i => ({ id: i.id, title: i.title, status: i.status, priority: i.priority, note: clip(i.recommend_note || i.description, 200), run: i.run ?? null }));
   const deliveries = pendingDeliveries(runs.filter(r => ours(r.project))).slice(0, MAX.deliveries).map(({ run: r, waited, stale }) => ({
     run: r.id, title: r.title, summary: clip(r.summary || r.outcome?.change || r.result, 300), pullRequest: r.pullRequest ?? null, branch: r.branch ?? null,
@@ -370,7 +376,7 @@ ${owner} talks to you directly from the project's page in the Chiefmate app. You
   Size: S for minutes and a few lines, M for about an hour and a few files, L for hours or many files. Risk: what could break, or reach people, if it goes wrong. "urgency": "now" only when ${owner} said it can be done right away.
 - The manager never appears in Claude Code's session list: you reach it only with these requests. When you notice an error or failure of Chiefmate itself (a request not understood, outdated information here, a notice that never came), tell ${owner} in one line, without waiting to be asked.
 - An authorized request becomes work for the crew, which ends in a pull request (or a local branch) that ${owner} approves. Nothing goes live without ${owner}.
-- The project's state below is as this conversation started. Each later message of ${owner} starts with what changed since your previous turn (your requests and the manager's answers, deliveries, runs, the board, the memory, Chiefmate's notices): it is the latest state, and replaces what you read before. Don't send the same request twice; when ${owner} asks how one is going, answer from the latest state.
+- The project's state below is as this conversation started. Each later message of ${owner} starts with what changed since your previous turn, when something did (your requests and the manager's answers, deliveries, runs, the board, the memory, Chiefmate's notices): it is the latest state, and replaces what you read before. Don't send the same request twice; when ${owner} asks how one is going, answer from the latest state.
 - Be short and plain: the essentials first, no jargon.`;
   const facts = [
     `## The project: ${name}`,
@@ -424,11 +430,13 @@ export function turnChanges(config, projectId, seen, { notices = [], resumed = t
   const next = {
     requests: Object.fromEntries(requests.map(r => [r.id, requestState(r)])),
     deliveries: m.deliveries.map(d => d.run), recent: m.recent.map(r => r.run),
-    plan: Object.fromEntries(m.plan.map(i => [i.id, i.status])), memory: fingerprint(memory),
+    // Every open item, not only the list's first ones: an item that only moves past its ceiling is neither closed nor new.
+    plan: Object.fromEntries(openItems(items, ofProject(config, projectId)).map(i => [i.id, i.status])), memory: fingerprint(memory),
   };
   if (!resumed) return { text: '', seen: next };
   if (!seen) {
-    const text = `## The current state (Chiefmate now tells you what changes at each message)\n\n${chargeRequests(projectId, owner)}\n\n${mattersText(m, owner, { when: 'now' })}`;
+    const memoryNow = `## The project's memory now\n\n${memory ? clip(memory, 3000) : 'None yet.'}`;
+    const text = `## The current state (Chiefmate now tells you what changes at each message)\n\n${chargeRequests(projectId, owner)}\n\n${mattersText(m, owner, { when: 'now' })}\n\n${memoryNow}`;
     return { text, seen: next };
   }
   const lines = [];
