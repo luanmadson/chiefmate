@@ -1956,5 +1956,11 @@
   "File not found": "Arquivo não encontrado",
   "Path copied.": "Caminho copiado.",
   "Open on the computer": "Abrir no computador",
-  "Copy the path": "Copiar o caminho"
+  "Copy the path": "Copiar o caminho",
+  "Claude Code sign-in expiring": "Login do Claude Code vencendo",
+  "Claude Code sign-in about to end": "Login do Claude Code prestes a vencer",
+  "Claude Code sign-in expired": "Login do Claude Code vencido",
+  "The sign-in of Claude Code on this computer may end from {from} on, and by {when} at the latest. Without it, the crew and the manager stop.": "O login do Claude Code neste computador pode vencer a partir de {from}, e no máximo em {when}. Sem ele, a equipe e o gerente param.",
+  "The sign-in of Claude Code on this computer expired {when}: the crew and the manager stop until you sign in again.": "O login do Claude Code neste computador venceu em {when}: a equipe e o gerente ficam parados até você entrar de novo.",
+  "To renew it, run in a terminal: {command}": "Para renovar, rode num terminal: {command}"
 }

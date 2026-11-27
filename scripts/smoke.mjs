@@ -2040,6 +2040,10 @@ try {
   const again = attentionItems(input);
   expect(!again.some(i => i.id === 'done:a-done') && again.find(i => i.id === 'failed:a-failed')?.seen, 'a seen info notice did not go away, or a seen urgent one did not fade');
   expect(attentionItems({ ...input, runs: [...runs, { id: 'a-redo', project: 'p', title: 'Broke', status: 'running', created: new Date().toISOString() }] }).every(i => i.id !== 'failed:a-failed'), 'a failed run redone still asks for attention');
+  // Claude Code's sign-in (made-up expiry): important 3 days before, urgent and never "seen" on its last day.
+  const signIn = step => attentionItems({ ...input, login: { expires: later, left: 1, step } }).find(i => i.kind === 'login');
+  expect(signIn('3d')?.level === 'important' && signIn('3d').seenable && signIn('1d')?.level === 'urgent' && !signIn('1d').seenable && signIn('1d').text.includes('claude auth login'),
+    "the warning before Claude Code's sign-in expires is missing, at the wrong level or without the command to renew it");
 
   // The archive: a pull request merged or closed on GitHub, a branch merged in the owner's clone, a board item done,
   // an info notice seen or a day old, and a cause that ended (and came back). Nothing is lost.
