@@ -756,9 +756,11 @@ const reasonName = key => ({
   type: t('this kind of alarm is not on the list the watch may release'),
   analysts: t('the analysts did not both say false alarm'),
   analysts_disagree: t('the analysts disagree'),
+  unsure: t('an analyst said false alarm without enough confidence'),
   repeat: t('it is the second alarm within {hours} hours', { hours: 24 }),
   manager: t('it involves the manager'),
   new_evidence: t('more evidence came while it reviewed'),
+  engaged_again: t('someone engaged the lockdown again while it reviewed'),
   error: t('its review failed'),
 }[key] ?? key);
 
@@ -833,7 +835,8 @@ async function drawLockdownScreen() {
   }
   const l = data.lockdown;
   if (!l?.active) return false;
-  if (!started) {
+  // Opened during the lockdown: the owner's language, read once.
+  if (!started && language() !== (data.language || 'en')) {
     await setLanguage(data.language);
     translatePage();
   }

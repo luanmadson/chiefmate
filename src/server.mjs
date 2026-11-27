@@ -525,9 +525,10 @@ export function startServer() {
           recordSignal(refused === 'not allowed in' ? 'login_failed' : 'unknown_origin', `${req.method} ${clip(String(req.url), 120)} (${refused})`, { who: 'remote' });
           return reply(res, 403, { error: refused });
         }
-        // In an emergency lockdown, the remote access is off: only the lockdown's own screen is taken (reading it,
-        // engaging it again, the owner's note).
-        if (isLocked() && !(['GET', 'POST'].includes(req.method) && req.url === '/api/lockdown')) return reply(res, 423, { error: t('Chiefmate is in emergency lockdown: the remote access is off until the owner releases it on the computer.') });
+        // In an emergency lockdown, the remote access is off: only the lockdown's own screen is taken (the app's files,
+        // which hold no data, so the phone can open it; reading the lockdown, engaging it again, the owner's note).
+        const screen = req.url === '/api/lockdown' ? ['GET', 'POST'].includes(req.method) : req.method === 'GET' && !String(req.url).startsWith('/api/');
+        if (isLocked() && !screen) return reply(res, 423, { error: t('Chiefmate is in emergency lockdown: the remote access is off until the owner releases it on the computer.') });
       } else if (!allowed.has(req.headers.host)) {
         recordSignal('unknown_origin', `${req.method} ${clip(String(req.url), 120)} (host ${clip(String(req.headers.host ?? ''), 80)})`, { who: 'app' });
         return reply(res, 403, { error: 'address not allowed' });

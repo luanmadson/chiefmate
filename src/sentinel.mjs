@@ -5,7 +5,7 @@
 // given and answer: one on Claude Code, the other on Codex; both on Claude Code, with different prompts, for a project
 // marked sensitive) and releases by itself only when every rule of decide() holds. Otherwise the lockdown stays and the
 // owner gets the whole report. It never reviews a lockdown a person engaged, and the manager never releases one.
-import { spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -25,8 +25,11 @@ export const WATCH = { id: 'sentinel', name: 'Sentinel', title: 'Emergency watch
 // The kinds of alarm the watch may release by itself; any other always waits for the owner.
 export const ALLOWED_TYPES = ['own_folder_delete', 'github_read'];
 export const REPEAT_HOURS = 24;
+// A "false alarm" below this confidence counts as unsure.
+export const MIN_CONFIDENCE = 0.7;
 const BASELINE_MINUTES = 10;
-const ANALYST_MINUTES = 4;
+// Room for the analysts' highest effort; past it, the analyst is "uncertain" and the alarm waits for the owner.
+const ANALYST_MINUTES = 8;
 const baselineFile = (dir = SECURITY_DIR) => path.join(dir, 'baseline.json');
 
 // The signals a guard always refuses (for signals noted before the "refused" fact existed).
@@ -40,12 +43,14 @@ const inside = (inner, outer) => {
 
 // ---------- The state before: the protected places, taken every few minutes while nothing is locked ----------
 
-/** A repository's tracked files deleted from its working tree (git status), or null when git can't tell. */
+/** A repository's tracked files deleted from its working tree (git status), or null when git can't tell. Never blocks the server. */
 function deletedFiles(dir) {
-  if (!existsSync(dir)) return null;
-  const r = spawnSync('git', ['-C', dir, 'status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8', windowsHide: true, timeout: 15_000 });
-  if (r.status !== 0) return null;
-  return r.stdout.split('\n').filter(line => /^(D.|.D) /.test(line)).map(line => line.slice(3).trim()).slice(0, 200);
+  if (!existsSync(dir)) return Promise.resolve(null);
+  return new Promise(resolve => {
+    execFile('git', ['-C', dir, 'status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8', windowsHide: true, timeout: 15_000 }, (error, stdout) => {
+      resolve(error ? null : String(stdout).split('\n').filter(line => /^(D.|.D) /.test(line)).map(line => line.slice(3).trim()).slice(0, 200));
+    });
+  });
 }
 
 // The folders right in a folder (files there come and go on their own).
@@ -61,18 +66,19 @@ const names = dir => {
  * The protected places as they are now: the owner's home folder (its entries), Chiefmate's installation (its deleted
  * tracked files) and settings, each project's local clone, and the protected folders. git: for the tests.
  */
-export function snapshot(config = loadConfig(), { home = os.homedir(), root = ROOT, data = DATA, git = deletedFiles } = {}) {
+export async function snapshot(config = loadConfig(), { home = os.homedir(), root = ROOT, data = DATA, git = deletedFiles } = {}) {
+  const at = new Date().toISOString();
   const places = [{ id: 'home', path: home, names: names(home) }];
-  places.push({ id: 'chiefmate', path: root, exists: existsSync(root), deleted: git(root) });
+  places.push({ id: 'chiefmate', path: root, exists: existsSync(root), deleted: await git(root) });
   const settings = path.join(root, 'config', 'chiefmate.json');
   places.push({ id: 'settings', path: settings, exists: existsSync(settings) });
   for (const [id, p] of Object.entries(config.projects ?? {})) {
     if (!p?.local_clone) continue;
     const dir = path.resolve(p.local_clone);
-    places.push({ id: `clone:${id}`, path: dir, exists: existsSync(dir), deleted: git(dir) });
+    places.push({ id: `clone:${id}`, path: dir, exists: existsSync(dir), deleted: await git(dir) });
   }
   for (const dir of protectedFolders(config, data)) places.push({ id: `protected:${path.basename(dir)}`, path: dir, exists: existsSync(dir) });
-  return { at: new Date().toISOString(), places };
+  return { at, places };
 }
 
 export const readBaseline = dir => readJson(baselineFile(dir), null);
@@ -105,15 +111,30 @@ export function protectedChanges(before, after, own = []) {
   return changes;
 }
 
-/** Keeps the state before up to date: now, then every BASELINE_MINUTES while the lockdown is off. */
+/**
+ * Keeps the state before up to date: now, then every BASELINE_MINUTES while the lockdown is off. An alarm whose review
+ * was cut short (Chiefmate stopped meanwhile) is reviewed again, so it never shows "reviewing" with no one at it.
+ */
 export function startSentinel() {
-  const take = () => {
+  let taking = false;
+  const take = async () => {
+    if (taking) return;
+    taking = true;
     try {
-      if (!readLockdown().active) saveBaseline(snapshot());
+      if (readLockdown().active) return;
+      const shot = await snapshot();
+      // An alarm that began while it was taken: that state is no longer "before".
+      if (!readLockdown().active) saveBaseline(shot);
     } catch (error) {
       console.error('Emergency watch:', error.message);
+    } finally {
+      taking = false;
     }
   };
+  const state = readLockdown();
+  if (state.active === true && state.by === 'auto' && state.from === 'detection' && (!state.sentinel || state.sentinel.status === 'reviewing')) {
+    reviewIncident(state).catch(error => console.error('Emergency watch:', error.message));
+  }
   take();
   return setInterval(take, BASELINE_MINUTES * 60_000).unref();
 }
@@ -133,6 +154,11 @@ export function stepCommands(runId, stepNumber, { runsDir = RUNS, read = readRun
   return commandsInLog(readFileSync(file, 'utf8'));
 }
 
+// The guard's refusal as Claude Code writes it in the step's log: an error result that starts with it
+// ("PreToolUse:Bash hook error: Refused by Chiefmate: ..."). A command that ran can't forge it: its output is no error,
+// or comes after "Exit code N".
+const REFUSAL = /^\s*(PreToolUse:[\w-]+ hook [\w ]+: )?Refused by Chiefmate\b/;
+
 /** The shell commands in a step's log text, with whether each was refused by Chiefmate. */
 export function commandsInLog(text) {
   const calls = new Map();
@@ -144,10 +170,10 @@ export function commandsInLog(text) {
       continue;
     }
     for (const c of Array.isArray(e?.message?.content) ? e.message.content : []) {
-      if (c.type === 'tool_use' && /^(Bash|shell|command)$/i.test(c.name ?? '') && c.input?.command) calls.set(c.id, { command: String(c.input.command), refused: false });
+      if (c.type === 'tool_use' && /^(Bash|PowerShell|shell|command)$/i.test(c.name ?? '') && c.input?.command) calls.set(c.id, { command: String(c.input.command), refused: false });
       if (c.type === 'tool_result' && calls.has(c.tool_use_id)) {
         const said = typeof c.content === 'string' ? c.content : (c.content ?? []).map(x => x.text ?? '').join(' ');
-        if (/Refused by Chiefmate/.test(said)) calls.get(c.tool_use_id).refused = true;
+        if (c.is_error === true && REFUSAL.test(said)) calls.get(c.tool_use_id).refused = true;
       }
     }
   }
@@ -179,6 +205,8 @@ export function githubRead(command) {
   const flagged = parts.filter(p => publishing(p).length);
   if (!flagged.length) return false;
   return flagged.every(p => {
+    // A body read from a file (@file, --input, -InFile) may hold anything: not a read it can tell.
+    if (/(=|\s)@\S|--input\b|-InFile\b/i.test(p)) return false;
     if (/^gh\s+api\s+graphql\b/i.test(p)) return !/\bmutation\b/i.test(p);
     if (/^gh\s+api\b/i.test(p)) return /(\s)(-X|--method)[\s=]*GET\b/i.test(p);
     if (/^gh\s+(pr|issue|repo|release|run|workflow|label|search)\s+(view|list|status|diff|checks|search|clone)\b/i.test(p)) return true;
@@ -234,7 +262,7 @@ export function runChecks(state, { created = [], before = null, after = null, co
       outbound = null;
       continue;
     }
-    commands.push(...list.slice(-30).map(c => ({ ...c, run: e.run, step: e.step })));
+    commands.push(...list.slice(-30).map(c => ({ ...c, command: clip(c.command, 1000), run: e.run, step: e.step })));
     for (const c of list) {
       const kind = !c.refused && sendsOut(c.command);
       if (kind && outbound) outbound.push({ command: clip(c.command, 300), kind });
@@ -328,7 +356,8 @@ export function parseVerdict(text) {
 
 /**
  * Asks one analyst, in a fresh session in an empty temporary folder, that only answers: Claude Code with no tool at
- * all, or Codex in its read-only sandbox (with the guard, which refuses every command while the lockdown is on).
+ * all, or Codex in its read-only sandbox (with the guard, which refuses every command while the lockdown is on). Both
+ * at their highest effort (the owner's decision for the security roles): max on Claude Code, xhigh on Codex.
  * Returns { tool, verdict, confidence, reason, error }.
  */
 export async function askAnalyst({ tool, prompt, config = loadConfig() }) {
@@ -336,10 +365,10 @@ export async function askAnalyst({ tool, prompt, config = loadConfig() }) {
   try {
     let r;
     if (tool === 'codex') {
-      r = await runTool('codex', { dir, prompt, readOnly: true, guardLog: path.join(dir, 'guard.jsonl'), log: path.join(dir, 'analyst.jsonl'), maxMinutes: ANALYST_MINUTES }).promise;
+      r = await runTool('codex', { dir, prompt, effort: 'xhigh', readOnly: true, guardLog: path.join(dir, 'guard.jsonl'), log: path.join(dir, 'analyst.jsonl'), maxMinutes: ANALYST_MINUTES }).promise;
     } else {
       const model = config.crew?.manager?.model ?? loadAgents(config).manager?.model ?? 'opus';
-      r = await runClaude({ dir, prompt, model, noTools: true, tools: [], disallowed: [], maxMinutes: ANALYST_MINUTES, attribution: config.attribution !== false }).promise;
+      r = await runClaude({ dir, prompt, model, effort: 'max', noTools: true, tools: [], disallowed: [], maxMinutes: ANALYST_MINUTES, attribution: config.attribution !== false }).promise;
     }
     if (!r.ok && !r.text) return { tool, verdict: 'uncertain', confidence: 0, reason: '', error: clip(String(r.error ?? 'failed'), 300) };
     return { tool, ...parseVerdict(r.text), error: null };
@@ -361,7 +390,7 @@ export async function analystTools(sensitive, { codexReady = () => signedIn('cod
 /**
  * Whether the watch releases by itself: { release, reasons }. Only when everything holds: the command refused or
  * harmless; nothing changed in the protected places; nothing sent out; an allowed kind of alarm; both analysts say
- * false alarm; not a second alarm within REPEAT_HOURS; the manager not involved.
+ * false alarm, each with at least MIN_CONFIDENCE; not a second alarm within REPEAT_HOURS; the manager not involved.
  */
 export function decide(checks, verdicts) {
   const reasons = [];
@@ -373,7 +402,7 @@ export function decide(checks, verdicts) {
   if (!ALLOWED_TYPES.includes(checks.type)) reasons.push('type');
   if (verdicts.length < 2 || verdicts.some(v => v.verdict !== 'false_alarm')) {
     reasons.push(new Set(verdicts.map(v => v.verdict)).size > 1 ? 'analysts_disagree' : 'analysts');
-  }
+  } else if (verdicts.some(v => !(Number(v.confidence) >= MIN_CONFIDENCE))) reasons.push('unsure');
   if (checks.repeat) reasons.push('repeat');
   if (checks.manager) reasons.push('manager');
   return { release: reasons.length === 0, reasons };
@@ -389,9 +418,11 @@ export const REASONS = {
   type: 'this kind of alarm is not on the list the watch may release',
   analysts: 'the analysts did not both say false alarm',
   analysts_disagree: 'the analysts disagree',
+  unsure: 'an analyst said false alarm without enough confidence',
   repeat: `it is the second alarm within ${REPEAT_HOURS} hours`,
   manager: 'it involves the manager',
   new_evidence: 'more evidence came while it reviewed',
+  engaged_again: 'someone engaged the lockdown again while it reviewed',
   error: 'its review failed',
 };
 
@@ -404,9 +435,11 @@ export const reasonText = key => ({
   type: t('this kind of alarm is not on the list the watch may release'),
   analysts: t('the analysts did not both say false alarm'),
   analysts_disagree: t('the analysts disagree'),
+  unsure: t('an analyst said false alarm without enough confidence'),
   repeat: t('it is the second alarm within {hours} hours', { hours: REPEAT_HOURS }),
   manager: t('it involves the manager'),
   new_evidence: t('more evidence came while it reviewed'),
+  engaged_again: t('someone engaged the lockdown again while it reviewed'),
   error: t('its review failed'),
 }[key] ?? key);
 
@@ -506,9 +539,11 @@ async function review(state, config, deps) {
   const checks = runChecks(state, {
     created: deps.created ?? readCreated(dir),
     before: deps.before !== undefined ? deps.before : readBaseline(dir),
-    after: deps.after !== undefined ? deps.after : snapshot(config),
+    after: deps.after !== undefined ? deps.after : await snapshot(config),
     commandsOf: deps.commandsOf ?? ((run, step) => stepCommands(run, step, { read })),
   });
+  // A step of the manager (its final review of a run) involves the manager too.
+  if (incident.involved.some(x => x.agent?.id === 'manager')) checks.manager = true;
   // The analysts get the incident and the checks, never anything that lets them act.
   const data = { incident, checks: { ...checks, commands: undefined }, recentCommands: checks.commands };
   const tools = await analystTools(incident.involved.some(x => x.sensitive), { codexReady: deps.codexReady });
@@ -529,6 +564,11 @@ async function review(state, config, deps) {
   if (decision.release && (current.evidence ?? []).length !== (state.evidence ?? []).length) {
     decision.release = false;
     decision.reasons.push('new_evidence');
+  }
+  // A person engaged it again meanwhile (the owner's button, the command line): theirs to release.
+  if (decision.release && current.engagedAgain) {
+    decision.release = false;
+    decision.reasons.push('engaged_again');
   }
   const culprits = [...new Set(incident.involved.map(x => x.run).filter(Boolean))];
   const stopped = [...new Set(current.stopped?.runIds ?? [])];

@@ -420,7 +420,10 @@ try {
     expect(lockedMerge.status === 400 && /lockdown|emergência/i.test((await lockedMerge.json()).error ?? ''), 'a merge was not refused in the lockdown');
     expect((await ask(remote.port, '/api/state', tailnet)).status === 423, 'the remote access answered in the lockdown');
     expect((await ask(remote.port, '/api/lockdown', command, { action: 'release', confirm: true })).status === 403, 'the lockdown was released through the remote access');
-    // The phone's lockdown screen: it reads the lockdown and sends the owner's note, even with the rest off.
+    // The phone's lockdown screen: it opens the app (its files hold no data), reads the lockdown and sends the owner's
+    // note, even with the rest off.
+    const phonePage = await ask(remote.port, '/', tailnet);
+    expect(phonePage.status === 200 && /<html/i.test(phonePage.text), `the phone could not open the app in the lockdown: ${phonePage.status}`);
     const phoneView = await ask(remote.port, '/api/lockdown', tailnet);
     expect(phoneView.status === 200 && JSON.parse(phoneView.text).lockdown?.active === true, `the phone could not read the lockdown: ${phoneView.status}`);
     const phoneNote = await ask(remote.port, '/api/lockdown', command, { action: 'note', note: 'Seen from the phone' });

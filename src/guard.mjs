@@ -510,11 +510,14 @@ async function hook(argv) {
   if (grave) {
     return deny("Refused by Chiefmate: this reaches into Chiefmate's protected folders, or deletes a whole drive, a personal folder or Chiefmate. The owner was warned. Don't try it another way: say why you wanted it, and stop.");
   }
-  try {
-    recordCreated(createdPaths(command, { cwd }), facts);
-  } catch {
-    // noting never blocks a command
-  }
+  // The folders the command creates outside the agent's own, noted only when it goes on (a refused one creates none).
+  const goes = () => {
+    try {
+      recordCreated(createdPaths(command, { cwd }), facts);
+    } catch {
+      // noting never blocks a command
+    }
+  };
   const found = publishing(command);
   // A "Work now" session (src/worknow.mjs): only a plain push of one branch other than the main one may ever go, once
   // the owner allows pushing; any other push is refused at once, so it never becomes a permission request. HEAD is
@@ -528,10 +531,10 @@ async function hook(argv) {
     }
   }
   const refused = found.filter(f => !allowed.has(f.rule));
-  if (!refused.length) return;
+  if (!refused.length) return goes();
   // The manager's push the owner allowed on its card: it goes, once.
   const target = grants && refused.every(f => f.rule === PUSH) ? plainPush(command, cwd) : null;
-  if (target?.branch && takeGrant(grants, target)) return;
+  if (target?.branch && takeGrant(grants, target)) return goes();
   if (log) appendFileSync(log, `${JSON.stringify({ tool_name: 'Bash', tool_use_id: call.tool_use_id, tool_input: { command }, cwd })}\n`);
   const rules = [...new Set(refused.map(f => f.rule))].join(', ');
   // The manager asks for a new repository through Chiefmate's command line, never through gh (src/decisions.mjs, repoCreate).

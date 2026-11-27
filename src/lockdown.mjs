@@ -194,6 +194,8 @@ export async function engage({ reason = '', by = 'owner', from = 'app', evidence
     reason: again ? state.reason : clip(String(reason ?? '').trim(), 500) || t('Engaged by the owner'),
     evidence: [...(again ? state.evidence ?? [] : []), ...evidence].slice(-30),
     stopped: again ? state.stopped ?? {} : {},
+    // A person engaging it again while it is on: the emergency watch then leaves the release to the owner.
+    engagedAgain: again ? (by !== 'auto' ? { at, by, from } : state.engagedAgain ?? null) : null,
   }, dir);
   let stopped;
   try {
@@ -225,13 +227,23 @@ export async function engage({ reason = '', by = 'owner', from = 'app', evidence
   return readLockdown(dir);
 }
 
-/** The incident's entry for the history and data/security/incidents.jsonl: its whole evidence, notes and review. */
+/** The incident's entry for data/security/incidents.jsonl: its whole evidence, notes and review. */
 function incidentEntry(state, { until, releasedBy, releasedFrom }) {
   return {
     since: state.since, until, by: state.by, from: state.from, reason: state.reason,
     evidence: state.evidence ?? [], stopped: state.stopped ?? {}, notes: state.notes ?? [], sentinel: state.sentinel ?? null,
+    ...(state.engagedAgain ? { engagedAgain: state.engagedAgain } : {}),
     releasedBy, releasedFrom,
   };
+}
+
+/**
+ * The same, in short, for the history kept in lockdown.json (read before every agent's command): the evidence counted
+ * and the watch's decision; the whole record stays in incidents.jsonl.
+ */
+function historyEntry(entry) {
+  const s = entry.sentinel;
+  return { ...entry, evidence: entry.evidence.length, sentinel: s ? { status: s.status, at: s.at, decision: s.decision, actions: s.actions } : null };
 }
 
 /**
@@ -269,7 +281,7 @@ export function release({ by = 'owner', from = 'app', note = '' } = {}, { dir, h
   const at = new Date().toISOString();
   const entry = incidentEntry(state, { until: at, releasedBy: 'owner', releasedFrom: from });
   recordIncident(entry, dir);
-  const next = { ...state, active: false, released: at, evidence: [], stopped: {}, notes: [], sentinel: null, history: [...(state.history ?? []), entry].slice(-KEEP_HISTORY) };
+  const next = { ...state, active: false, released: at, evidence: [], stopped: {}, notes: [], sentinel: null, engagedAgain: null, history: [...(state.history ?? []), historyEntry(entry)].slice(-KEEP_HISTORY) };
   saveLockdown(next, dir);
   try {
     h.resume();
@@ -305,12 +317,12 @@ export function saveReview(since, review, dir) {
  */
 export function sentinelRelease(since, review, { dir, h = hooks } = {}) {
   const state = readLockdown(dir);
-  if (state.active !== true || state.since !== since || state.by !== 'auto' || state.from !== 'detection' || review?.decision?.release !== true) return null;
+  if (state.active !== true || state.since !== since || state.by !== 'auto' || state.from !== 'detection' || state.engagedAgain || review?.decision?.release !== true) return null;
   const at = new Date().toISOString();
   const reviewed = { ...state, sentinel: { ...review, status: 'released', at } };
   const entry = incidentEntry(reviewed, { until: at, releasedBy: 'sentinel', releasedFrom: 'sentinel' });
   recordIncident(entry, dir);
-  const next = { ...reviewed, active: false, released: at, evidence: [], stopped: {}, notes: [], sentinel: null, history: [...(state.history ?? []), entry].slice(-KEEP_HISTORY) };
+  const next = { ...reviewed, active: false, released: at, evidence: [], stopped: {}, notes: [], sentinel: null, engagedAgain: null, history: [...(state.history ?? []), historyEntry(entry)].slice(-KEEP_HISTORY) };
   saveLockdown(next, dir);
   try {
     h.resume();
