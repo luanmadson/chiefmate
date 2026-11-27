@@ -229,14 +229,16 @@ try {
       const now = async () => (await (await fetch(`${base}/api/state`)).json());
       const mine = s => s.queue.filter(r => r.id.startsWith('smoke-q'));
       const ids = s => mine(s).map(r => r.id.slice(6)).join(',');
-      expect(ids(await now()) === 'q1,q2,q3,q4', `the queue is not in the order the runs were asked for: ${ids(await now())}`);
+      // Before any move, the order the turns go (src/queue.mjs): the two projects in turn, each in the order asked.
+      expect(ids(await now()) === 'q1,q3,q2,q4', `the queue is not in turn among its projects, in the order the runs were asked for: ${ids(await now())}`);
       const unkeyed = await keyless('/api/queue', { action: 'move', id: 'smoke-q4', top: true });
-      expect(unkeyed.status === 403 && ids(await now()) === 'q1,q2,q3,q4', `a change to the queue without the owner's key answered ${unkeyed.status}, or changed it`);
+      expect(unkeyed.status === 403 && ids(await now()) === 'q1,q3,q2,q4', `a change to the queue without the owner's key answered ${unkeyed.status}, or changed it`);
       for (const body of [{ id: 'smoke-q4', top: true }, { id: 'smoke-q1', down: true }, { id: 'smoke-q3', before: 'smoke-q4' }, { id: 'smoke-q2', up: true }]) {
         const r = await post('/api/queue', { action: 'move', ...body });
         expect(r.ok, `moving a run in the queue failed: ${JSON.stringify(body)} ${r.status}`);
       }
-      expect(ids(await now()) === 'q3,q2,q4,q1', `the owner's moves did not give the queue's order: ${ids(await now())}`);
+      // Each move goes from the order shown, and keeps it: the fair turn no longer rearranges the runs placed.
+      expect(ids(await now()) === 'q3,q4,q2,q1', `the owner's moves did not give the queue's order: ${ids(await now())}`);
       const held = await post('/api/queue', { action: 'hold', id: 'smoke-q2', reason: 'Waiting for the API key' });
       let s = await now();
       const q2 = mine(s).find(r => r.id === 'smoke-q2');
@@ -246,7 +248,7 @@ try {
       const undo = [await post('/api/queue', { action: 'release', id: 'smoke-q2', by: 'manager' }), await post('/api/queue', { action: 'move', id: 'smoke-q4', top: true, by: 'manager' }),
         await post('/api/queue', { action: 'cancel', id: 'smoke-q1', by: 'manager' }), await post('/api/queue', { action: 'do-now', id: 'smoke-q4', scope: 'all', by: 'manager' })];
       s = await now();
-      expect(undo.every(r => r.status === 400) && ids(s) === 'q3,q2,q4,q1' && mine(s).find(r => r.id === 'smoke-q2')?.hold?.by === 'owner',
+      expect(undo.every(r => r.status === 400) && ids(s) === 'q3,q4,q2,q1' && mine(s).find(r => r.id === 'smoke-q2')?.hold?.by === 'owner',
         `the manager undid the owner's changes to the queue: ${undo.map(r => r.status).join(',')} ${ids(s)}`);
       // "Do now" for its project: to the top, and only the other runs of its project wait; for all: every other run waits.
       await post('/api/queue', { action: 'do-now', id: 'smoke-q4', scope: 'project' });
@@ -770,6 +772,9 @@ try {
     expect(order() === 'smoke-q1,smoke-q2', `the queue is not listed in order: ${cli(['queue'])}`);
     cli(['queue', 'move', 'smoke-q2', '--top'], manager);
     expect(order() === 'smoke-q2,smoke-q1', `a run was not moved to the top of the queue: ${cli(['queue'])}`);
+    // the same queue controls as the owner's (src/queue.mjs): the move kept among the queue's changes, as the manager's
+    const movedByManager = (await (await fetch(`${base}/api/state`)).json()).queueControl?.changes?.find(c => c.run === 'smoke-q2' && c.action === 'move');
+    expect(movedByManager?.by === 'manager' && movedByManager.to === 'top', `the manager's move did not go through the queue's controls: ${JSON.stringify(movedByManager)}`);
     cli(['queue', 'move', 'smoke-q2', '--before', 'smoke-q1'], manager);
     cli(['queue', 'hold', 'smoke-q1'], manager);
     expect(/smoke-q1\].*ON HOLD/.test(cli(['queue'])) && readJson(path.join(data, 'runs', 'smoke-q1.json')).onHold?.by === 'manager', 'a run was not held in the queue');

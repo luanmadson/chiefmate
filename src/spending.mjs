@@ -16,6 +16,8 @@ import { loadConfig, saveConfig } from './config.mjs';
 import { formatPercent, locale, t } from './i18n.mjs';
 import { reportEvent } from './news.mjs';
 import { CLOSED, planItems } from './planning.mjs';
+import { quarantineHold } from './quarantine.mjs';
+import { activeDoNow, heldByDoNow } from './queue.mjs';
 import { holdReason, readSteer } from './steer.mjs';
 import { listRuns, readState, readUsage, saveState } from './store.mjs';
 import { clip, DATA, now, readJson, writeJson } from './util.mjs';
@@ -150,11 +152,13 @@ export function forecast({ usage, samples = [], session, running = 0, capacity =
 
 /**
  * How many projects the crew could work on at once now: with a run going on, queued or waiting, and, with the
- * autopilot on, with an item it may start (approved, or triaged "now"); none held by the owner's focus.
+ * autopilot on, with an item it may start (approved, or triaged "now"); none held by the owner's focus or waiting for a
+ * quarantined file, and no queued run on hold or waiting for the owner's "Do now" (doing: the one in force, src/queue.mjs).
  */
-export function projectsWithWork(config = loadConfig(), runs = listRuns(), items = null, steer = readSteer()) {
-  const free = id => !holdReason(id, steer);
-  const projects = new Set(runs.filter(r => ['running', 'queued', 'waiting'].includes(r.status) && free(r.project)).map(r => r.project));
+export function projectsWithWork(config = loadConfig(), runs = listRuns(), items = null, steer = readSteer(), doing = activeDoNow(runs)) {
+  const free = id => !holdReason(id, steer) && !quarantineHold(id);
+  const startable = r => r.status === 'running' || (['queued', 'waiting'].includes(r.status) && !r.onHold && !heldByDoNow(r, doing));
+  const projects = new Set(runs.filter(r => startable(r) && free(r.project)).map(r => r.project));
   if (config.autopilot?.enabled === true) {
     for (const i of items ?? planItems()) {
       const startable = i.status === 'approved' || (i.status === 'triaged' && i.recommend === 'now');

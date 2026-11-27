@@ -32,7 +32,7 @@ import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
 import { copyHolders, heldByDoNow, holdOf, lastRan, pickNext, placeFor, turnOrder } from '../src/queue.mjs';
 import {
-  changeSession, checkSpending, effectiveLimits, forecast, readSpending, SAFETY, sessionMode, sessionNow, SPEND_TO, spendingStatus,
+  changeSession, checkSpending, effectiveLimits, forecast, projectsWithWork, readSpending, SAFETY, sessionMode, sessionNow, SPEND_TO, spendingStatus,
 } from '../src/spending.mjs';
 import { HELD_WHILE_AWAY, NEWS_EVENTS } from '../src/news.mjs';
 import { askedTool, copyHolder, endLine, holdsCopy, limitWaitCleared, pausedLine, stepTool } from '../src/runs.mjs';
@@ -1957,6 +1957,8 @@ test('without the key, a command may do only what an agent may, never as the own
     // The owner's changes to the queue from the app (src/queue.mjs).
     ['/api/queue', { action: 'move', id: 'r', top: true }], ['/api/queue', { action: 'hold', id: 'r', reason: 'x' }], ['/api/queue', { action: 'release', id: 'r' }],
     ['/api/queue', { action: 'do-now', id: 'r', scope: 'all' }], ['/api/queue', { action: 'do-now-end' }], ['/api/queue', { action: 'cancel', id: 'r' }],
+    // The session's mode and "Spend all until" the renewal (src/spending.mjs).
+    ['/api/spending', { mode: 'all' }], ['/api/spending', { boost: true }], ['/api/spending', { mode: 'save', by: 'manager' }],
   ];
   for (const [route, body] of owners) assert.equal(ownerOnly(route, body), true, `${route} ${JSON.stringify(body)} goes without the key`);
   // What the command line sends for an agent (a step, a live session, the manager, the watchdog and its rescuer).
@@ -2573,6 +2575,33 @@ test("the queue's fair turn: the room goes to the project longest without runnin
   // the order shown: round by round, one per project
   assert.deepEqual(turnOrder([...queue, a1], ran).map(r => r.id), ['a1', 'r1', 'c1', 'c2', 'c3']);
   assert.deepEqual(turnOrder([...queue, a1, run('a2', 'acervo', '2026-11-27T11:59:00.000Z')], ran).map(r => r.id), ['a1', 'r1', 'c1', 'a2', 'c2', 'c3']);
+});
+
+test('the queue in one order: the runs placed by a move as given, then the fair turn for the rest; the spare counts only work that can start', () => {
+  const at = Date.parse('2026-11-27T12:00:00.000Z');
+  const run = (id, project, created, extra = {}) => ({ id, project, created, status: 'queued', ...extra });
+  // A move (the owner's or the manager's) ranked every run then in the queue: that order stands, though riffdex has
+  // gone longer without running than chiefmate.
+  const c1 = run('c1', 'chiefmate', '2026-11-27T08:00:00.000Z', { rank: 0, movedBy: 'owner' });
+  const c2 = run('c2', 'chiefmate', '2026-11-27T08:30:00.000Z', { rank: 1 });
+  const r1 = run('r1', 'riffdex', '2026-11-27T09:00:00.000Z', { rank: 2 });
+  // queued after it: in turn among themselves, after the runs placed
+  const r2 = run('r2', 'riffdex', '2026-11-27T11:00:00.000Z');
+  const a1 = run('a1', 'acervo', '2026-11-27T11:10:00.000Z');
+  const ran = new Map([['chiefmate', '2026-11-27T11:55:00.000Z'], ['riffdex', '2026-11-26T09:40:00.000Z']]);
+  const queue = [c1, c2, r1, r2, a1];
+  assert.deepEqual(turnOrder(queue, ran).map(r => r.id), ['c1', 'c2', 'r1', 'a1', 'r2']);
+  assert.deepEqual(pickNext(queue, [], 1, at, new Map(), ran).map(r => r.id), ['c1']);
+  assert.deepEqual(pickNext(queue, ['chiefmate'], 2, at, new Map(), ran).map(r => r.id), ['r1', 'a1']);
+  // a run marked to go first still goes before them
+  const back = run('b1', 'acervo', '2026-11-27T11:20:00.000Z', { resumeFirst: true, rank: 3 });
+  assert.equal(turnOrder([back, ...queue], ran)[0].id, 'b1');
+  assert.deepEqual(pickNext([back, ...queue], [], 1, at, new Map(), ran).map(r => r.id), ['b1']);
+  // The session's spare: a run on hold, or one waiting for the owner's "Do now", is no work the crew can do now.
+  const free = { mode: 'free', only: [], paused: [] };
+  const work = [run('w1', 'a', '2026-11-27T10:00:00.000Z', { onHold: { by: 'owner' } }), run('w2', 'b', '2026-11-27T10:00:00.000Z'), run('w3', 'c', '2026-11-27T10:00:00.000Z', { status: 'running' })];
+  assert.equal(projectsWithWork({}, work, [], free, null), 2);
+  assert.equal(projectsWithWork({}, work, [], free, { run: 'w3', project: 'c', scope: 'all' }), 1);
 });
 
 test("the session's spare near its renewal: spent alone while the owner is away, offered once when present, back after the renewal", () => {

@@ -2,8 +2,10 @@
 // default; src/spending.mjs); within one project, one run at a time, in the order requested. This is what keeps agents
 // from setting off other agents. When there is less room than projects waiting, the turn is fair: the room goes to the
 // project that has gone longest without running.
-// The owner orders it from the app (move, hold and release, "Do now", cancel), and so may the manager, which never
-// undoes the owner's changes; each change is kept with who made it (data/state.json, "queue").
+// The owner orders it from the app (move, hold and release, "Do now", cancel), and so may the manager (cli.mjs queue,
+// through the same functions), which never undoes the owner's changes; each change is kept with who made it
+// (data/state.json, "queue"). A move keeps the order shown with the change: the fair turn arranges only the runs no one
+// placed.
 import { loadConfig } from './config.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { activeRun, cancelLive, doingNow, editRun, execute, holdsCopy, limitWaitCleared, live, liveRuns } from './runs.mjs';
@@ -36,8 +38,9 @@ function recoverInterrupted() {
 }
 
 /**
- * Runs waiting their turn: queued, or waiting for the account's limit to reset, in the order they run. The runs paused
- * for an update of Chiefmate come first: their working copy is as their step left it. runs: the records already read.
+ * Runs waiting their turn: queued, or waiting for the account's limit to reset, in the queue's order (the order they
+ * run, with the turns among projects, is queueInTurn). The runs paused for an update of Chiefmate come first: their
+ * working copy is as their step left it. runs: the records already read.
  */
 export function queued(runs = listRuns()) {
   return runs
@@ -156,13 +159,14 @@ export function placeFor(run, from, order, { before = null, after = null, top = 
 }
 
 /**
- * Moves a run in the queue (where: see placeFor). The queue keeps the order given from then on (new runs go last); one
- * run per project still goes at a time. by: "owner" or "manager"; record: false leaves the change to the caller.
- * Returns the queue, in order.
+ * Moves a run in the queue as it is shown, in the order the turns go (where: see placeFor). The queue keeps that order
+ * with the change from then on: every run in it gets its place (rank), so the fair turn no longer rearranges them, and
+ * new runs go after them, in turn among themselves (turnOrder). One run per project still goes at a time. by: "owner"
+ * or "manager"; record: false leaves the change to the caller. Returns the queue, in order.
  */
 export function moveInQueue(id, where = {}, by = 'manager', { record = true } = {}) {
   const run = inQueue(id);
-  const all = queued();
+  const all = queueInTurn();
   const from = all.findIndex(r => r.id === run.id);
   const order = all.filter(r => r.id !== run.id);
   const at = placeFor(run, from, order, where, by, ownerName());
@@ -177,7 +181,7 @@ export function moveInQueue(id, where = {}, by = 'manager', { record = true } = 
   const to = where.top ? 'top' : where.up ? 'up' : where.down ? 'down' : 'place';
   if (record) keep({ by, action: 'move', ...runRef(run), to, place: at + 1 });
   nudgeQueue();
-  return queued();
+  return queueInTurn();
 }
 
 /**
@@ -279,8 +283,9 @@ export function queueManagerLines(config = loadConfig(), runs = listRuns(), at =
     const placed = r.movedBy === 'owner' ? `, placed here by ${owner}` : '';
     return `${i + 1}. ${r.title} [${r.id}] (project ${r.project}${hold}${placed}${r.notBefore ? `, not before ${formatDateTime(r.notBefore)}` : ''})`;
   };
-  const queue = queued(runs);
-  const lines = [queue.length ? `Queue, in the order it runs (one run per project at a time): ${queue.map(entry).join('; ')}.` : 'Queue: empty.'];
+  // in the order the turns go (turnOrder): the runs placed by a move as given, the others in turn among projects
+  const queue = queueInTurn(runs);
+  const lines = [queue.length ? `Queue, in the order the turns go (one run per project at a time): ${queue.map(entry).join('; ')}.` : 'Queue: empty.'];
   if (d) lines.push(`${owner}'s "Do now": "${d.title}" [${d.run}] goes first, and until it ends ${d.scope === 'all' ? 'no other run starts' : `no other run of ${d.project} starts`}; then the others go on by themselves.`);
   const recent = queueState().changes.filter(c => at - Date.parse(c.at) < 24 * 3600_000).slice(-8);
   if (recent.some(c => c.by === 'owner')) {
@@ -308,9 +313,14 @@ export function lastRan(runs = listRuns()) {
   return ran;
 }
 
-// The turn among projects: the runs marked to go first, then the project that has gone longest without running
-// (one never run first), then the queue's order.
+// A run placed by a move (the owner's or the manager's: moveInQueue gives every run then in the queue its rank): it keeps
+// the order given, which the fair turn never rearranges.
+const placed = run => !goesFirst(run) && Number.isFinite(run.rank);
+
+// The turn among projects: the runs marked to go first, then the runs placed by a move in the order given, then the
+// project that has gone longest without running (one never run first), then the queue's order.
 const byTurn = ran => (a, b) => (goesFirst(b.run) ? 1 : 0) - (goesFirst(a.run) ? 1 : 0)
+  || (placed(b.run) ? 1 : 0) - (placed(a.run) ? 1 : 0) || (placed(a.run) ? a.run.rank - b.run.rank : 0)
   || (ran.get(a.run.project) ?? '').localeCompare(ran.get(b.run.project) ?? '') || a.order - b.order;
 
 /**
@@ -337,15 +347,17 @@ export function pickNext(queue, busy, free, at = Date.now(), holders = new Map()
 }
 
 /**
- * The queue in the order its turns go, for the app and the manager: round by round, one run per project, the projects
- * in turn (byTurn); within a project, the queue's order.
+ * The queue in the order its turns go, for the app and the manager: the runs marked to go first, then those placed by a
+ * move in the order given, then the others round by round, one run per project, the projects in turn (byTurn); within a
+ * project, the queue's order.
  */
 export function turnOrder(queue, ran = new Map()) {
   const byProject = new Map();
-  for (const run of queue) byProject.set(run.project, [...(byProject.get(run.project) ?? []), run]);
+  for (const run of queue.filter(r => !placed(r))) byProject.set(run.project, [...(byProject.get(run.project) ?? []), run]);
   const projects = [...byProject.values()].map((runs, order) => ({ run: runs[0], runs, order })).sort(byTurn(ran));
   const rounds = Math.max(0, ...projects.map(p => p.runs.length));
-  return Array.from({ length: rounds }, (_, i) => projects.map(p => p.runs[i]).filter(Boolean)).flat();
+  const turns = Array.from({ length: rounds }, (_, i) => projects.map(p => p.runs[i]).filter(Boolean)).flat();
+  return [...turns.filter(goesFirst), ...queue.filter(placed), ...turns.filter(r => !goesFirst(r))];
 }
 
 /** The queue now, in the order its turns go (turnOrder). runs: the records already read, if any. */
