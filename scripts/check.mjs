@@ -1,7 +1,7 @@
 // Checks the code before a commit: the syntax of every script, and that every text the app shows has a translation.
 // Usage: npm run check
 import { spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -19,8 +19,10 @@ export function syntaxProblem(file, run = spawnSync) {
   return null;
 }
 
-// Only when run as a script (npm run check), not when the tests import syntaxProblem.
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();
+// Only when run as a script (npm run check), not when the tests import syntaxProblem. Real paths on both sides, as
+// Node.js resolves its entry point: a folder reached through a junction or symlink would otherwise skip the whole check
+// and still exit 0.
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) main();
 
 function main() {
   const scripts = dir => readdirSync(path.join(root, dir)).filter(f => /\.m?js$/.test(f)).map(f => path.join(dir, f));
