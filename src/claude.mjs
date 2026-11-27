@@ -49,10 +49,10 @@ export function checkClaude() {
   });
 }
 
-/** One line saying what the agent did, for the logbook. */
 /** The file a file tool writes (Write, Edit, MultiEdit, NotebookEdit), or null. */
 export const writtenFile = (name, input = {}) => (/^(Write|Edit|MultiEdit|NotebookEdit)$/.test(name) ? input?.file_path ?? input?.notebook_path ?? null : null);
 
+/** One line saying what the agent did, for the logbook. */
 export function describeAction(name, input = {}, dir) {
   const file = p => (p ? path.relative(dir, p) || p : '');
   switch (name) {

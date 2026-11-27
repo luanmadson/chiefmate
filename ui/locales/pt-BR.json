@@ -1948,5 +1948,15 @@
   "run parked": "execução estacionada",
   "antivirus quarantine": "quarentena do antivírus",
   "Parked: it resumes first once you answer": "Estacionada: retoma em primeiro lugar quando você responder",
-  "Marked done by the manager on your words: \"{words}\"": "Marcada como feita pelo gerente com as suas palavras: \"{words}\""
+  "Marked done by the manager on your words: \"{words}\"": "Marcada como feita pelo gerente com as suas palavras: \"{words}\"",
+  "git stash apply failed: {output}": "o git stash apply falhou: {output}",
+  "The working copy has changes not committed yet: the work put aside was not put back over them.": "A cópia de trabalho tem alterações ainda sem commit: o trabalho guardado não foi devolvido por cima delas.",
+  "Waits for the paused run {id}, which keeps the working copy.": "Espera a tarefa pausada {id}, que está com a cópia de trabalho.",
+  "The work not committed yet was put aside until the run resumes.": "O trabalho ainda sem commit foi guardado até a tarefa ser retomada.",
+  "Couldn't put aside the work not committed yet: {error}": "Não foi possível guardar o trabalho ainda sem commit: {error}",
+  "Couldn't bring the run's branch up to date: {error}": "Não foi possível atualizar o branch da tarefa: {error}",
+  "The work put aside at the pause could not be put back. It is kept in the stash \"chiefmate: paused run {id}\" ({ref}) of {path}. {error}": "O trabalho guardado na pausa não pôde ser devolvido. Ele continua no stash \"chiefmate: paused run {id}\" ({ref}) de {path}. {error}",
+  "The work not committed yet was put back.": "O trabalho ainda sem commit foi devolvido.",
+  "The branch had no commits of its own: it now starts from the current {base}.": "O branch não tinha commits próprios: agora parte do {base} atual.",
+  "The work not committed yet didn't apply on the current {base}: the branch stays where it was.": "O trabalho ainda sem commit não coube no {base} atual: o branch ficou onde estava."
 }

@@ -17,13 +17,14 @@ import { plainPush, publishing, riskyCommand } from '../src/guard.mjs';
 import { checkSignals, engage, isLocked, readLockdown, recordSignal, refuseWhileLocked, release, RULES, weigh, WINDOW_MINUTES } from '../src/lockdown.mjs';
 import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
-import { askedTool, limitWaitCleared, stepTool } from '../src/runs.mjs';
+import { copyHolders, pickNext } from '../src/queue.mjs';
+import { askedTool, copyHolder, holdsCopy, limitWaitCleared, stepTool } from '../src/runs.mjs';
 import {
   agentTool, availableTools, chooseTool, codexEnvironment, codexEvents, codexGuard, codexStepArgs, correctionLine, GROK_DENY, grokEvents, grokStepArgs, parseTool,
   qualityRecords, qualitySummary, runTools, toolAvailable, toolEffort, toolModel,
 } from '../src/tools.mjs';
 import { parseLevel } from '../src/util.mjs';
-import { behindOrigin, checkoutBranch, fastForward, projectLibraries, sameRepository } from '../src/workspace.mjs';
+import { behindOrigin, checkoutBranch, fastForward, freshenBranch, projectLibraries, restoreShelf, sameRepository, shelfRef, shelveWork } from '../src/workspace.mjs';
 import { syntaxProblem } from './check.mjs';
 import { SAMPLE_CSV, sampleXlsx, zip } from './fixtures.mjs';
 import { compose, Dictation, nextState, recognizer, transcript } from '../ui/voice.js';
@@ -522,6 +523,142 @@ test('a run waiting for a usage limit goes back to the queue once the limit is r
   assert.equal(cleared(0.7), true);
   assert.equal(cleared(undefined), true);
   assert.equal(limitWaitCleared({ status: 'waiting', note: 'Your account reached its limit in the middle of a step' }, {}, usage), false);
+});
+
+// ---------- A paused run's working copy: its work put aside, the copy kept, the branch up to date ----------
+
+/** A text file as LF, whatever core.autocrlf did to it. */
+const lf = file => readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+
+/** origin with a main branch, and the crew's copy of it on the run's branch "run-a". */
+function pausedCopy() {
+  const top = mkdtempSync(path.join(temp, 'paused-'));
+  const origin = path.join(top, 'origin');
+  const dir = path.join(top, 'copy');
+  mkdirSync(origin);
+  gitIn(origin, 'init', '-q', '-b', 'main');
+  write(path.join(origin, 'app.md'), 'App\n');
+  gitIn(origin, 'add', '-A');
+  gitIn(origin, 'commit', '-qm', 'start');
+  gitIn(top, 'clone', '-q', origin, dir);
+  gitIn(dir, 'checkout', '-q', '-b', 'run-a');
+  // A stash is a commit: Chiefmate's own git calls need an identity.
+  gitIn(dir, 'config', 'user.name', 'Test');
+  gitIn(dir, 'config', 'user.email', 'test@example.com');
+  /** A pull request merged on origin's main meanwhile. */
+  const merged = (name, text) => {
+    write(path.join(origin, name), text);
+    gitIn(origin, 'add', '-A');
+    gitIn(origin, 'commit', '-qm', `merged ${name}`);
+  };
+  return { dir, origin, merged, git: (...args) => gitIn(dir, ...args) };
+}
+
+test('a paused run keeps its work: another run preparing the copy loses nothing, and it comes back on the current main', async () => {
+  const { dir, merged, git } = pausedCopy();
+  // Run A's step paused with a new file and a changed one, not committed.
+  write(path.join(dir, 'new.md'), 'New\n');
+  write(path.join(dir, 'app.md'), 'App by A\n');
+  const commit = await shelveWork(dir, 'run-a');
+  assert.match(commit, /^[0-9a-f]{40}$/);
+  assert.equal(git('status', '--porcelain'), '');
+  assert.equal(git('rev-parse', shelfRef('run-a')), commit);
+  assert.match(git('stash', 'list'), /chiefmate: paused run run-a/);
+  // Run B of the same project prepares the copy as prepareWorkspace does, and leaves work of its own in the stash list.
+  git('checkout', '-q', '-f', 'main');
+  git('reset', '--hard', '-q', 'origin/main');
+  git('clean', '-fdq');
+  write(path.join(dir, 'b.md'), 'B\n');
+  git('stash', 'push', '-q', '--include-untracked', '-m', 'other');
+  // Seven pull requests merged while A waited.
+  for (let n = 1; n <= 7; n++) merged(`pr${n}.md`, `PR ${n}\n`);
+  await checkoutBranch(dir, 'run-a');
+  const fresh = await freshenBranch(dir, 'main');
+  assert.equal(fresh.behind, 7);
+  assert.equal(git('rev-parse', 'HEAD'), git('rev-parse', 'origin/main'));
+  assert.equal(git('branch', '--show-current'), 'run-a');
+  await restoreShelf(dir, 'run-a', commit);
+  assert.equal(lf(path.join(dir, 'new.md')), 'New\n');
+  assert.equal(lf(path.join(dir, 'app.md')), 'App by A\n');
+  assert.ok(existsSync(path.join(dir, 'pr7.md')));
+  // Its stash and ref are gone; the other stash stays.
+  assert.equal(git('stash', 'list').split('\n').length, 1);
+  assert.match(git('stash', 'list'), /other/);
+  assert.throws(() => git('rev-parse', '--verify', '-q', shelfRef('run-a')));
+  assert.equal(await shelveWork(dir, 'run-a').then(() => shelveWork(dir, 'run-a')), null);
+});
+
+test("a branch with commits of its own, or a copy with changes, isn't moved; work that doesn't fit keeps its stash", async () => {
+  const { dir, merged, git } = pausedCopy();
+  write(path.join(dir, 'own.md'), 'Own\n');
+  git('add', '-A');
+  git('commit', '-qm', 'own');
+  merged('pr1.md', 'PR 1\n');
+  const head = git('rev-parse', 'HEAD');
+  assert.equal(await freshenBranch(dir, 'main'), null);
+  assert.equal(git('rev-parse', 'HEAD'), head);
+
+  const second = pausedCopy();
+  second.merged('pr1.md', 'PR 1\n');
+  write(path.join(second.dir, 'dirty.md'), 'Dirty\n');
+  const start = second.git('rev-parse', 'HEAD');
+  assert.equal(await freshenBranch(second.dir, 'main'), null);
+  assert.equal(second.git('rev-parse', 'HEAD'), start);
+
+  // The work changes a file main changed too: it doesn't apply there, the copy is left clean and the stash kept.
+  const third = pausedCopy();
+  write(path.join(third.dir, 'app.md'), 'App by A\n');
+  const commit = await shelveWork(third.dir, 'run-a');
+  third.merged('app.md', 'App on main\n');
+  const fresh = await freshenBranch(third.dir, 'main');
+  await assert.rejects(restoreShelf(third.dir, 'run-a', commit), /stash apply/);
+  assert.equal(third.git('status', '--porcelain'), '');
+  assert.equal(third.git('rev-parse', shelfRef('run-a')), commit);
+  // Back on the branch where it was, it applies; over changes already in the copy, it applies and cleans nothing.
+  third.git('reset', '--hard', '-q', fresh.from);
+  write(path.join(third.dir, 'mine.md'), 'Mine\n');
+  await assert.rejects(restoreShelf(third.dir, 'run-a', commit), /changes not committed/);
+  assert.equal(lf(path.join(third.dir, 'mine.md')), 'Mine\n');
+  assert.equal(third.git('rev-parse', shelfRef('run-a')), commit);
+  rmSync(path.join(third.dir, 'mine.md'));
+  await restoreShelf(third.dir, 'run-a', commit);
+  assert.equal(lf(path.join(third.dir, 'app.md')), 'App by A\n');
+});
+
+test('a run paused in the middle of its work keeps the copy: no other run of the project starts until it resumes', () => {
+  const at = '2026-11-26T12:00:00.000Z';
+  const runA = { id: 'a', project: 'demo', created: at, status: 'paused', prepared: true, resumeFirst: true };
+  const runB = { id: 'b', project: 'demo', created: at, status: 'queued' };
+  const runC = { id: 'c', project: 'other', created: at, status: 'queued' };
+  assert.equal(holdsCopy(runA), true);
+  assert.equal(holdsCopy({ ...runA, resumeFirst: false }), false);
+  assert.equal(holdsCopy({ ...runA, resumeFirst: false, shelf: { commit: 'x' } }), true);
+  assert.equal(holdsCopy({ ...runA, prepared: false }), false);
+  assert.equal(holdsCopy({ ...runA, status: 'done' }), false);
+  assert.equal(copyHolder(runB, [runA, runB, runC])?.id, 'a');
+  assert.equal(copyHolder(runC, [runA, runB, runC]), null);
+  // Paused (held for the owner): B waits, the other project's run goes on.
+  const holders = copyHolders([runA, runB, runC]);
+  assert.deepEqual(pickNext([runB, runC], [], 3, Date.now(), holders).map(r => r.id), ['c']);
+  // Back in the queue (first, as resumeFirst puts it): A starts, never B beside it.
+  const back = { ...runA, status: 'queued' };
+  assert.deepEqual(pickNext([back, runB, runC], [], 3, Date.now(), copyHolders([back, runB, runC])).map(r => r.id), ['a', 'c']);
+  // Waiting for a time ahead: nothing of the project starts.
+  const later = { ...runA, status: 'waiting', notBefore: new Date(Date.now() + 3_600_000).toISOString() };
+  assert.deepEqual(pickNext([later, runB], [], 3, Date.now(), copyHolders([later, runB])).map(r => r.id), []);
+  // Once it resumed and ended, B goes.
+  assert.deepEqual(pickNext([runB], [], 3, Date.now(), copyHolders([{ ...runA, status: 'done' }, runB])).map(r => r.id), ['b']);
+  // Parked for the owner's answer with its work committed (src/needs.mjs): it leaves the copy, so B goes; once answered
+  // it is first in the queue, but waits for a run that keeps the copy. A parked run whose commit failed still keeps it.
+  const parked = { ...runA, parked: { request: 'q', committed: true } };
+  assert.equal(holdsCopy(parked), false);
+  assert.deepEqual(pickNext([runB, runC], [], 3, Date.now(), copyHolders([parked, runB, runC])).map(r => r.id), ['b', 'c']);
+  const answered = { ...parked, status: 'queued' };
+  const pausedB = { ...runB, status: 'queued', prepared: true, resumeFirst: true };
+  assert.deepEqual(pickNext([answered, pausedB], [], 3, Date.now(), copyHolders([answered, pausedB])).map(r => r.id), ['b']);
+  assert.deepEqual(pickNext([answered, runB], [], 3, Date.now(), copyHolders([answered, runB])).map(r => r.id), ['a']);
+  assert.equal(holdsCopy({ ...runA, parked: { request: 'q' } }), true);
+  assert.equal(holdsCopy({ ...parked, shelf: { commit: 'x' } }), true);
 });
 
 // ---------- The crew's tools (src/tools.mjs): which one a member runs on, until when, and how each is started ----------

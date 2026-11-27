@@ -22,13 +22,14 @@ import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { holdForQuarantine, lostFile, quarantinedBy, writtenSuspects } from './quarantine.mjs';
 import { builderSettings, projectInstructions, writtenInstructions } from './prompts.mjs';
-import { readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
+import { listRuns, readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
 import { chooseTool, GROK_DENY, LOGIN_COMMAND, parseTool, qualityRecords, recordQuality, runTool, signedIn, TOOL_NAMES, toolEffort, toolModel } from './tools.mjs';
 import { clip, languageName, now, parseLevel, ROOT, slug, stamp } from './util.mjs';
 import {
-  advanceClone, baseBranch, changedFiles, checkoutBranch, commitPending, commitSubjects, createBranch, deliverToClone, discardSince, freeBranch, headCommit, newCommits, noTrace,
-  openPullRequest, prepareLibrary, prepareWorkspace, projectDir, runBranch, runChecks, traces,
+  advanceClone, baseBranch, changedFiles, checkoutBranch, commitPending, commitSubjects, createBranch, deliverToClone, discardSince, freeBranch, freshenBranch, headCommit,
+  installSetup, newCommits, noTrace, openPullRequest, prepareLibrary, prepareWorkspace, projectDir, restoreShelf, runBranch, runChecks, shelfRef,
+  shelveWork, traces,
 } from './workspace.mjs';
 
 /**
@@ -292,6 +293,26 @@ function pausedNote(why) {
   if (why === 'focus') return t('Paused at a safe point by your focus. It resumes by itself when its project is free again.');
   if (why === 'stop') return t('Paused at a safe point because Chiefmate was shut down. It resumes by itself at the next start.');
   return t('Paused for an update of Chiefmate. It resumes by itself as soon as the update is over.');
+}
+
+/**
+ * Whether a run keeps its project's working copy while it is not going on: paused (or back in the queue) in the middle
+ * of its work, or with its uncommitted work put aside (run.shelf). No other run of the project prepares the copy then.
+ * A run parked while it waits for the owner (src/needs.mjs) leaves the copy to the project's next run once its work is
+ * committed on its branch (run.parked.committed); it resumes after any run that keeps the copy.
+ */
+export const holdsCopy = run => !!run?.prepared && ['queued', 'waiting', 'paused'].includes(run.status) && !!(run.shelf || (run.resumeFirst && !run.parked?.committed));
+
+/** The other run of the same project that keeps the working copy (see holdsCopy), or null. */
+export const copyHolder = (run, runs = listRuns()) => runs.find(r => r.id !== run.id && r.project === run.project && holdsCopy(r)) ?? null;
+
+/** What the step is told when its branch was brought up to date as the run resumed (step.freshBase), or ''. */
+export function branchNote(fresh, base) {
+  if (!fresh) return '';
+  if (fresh.kept) {
+    return `While this run was paused, ${base} moved on by ${fresh.behind} commit(s). Your uncommitted work did not apply on top of it, so the run's branch stays where it was, with your work back in place. Check what changed (git log HEAD..origin/${base}) before you go on.`;
+  }
+  return `While this run was paused, ${base} moved on by ${fresh.behind} commit(s). The run's branch had no commits of its own, so Chiefmate moved it to the current ${base} before resuming${fresh.restored ? ' and put your uncommitted work back on top of it' : ''}: the files now include the work merged meanwhile. Check what changed (git log ${fresh.from.slice(0, 7)}..HEAD) before you go on.`;
 }
 
 /**
@@ -724,7 +745,8 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   for (const a of built?.adaptations ?? []) logAction(l, { type: 'action', text: t('Prompt builder: a line of "{block}" was adapted to the crew\'s rules', { block: a.block }) });
   const op = step.gitRecovery;
   const gitRecovery = op ? `Chiefmate found an unfinished git ${op} in the working copy and aborted it before checking out the run branch: the commits are as they were, but what that ${op} had not committed yet is gone. Check the working copy (git status, git log) and redo the ${op} if it is still needed.` : '';
-  const prompt = [stepPrompt({ run, step, project, previous, finalReview, changes, traces: found, config, libraries, base, access, built, agents, tool }), gitRecovery].filter(Boolean).join('\n\n');
+  const freshNote = branchNote(step.freshBase, base);
+  const prompt = [stepPrompt({ run, step, project, previous, finalReview, changes, traces: found, config, libraries, base, access, built, agents, tool }), gitRecovery, freshNote].filter(Boolean).join('\n\n');
   const { tools, disallowed } = tool === 'claude' ? stepTools(agent, mcp, access) : { tools: [], disallowed: tool === 'grok' ? GROK_DENY : [] };
   const name = stepFileName(index, step);
   const contextFile = path.join(runDir(run.id), `${name}.context.md`);
@@ -738,6 +760,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   delete step.paused;
   // Told once: a later resume finds, and tells, an operation of its own.
   delete step.gitRecovery;
+  delete step.freshBase;
   Object.assign(step, { status: 'running', started: paused ? step.started ?? now() : now(), error: null, model, tool, effort: toolEffort(tool, agent.effort), promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
   Object.assign(l, {
     step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0, talking: false, reply: null, session: null,
@@ -818,7 +841,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     const messages = pendingTalk(run, index + 1);
     for (const m of messages) Object.assign(m, { status: 'delivered', delivered: now(), via: 'resume' });
     if (messages.length) l.reply = messages.at(-1).id;
-    turn = updatedTurn(messages, config, paused.why ?? 'update', gitRecovery, pauseAbout(run, paused));
+    turn = updatedTurn(messages, config, paused.why ?? 'update', [gitRecovery, freshNote].filter(Boolean).join(' '), pauseAbout(run, paused));
     logAction(l, { type: 'action', text: (paused.why ?? 'update') === 'update' ? t('Chiefmate was updated: the agent goes on in the same session') : t('Back from the pause: the agent goes on in the same session') });
   }
   let r;
@@ -1040,6 +1063,15 @@ export async function execute(run) {
   const project = config.projects?.[run.project];
   const prLang = project?.language || config.language || 'en';
   if (live.has(run.id)) throw new Error(`Run ${run.id} is already going on.`);
+  // A run paused in the middle of its work keeps the working copy: this one waits in the queue (the queue's own check
+  // in pickNext, repeated here). So does a parked run that left the copy to the project's next run (see holdsCopy).
+  const released = !!run.parked?.committed && !run.shelf;
+  const holder = run.prepared && !released ? null : copyHolder(run);
+  if (holder) {
+    run.note = t('Waits for the paused run {id}, which keeps the working copy.', { id: holder.id });
+    saveRun(run);
+    return;
+  }
   Object.assign(run, described.get(run.id) ?? {});
   const l = {
     run: run.id, title: run.title, summary: run.summary ?? null, doing: t('preparing the working copy'), project: run.project, step: null, agent: null, started: now(), since: now(), pid: null, context: null, actions: [],
@@ -1055,8 +1087,34 @@ export async function execute(run) {
   delete run.parked;
   saveRun(run);
 
-  // Paused for an update of Chiefmate: back to the front of the queue, to resume as soon as the update is over.
-  const pauseForUpdate = () => {
+  // Paused for an update of Chiefmate: back to the front of the queue, to resume as soon as the update is over. Always
+  // "return await": the run stays in `live` (busy for the update, the power modes and the queue) until its work is put
+  // aside and its record saved; a plain "return" would let the finally below drop it from `live` first.
+  const pauseForUpdate = async () => {
+    // Parked for the owner's answer (src/needs.mjs): the project's next run takes the working copy, so what the step left
+    // uncommitted goes on its branch now; only then does the run leave the copy (run.parked.committed, see holdsCopy).
+    if (l.pauseRequest === 'park' && run.parked && run.prepared) {
+      try {
+        await commitPending(projectDir(run.project), noTrace(project) ? run.title : `Chiefmate: work in progress (${run.title})`);
+        run.parked.committed = true;
+      } catch (error) {
+        log(t("Couldn't commit the work before parking: {error}", { error: error.message }));
+      }
+    }
+    // What the agent had not committed yet is put aside (a stash named after the run), so nothing done in the copy
+    // meanwhile can lose it; it goes back when the run resumes. Not for a file the antivirus probably took: the copy
+    // stays as the step left it while the project waits, so the file restored finds the step's work around it.
+    if (run.prepared && !run.shelf && l.pauseRequest !== 'quarantine') {
+      try {
+        const commit = await shelveWork(projectDir(run.project), run.id);
+        if (commit) {
+          run.shelf = { commit, at: now() };
+          log(t('The work not committed yet was put aside until the run resumes.'));
+        }
+      } catch (error) {
+        log(t("Couldn't put aside the work not committed yet: {error}", { error: error.message }));
+      }
+    }
     // Paused for the owner's session (or parked for an answer): held (not in the queue) while it is open (or the request
     // unanswered); it goes back to the queue when it ends.
     const held = ['owner', 'park'].includes(l.pauseRequest) && l.holdWhile?.() !== false;
@@ -1088,7 +1146,7 @@ export async function execute(run) {
       if (pending) await Promise.race([pending, new Promise(resolve => setTimeout(resolve, 20_000))]);
       notify(t('Chiefmate started'), run.summary ? clip(`${run.title}. ${run.summary}`, 250) : run.title);
     }
-    if (l.pauseRequest) return pauseForUpdate();
+    if (l.pauseRequest) return await pauseForUpdate();
     let dir;
     if (!run.prepared) {
       // A pause for an update stops the preparation at once (see pauseLive): it starts over when the run resumes.
@@ -1113,6 +1171,9 @@ export async function execute(run) {
       const index = steps.findIndex(step => step.status === 'pending' || step.status === 'running');
       const step = steps[index];
       try {
+        // Parked with its work committed: another run of the project may have used the copy meanwhile, and what it left
+        // uncommitted there is not this run's work.
+        if (released) await discardSince(dir, await headCommit(dir));
         await checkoutBranch(dir, run.branch, operation => {
           const text = t('The unfinished Git {operation} was aborted before resuming: the commits are kept.', { operation });
           log(text);
@@ -1130,6 +1191,44 @@ export async function execute(run) {
         if (step) Object.assign(step, { status: 'failed', ended: now(), error: error.message });
         throw error;
       }
+      // A branch with no commits of its own starts again from its base as it is now; the work put aside at the pause
+      // goes back on top of it or, when it doesn't fit there, on the branch where it was.
+      let fresh = null;
+      try {
+        fresh = await freshenBranch(dir, run.base ?? project.main_branch);
+      } catch (error) {
+        log(t("Couldn't bring the run's branch up to date: {error}", { error: error.message }));
+      }
+      if (run.shelf) {
+        try {
+          try {
+            await restoreShelf(dir, run.id, run.shelf.commit);
+          } catch (error) {
+            if (!fresh) throw error;
+            await discardSince(dir, fresh.from);
+            fresh = { ...fresh, kept: true };
+            await restoreShelf(dir, run.id, run.shelf.commit);
+          }
+        } catch (error) {
+          const text = t('The work put aside at the pause could not be put back. It is kept in the stash "chiefmate: paused run {id}" ({ref}) of {path}. {error}', {
+            id: run.id, ref: shelfRef(run.id), path: dir, error: error.message,
+          });
+          if (step) Object.assign(step, { status: 'failed', ended: now(), error: text });
+          throw new Error(text, { cause: error });
+        }
+        delete run.shelf;
+        if (fresh) fresh.restored = true;
+        log(t('The work not committed yet was put back.'));
+      }
+      if (fresh) {
+        if (!fresh.kept) {
+          run.baseCommit = fresh.to;
+          log(t('The branch had no commits of its own: it now starts from the current {base}.', { base: run.base ?? project.main_branch }));
+          await installSetup(dir, project, log);
+        } else log(t("The work not committed yet didn't apply on the current {base}: the branch stays where it was.", { base: run.base ?? project.main_branch }));
+        if (step) step.freshBase = fresh;
+      }
+      saveRun(run);
     }
     const base = run.base ?? project.main_branch;
     const libraries = await prepareLibraries(config, libraryIds(project), log);
@@ -1146,7 +1245,7 @@ export async function execute(run) {
       const order = [...run.steps.map(step => ({ step, finalReview: false })), ...(run.review ? [{ step: run.review, finalReview: true }] : [])];
       const index = order.findIndex(x => x.step.status === 'pending' || x.step.status === 'running');
       if (index < 0 || l.cancelRequest) break;
-      if (l.pauseRequest) return pauseForUpdate();
+      if (l.pauseRequest) return await pauseForUpdate();
       const { step, finalReview } = order[index];
       const limit = checkLimits(run, config);
       if (limit) return wait(limit.waitUntil, limit.note, limit.limitWait);
@@ -1154,11 +1253,7 @@ export async function execute(run) {
       const reviewFrom = finalReview ? await headCommit(dir).catch(() => null) : null;
       const { waitUntil, paused } = await runStep({ l, run, step, index, dir, project, config, agents, libraries, base, finalReview });
       if (reviewFrom && step.status === 'done') step.commits = await commitSubjects(dir, reviewFrom).catch(() => []);
-      if (paused && !l.cancelRequest) {
-        // Parked: the next run of the project takes the working copy, so what the step left uncommitted goes on its branch now.
-        if (l.pauseRequest === 'park') await commitPending(dir, noTrace(project) ? run.title : `Chiefmate: work in progress (${run.title})`).catch(e => log(t("Couldn't commit the work before parking: {error}", { error: e.message })));
-        return pauseForUpdate();
-      }
+      if (paused && !l.cancelRequest) return await pauseForUpdate();
       if (waitUntil) return wait(waitUntil, t('Your account reached its limit in the middle of a step'));
       if (step.agent === LEAD) afterLead(run, step, agents, log);
     }
@@ -1248,7 +1343,7 @@ export async function execute(run) {
   } catch (error) {
     if (error?.name === 'AbortError' && l.pauseRequest && !l.cancelRequest) {
       log(t('Preparation stopped for the update: it starts over when the run resumes'));
-      return pauseForUpdate();
+      return await pauseForUpdate();
     }
     // A git step that met a file the antivirus probably took: the run waits in the queue instead of failing.
     const lost = !l.cancelRequest && project ? await quarantinedBy(error, projectDir(run.project)).catch(() => null) : null;
