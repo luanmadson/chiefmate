@@ -13,6 +13,7 @@ import { byRank, CLOSED, decideItem, planItem, planItems, startApproved } from '
 import { listRuns, readState, readUsage, saveState } from './store.mjs';
 import { isLocked } from './lockdown.mjs';
 import { held } from './power.mjs';
+import { holdReason, readSteer } from './steer.mjs';
 import { updating } from './update.mjs';
 import { clip, now } from './util.mjs';
 
@@ -231,10 +232,11 @@ export function autopilotStatus(config = loadConfig(), usage = readUsage(), at =
   };
 }
 
-/** The projects in the settings with nothing queued, waiting, going on or paused. */
+/** The projects in the settings with nothing queued, waiting, going on or paused, and not held by the owner's focus. */
 export function idleProjects(config = loadConfig(), runs = listRuns()) {
   const busy = new Set(runs.filter(r => BUSY.includes(r.status)).map(r => r.project));
-  return new Set(Object.keys(config.projects ?? {}).filter(id => !busy.has(id)));
+  const steer = readSteer();
+  return new Set(Object.keys(config.projects ?? {}).filter(id => !busy.has(id) && !holdReason(id, steer)));
 }
 
 const open = i => !i.archived && !CLOSED.includes(i.status);
@@ -335,6 +337,7 @@ export async function autopilotApprove(id, { config = loadConfig(), usage = read
   if (blocked) throw new Error(`The autopilot can't put an item on the queue now: ${blocked}.`);
   const item = planItem(id);
   if (item.archived || item.status !== 'triaged' || item.recommend !== 'now') throw new Error(`Item #${item.id} is not triaged "now": the autopilot only starts those, the rest waits for the owner.`);
+  if (holdReason(item.project)) throw new Error(`${item.project} is held by the owner's focus (paused, or out of the focus): the autopilot starts nothing there until it is free.`);
   if (!idleProjects(config).has(item.project)) throw new Error(`${item.project} has work queued or going on: the autopilot waits for its queue to empty.`);
   const approved = await decideItem(item.id, 'approve', { by: 'autopilot' });
   const state = readState();

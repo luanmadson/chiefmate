@@ -16,7 +16,7 @@ const option = name => {
 };
 const has = name => rest.includes(name);
 // The words of a command that are not options nor their values ("--title <text>").
-const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--level', '--note', '--recommend', '--project', '--run', '--tool', '--from', '--description'];
+const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--level', '--note', '--recommend', '--project', '--run', '--tool', '--from', '--description', '--for', '--until'];
 const words = () => rest.filter((x, i) => !x.startsWith('--') && !VALUED.includes(rest[i - 1]));
 /** The title and summary given with --title and --summary: nothing is generated for them. */
 const brief = () => ({ title: option('--title'), summary: option('--summary'), level: option('--level'), tool: option('--tool') });
@@ -220,6 +220,16 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 the next start resumes the work). shutdown: the same, then Windows shuts
                                                 down after a 60-second countdown. cancel: stops a stop or shutdown going
                                                 on. Without --yes, only shows what would happen
+  node src/cli.mjs focus [status]               the owner's focus: which projects may start new work
+  node src/cli.mjs focus <project...> | off | pause-all [--for 2h | --until 08:00] [--pause-running]
+                                                focus: only these projects start new work (the others' runs and
+                                                missions wait; a mission missed meanwhile runs once after); off: no
+                                                restriction; pause-all: nothing new starts. The owner's live sessions
+                                                are never held. --for/--until: back to the state before by itself.
+                                                --pause-running: the runs going on of the projects held pause at a safe
+                                                point (else they finish). For the manager, only at the owner's request
+  node src/cli.mjs project-pause <project> [--for 2h | --until 08:00] [--pause-running]
+  node src/cli.mjs project-resume <project>     pauses one project (no new run starts there), or frees it
   node src/cli.mjs history [n]                  the latest runs
   node src/cli.mjs report <id>                  the report of each step of a run
   node src/cli.mjs context <id> [step]          what each step received: prompt, model, tools, folders, MCP servers
@@ -761,6 +771,36 @@ async function effortCommand() {
   }
 }
 
+/**
+ * "focus", "project-pause" and "project-resume": the owner's focus (src/steer.mjs), for the manager at the owner's
+ * request and for a terminal. Refused inside a step.
+ */
+async function steerCommand(which) {
+  if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error("A step doesn't change the owner's focus: ask the owner with needs-you.");
+  const args = words();
+  const body = { by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'cli', running: has('--pause-running') ? 'pause' : 'finish' };
+  if (which === 'focus') {
+    const first = args[0] ?? 'status';
+    if (first === 'status') return console.log((await api('/api/state')).steer?.line ?? 'No restriction');
+    if (first === 'off') body.action = 'free';
+    else if (first === 'pause-all') body.action = 'pause-all';
+    else Object.assign(body, { action: 'focus', projects: args });
+  } else {
+    if (args.length !== 1) throw new Error(`Use: node src/cli.mjs ${which} <project> [--for 2h | --until 08:00]${which === 'project-pause' ? ' [--pause-running]' : ''}`);
+    Object.assign(body, { action: 'project', project: args[0], to: which === 'project-pause' ? 'paused' : 'active' });
+  }
+  const { parseFor } = await import('./steer.mjs');
+  if (option('--for') !== undefined) {
+    const ms = parseFor(option('--for'));
+    if (!ms) throw new Error('--for takes a length such as 2h, 90m or 1h30m.');
+    body.until = new Date(Date.now() + ms).toISOString();
+  } else if (option('--until') !== undefined) body.until = option('--until');
+  const r = await api('/api/steer', body);
+  console.log(r.steer.line);
+  if (r.paused.length) console.log(`Pausing at a safe point: ${r.paused.join(', ')} (they resume when their project is free).`);
+  if (r.steer.back) console.log(`Then back to: ${r.steer.back}.`);
+}
+
 /** "power": the power modes (src/power.mjs). Only the owner's: refused inside a step and the manager's answer. */
 async function powerCommand() {
   const action = rest.find(x => !x.startsWith('--')) ?? 'status';
@@ -943,6 +983,12 @@ async function main() {
           },
         });
         lockdown.startLockdownWatch();
+        // A change of the owner's focus (src/steer.mjs), its automatic return included: the projects now free start
+        // their queue and their approved board items.
+        (await import('./steer.mjs')).onSteerChange(() => {
+          nudgeQueue();
+          import('./planning.mjs').then(m => m.startApproved()).catch(error => console.error('Focus:', error));
+        });
         deliverPending(); // messages left in the queue when Chiefmate stopped
         (await import('./news.mjs')).startNews(); // and the news for the manager, such as "update installed"
       }
@@ -955,6 +1001,7 @@ async function main() {
       const percent = v => `${Math.round((v ?? 0) * 100)}%`;
       const going = s.running ?? (s.current ? [s.current] : []);
       if (s.power && s.power.mode !== 'on') console.log(`Power: ${powerLine(s.power)}`);
+      if (s.steer) console.log(`Focus: ${s.steer.line}`);
       if (!going.length) console.log('Running: nothing');
       for (const r of going) console.log(`Running: ${r.title} [${r.id}] (${r.project}), step ${r.step ?? '-'}: ${r.agent ?? 'preparing'}`);
       for (const x of s.sessions?.open ?? []) console.log(`Session: ${x.name} [${x.id}] (${x.tool}${x.project ? `, ${x.project}` : ''}), ${x.alive ? 'open' : x.status} since ${formatDateTime(x.started)}`);
@@ -1236,6 +1283,11 @@ async function main() {
       await powerCommand();
       return;
     }
+    case 'focus':
+    case 'project-pause':
+    case 'project-resume':
+      await steerCommand(command);
+      return;
     case 'effort':
       await effortCommand();
       return;

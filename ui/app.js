@@ -845,12 +845,14 @@ document.addEventListener('click', event => {
 /** The project in focus: the run going on now, else the next one in the queue. */
 function drawFocus() {
   const f = online ? state.focus : null;
-  const label = `<span class="label">${esc(t('Focus'))}</span>`;
+  // the owner's focus (src/steer.mjs), when it holds a project: a mark that opens the Focus panel
+  const label = `<span class="label">${esc(t('Focus'))}</span>${online ? steerChip() : ''}`;
   // A run going on in focus: a click opens the panel of its agent at work.
   if (f?.state === 'running') $('#focus').dataset.agentRun = f.run;
   else delete $('#focus').dataset.agentRun;
   if (!f) {
-    const text = online ? t('No project in focus') : '—';
+    // with the owner's focus on, "no project in focus" would contradict its mark: nothing runs, that's all
+    const text = online ? (steerMode() ? t('Nothing running') : t('No project in focus')) : '—';
     const html = `${label}<span class="focus-none">${esc(text)}</span>`;
     $('#focus').title = text;
     draw('#focus', html, html);
@@ -869,6 +871,186 @@ function drawFocus() {
   $('#focus').title = [f.projectName, ...parts, f.summary].filter(Boolean).join(' · ');
   draw('#focus', html, html);
 }
+
+// ---------- The owner's focus (src/steer.mjs): the Focus panel at the top of Operations ----------
+
+// The "Focus on…" picker (open, and the projects ticked) and the "until when" choice for the next change.
+const steerPick = { open: false, chosen: new Set() };
+let steerUntil = '';
+
+/** The mode in a few words, for the mark at the top; none with no restriction. */
+function steerMode(s = state?.steer) {
+  if (!s) return null;
+  const names = ids => ids.map(projectName).join(', ');
+  if (s.mode === 'paused-all') return { text: t('Everything paused'), level: 'warn' };
+  if (s.mode === 'focus') return { text: s.only.length ? t('Only {list}', { list: names(s.only) }) : t('Nothing starts'), level: 'accent' };
+  if (s.paused.length) return { text: t('{count} paused', { count: s.paused.length }), level: 'warn' };
+  return null;
+}
+
+function steerChip() {
+  const m = steerMode();
+  return m ? `<a class="steer-chip state-${m.level}" href="#operations" title="${esc(state.steer.line)}">${esc(m.text)}</a>` : '';
+}
+
+// Before 8:00 the next 8:00 is today's: a choice made after midnight lasts the night, not a day more.
+const beforeEight = () => new Date().getHours() < 8;
+
+/** When a change ends by itself: in 1, 2 or 4 hours, or at the next 8:00. */
+function steerUntilIso(choice = steerUntil) {
+  if (!choice) return null;
+  const d = new Date();
+  if (choice === 'at8') {
+    if (!beforeEight()) d.setDate(d.getDate() + 1);
+    d.setHours(8, 0, 0, 0);
+    return d.toISOString();
+  }
+  return new Date(d.getTime() + Number(choice) * 3600_000).toISOString();
+}
+
+/** A project's activity: who works there now, its queue, its memory and its live sessions. */
+function steerActivity(id) {
+  const runs = going().filter(a => a.project === id);
+  const queued = (state.queue ?? []).filter(r => r.project === id).length;
+  const machine = state.computer?.projects.find(p => p.id === id);
+  return { runs, queued, ram: machine?.ram ?? 0, session: !!machine?.session, measured: !!state.computer?.supported };
+}
+
+/** The card's state, in words and color: working, paused by you, waiting for the focus, queued or stopped. */
+function steerState(p, act) {
+  if (act.runs.length) return [t('Working now'), 'ok', 'working'];
+  if (p.hold === 'paused') return [t('Paused by you'), 'warn', 'paused'];
+  if (p.hold === 'all') return [t('Paused: everything is paused'), 'warn', 'paused'];
+  if (p.hold === 'focus') return [t('Waiting for the focus to end'), 'neutral', 'waiting'];
+  if (act.queued) return [t('In the queue: {count}', { count: act.queued }), 'info', 'queued'];
+  return [t('Stopped'), 'neutral', 'idle'];
+}
+
+function steerCard(p) {
+  const act = steerActivity(p.id);
+  const [label, level, kind] = steerState(p, act);
+  const who = act.runs.map(a => {
+    const m = member(a.agent, p.id);
+    const role = a.agent && m.title ? ` (${t(m.title)})` : '';
+    return `<div class="steer-who"${opensPanel(a.id)}>${liveDot()}<strong>${esc(a.agent ? agentName(a.agent, p.id) : t('preparing'))}</strong>${esc(role)}<span class="hint"> · ${esc(a.title)}</span></div>`;
+  }).join('') || `<div class="steer-who hint">${esc(t('Nobody working'))}</div>`;
+  const meta = [];
+  // what waits behind the work going on, and what happens to it
+  if (act.runs.length && act.queued) meta.push(t('In the queue: {count}', { count: act.queued }));
+  else if (!act.runs.length && act.queued && p.hold) meta.push(t('{count} waiting in the queue', { count: act.queued }));
+  if (act.runs.length && p.hold) meta.push(t('Finishes what it is doing, then waits'));
+  meta.push(act.measured ? t('Memory: {size}', { size: bytes(act.ram) }) : t('Memory: not measured'));
+  if (act.session) meta.push(t('Your live session is open (never held)'));
+  const waits = state.steer.mode !== 'free';
+  const buttons = [
+    ['active', waits ? t('Waits') : t('Active'), waits ? t('Not paused: it works when the focus or the pause ends') : t('Works normally')],
+    ['paused', t('On pause'), t('Starts nothing new until you resume it')],
+    ['focus', t('Focus'), t('Only the projects in focus start new work')],
+  ].map(([to, text, title]) => `<button type="button" class="steer-option" data-to="${to === 'active' && waits ? 'waits' : to}" data-steer-project="${esc(p.id)}" data-steer-to="${to}" aria-pressed="${p.control === to}" title="${esc(title)}">${esc(text)}</button>`).join('');
+  return `<article class="steer-card" data-state="${kind}">
+    <div class="steer-card-head"><span class="steer-name">${projectLink(p.id)}</span><span class="state state-${level}">${esc(label)}</span></div>
+    ${who}
+    <div class="steer-meta hint">${meta.map(esc).join(' · ')}</div>
+    <div class="steer-options" role="group" aria-label="${esc(t('{project}: active, paused or in focus', { project: projectName(p.id) }))}">${buttons}</div>
+  </article>`;
+}
+
+function drawSteer() {
+  const s = online ? state.steer : null;
+  if (!s) {
+    draw('#steer', 'off', '');
+    return;
+  }
+  const modes = [
+    ['free', t('No restriction'), s.mode === 'free' && !s.paused.length],
+    ['focus', t('Focus on…'), s.mode === 'focus' || steerPick.open],
+    ['pause-all', t('Pause all'), s.mode === 'paused-all'],
+  ].map(([action, text, on]) => `<button type="button" class="steer-mode" data-steer-mode="${action}" aria-pressed="${on}"${action === 'focus' ? ` aria-expanded="${steerPick.open}"` : ''}>${esc(text)}</button>`).join('');
+  const until = [['', t('No end')], ['1', t('For 1 hour')], ['2', t('For 2 hours')], ['4', t('For 4 hours')], ['at8', beforeEight() ? t('Until today at 8:00') : t('Until tomorrow at 8:00')]]
+    .map(([value, text]) => `<option value="${value}"${value === steerUntil ? ' selected' : ''}>${esc(text)}</option>`).join('');
+  const pick = steerPick.open
+    ? `<div class="steer-pick"><span class="hint">${esc(t('Only these start new work; the others wait, their missions kept for after the focus.'))}</span>
+      <div class="steer-pick-list">${s.projects.map(p => `<label class="steer-pick-item"><input type="checkbox" data-steer-pick="${esc(p.id)}"${steerPick.chosen.has(p.id) ? ' checked' : ''}> ${esc(projectName(p.id))}</label>`).join('')}</div>
+      <div class="steer-pick-actions"><button type="button" class="button" data-steer-apply${steerPick.chosen.size ? '' : ' disabled'}>${esc(t('Focus on these'))}</button><button type="button" class="button secondary" data-steer-cancel>${esc(t('Cancel'))}</button></div></div>`
+    : '';
+  const mode = steerMode(s);
+  const line = `<div class="steer-line"><span class="state state-${mode?.level ?? 'ok'}">${esc(s.line)}</span>${s.back ? `<span class="hint">${esc(t('then back to: {state}', { state: s.back }))}</span>` : ''}</div>`;
+  const changes = s.changes.length
+    ? `<details class="steer-history" data-keep-open="steer-history"><summary>${esc(t('Latest changes ({count})', { count: s.changes.length }))}</summary><ul>${s.changes.map(c => `<li><span class="hint">${esc(shortDate(c.at))}</span> ${esc(c.text)}<span class="hint">, ${esc(c.who)}${c.until ? `, ${esc(t('until {time}', { time: shortDate(c.until) }))}` : ''}</span></li>`).join('')}</ul></details>`
+    : '';
+  const top = `<div class="steer-head"><div class="label">${esc(t('Focus'))}</div>${line}</div>
+    <div class="steer-controls"><div class="steer-modes" role="group" aria-label="${esc(t('Which projects may work'))}">${modes}</div>
+    <label class="steer-until"><span class="hint">${esc(t('Until when'))}</span><select id="steer-until">${until}</select></label></div>${pick}`;
+  // three parts drawn apart, so the memory read every few seconds never redraws the controls in use
+  if (draw('#steer', 'on', '<div id="steer-top"></div><div id="steer-cards" class="steer-cards"></div><div id="steer-foot"></div>')) {
+    for (const key of ['#steer-top', '#steer-cards', '#steer-foot']) delete signatures[key];
+  }
+  draw('#steer-top', JSON.stringify([s.line, s.back, s.mode, s.only, s.paused, s.projects, steerPick.open, steerUntil, beforeEight()]), top);
+  const cards = s.projects.map(steerCard).join('');
+  draw('#steer-cards', JSON.stringify([s.mode, s.projects, going().map(a => [a.id, a.project, a.agent, a.title]), (state.queue ?? []).map(r => r.project), state.computer?.projects.map(p => [p.id, Math.round((p.ram ?? 0) / 2 ** 20), p.session])]), cards);
+  const foot = `<div class="hint steer-note">${esc(t('Your live sessions and the conversation with the manager are never held.'))}</div>${changes}`;
+  draw('#steer-foot', JSON.stringify(s.changes), foot);
+}
+
+/** Sends a change; when it would hold work going on, the owner chooses first: let it finish or pause it now. */
+async function changeSteer(body) {
+  try {
+    const full = { ...body, until: steerUntilIso() };
+    const { held } = await api('/api/steer', { ...full, preview: true });
+    if (held.length) {
+      const names = [...new Set(held.map(h => projectName(h.project)))].join(', ');
+      const choice = await steerChoice(t('{list}: work going on now. What should happen to it?', { list: names }));
+      if (!choice) return;
+      full.running = choice;
+    }
+    const r = await api('/api/steer', full);
+    toast(r.paused.length ? t('{line}. The work going on pauses at a safe point.', { line: r.steer.line }) : r.steer.line);
+    steerPick.open = false;
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function steerChoice(text) {
+  const dialog = $('#steer-dialog');
+  $('#steer-dialog-text').textContent = text;
+  dialog.returnValue = '';
+  dialog.showModal();
+  return new Promise(resolve => dialog.addEventListener('close', () => resolve(['finish', 'pause'].includes(dialog.returnValue) ? dialog.returnValue : null), { once: true }));
+}
+
+document.addEventListener('click', event => {
+  const option = event.target.closest('[data-steer-to]');
+  if (option) {
+    if (option.getAttribute('aria-pressed') !== 'true') changeSteer({ action: 'project', project: option.dataset.steerProject, to: option.dataset.steerTo });
+    return;
+  }
+  const mode = event.target.closest('[data-steer-mode]');
+  if (mode) {
+    if (mode.dataset.steerMode === 'focus') {
+      steerPick.open = !steerPick.open;
+      steerPick.chosen = new Set(state.steer.mode === 'focus' ? state.steer.only : []);
+      drawSteer();
+    } else changeSteer({ action: mode.dataset.steerMode });
+    return;
+  }
+  if (event.target.closest('[data-steer-apply]')) changeSteer({ action: 'focus', projects: [...steerPick.chosen] });
+  else if (event.target.closest('[data-steer-cancel]')) {
+    steerPick.open = false;
+    drawSteer();
+  }
+});
+
+document.addEventListener('change', event => {
+  if (event.target.id === 'steer-until') steerUntil = event.target.value;
+  const pick = event.target.closest('[data-steer-pick]');
+  if (!pick) return;
+  if (pick.checked) steerPick.chosen.add(pick.dataset.steerPick);
+  else steerPick.chosen.delete(pick.dataset.steerPick);
+  // the ticks stay as they are (no redraw): only the button follows them
+  $('[data-steer-apply]').disabled = !steerPick.chosen.size;
+});
 
 function drawCounters() {
   const runs = going().length;
@@ -1351,7 +1533,7 @@ const newsEvent = kind => ({
   memory_alert: t('memory alert'), usage_alert: t('usage alert'), session_ended: t('live session ended'), plan_proposed: t('new proposal'),
   idle: t('empty queue'), autopilot_report: t('autopilot report'), watchdog: t('watchdog'), lockdown: t('emergency lockdown'), security_warning: t('security warning'),
   away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'), power: t('power mode'),
-  owner_working: t('you working now'), defect: t('defect reported'), agent_message: t('message from an agent'),
+  owner_working: t('you working now'), defect: t('defect reported'), agent_message: t('message from an agent'), focus: t('focus changed'),
 }[kind] ?? kind);
 
 // Who wrote an agent's message to the manager (a live session or a step of a run, from the command line).
@@ -1536,23 +1718,31 @@ function drawQueue() {
   // Runs of different projects go on at once, up to the limit; within a project, one at a time.
   const busy = new Set(going().map(a => a.project));
   let room = (state.parallel?.max ?? 1) - going().length;
+  // a project the owner's focus holds (src/steer.mjs) starts nothing: its runs wait, and none of them is next
+  const hold = id => state.steer?.projects.find(p => p.id === id)?.hold ?? null;
+  const held = { paused: t('when you resume its project'), all: t('when you resume the work'), focus: t('when the focus ends') };
   const expected = r => {
     if (busy.has(r.project)) return t('when the run of its project ends');
     busy.add(r.project);
     return room-- > 0 ? t('in a moment') : t('when a run ends');
   };
-  const rows = list.map((r, i) => `<tr class="${i === 0 ? 'next' : ''}">
+  const start = r => {
+    if (hold(r.project)) return esc(held[hold(r.project)]);
+    return r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? `${shortDate(r.notBefore)} (${esc(relative(r.notBefore))})` : esc(expected(r));
+  };
+  const next = list.find(r => !hold(r.project));
+  const rows = list.map((r, i) => `<tr class="${r === next ? 'next' : ''}">
       <td class="num">${i + 1}</td>
-      <td>${i === 0 ? `<span class="tag">${esc(t('Next'))}</span>` : ''}${lateTag(r)}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span></td>
+      <td>${r === next ? `<span class="tag">${esc(t('Next'))}</span>` : ''}${lateTag(r)}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span></td>
       <td>${stateHtml(runState(r.status))}</td>
-      <td class="num">${r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? `${shortDate(r.notBefore)} (${esc(relative(r.notBefore))})` : esc(expected(r))}</td>
+      <td class="num">${start(r)}</td>
       <td class="row-actions"><button type="button" class="button danger small" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button></td>
     </tr>`);
   const html = list.length
     ? `<div class="label" style="margin-top:24px">${esc(t('Queue'))}</div>
     <table class="table queue"><thead><tr><th>#</th><th>${esc(t('Run'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Expected start'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
     : '';
-  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools, r.due]), Math.floor(Date.now() / 60000)]), html);
+  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools, r.due, hold(r.project)]), Math.floor(Date.now() / 60000)]), html);
 }
 
 /** A run going on: who is at work, the step out of how many, the time counting and the last action, all live. */
@@ -1659,6 +1849,7 @@ function leadPlan(a) {
 }
 
 function drawOperations() {
+  drawSteer();
   const runs = going();
   const parallel = state.parallel?.max ?? 1;
   const head = runs.length > 1 || (runs.length && parallel > 1)

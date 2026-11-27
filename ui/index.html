@@ -103,6 +103,8 @@
             <p data-t="What the crew is doing right now, step by step, and what is in the queue.">What the crew is doing right now, step by step, and what is in the queue.</p>
           </div>
         </div>
+        <!-- The owner's focus (src/steer.mjs): which projects may work, each project's state and control -->
+        <section id="steer" class="panel steer" aria-live="polite"></section>
         <div class="operations-layout">
           <div id="operations"></div>
           <aside class="side">
@@ -390,6 +392,18 @@
       <div class="actions">
         <button value="no" class="button secondary" data-t="Cancel">Cancel</button>
         <button value="yes" class="button" id="confirm-yes"></button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="steer-dialog" class="confirm">
+    <form method="dialog">
+      <div class="label" data-t="Work going on">Work going on</div>
+      <p id="steer-dialog-text"></p>
+      <p class="hint" data-t="Finish: the run goes to the end, then the project waits. Pause: it stops at a safe point and resumes by itself when the project is free.">Finish: the run goes to the end, then the project waits. Pause: it stops at a safe point and resumes by itself when the project is free.</p>
+      <div class="actions">
+        <button value="no" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="pause" class="button secondary" data-t="Pause it now">Pause it now</button>
+        <button value="finish" class="button" data-t="Let it finish">Let it finish</button>
       </div>
     </form>
   </dialog>
