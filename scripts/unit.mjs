@@ -1292,6 +1292,32 @@ test("the settings' backup: a redacted copy in backup_dir, the full one only on 
   const other = path.join(temp, 'backup', 'none');
   backupConfig({ owner: 'x' }, { fullDir: other });
   assert.ok(!existsSync(other), 'no backup without backup_dir');
+
+  // full_backup_dir: the full copy also off this computer, on its own too, but never inside git nor in backup_dir.
+  const cloud = path.join(temp, 'backup', 'cloud');
+  backupConfig({ ...config, full_backup_dir: cloud }, { fullDir });
+  assert.equal(JSON.parse(readFileSync(path.join(cloud, 'chiefmate.json'), 'utf8')).projects.demo.notes, config.projects.demo.notes);
+  const alone = { owner: 'y', full_backup_dir: path.join(temp, 'backup', 'alone') };
+  backupConfig(alone, { fullDir: other });
+  for (const dir of [alone.full_backup_dir, other]) assert.deepEqual(JSON.parse(readFileSync(path.join(dir, 'chiefmate.json'), 'utf8')), alone);
+  const repo = path.join(temp, 'backup', 'git');
+  mkdirSync(path.join(repo, '.git'), { recursive: true });
+  const logged = console.error;
+  const said = [];
+  console.error = (...words) => said.push(words.join(' '));
+  try {
+    backupConfig({ owner: 'z', full_backup_dir: path.join(repo, 'private') }, { fullDir: path.join(temp, 'backup', 'z') });
+    backupConfig({ ...config, full_backup_dir: config.backup_dir }, { fullDir });
+    // the same folder spelled in other letters, on Windows
+    if (windows) backupConfig({ ...config, full_backup_dir: `${config.backup_dir.toUpperCase()}\\` }, { fullDir });
+    // a value that is not a path neither breaks the save nor Chiefmate's start
+    backupConfig({ owner: 'w', full_backup_dir: true }, { fullDir: path.join(temp, 'backup', 'w') });
+  } finally {
+    console.error = logged;
+  }
+  assert.ok(!existsSync(path.join(repo, 'private')), 'no full copy inside a git repository');
+  assert.equal(JSON.parse(readFileSync(path.join(config.backup_dir, 'chiefmate.json'), 'utf8')).projects.demo.notes, '[removed from this copy]', 'backup_dir keeps the redacted copy');
+  assert.deepEqual(said.map(line => line.match(/full_backup_dir (.+?)(?: \(|, so )/)?.[1] ?? line),['is inside a git repository', 'is the same folder as backup_dir', ...(windows ? ['is the same folder as backup_dir'] : []), 'is not a folder path'], 'the log says why');
 });
 
 test('npm run check says why a script was not checked, with no pipe a sandbox could refuse', () => {
