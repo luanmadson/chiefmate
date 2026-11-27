@@ -220,6 +220,64 @@ try {
     expect(state.steer?.mode === 'free' && typeof state.steer.line === 'string' && Array.isArray(state.steer.projects) && Array.isArray(state.steer.changes), `/api/state has no focus: ${JSON.stringify(state.steer)}`);
     expect((await post('/api/steer', { action: 'focus', projects: ['no-such-project'] })).status === 400 && (await post('/api/steer', { action: 'free', until: 'yesterday' })).status === 400, 'an invalid change of focus was not refused');
     expect(html.includes('id="steer"') && html.includes('id="steer-dialog"'), 'Operations has no Focus panel');
+    // The owner's queue controls (src/queue.mjs): the order given, a hold with its reason, "Do now" and its end, cancel;
+    // nothing changes without the owner's key, and the manager never undoes the owner's changes.
+    {
+      const made = (id, project, minutes) => ({ id, kind: 'task', project, title: `Queue ${id}`, summary: 'Made up.', status: 'queued', created: new Date(Date.now() - minutes * 60_000).toISOString(), steps: [{ agent: 'generalist', status: 'pending' }] });
+      const runs = [made('smoke-q1', 'smoke-a', 40), made('smoke-q2', 'smoke-a', 30), made('smoke-q3', 'smoke-b', 20), made('smoke-q4', 'smoke-b', 10)];
+      for (const r of runs) writeFileSync(path.join(data, 'runs', `${r.id}.json`), JSON.stringify(r));
+      const now = async () => (await (await fetch(`${base}/api/state`)).json());
+      const mine = s => s.queue.filter(r => r.id.startsWith('smoke-q'));
+      const ids = s => mine(s).map(r => r.id.slice(6)).join(',');
+      expect(ids(await now()) === 'q1,q2,q3,q4', `the queue is not in the order the runs were asked for: ${ids(await now())}`);
+      const unkeyed = await keyless('/api/queue', { action: 'move', id: 'smoke-q4', top: true });
+      expect(unkeyed.status === 403 && ids(await now()) === 'q1,q2,q3,q4', `a change to the queue without the owner's key answered ${unkeyed.status}, or changed it`);
+      for (const body of [{ id: 'smoke-q4', top: true }, { id: 'smoke-q1', down: true }, { id: 'smoke-q3', before: 'smoke-q4' }, { id: 'smoke-q2', up: true }]) {
+        const r = await post('/api/queue', { action: 'move', ...body });
+        expect(r.ok, `moving a run in the queue failed: ${JSON.stringify(body)} ${r.status}`);
+      }
+      expect(ids(await now()) === 'q3,q2,q4,q1', `the owner's moves did not give the queue's order: ${ids(await now())}`);
+      const held = await post('/api/queue', { action: 'hold', id: 'smoke-q2', reason: 'Waiting for the API key' });
+      let s = await now();
+      const q2 = mine(s).find(r => r.id === 'smoke-q2');
+      expect(held.ok && q2?.onHold === true && q2.hold?.by === 'owner' && q2.hold.reason === 'Waiting for the API key' && q2.movedBy === 'owner',
+        `a run held by the owner does not say who held it and why: ${JSON.stringify(q2?.hold)}`);
+      // The manager (by "manager"): refused when it would undo the owner's hold or order.
+      const undo = [await post('/api/queue', { action: 'release', id: 'smoke-q2', by: 'manager' }), await post('/api/queue', { action: 'move', id: 'smoke-q4', top: true, by: 'manager' }),
+        await post('/api/queue', { action: 'cancel', id: 'smoke-q1', by: 'manager' }), await post('/api/queue', { action: 'do-now', id: 'smoke-q4', scope: 'all', by: 'manager' })];
+      s = await now();
+      expect(undo.every(r => r.status === 400) && ids(s) === 'q3,q2,q4,q1' && mine(s).find(r => r.id === 'smoke-q2')?.hold?.by === 'owner',
+        `the manager undid the owner's changes to the queue: ${undo.map(r => r.status).join(',')} ${ids(s)}`);
+      // "Do now" for its project: to the top, and only the other runs of its project wait; for all: every other run waits.
+      await post('/api/queue', { action: 'do-now', id: 'smoke-q4', scope: 'project' });
+      s = await now();
+      const hold = id => mine(s).find(r => r.id === id)?.hold;
+      expect(ids(s) === 'q4,q3,q2,q1' && s.queueControl?.doNow?.run === 'smoke-q4' && mine(s)[0].doNow && hold('smoke-q3')?.doNow?.run === 'smoke-q4' && !hold('smoke-q1') && hold('smoke-q2')?.reason,
+        `"Do now" for its project did not put it first and hold only its project's runs: ${ids(s)} ${JSON.stringify(mine(s).map(r => r.hold))}`);
+      await post('/api/queue', { action: 'do-now', id: 'smoke-q4', scope: 'all' });
+      s = await now();
+      expect(s.queueControl?.doNow?.scope === 'all' && hold('smoke-q1')?.doNow?.run === 'smoke-q4' && s.focus?.run !== 'smoke-q1', `"Do now" for all did not hold every other run: ${JSON.stringify(mine(s).map(r => r.hold))}`);
+      // The manager sees the order, the holds and why, the "Do now" and the owner's changes, which it must keep.
+      const { queueManagerLines } = await import('../src/queue.mjs');
+      const lines = queueManagerLines().join('\n');
+      expect(/ON HOLD by .+ \(why: Waiting for the API key\)/.test(lines) && /"Do now": "Queue smoke-q4"/.test(lines) && lines.includes('never undo them'),
+        `the manager's situation lacks the queue's holds, "Do now" or the owner's changes: ${lines}`);
+      // Once its run ends, the others go on by themselves; ended early, at once.
+      writeFileSync(path.join(data, 'runs', 'smoke-q4.json'), JSON.stringify({ ...runs[3], status: 'done', ended: new Date().toISOString() }));
+      s = await now();
+      expect(!s.queueControl?.doNow && !hold('smoke-q1') && !hold('smoke-q3') && hold('smoke-q2')?.by === 'owner', `a "Do now" whose run ended still holds the others: ${JSON.stringify(s.queueControl)}`);
+      await post('/api/queue', { action: 'do-now', id: 'smoke-q3', scope: 'all' });
+      await post('/api/queue', { action: 'do-now-end' });
+      await post('/api/queue', { action: 'release', id: 'smoke-q2' });
+      const canceled = await (await post('/api/queue', { action: 'cancel', id: 'smoke-q1' })).json();
+      s = await now();
+      const actions = (s.queueControl?.changes ?? []).map(c => c.action);
+      expect(canceled.status === 'canceled' && !s.queueControl?.doNow && !mine(s).some(r => r.hold) && ids(s) === 'q3,q2'
+        && ['move', 'hold', 'do-now', 'do-now-end', 'release', 'cancel'].every(a => actions.includes(a)) && s.queueControl.changes.every(c => c.by === 'owner' && c.at),
+        `the owner's "Do now" end, release or cancel did not take, or was not recorded: ${ids(s)} ${JSON.stringify(s.queueControl)}`);
+      expect(html.includes('id="do-now-dialog"') && html.includes('id="hold-dialog"') && appJs.includes('data-queue="move"') && appJs.includes("'/api/queue'"), "the app has no queue controls");
+      for (const r of runs) rmSync(path.join(data, 'runs', `${r.id}.json`), { force: true });
+    }
     expect((await post('/api/stop-project', { project: 'none' })).status === 400, 'stopping a project without a confirmed list was not refused');
     expect((await post('/api/reset-grants', { action: 'used', index: 9999 })).status === 400, 'marking a free reset that does not exist was not refused');
     // Updates are off in the smoke test: "update now" and "update check" answer so, and nothing is fetched or installed.
@@ -724,7 +782,9 @@ try {
     const { CONFIG_FILE, saveConfig } = await load('config');
     const { execute, live } = await load('runs');
     const { recordUsage, readRun, saveRun } = await load('store');
-    const { nudgeQueue } = await load('queue');
+    const { nudgeQueue, startQueue } = await load('queue');
+    // This process runs the copy's queue when nudged (only the process that starts the queue runs it), with no timer.
+    startQueue({ timer: false });
     const resetsAt = Math.floor(Date.now() / 1000) + 3600;
     const usage = utilization => ({ unifiedWindows: {
       five_hour: { utilization, resetsAt }, seven_day: { utilization: 0.20, resetsAt: resetsAt + 86400 },

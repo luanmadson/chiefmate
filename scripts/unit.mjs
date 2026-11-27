@@ -30,7 +30,7 @@ import { sendMail } from '../src/smtp.mjs';
 import { analystPrompt, commandsInLog, decide, githubRead, parseVerdict, protectedChanges, reviewIncident, sendsOut } from '../src/sentinel.mjs';
 import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
-import { copyHolders, pickNext } from '../src/queue.mjs';
+import { copyHolders, heldByDoNow, holdOf, pickNext, placeFor } from '../src/queue.mjs';
 import { askedTool, copyHolder, endLine, holdsCopy, limitWaitCleared, stepTool } from '../src/runs.mjs';
 import { addSpeech, askedBy, SPEECH_KEEP, SPEECH_MAX, SPEECH_SHOWN, speechLine, speechNow, speechRule, speechView } from '../src/speech.mjs';
 import {
@@ -785,6 +785,55 @@ test('a run paused in the middle of its work keeps the copy: no other run of the
   assert.deepEqual(pickNext([later, runB], [], 3, Date.now(), copyHolders([later, runB])).map(r => r.id), []);
   // Once it resumed and ended, B goes.
   assert.deepEqual(pickNext([runB], [], 3, Date.now(), copyHolders([{ ...runA, status: 'done' }, runB])).map(r => r.id), ['b']);
+});
+
+test("the queue's controls: a held run keeps its place, \"Do now\" holds its project's runs or all, and the manager never undoes the owner's order", () => {
+  const at = '2026-11-27T12:00:00.000Z';
+  const run = (id, project, extra = {}) => ({ id, project, title: `Run ${id}`, created: at, status: 'queued', ...extra });
+  // A held run never starts and doesn't hold up the ones behind it.
+  const a = run('a', 'demo', { onHold: { at, by: 'owner', reason: 'wait' } });
+  const b = run('b', 'demo');
+  const c = run('c', 'other');
+  assert.deepEqual(pickNext([a, b, c], [], 3).map(r => r.id), ['b', 'c']);
+  // "Do now" on b for its project: the other runs of demo wait, the other projects go on; for all, every other run waits.
+  const d = { run: 'b', project: 'demo', scope: 'project', title: 'Run b', by: 'owner', at };
+  const x = run('x', 'demo');
+  assert.equal(heldByDoNow(b, d), false);
+  assert.equal(heldByDoNow(x, d), true);
+  assert.equal(heldByDoNow(c, d), false);
+  assert.equal(heldByDoNow(c, { ...d, scope: 'all' }), true);
+  assert.equal(heldByDoNow(x, null), false);
+  // never a run that keeps the project's working copy: it resumes before the run to do now can start there
+  assert.equal(heldByDoNow(run('p', 'demo', { prepared: true, resumeFirst: true }), d), false);
+  assert.deepEqual(holdOf(x, d), { by: 'owner', at, reason: null, doNow: { run: 'b', title: 'Run b', project: 'demo', scope: 'project' } });
+  assert.deepEqual(holdOf(a, d), { by: 'owner', at, reason: 'wait', doNow: null });
+  assert.deepEqual(holdOf(run('m', 'other', { onHold: { at, by: 'manager' } }), null), { by: 'manager', at, reason: null, doNow: null });
+  assert.equal(holdOf(c, d), null);
+  // Moves: up, down, to the top, before and after another run; a run that resumes first stays ahead.
+  const q = [run('r1', 'p1', { resumeFirst: true }), run('r2', 'p2'), run('r3', 'p3'), run('r4', 'p4')];
+  const place = (id, where, by = 'owner') => {
+    const from = q.findIndex(r => r.id === id);
+    return placeFor(q[from], from, q.filter(r => r.id !== id), where, by);
+  };
+  assert.equal(place('r4', { top: true }), 1);
+  assert.equal(place('r3', { up: true }), 1);
+  assert.equal(place('r2', { up: true }), 1);
+  assert.equal(place('r2', { down: true }), 2);
+  assert.equal(place('r4', { down: true }), 3);
+  assert.equal(place('r4', { before: 'r2' }), 1);
+  assert.equal(place('r2', { after: 'r4' }), 3);
+  assert.equal(place('r1', { down: true }), 0);
+  assert.throws(() => place('r2', { before: 'nope' }));
+  assert.throws(() => place('r2', {}));
+  // The manager never undoes the owner's order: not a run the owner placed or held, nor past one.
+  q[1].movedBy = 'owner';
+  assert.throws(() => place('r2', { down: true }, 'manager'));
+  assert.throws(() => place('r4', { top: true }, 'manager'), /Run r2/);
+  assert.equal(place('r4', { up: true }, 'manager'), 2);
+  assert.equal(place('r3', { down: true }, 'manager'), 3);
+  q[2].onHold = { at, by: 'owner' };
+  assert.throws(() => place('r3', { down: true }, 'manager'));
+  assert.equal(place('r4', { top: true }), 1);
 });
 
 // ---------- The crew's tools (src/tools.mjs): which one a member runs on, until when, and how each is started ----------
@@ -1880,6 +1929,9 @@ test('without the key, a command may do only what an agent may, never as the own
     ['/api/lockdown', { action: 'note', note: 'x' }], ['/api/lockdown', { action: 'note', note: 'x', by: 'step' }],
     ['/api/escalation', { action: 'pin', pin: '480215' }], ['/api/escalation', { action: 'token', token: 'x' }], ['/api/escalation', { action: 'test' }],
     ['/api/escalation', { action: 'remove', channel: 'telegram' }], ['/api/escalation', { action: 'status' }],
+    // The owner's changes to the queue from the app (src/queue.mjs).
+    ['/api/queue', { action: 'move', id: 'r', top: true }], ['/api/queue', { action: 'hold', id: 'r', reason: 'x' }], ['/api/queue', { action: 'release', id: 'r' }],
+    ['/api/queue', { action: 'do-now', id: 'r', scope: 'all' }], ['/api/queue', { action: 'do-now-end' }], ['/api/queue', { action: 'cancel', id: 'r' }],
   ];
   for (const [route, body] of owners) assert.equal(ownerOnly(route, body), true, `${route} ${JSON.stringify(body)} goes without the key`);
   // What the command line sends for an agent (a step, a live session, the manager, the watchdog and its rescuer).
