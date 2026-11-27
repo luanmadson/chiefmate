@@ -11,7 +11,7 @@ import path from 'node:path';
 import { instructionFiles, stepAccess, stepMcp } from './access.mjs';
 import { loadAgents, loadConfig, projectCrew, saveConfig } from './config.mjs';
 import { t } from './i18n.mjs';
-import { LEAD, leadReviewStep, memoryFile } from './leads.mjs';
+import { LEAD, leadReviewStep, markReview, memoryFile } from './leads.mjs';
 import { projectOf } from './projects.mjs';
 import { builderSettings, builderStatus, projectInstructions, readBuilder } from './prompts.mjs';
 import { libraryIds, promptParts, stepTool, stepTools } from './runs.mjs';
@@ -101,6 +101,8 @@ function memberContext({ config, id, project, team, memberId, builder, libraries
   const kind = memberId === 'manager' ? 'manager' : memberId === LEAD ? 'lead' : 'member';
   const finalReview = kind === 'manager';
   const step = kind === 'lead' ? leadReviewStep() : { agent: memberId, part: finalReview ? REVIEW_TASK : TASK, status: 'running' };
+  // The lead's review as in a level 1 run: the final one when the project delegates it (src/leads.mjs).
+  if (kind === 'lead') markReview({ project: id, level: 1, review: { status: 'pending' } }, step, config);
   const run = { id: '(run id)', kind: 'task', project: id, title: RUN_TITLE, branch: runBranch(project, '(run id)', 'title'), instruction: null, steps: [step], lead: null };
   const access = stepAccess({ config, projectId: id, project, libraries, manager: finalReview });
   const mcp = stepMcp(config, project, agent);
@@ -262,7 +264,7 @@ export function lineDiff(before, after) {
 }
 
 // The prompt's sections that belong to one run (its task, the reports before): never compared.
-const RUN_SECTIONS = /^(Your part|What to do in this review|The request to plan|The request|The request this task is part of|What the previous steps did|Crew reports|Changed files|The team lead's plan|The team lead's opinion)\b/;
+const RUN_SECTIONS = /^(Your part|What to do in this review|The request to plan|The request|The request this task is part of|What the previous steps did|Crew reports|Changed files|The team lead's plan|The team lead's opinion|The team lead's final reviews|The team lead's last review|The team lead sent the work back|The request this run is for|Open messages from your crew|The team lead's answers)\b/;
 
 /** A prompt by its "## " sections, without the header (the run's title, date and branch) and the run's own sections. */
 function promptSections(prompt) {

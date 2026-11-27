@@ -1490,7 +1490,7 @@ async function main() {
         console.log(`${m.title} [${m.run}], project ${m.project}`);
         console.log(m.kind === 'pr' ? `Pull request: ${m.url}` : `Branch ${m.branch} into ${m.base}, in ${m.dir} (nothing is sent to GitHub)`);
         console.log(m.failedChecks ? `${m.failedChecks} check(s) failed.` : 'The checks passed.');
-        console.log(m.verdict ? `Review's verdict:\n${m.verdict}` : 'No review verdict was found.');
+        console.log(m.verdict ? `${m.verdictBy === 'lead' ? "The team lead's verdict (delegated review)" : "Review's verdict"}:\n${m.verdict}` : 'No review verdict was found.');
         console.log("Nothing was merged. Add --yes only with the owner's explicit yes for this run.");
         return;
       }

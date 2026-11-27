@@ -2279,5 +2279,19 @@
   "The emergency lockdown is on: only the owner may restart the computer now.": "O modo emergência está ativo: agora só o dono pode reiniciar o computador.",
   "Pausing at a safe point: the computer is restarting, and the agent carries on by itself once Chiefmate is back.": "Pausando num ponto seguro: o computador vai reiniciar, e o agente continua sozinho quando o Chiefmate voltar.",
   "Restarting": "Reiniciando",
-  "Restarting…": "Reiniciando…"
+  "Restarting…": "Reiniciando…",
+  "No verdict from the team lead was found.": "O parecer do chefe de equipe não foi encontrado.",
+  "Reviewed by the team lead {lead} (delegated review, level 1), not by the manager.": "Revisado pelo chefe de equipe {lead} (revisão delegada, nível 1), não pelo gerente.",
+  "Team lead's verdict": "Parecer do chefe de equipe",
+  "the team lead asked for it": "o chefe pediu",
+  "{count} rounds of fixes were not enough": "{count} voltas de correção não bastaram",
+  "the run is no longer level 1": "a execução deixou de ser nível 1",
+  "{lead} approved the work in its final review (round {round}): the project's checks run before it comes to you": "{lead} aprovou o trabalho na revisão final (rodada {round}): as verificações do projeto rodam antes de chegar a você",
+  "{lead} sent the work back to the crew (round {round}): {list}": "{lead} devolveu o trabalho à equipe (rodada {round}): {list}",
+  "{lead} handed the final review to the manager: {why}": "{lead} passou a revisão final ao gerente: {why}",
+  "Reviewed by {lead}: the manager gets only its verdict, to decide the merge": "Revisado por {lead}: o gerente recebe só o parecer, para decidir o merge",
+  "The manager reviews the work after all: {why}": "O gerente revisa o trabalho mesmo assim: {why}",
+  "the project's checks failed": "as verificações do projeto falharam",
+  "the team lead's review failed": "a revisão do chefe falhou",
+  "the team lead's review gave no clear decision": "a revisão do chefe não trouxe uma decisão clara"
 }
