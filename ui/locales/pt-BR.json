@@ -2213,6 +2213,7 @@
   "{owner} placed \"{title}\" where it is: no run moves past it without them.": "Quem pôs \"{title}\" onde está foi {owner}: nenhuma execução passa à frente dela sem o dono.",
   "{owner} held this run: only they release it.": "Quem segurou esta execução foi {owner}: só o dono a solta.",
   "This run resumes first: it keeps its project's working copy, so holding it would stop the whole project. Cancel it instead, or pause the project in Focus.": "Esta execução retoma primeiro: ela guarda a cópia de trabalho do projeto, então segurá-la pararia o projeto inteiro. Cancele-a, ou pause o projeto no Foco.",
+  "This is the run to do now: end its \"Do now\" first (Release the others), then hold it.": "Esta é a execução de \"Fazer agora\": encerre o \"Fazer agora\" antes (Soltar as outras) e depois segure-a.",
   "\"Do now\" is only for {owner}.": "\"Fazer agora\" é só de {owner}.",
   "Choose which runs wait: those of its project, or all the others.": "Escolha quais execuções esperam: as do projeto dela, ou todas as outras.",
   "{owner} chose \"Do now\": only they end it.": "Quem escolheu \"Fazer agora\" foi {owner}: só o dono o encerra.",

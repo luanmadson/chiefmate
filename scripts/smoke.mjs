@@ -254,6 +254,8 @@ try {
       const hold = id => mine(s).find(r => r.id === id)?.hold;
       expect(ids(s) === 'q4,q3,q2,q1' && s.queueControl?.doNow?.run === 'smoke-q4' && mine(s)[0].doNow && hold('smoke-q3')?.doNow?.run === 'smoke-q4' && !hold('smoke-q1') && hold('smoke-q2')?.reason,
         `"Do now" for its project did not put it first and hold only its project's runs: ${ids(s)} ${JSON.stringify(mine(s).map(r => r.hold))}`);
+      // the run on "Do now" is never held: the runs it holds would wait for nothing
+      expect((await post('/api/queue', { action: 'hold', id: 'smoke-q4' })).status === 400, 'the run on "Do now" was held');
       await post('/api/queue', { action: 'do-now', id: 'smoke-q4', scope: 'all' });
       s = await now();
       expect(s.queueControl?.doNow?.scope === 'all' && hold('smoke-q1')?.doNow?.run === 'smoke-q4' && s.focus?.run !== 'smoke-q1', `"Do now" for all did not hold every other run: ${JSON.stringify(mine(s).map(r => r.hold))}`);
@@ -275,6 +277,11 @@ try {
       expect(canceled.status === 'canceled' && !s.queueControl?.doNow && !mine(s).some(r => r.hold) && ids(s) === 'q3,q2'
         && ['move', 'hold', 'do-now', 'do-now-end', 'release', 'cancel'].every(a => actions.includes(a)) && s.queueControl.changes.every(c => c.by === 'owner' && c.at),
         `the owner's "Do now" end, release or cancel did not take, or was not recorded: ${ids(s)} ${JSON.stringify(s.queueControl)}`);
+      // A hold ends with its run: canceled, it keeps no hold for a later resume.
+      await post('/api/queue', { action: 'hold', id: 'smoke-q3', reason: 'Later' });
+      await post('/api/queue', { action: 'cancel', id: 'smoke-q3' });
+      const q3 = JSON.parse(readFileSync(path.join(data, 'runs', 'smoke-q3.json'), 'utf8'));
+      expect(q3.status === 'canceled' && !q3.onHold, `a held run canceled kept its hold: ${JSON.stringify(q3.onHold)}`);
       expect(html.includes('id="do-now-dialog"') && html.includes('id="hold-dialog"') && appJs.includes('data-queue="move"') && appJs.includes("'/api/queue'"), "the app has no queue controls");
       for (const r of runs) rmSync(path.join(data, 'runs', `${r.id}.json`), { force: true });
     }

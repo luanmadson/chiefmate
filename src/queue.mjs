@@ -178,12 +178,14 @@ export function moveInQueue(id, where = {}, by = 'manager', { record = true } = 
 /**
  * Holds a run of the queue without canceling it (hold true), with the reason given, or lets it go again (false). The
  * manager never releases (nor holds again) a run the owner held. A run that keeps its project's working copy is never
- * held: its whole project would stop behind it. Returns the run.
+ * held: its whole project would stop behind it; nor the run of the "Do now" in force: the runs it holds would wait for
+ * nothing. Returns the run.
  */
 export function holdRun(id, hold = true, by = 'manager', reason = null) {
   const run = inQueue(id);
   if (by !== 'owner' && run.onHold?.by === 'owner') throw new Error(t('{owner} held this run: only they release it.', { owner: ownerName() }));
   if (hold && holdsCopy(run)) throw new Error(t("This run resumes first: it keeps its project's working copy, so holding it would stop the whole project. Cancel it instead, or pause the project in Focus."));
+  if (hold && activeDoNow()?.run === run.id) throw new Error(t('This is the run to do now: end its "Do now" first (Release the others), then hold it.'));
   if (!hold && !run.onHold) return run;
   const why = clip(reason, REASON_MAX) || null;
   if (hold) run.onHold = { at: now(), by, reason: why };
@@ -416,6 +418,8 @@ export function cancel(id) {
   if (!run) throw new Error(t('Run not found.'));
   if (cancelLive(id, t('canceled by you'))) return 'canceling';
   if (['queued', 'waiting', 'paused'].includes(run.status)) {
+    // a hold ends with the run: resumed later, it waits for its turn again
+    delete run.onHold;
     Object.assign(run, { status: 'canceled', ended: now(), note: t('canceled before it finished') });
     saveRun(run);
     return 'canceled';

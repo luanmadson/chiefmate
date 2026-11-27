@@ -2043,7 +2043,7 @@ function queueControls(r, { prev = null, next = null, list = queueOrder(), key =
   const items = [
     top ? item('move', t('Move to the top'), 'data-where="top"') : '',
     r.doNow ? item('do-now-end', t('Release the others')) : item('do-now', t('Do now…')),
-    held ? item('release', t('Release it')) : r.keepsCopy ? '' : item('hold', r.hold ? t('Hold until you release it…') : t('Hold…')),
+    held ? item('release', t('Release it')) : r.keepsCopy || r.doNow ? '' : item('hold', r.hold ? t('Hold until you release it…') : t('Hold…')),
     item('cancel', t('Cancel…')),
   ].join('');
   return `${move('up', prev)}${move('down', next)}${held ? `<button type="button" class="button secondary small" data-queue="release" data-id="${id}">${esc(t('Release it'))}</button>` : ''}<details class="menu queue-menu" data-keep-open="queue-menu-${key}-${id}"><summary class="button secondary small" aria-label="${esc(t('Actions for “{title}”', { title: r.title }))}">${esc(t('Actions'))}</summary><div class="menu-list">${items}</div></details>`;
@@ -2105,7 +2105,10 @@ function drawQueue() {
     busy.add(r.project);
     return room-- > 0 ? t('in a moment') : t('when a run ends');
   };
-  const next = list.find(r => !steerHold(r.project) && !r.hold);
+  // the run the server starts next (focus in src/queue.mjs): the first free one ready now, else the one that waits the least
+  const startable = list.filter(r => !steerHold(r.project) && !r.hold);
+  const soon = r => !r.notBefore || new Date(r.notBefore).getTime() <= Date.now() + skew;
+  const next = startable.find(soon) ?? [...startable].sort((x, y) => x.notBefore.localeCompare(y.notBefore))[0];
   const rows = list.map((r, i) => `<tr class="${r === next ? 'next' : ''}" data-queue-row="${esc(r.id)}"${r.hold ? ` data-held="${r.hold.doNow ? 'do-now' : r.hold.by}"` : ''}${r.first ? ' data-pinned' : ''}>
       <td class="num queue-place"${r.first ? '' : ` draggable="true" title="${esc(t('Drag to change the order'))}"`}><span class="queue-grip" aria-hidden="true"></span>${i + 1}</td>
       <td>${r === next ? `<span class="tag">${esc(t('Next'))}</span>` : ''}${lateTag(r)}${queueTags(r)}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span>${r.hold ? `<span class="queue-why">${esc(holdWhy(r.hold))}</span>` : ''}</td>
