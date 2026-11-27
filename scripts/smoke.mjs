@@ -286,6 +286,20 @@ try {
       expect(q3.status === 'canceled' && !q3.onHold, `a held run canceled kept its hold: ${JSON.stringify(q3.onHold)}`);
       expect(html.includes('id="do-now-dialog"') && html.includes('id="hold-dialog"') && appJs.includes('data-queue="move"') && appJs.includes("'/api/queue'"), "the app has no queue controls");
       for (const r of runs) rmSync(path.join(data, 'runs', `${r.id}.json`), { force: true });
+      // "Do now" on the run shown first keeps it first, though only the fair turn put it there: once its project ran
+      // last, the turn alone would give the other project's run the next place.
+      const later = [made('smoke-q5', 'smoke-c', 8), made('smoke-q6', 'smoke-d', 6)];
+      for (const r of later) writeFileSync(path.join(data, 'runs', `${r.id}.json`), JSON.stringify(r));
+      const pair = s => s.queue.filter(r => r.id === 'smoke-q5' || r.id === 'smoke-q6').map(r => r.id).join(',');
+      s = await now();
+      expect(s.queue[0]?.id === 'smoke-q5' && pair(s) === 'smoke-q5,smoke-q6', `the runs for "Do now" are not in the order the turns go: ${s.queue.map(r => r.id).join(',')}`);
+      await post('/api/queue', { action: 'do-now', id: 'smoke-q5', scope: 'project' });
+      const ended = new Date().toISOString();
+      writeFileSync(path.join(data, 'runs', 'smoke-q7.json'), JSON.stringify({ ...made('smoke-q7', 'smoke-c', 7), status: 'done', started: ended, ended }));
+      s = await now();
+      expect(pair(s) === 'smoke-q5,smoke-q6' && s.queue[0]?.id === 'smoke-q5', `"Do now" on the run shown first did not keep it first: ${s.queue.map(r => r.id).join(',')}`);
+      await post('/api/queue', { action: 'do-now-end' });
+      for (const id of ['smoke-q5', 'smoke-q6', 'smoke-q7']) rmSync(path.join(data, 'runs', `${id}.json`), { force: true });
     }
     expect((await post('/api/stop-project', { project: 'none' })).status === 400, 'stopping a project without a confirmed list was not refused');
     expect((await post('/api/reset-grants', { action: 'used', index: 9999 })).status === 400, 'marking a free reset that does not exist was not refused');

@@ -170,7 +170,8 @@ export function moveInQueue(id, where = {}, by = 'manager', { record = true } = 
   const from = all.findIndex(r => r.id === run.id);
   const order = all.filter(r => r.id !== run.id);
   const at = placeFor(run, from, order, where, by, ownerName());
-  if (at === from) return all;
+  // where it is already: nothing to change once that place is kept (shown there by the fair turn alone, it may lose it)
+  if (at === from && (placed(run) || goesFirst(run))) return all;
   order.splice(at, 0, run);
   order.forEach((r, i) => {
     if (r === run) Object.assign(r, { movedBy: by, movedAt: now() });
