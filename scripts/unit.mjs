@@ -28,6 +28,9 @@ import { syntaxProblem } from './check.mjs';
 import { SAMPLE_CSV, sampleXlsx, zip } from './fixtures.mjs';
 import { compose, Dictation, nextState, recognizer, transcript } from '../ui/voice.js';
 import './away-ui.test.mjs';
+import { AFAR_VERSION, offered, ONLY_ON_PC } from '../ui/afar.js';
+import { devLog, startDev } from '../src/projects.mjs';
+import { fromAfar } from '../src/server.mjs';
 
 const windows = process.platform === 'win32';
 const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-unit-'));
@@ -974,4 +977,35 @@ test('npm run check says why a script was not checked, with no pipe a sandbox co
   const stdio = o => typeof o?.stdio === 'string' ? [o.stdio, o.stdio, o.stdio] : [0, 1, 2].map(i => o?.stdio?.[i]);
   assert.ok(calls.length === 3 && calls.every(o => stdio(o).every(s => s != null && s !== 'pipe' && s !== 'overlapped')), 'node --check got a pipe');
   assert.equal(syntaxProblem(path.join('scripts', 'fixtures.mjs')), null, 'a real script failed the check');
+});
+
+// ---------- From another device (the remote access) ----------
+
+test('from afar, what opens on the computer is refused and not offered, and the rest has a version that works', () => {
+  for (const [action, { route, body }] of Object.entries(ONLY_ON_PC)) {
+    assert.equal(fromAfar(route, { project: 'demo', ...body }).refused, true, `${action} is offered from afar but the server refuses it`);
+    assert.equal(offered(action, 'pc.tailnet.ts.net'), false, `${action} is offered from afar`);
+    assert.equal(offered(action, 'localhost'), true, `${action} is not offered on the computer`);
+  }
+  for (const [action, { route, body, becomes }] of Object.entries(AFAR_VERSION)) {
+    const afar = fromAfar(route, { project: 'demo', ...body });
+    assert.ok(!afar.refused, `${action} is refused from afar`);
+    assert.deepEqual(afar.body, { project: 'demo', ...becomes }, `${action} does not become its version from afar`);
+    assert.equal(offered(action, 'pc.tailnet.ts.net'), true, `${action} is not offered from afar`);
+  }
+  // What doesn't open anything goes on as it is.
+  assert.deepEqual(fromAfar('/api/browser', { action: 'close', pid: 1 }), { body: { action: 'close', pid: 1 }, refused: false });
+  assert.deepEqual(fromAfar('/api/project/dev', { action: 'stop' }).body, { action: 'stop' });
+  assert.deepEqual(fromAfar('/api/task', { x: 1 }), { body: { x: 1 } });
+});
+
+test('the development environment started from afar runs in the background', async () => {
+  const dev = { projects: { demo: { name: 'Demo', local_clone: clone, dev_start: 'npm run dev' } } };
+  const plan = await startDev('demo', { dryRun: true, background: true, config: dev });
+  assert.equal(plan.background, true);
+  assert.equal(plan.window, undefined, 'a window would open');
+  assert.deepEqual(plan.run, ['dev-run', 'demo', '--background']);
+  assert.equal(plan.log, devLog('demo'));
+  assert.ok(plan.log.endsWith(path.join('projects', 'demo', 'dev.log')));
+  assert.deepEqual((await startDev('demo', { dryRun: true, config: dev })).window, ['dev-run', 'demo'], 'on the computer, it no longer opens in a window');
 });
