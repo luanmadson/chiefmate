@@ -14,6 +14,7 @@ import { t } from './i18n.mjs';
 import { ownerKeyFile } from './lockdown.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
+import { offOnPurpose } from './power.mjs';
 import { readState } from './store.mjs';
 import { clip, DATA, ensureDir, languageName, now, readJson, ROOT, stamp, writeJson } from './util.mjs';
 
@@ -132,7 +133,8 @@ export function findProblems({ health, state, memory, orphans = [], seen = {}, l
   const problems = [];
   const add = (id, level, text, say) => problems.push({ id, level, text, say });
   const lasting = id => age(seen[id], at) >= PERSIST_MS;
-  // Stopped by the owner (the power modes, src/power.mjs): off on purpose, and left off.
+  // Stopped by the owner (the power modes, src/power.mjs): off on purpose, and left off. A restart from Chiefmate is not,
+  // once the computer is back: Chiefmate is meant to start again.
   if (!health && off) {
     // nothing to do: it starts again when the owner opens it
   } else if (!health) {
@@ -195,7 +197,8 @@ export async function look(config = loadConfig(), watch = readWatch(), { quick =
     // the process list is a help, not a must
   }
   const memory = { free: os.freemem(), total: os.totalmem() };
-  const off = !health && readState().power?.mode === 'off';
+  // stopped or shut down by the owner; not a restart once the computer is back (src/power.mjs)
+  const off = !health && offOnPurpose(readState().power);
   const problems = findProblems({ health, state, memory, orphans, seen: watch.seen ?? {}, lastCheck: watch.last?.at ?? null, off });
   return { health, state, orphans, problems };
 }

@@ -17,7 +17,7 @@ const option = name => {
 };
 const has = name => rest.includes(name);
 // The words of a command that are not options nor their values ("--title <text>").
-const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--level', '--note', '--recommend', '--project', '--run', '--tool', '--from', '--description', '--for', '--until'];
+const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--level', '--note', '--recommend', '--project', '--run', '--tool', '--from', '--description', '--for', '--until', '--reason'];
 const words = () => rest.filter((x, i) => !x.startsWith('--') && !VALUED.includes(rest[i - 1]));
 /** The title and summary given with --title and --summary: nothing is generated for them. */
 const brief = () => ({ title: option('--title'), summary: option('--summary'), level: option('--level'), tool: option('--tool') });
@@ -220,8 +220,16 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 from standby. stop: pauses everything at a safe point, closes the crew's
                                                 browsers and processes and ends Chiefmate (the watchdog leaves it off;
                                                 the next start resumes the work). shutdown: the same, then Windows shuts
-                                                down after a 60-second countdown. cancel: stops a stop or shutdown going
-                                                on. Without --yes, only shows what would happen
+                                                down after a 60-second countdown. cancel: stops a stop, shutdown or
+                                                restart going on. Without --yes, only shows what would happen
+  node src/cli.mjs reboot --reason "<why>" [--yes]
+                                                restarts the computer (the manager's, or your terminal's): shows what
+                                                stops; with --yes, pauses everything at a safe point as for an update,
+                                                tells you and restarts Windows after a 2-minute countdown. Back after the
+                                                restart, the paused runs resume first and the live sessions carry on.
+                                                Refused while a live session's turn goes on; outside away mode, the
+                                                manager's waits for your yes on a card
+  node src/cli.mjs reboot history               the restarts asked for: who, why and how each went
   node src/cli.mjs focus [status]               the owner's focus: which projects may start new work
   node src/cli.mjs focus <project...> | off | pause-all [--for 2h | --until 08:00] [--pause-running]
                                                 focus: only these projects start new work (the others' runs and
@@ -736,11 +744,12 @@ async function sessionCommand() {
 function powerLine(p) {
   if (p.mode === 'standby') return `Standby since ${formatDateTime(p.since)}: nothing new starts. Back on with: node src/cli.mjs power on --yes`;
   if (p.mode !== 'stopping') return 'On.';
-  const what = p.target === 'shutdown' ? 'Shutting the computer down' : 'Stopping Chiefmate';
+  const what = p.target === 'reboot' ? `Restarting the computer (asked by ${p.by === 'manager' ? 'the manager' : 'the owner'}: ${p.reason})`
+    : p.target === 'shutdown' ? 'Shutting the computer down' : 'Stopping Chiefmate';
   const waiting = (p.waitingFor ?? []).map(w => `${w.title ?? w.run}${w.doing ? ` (${w.doing})` : ''}`);
   const stage = p.stage === 'pausing' ? `pausing the work going on at a safe point${waiting.length ? `; waiting for: ${waiting.join('; ')}` : ''}`
     : p.stage === 'manager' ? "ending the manager's answer"
-      : p.stage === 'countdown' ? `the computer shuts down at ${formatDateTime(p.countdownUntil)}`
+      : p.stage === 'countdown' ? `the computer ${p.target === 'reboot' ? 'restarts' : 'shuts down'} at ${formatDateTime(p.countdownUntil)}`
         : 'closing';
   return `${what}: ${stage}.${p.stage !== 'closing' ? ' To cancel: node src/cli.mjs power cancel' : ''}`;
 }
@@ -833,6 +842,39 @@ async function powerCommand() {
   console.log(powerLine(await api('/api/power', { action })));
 }
 
+/**
+ * "reboot": restarts the computer at a safe point (src/power.mjs), for the manager (and the owner's terminal), always
+ * with --reason. Without --yes, only what would stop. With it, outside away mode the manager's waits for the owner's
+ * confirmation on a card. Refused inside a step or a live session.
+ */
+async function rebootCommand() {
+  if (words()[0] === 'history') {
+    const { powerLog } = await import('./power.mjs');
+    const list = powerLog().slice(-20);
+    console.log(list.length ? list.map(e => `${formatDateTime(e.at)}  ${e.action} ${e.outcome}  by ${e.by}${e.reason ? `: ${e.reason}` : ''}${e.why ? ` (${e.why})` : ''}`).join('\n') : 'No restart recorded.');
+    return;
+  }
+  if (process.env.CHIEFMATE_RUN || process.env.CHIEFMATE_SESSION) throw new Error('A step or a live session never restarts the computer: ask the manager, or the owner with needs-you.');
+  const reason = String(option('--reason') ?? '').trim();
+  if (!reason) throw new Error('Use: node src/cli.mjs reboot --reason "<why the computer should restart>" [--yes]  (or: reboot history)');
+  const by = process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner';
+  if (!has('--yes')) {
+    const p = await api('/api/power', { action: 'preview' });
+    console.log(`Restart the computer (${reason}): the runs and the live sessions' turns pause at a safe point, the crew's browsers and processes close, Chiefmate ends and Windows restarts after a 2-minute countdown (cancel with: node src/cli.mjs power cancel, or in the app). Once the owner is signed in again, Chiefmate starts by itself: the paused runs resume first, the live sessions carry on in the same conversation and their windows open again.`);
+    console.log(p.runs.length ? ['Runs that pause at a safe point:', ...p.runs.map(r => `  ${r.title} [${r.run}] (${r.project})`)].join('\n') : 'No run is going on.');
+    if (p.sessions.length) console.log(['Live sessions open:', ...p.sessions.map(x => `  ${x.name} [${x.id}] (${x.mode === 'app' ? (x.phase === 'working' ? 'in the app, a turn going on' : 'in the app') : 'in a window, opens again'})`)].join('\n'));
+    if (p.unsaved.length) console.log(['Changes not committed (they stay on disk):', ...p.unsaved.map(u => `  ${u.folder}: ${u.files} file(s)`)].join('\n'));
+    const turns = p.sessions.filter(x => x.mode === 'app' && x.phase === 'working');
+    if (turns.length) console.log(`Refused now: a live session's turn is going on (${turns.map(x => x.name).join(', ')}). Try again once it ends.`);
+    else if (by === 'manager' && !p.away) console.log("The owner is not in away mode: with --yes, the owner gets a card to confirm, and the restart starts only with their yes (valid for 30 minutes).");
+    console.log('Nothing was done. Add --yes to go ahead.');
+    return;
+  }
+  const r = await api('/api/power', { action: 'reboot', by, reason });
+  if (r.asked) console.log(`Waiting for the owner's confirmation: question #${r.asked} in the app's Decisions. The restart starts only with their yes; you hear of it in the news.`);
+  else console.log(powerLine(r));
+}
+
 /** What an update going on is doing, in one line. */
 function updateLine(u) {
   const job = u.installing;
@@ -899,7 +941,7 @@ async function main() {
         const { startUpdates } = await import('./update.mjs');
         const { doingNow, live, pauseAll } = await import('./runs.mjs');
         const { nudgeQueue } = await import('./queue.mjs');
-        const { pauseSessionTurns, resumeSessions, sessionTurnsGoingOn, startSessions } = await import('./sessions.mjs');
+        const { pauseSessionTurns, reopenWindows, resumeSessions, sessionTurnsGoingOn, startSessions } = await import('./sessions.mjs');
         const { chat, deliverPending, interruptManager, managerBusy } = await import('./manager.mjs');
         const { startWatch } = await import('./plan.mjs');
         const { startAutopilot } = await import('./autopilot.mjs');
@@ -931,7 +973,9 @@ async function main() {
             const { crewUnder, processList, stopPids } = await import('./watch.mjs');
             await stopPids(crewUnder(process.pid, await processList()).map(p => p.pid));
           },
-          powerOff: () => powerOffCommand(),
+          powerOff: target => powerOffCommand({ target }),
+          // After a restart (or the computer going down without a stop): the live sessions' windows open again.
+          reopenWindows: boot => reopenWindows(boot),
           // A connection slow to close must not keep Chiefmate alive.
           finish: async () => {
             await Promise.race([close(), sleep(10_000)]);
@@ -1296,6 +1340,10 @@ async function main() {
     }
     case 'power': {
       await powerCommand();
+      return;
+    }
+    case 'reboot': {
+      await rebootCommand();
       return;
     }
     case 'focus':

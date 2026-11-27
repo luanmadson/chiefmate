@@ -280,13 +280,14 @@ export function pauseLive(id, why = 'update', { holdWhile = null } = {}) {
     : why === 'standby' ? t('Pausing at a safe point: Chiefmate is going on standby')
     : why === 'focus' ? t('Pausing at a safe point: you paused this project, or put another in focus')
     : why === 'stop' ? t('Pausing at a safe point: Chiefmate is shutting down')
+    : why === 'reboot' ? t('Pausing at a safe point: the computer is restarting')
       : t('Pausing at a safe point for an update of Chiefmate');
   logAction(l, { type: 'action', text });
   return true;
 }
 
 /**
- * Asks every run going on to pause (see pauseLive). why: "update" (the default), "standby" or "stop" (the power modes,
+ * Asks every run going on to pause (see pauseLive). why: "update" (the default), "standby", "stop" or "reboot" (the power modes,
  * src/power.mjs); "focus" pauses one run alone (src/steer.mjs). Returns the ids it asked.
  */
 export const pauseAll = (why = 'update') => [...live.keys()].filter(id => pauseLive(id, why));
@@ -316,6 +317,7 @@ function pausedNote(why) {
   if (why === 'standby') return t('Paused at a safe point for standby. It resumes by itself when Chiefmate is turned back on.');
   if (why === 'focus') return t('Paused at a safe point by your focus. It resumes by itself when its project is free again.');
   if (why === 'stop') return t('Paused at a safe point because Chiefmate was shut down. It resumes by itself at the next start.');
+  if (why === 'reboot') return t('Paused at a safe point because the computer is restarting. It resumes by itself, first in the queue, once Chiefmate is back.');
   return t('Paused for an update of Chiefmate. It resumes by itself as soon as the update is over.');
 }
 
@@ -343,6 +345,7 @@ export function updatedTurn(messages, config = loadConfig(), why = 'update', git
     why === 'update' ? 'Chiefmate was updated while you were working: your work was paused at a safe point so the new version could be installed, and this session now resumes.'
       : why === 'owner' ? `${config.owner || 'The owner'} paused your work at a safe point to work on this project themselves, and this session now resumes. They may have changed the project meanwhile: check what changed on the main branch before you go on.`
       : why === 'focus' ? 'Your project was paused by its owner (or another project was put in focus) while you were working: your work was paused at a safe point, and this session now resumes.'
+      : why === 'reboot' ? 'The computer was restarted while you were working: your work was paused at a safe point first, and this session now resumes. Programs started from this step (a development server, a watcher) did not survive the restart: start them again if you need them.'
       : `Chiefmate was ${why === 'standby' ? 'put on standby' : 'shut down'} by its owner while you were working: your work was paused at a safe point, and this session now resumes.`,
     gitRecovery || 'Continue from where you left off. The branch, the files and this session are as you left them. A command that was still running when you were paused may have been cut off: check its result before you go on.',
     "When you finish, your last message is still the step's full report.",

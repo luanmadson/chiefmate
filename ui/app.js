@@ -888,8 +888,8 @@ function powerLook() {
   if (p.mode === 'stopping') {
     const cancel = p.stage === 'closing' ? '' : `<button type="button" class="button danger small" data-power="cancel">${esc(t('Cancel'))}</button>`;
     const label = p.stage === 'countdown'
-      ? `${t('Shutting down')} · <span class="num" data-until="${esc(p.countdownUntil)}"></span> s`
-      : esc(p.target === 'shutdown' ? t('Shutting down…') : t('Stopping…'));
+      ? `${p.target === 'reboot' ? t('Restarting') : t('Shutting down')} · <span class="num" data-until="${esc(p.countdownUntil)}"></span> s`
+      : esc(p.target === 'reboot' ? t('Restarting…') : p.target === 'shutdown' ? t('Shutting down…') : t('Stopping…'));
     return [label, 'error', cancel, true];
   }
   return [t('On'), 'ok', ''];
