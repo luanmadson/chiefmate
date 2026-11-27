@@ -546,9 +546,13 @@ function pushParts(command, cwd) {
   const [remote, refspec] = args;
   const parts = refspec.split(':');
   const src = parts[0];
-  const branch = (parts[1] ?? parts[0]).replace(/^refs\/heads\//, '');
+  const dir = path.resolve(cwd, ...dirs);
+  // The branch it lands on, by its own name, so neither form hides the main branch: "heads/<name>" is that branch, and
+  // HEAD alone the one checked out (none when detached).
+  const named = (parts[1] ?? parts[0]).replace(/^(refs\/)?heads\//i, '');
+  const branch = /^head$/i.test(named) ? git(dir, 'symbolic-ref', '--short', '--quiet', 'HEAD') : named;
   if (parts.length > 2 || !src || !/^\w[\w./-]*$/.test(branch) || branch.includes('..') || branch.startsWith('refs/')) return shape;
-  return { dir: path.resolve(cwd, ...dirs), remote, src, branch, bare: rest.length === 2 && refspec === branch };
+  return { dir, remote, src, branch, bare: rest.length === 2 && refspec === branch };
 }
 
 const git = (dir, ...args) => {
@@ -566,9 +570,9 @@ const LISTED = 20;
 
 /**
  * What the push would send: { repo, main (the main branch: main, master or the remote's default), commits (up to 20,
- * "hash subject"), count, files (up to 20) and fileCount, migrations (up to 20) and migrationCount }. The commits are
- * those of the source not yet on the remote; the files, what they change against the remote's branch (for a branch
- * not there yet, what they touch).
+ * "hash subject"), count, files (up to 20) and fileCount, migrations (up to 20) and migrationCount, tip (the commit the
+ * source is at) }. The commits are those of the source not yet on the remote; the files, what they change against the
+ * remote's branch (for a branch not there yet, what they touch).
  */
 export function pushFacts({ dir, remote, src, branch }) {
   const url = /[:/]/.test(remote) ? remote : git(dir, 'remote', 'get-url', '--push', remote);
@@ -584,6 +588,7 @@ export function pushFacts({ dir, remote, src, branch }) {
   return {
     repo: repoOf(url), main: MAIN_BRANCHES.has(branch.toLowerCase()) || (!!head && head === branch), commits, count,
     files: files.slice(0, LISTED), fileCount: files.length, migrations: migrations.slice(0, LISTED), migrationCount: migrations.length,
+    tip: git(dir, 'rev-parse', '--verify', '--quiet', `${src}^{commit}`),
   };
 }
 
@@ -651,14 +656,16 @@ export const samePath = (a, b) => {
 /**
  * The grant that lets this push go now: allowed, not expired nor used, given to the same asker (the manager, or the id
  * of a "Work now" session) for the same repository, branch, folder and source. main: whether the push is one of the
- * main branch the owner may allow (mainPushTarget): such a push takes only a grant given for the main branch, and such
- * a grant serves nothing else; any other push of the main branch never goes.
+ * main branch the owner may allow (mainPushTarget): such a push takes only a grant given for the main branch, and only
+ * with the commits its card showed (the source still at the same commit); such a grant serves nothing else, and any
+ * other push of the main branch never goes.
  */
 export function grantFor(list, target, facts, asker = 'manager', main = false) {
   if (!target?.branch || !facts?.repo) return null;
   if ((!!facts.main || MAIN_BRANCHES.has(target.branch.toLowerCase())) !== main) return null;
   return list.find(g => g.status === 'allowed' && Date.parse(g.expires) > Date.now() && !!g.main === main && (g.session ?? 'manager') === asker
-    && g.repo === facts.repo && g.branch === target.branch && g.src === target.src && samePath(g.dir, target.dir)) ?? null;
+    && g.repo === facts.repo && g.branch === target.branch && g.src === target.src && samePath(g.dir, target.dir)
+    && (!main || (!!g.tip && g.tip === facts.tip))) ?? null;
 }
 
 /** Takes the grant for this push, if there is one, and uses it up at once, written down (logPush). Returns it, or null. */
@@ -683,7 +690,7 @@ export function logPush(grants, event, p) {
   try {
     const entry = {
       at: new Date().toISOString(), event, id: p.id, by: p.session ? `session ${p.session}` : 'manager', project: p.project ?? null,
-      repo: p.repo, branch: p.branch, main: !!p.main, dir: p.dir, remote: p.remote, src: p.src,
+      repo: p.repo, branch: p.branch, main: !!p.main, dir: p.dir, remote: p.remote, src: p.src, tip: p.tip || null,
       commits: p.count ?? 0, files: p.fileCount ?? null, migrations: p.migrationCount ?? null, expires: p.expires ?? null,
     };
     appendFileSync(pushLogFile(grants), `${JSON.stringify(entry)}\n`);
@@ -755,16 +762,14 @@ async function hook(argv) {
     if (takeGrant(grants, main, main.facts, asker, true)) return;
     if (log) appendFileSync(log, `${JSON.stringify({ tool_name: 'Bash', tool_use_id: call.tool_use_id, tool_input: { command }, cwd, card: 'main' })}\n`);
     if (who !== 'session') recordSignal('publish_refused', found.map(f => f.part).join('; '), { who });
-    return deny(`Refused by Chiefmate for now: the main branch (${main.branch}) of this project goes to GitHub only once the owner allows this push on its card. The owner now gets the card in the app, with what goes (commits, files, migrations); you are told when they allow it, and may then run the same command again, once, within ${GRANT_MINUTES} minutes. Only "git push <remote> ${main.branch}" goes that way (alone, or after "cd <folder> &&" or with "-C <folder>", with "2>&1" at most), with no option; never a forced push or a deleted branch. Say what goes and why, and stop.`);
+    return deny(`Refused by Chiefmate for now: the main branch (${main.branch}) of this project goes to GitHub only once the owner allows this push on its card. The owner now gets the card in the app, with what goes (commits, files, migrations); you are told when they allow it, and may then run the same command again, once, within ${GRANT_MINUTES} minutes, with nothing committed meanwhile (the card allows exactly the commits it shows). Only "git push <remote> ${main.branch}" goes that way (alone, or after "cd <folder> &&" or with "-C <folder>", with "2>&1" at most), with no option; never a forced push or a deleted branch. Say what goes and why, and stop.`);
   }
   // A "Work now" session (src/worknow.mjs): only a plain push of one branch other than the main one may ever go, once
   // the owner allows pushing; any other push is refused at once, so it never becomes a permission request. HEAD is
-  // the branch checked out, and "heads/<name>" that branch.
+  // the branch checked out, and "heads/<name>" that branch (pushParts).
   if (argv.includes('--no-main') && found.some(f => f.rule === PUSH)) {
     const target = plainPush(command, cwd);
-    const named = /^head$/i.test(target.branch ?? '') ? git(target.dir, 'symbolic-ref', '--short', 'HEAD') : target.branch;
-    const branch = named?.replace(/^(refs\/)?heads\//i, '');
-    if (!branch || pushFacts({ ...target, branch }).main) {
+    if (!target.branch || pushFacts(target).main) {
       return deny(`Refused by Chiefmate, always: nothing goes straight to the main branch (main, master or the default one), and no push is forced. Only "git push [-u] <remote> <branch>" of a branch of the work goes (alone, or after "cd <folder> &&", with "2>&1" at most), once the owner allowed pushing.${onlyCard} Say what you wanted to send and why, and stop.`);
     }
   }

@@ -1269,7 +1269,7 @@ async function main() {
         throw new Error(`The main branch of the project in ${dir} no longer goes to GitHub through the owner's card ("main_push": "card" is off): nothing was sent.`);
       }
       if (!target || !grantFor([asked], target, facts, 'manager', !!asked.main) || !takeGrant(pushesFile(), target, facts, 'manager', !!asked.main)) {
-        throw new Error(`The owner has not allowed a push of ${branch} from ${dir} now (or it expired, or was used). Try the push itself (git -C <folder> push <remote> <branch>): the owner gets a card to allow it once.`);
+        throw new Error(`The owner has not allowed a push of ${branch} from ${dir} now (or it expired, or was used${asked?.main ? ', or the branch has commits its card did not show' : ''}). Try the push itself (git -C <folder> push <remote> <branch>): the owner gets a card to allow it once.`);
       }
       const { spawnSync } = await import('node:child_process');
       const r = spawnSync('git', ['-C', target.dir, 'push', target.remote, `${target.src}:refs/heads/${target.branch}`], { stdio: 'inherit', windowsHide: true });

@@ -1185,6 +1185,16 @@ test("A push's folder is the command's own (a cd before it, git -C), so its card
   assert.deepEqual(plainPush(`cd "${temp}" && git push --set-upstream origin feature >/dev/null 2>&1`, os.tmpdir()), target);
   assert.equal(plainPush('git push -u origin main 2>&1', temp).refused, 'main');
   assert.equal(plainPush('git push --force-with-lease origin feature 2>&1', temp).refused, 'forced');
+  // HEAD and "heads/<name>" are the branch they name, so neither hides the main branch.
+  const checkedOut = path.join(temp, 'push-head');
+  mkdirSync(checkedOut, { recursive: true });
+  gitIn(checkedOut, 'init', '-q', '-b', 'main');
+  gitIn(checkedOut, 'commit', '-q', '--allow-empty', '-m', 'base');
+  for (const ref of ['HEAD', 'head', 'heads/main', 'refs/heads/main', 'HEAD:heads/main']) assert.equal(plainPush(`git push origin ${ref}`, checkedOut).refused, 'main', ref);
+  gitIn(checkedOut, 'checkout', '-q', '-b', 'feature');
+  assert.equal(plainPush('git push origin HEAD', checkedOut).branch, 'feature');
+  gitIn(checkedOut, 'checkout', '-q', '--detach');
+  assert.equal(plainPush('git push origin HEAD', checkedOut).refused, 'shape');
 });
 
 test('The main branch goes through a card only in a project that says so ("main_push": "card"), and its places reach the hook safely', () => {

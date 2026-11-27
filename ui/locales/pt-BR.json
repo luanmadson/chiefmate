@@ -1455,7 +1455,7 @@
   "Main branch of {project}, asked by {who}": "Branch principal de {project}, pedido por {who}",
   "Send the main branch ({branch}) to GitHub: {count} commit(s), {files} file(s), {migrations} migration(s)": "Enviar o branch principal ({branch}) ao GitHub: {count} commit(s), {files} arquivo(s), {migrations} migração(ões)",
   "From {folder} straight into the main branch {branch} of {repo}, with no pull request.": "De {folder} direto para o branch principal {branch} de {repo}, sem pull request.",
-  "Only this push is allowed: the main branch of this repository, from this folder, once, within {minutes} minutes; {who} then sends it. Never a forced push, never a deleted branch.": "Só este envio é liberado: o branch principal deste repositório, desta pasta, uma vez, em até {minutes} minutos; depois, {who} envia. Nunca um envio forçado, nunca um branch apagado.",
+  "Only this push is allowed: the main branch of this repository, from this folder, with exactly the commits listed, once, within {minutes} minutes; {who} then sends it. A new commit needs a new card. Never a forced push, never a deleted branch.": "Só este envio é liberado: o branch principal deste repositório, desta pasta, com exatamente os commits listados, uma vez, em até {minutes} minutos; depois, {who} envia. Um commit novo pede um novo cartão. Nunca um envio forçado, nunca um branch apagado.",
   "Whoever uses the main branch gets these commits at once, and undoing them takes a new commit.": "Quem usa o branch principal recebe estes commits na hora, e desfazê-los exige um novo commit.",
   "It carries {count} migration(s): the database changes wherever this is applied.": "Leva {count} migração(ões): o banco de dados muda onde isto for aplicado.",
   "Migrations": "Migrações",

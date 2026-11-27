@@ -155,13 +155,14 @@ export function pushRequestsFrom(log, history = null, config = loadConfig()) {
 
 /**
  * A push request for the owner: { dir, remote, src, branch, repo, commits, count, files, fileCount, migrations,
- * migrationCount, command }, and for the main branch main: true and its project; session (and sessionName): the "Work
- * now" session that asks (none: the manager). Null when the same one waits.
+ * migrationCount, tip, command }, and for the main branch main: true and its project; session (and sessionName): the
+ * "Work now" session that asks (none: the manager). Null when the same one waits.
  */
-export function addPushRequest({ dir, remote, src, branch, repo, commits = [], count = 0, files = [], fileCount = 0, migrations = [], migrationCount = 0, command = '', main = false, project = null, session = null, sessionName = null }) {
+export function addPushRequest({ dir, remote, src, branch, repo, commits = [], count = 0, files = [], fileCount = 0, migrations = [], migrationCount = 0, tip = '', command = '', main = false, project = null, session = null, sessionName = null }) {
   const list = readPushes(pushesFile());
   const same = p => p.repo === repo && p.branch === branch && p.src === src && samePath(p.dir, dir) && (p.session ?? null) === (session ?? null);
-  const what = { commits: commits.slice(0, 20), count, files: files.slice(0, 20), fileCount, migrations: migrations.slice(0, 20), migrationCount, command: clip(command, 500) };
+  // The commit the source is at goes with what the card shows: a grant of the main branch serves only that one (src/guard.mjs, grantFor).
+  const what = { commits: commits.slice(0, 20), count, files: files.slice(0, 20), fileCount, migrations: migrations.slice(0, 20), migrationCount, tip, command: clip(command, 500) };
   const open = openPushes(list).find(same);
   if (open) {
     // Tried again: what it would send now.
@@ -443,7 +444,7 @@ function mainPushCard(notice, p, config) {
     label: t('Main branch of {project}, asked by {who}', { project: projectName(config, p.project) || p.repo, who }),
     title: t('Send the main branch ({branch}) to GitHub: {count} commit(s), {files} file(s), {migrations} migration(s)', { branch: p.branch, count: p.count ?? 0, files: p.fileCount ?? 0, migrations: p.migrationCount ?? 0 }),
     what: t('From {folder} straight into the main branch {branch} of {repo}, with no pull request.', { folder: p.dir, branch: p.branch, repo: p.repo }),
-    change: t('Only this push is allowed: the main branch of this repository, from this folder, once, within {minutes} minutes; {who} then sends it. Never a forced push, never a deleted branch.', { minutes: GRANT_MINUTES, who }),
+    change: t('Only this push is allowed: the main branch of this repository, from this folder, with exactly the commits listed, once, within {minutes} minutes; {who} then sends it. A new commit needs a new card. Never a forced push, never a deleted branch.', { minutes: GRANT_MINUTES, who }),
     risk: [
       t('Whoever uses the main branch gets these commits at once, and undoing them takes a new commit.'),
       p.migrationCount ? t('It carries {count} migration(s): the database changes wherever this is applied.', { count: p.migrationCount }) : '',

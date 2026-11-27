@@ -2608,6 +2608,12 @@ try {
   expect((await decide({ card: mainCard.id, action: 'approve' }, mainCards)).done === 'allowed', 'the owner could not allow the push of the main branch from its card');
   expect(!passes(mainHook, 'git push --force origin trunk') && !passes(mainHook, 'git push -u origin trunk') && !passes(mainHook, 'git push origin :trunk') && !passes(noCardHook, 'git push origin trunk'),
     'an allowed push of the main branch let a forced push, an option, a deletion or a project without the setting through');
+  // The grant serves only the commits its card showed: one made after it needs a new card.
+  writeFileSync(path.join(repo, 'later.txt'), 'later');
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-q', '-m', 'Later');
+  expect(!passes(mainHook, 'git push origin trunk'), 'the main branch went with a commit its card did not show');
+  git(repo, 'reset', '-q', '--hard', 'HEAD~1');
   expect(passes(mainHook, `cd ${JSON.stringify(repo)} && git push origin trunk 2>&1`, pushDir) && !passes(mainHook, 'git push origin trunk'), 'the allowed push of the main branch did not go once');
   const written = readFileSync(pushLogFile(pushesFile()), 'utf8');
   expect(/"event":"allowed"[^\n]*"main":true/.test(written) && /"event":"used"[^\n]*"main":true/.test(written), `the push of the main branch was not written down: ${written}`);
