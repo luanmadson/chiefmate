@@ -16,7 +16,7 @@ import { loginText } from '../src/plan.mjs';
 import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, opening, openOnComputer, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
-import { guardHooks, plainPush, publishing, riskyCommand } from '../src/guard.mjs';
+import { guardHooks, mainPushTarget, mainPushTargets, plainPush, publishing, riskyCommand } from '../src/guard.mjs';
 import { checkSignals, engage, isLocked, ownerKeyFile, protectedFolders, readLockdown, recordSignal, refuseWhileLocked, release, RULES, weigh, WINDOW_MINUTES } from '../src/lockdown.mjs';
 import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
@@ -1185,6 +1185,25 @@ test("A push's folder is the command's own (a cd before it, git -C), so its card
   assert.deepEqual(plainPush(`cd "${temp}" && git push --set-upstream origin feature >/dev/null 2>&1`, os.tmpdir()), target);
   assert.equal(plainPush('git push -u origin main 2>&1', temp).refused, 'main');
   assert.equal(plainPush('git push --force-with-lease origin feature 2>&1', temp).refused, 'forced');
+});
+
+test('The main branch goes through a card only in a project that says so ("main_push": "card"), and its places reach the hook safely', () => {
+  const clone = path.join(temp, 'atlas');
+  const config = { projects: {
+    atlas: { main_push: 'card', repository: clone, local_clone: clone },
+    site: { main_push: 'card', repository: 'https://github.com/Example-Org/Site.git' },
+    other: { repository: 'example-org/other', local_clone: path.join(temp, 'other') },
+    off: { main_push: 'off', local_clone: path.join(temp, 'off') },
+  } };
+  // The clone that is also the repository counts once; projects without the setting (or another value) not at all.
+  assert.deepEqual(mainPushTargets(config), [{ project: 'atlas', dir: clone }, { project: 'site', repo: 'example-org/site' }]);
+  assert.deepEqual(mainPushTargets({ projects: {} }), []);
+  // The hook gets them only with the grants (the manager, a "Work now" session), and never a value a shell would read.
+  const hook = guardHooks({ log: 'g', grants: 'p.json', who: 'session', session: 'w1', mainCard: [{ dir: 'C:\\x\\atlas' }, { repo: 'a/b' }, { dir: 'C:\\x\\100%"&calc' }, { repo: '$(x)' }] }).PreToolUse[0].hooks[0].command;
+  assert.ok(hook.includes('--main-dir "C:/x/atlas"') && hook.includes('--main-repo "a/b"') && hook.includes('--session "w1"') && !hook.includes('calc') && !hook.includes('$('), hook);
+  assert.ok(!guardHooks({ log: 'g', mainCard: [{ dir: clone }] }).PreToolUse[0].hooks[0].command.includes('--main-dir'));
+  // Outside a repository there is no main branch to send: nothing becomes a card.
+  assert.equal(mainPushTarget('git push origin main', temp, mainPushTargets(config)), null);
 });
 
 test("gh's gists, releases, workflows and secrets publish, each under its own rule; what only looks does not", () => {
