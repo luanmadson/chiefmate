@@ -6,7 +6,8 @@
 // ~~~manager-request block; Chiefmate records the request (data/manager/owner-requests.json), shows it on the
 // project's page and tells the manager ("owner_request" news). The manager answers with "cli.mjs request <id>
 // approve|hold|ask-owner|forward|in-progress|reject" (answerRequest). Each answer goes back to the conversation, and
-// the agent reads its requests' state in every turn's input.
+// each turn's input tells the agent what changed since the turn before (turnChanges).
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { denyRules, stepAccess } from './access.mjs';
@@ -291,7 +292,7 @@ export function openMatters(config, projectId, { runs = listRuns(), items = plan
  * The open matters, in text for the instructions of the agent in charge and the first message of "Work now"
  * (src/worknow.mjs), capped at MATTERS_MAX characters. when: what the heading says of their date.
  */
-export function mattersText(m, owner = 'the owner', { when = 'current at every message' } = {}) {
+export function mattersText(m, owner = 'the owner', { when = 'now' } = {}) {
   const none = 'None.';
   const hours = ms => `${Math.floor(ms / 3600_000)} h`;
   const sections = [
@@ -323,8 +324,8 @@ export function chargeFolder(projectId, clone) {
 }
 
 /**
- * What one turn of the conversation gets: { system, model, tools, disallowed, addDirs }. The system prompt is built
- * again every turn, so the project's memory, its open matters and the requests' state are always current. cloneOf(project)
+ * What one turn of the conversation gets: { system, requests, model, tools, disallowed, addDirs }. The system prompt only
+ * counts on the conversation's first turn (a resumed one keeps it): later news comes in the turn's input (turnChanges). cloneOf(project)
  * finds the other projects' own clones, kept out of reach like their working copies; "sessions" are the live sessions' records.
  */
 export function chargeTurn(config, session, { cloneOf = () => null, sessions = [] } = {}) {
@@ -369,7 +370,7 @@ ${owner} talks to you directly from the project's page in the Chiefmate app. You
   Size: S for minutes and a few lines, M for about an hour and a few files, L for hours or many files. Risk: what could break, or reach people, if it goes wrong. "urgency": "now" only when ${owner} said it can be done right away.
 - The manager never appears in Claude Code's session list: you reach it only with these requests. When you notice an error or failure of Chiefmate itself (a request not understood, outdated information here, a notice that never came), tell ${owner} in one line, without waiting to be asked.
 - An authorized request becomes work for the crew, which ends in a pull request (or a local branch) that ${owner} approves. Nothing goes live without ${owner}.
-- Chiefmate gives you the latest state of your requests in each turn. Don't send the same one twice; when ${owner} asks how one is going, answer from the latest list.
+- The project's state below is as this conversation started. Each later message of ${owner} starts with what changed since your previous turn (your requests and the manager's answers, deliveries, runs, the board, the memory, Chiefmate's notices): it is the latest state, and replaces what you read before. Don't send the same request twice; when ${owner} asks how one is going, answer from the latest state.
 - Be short and plain: the essentials first, no jargon.`;
   const facts = [
     `## The project: ${name}`,
@@ -380,18 +381,79 @@ ${owner} talks to you directly from the project's page in the Chiefmate app. You
   const memoryText = memory
     ? `## The project's memory (kept by the team lead; read here, never changed)\n\n${memory}`
     : "## The project's memory\n\nNone yet.";
-  const matters = mattersText(openMatters(config, projectId, { sessions }), owner);
+  const matters = mattersText(openMatters(config, projectId, { sessions }), owner, { when: 'as this conversation started' });
   return [parts.map(p => p.text).join('').trim(), role, facts, memoryText, matters].filter(Boolean).join('\n\n');
+}
+
+/** One request with its latest state: the answer, the notes, and the linked run or project. */
+function requestLine(r, owner) {
+  const target = r.run ? `; run "${r.runTitle ?? r.run}" [open run](#log/${encodeURIComponent(r.run)})${r.runStatus ? ` (${r.merged ? 'merged' : r.runStatus})` : ''}`
+    : r.targetProject ? `; project ${r.targetProject} [open project](#project/${encodeURIComponent(r.targetProject)})` : '';
+  const managerNote = r.managerNote ? `; the manager: ${r.managerNote}` : '';
+  const ownerNote = r.by === 'owner' && r.note ? `; ${owner}: ${r.note}` : '';
+  return `- #${r.id}, ${formatDateTime(r.at)}: ${r.status}${managerNote}${ownerNote}${target}. ${clip(r.plan, 200)}`;
 }
 
 /** The request state goes in the turn's input so it also reaches a resumed conversation. */
 function chargeRequests(projectId, owner) {
-  const lines = projectRequests(projectId, 10).map(r => {
-    const target = r.run ? `; run "${r.runTitle ?? r.run}" [open run](#log/${encodeURIComponent(r.run)})${r.runStatus ? ` (${r.merged ? 'merged' : r.runStatus})` : ''}`
-      : r.targetProject ? `; project ${r.targetProject} [open project](#project/${encodeURIComponent(r.targetProject)})` : '';
-    const managerNote = r.managerNote ? `; the manager: ${r.managerNote}` : '';
-    const ownerNote = r.by === 'owner' && r.note ? `; ${owner}: ${r.note}` : '';
-    return `- #${r.id}, ${formatDateTime(r.at)}: ${r.status}${managerNote}${ownerNote}${target}. ${clip(r.plan, 200)}`;
-  });
+  const lines = projectRequests(projectId, 10).map(r => requestLine(r, owner));
   return `## Your requests to the manager, newest first\n\n${lines.join('\n') || 'None yet.'}`;
+}
+
+// ---------- What changed since the previous turn ----------
+// Claude Code keeps a conversation's first instructions when it resumes it (--resume ignores a new
+// --append-system-prompt-file), and Codex resumes its thread with the message alone: only the turn's own text is read
+// fresh. So each turn of a project's session (the agent in charge, "Work now") starts with what changed since the turn
+// before: the requests and their answers, the deliveries, the runs, the board, the memory and Chiefmate's notices.
+// "seen" is the state the previous turn read, kept in the session's record.
+
+const requestState = r => [r.status, r.managerNote ?? '', r.by === 'owner' ? r.note ?? '' : '', r.run ?? '', r.runStatus ?? '', r.merged ? 'merged' : '', r.targetProject ?? ''].join('|');
+const fingerprint = text => createHash('sha1').update(text ?? '').digest('hex').slice(0, 16);
+const CHANGES_MAX = 6000;
+
+/**
+ * What changed for projectId since "seen": { text (empty when nothing did), seen (the state now, for the next turn) }.
+ * notices: Chiefmate's notes in the session's history since the previous turn. resumed: the conversation goes on
+ * (without "seen", it then gets the whole current state once: a session opened before Chiefmate kept it).
+ */
+export function turnChanges(config, projectId, seen, { notices = [], resumed = true, runs = listRuns(), items = planItems(), sessions = [] } = {}) {
+  const owner = config.owner || 'the owner';
+  const m = openMatters(config, projectId, { runs, items, sessions });
+  const requests = projectRequests(projectId, 30);
+  const memory = readMemory(projectId);
+  const next = {
+    requests: Object.fromEntries(requests.map(r => [r.id, requestState(r)])),
+    deliveries: m.deliveries.map(d => d.run), recent: m.recent.map(r => r.run),
+    plan: Object.fromEntries(m.plan.map(i => [i.id, i.status])), memory: fingerprint(memory),
+  };
+  if (!resumed) return { text: '', seen: next };
+  if (!seen) {
+    const text = `## The current state (Chiefmate now tells you what changes at each message)\n\n${chargeRequests(projectId, owner)}\n\n${mattersText(m, owner, { when: 'now' })}`;
+    return { text, seen: next };
+  }
+  const lines = [];
+  // Your own new request, still with the manager, you already know of.
+  for (const r of requests.filter(x => next.requests[x.id] !== seen.requests?.[x.id] && (x.id in (seen.requests ?? {}) || x.status !== 'pending')).reverse()) {
+    lines.push(requestLine(r, owner).replace(/^- /, '- Request '));
+  }
+  for (const d of m.deliveries.filter(x => !seen.deliveries?.includes(x.run))) lines.push(`- New delivery waiting for ${owner}: ${d.title} [run ${d.run}], ${d.place}.${d.summary ? ` ${d.summary}` : ''}`);
+  for (const id of (seen.deliveries ?? []).filter(x => !next.deliveries.includes(x))) {
+    const r = runs.find(x => x.id === id);
+    lines.push(`- No longer waiting for ${owner}: ${r?.title ?? id} [run ${id}]${r ? `, ${r.merged ? 'merged' : r.discarded ? 'discarded' : r.status}` : ''}.`);
+  }
+  for (const r of m.recent.filter(x => !seen.recent?.includes(x.run) && !next.deliveries.includes(x.run)).reverse()) {
+    lines.push(`- Run ended: ${r.title} [run ${r.run}], ${r.merged ? 'merged' : r.discarded ? 'discarded' : r.status}.${r.outcome ? ` ${r.outcome}` : ''}`);
+  }
+  for (const i of m.plan.filter(x => seen.plan?.[x.id] !== x.status)) {
+    lines.push(`- Board #${i.id} ${i.title}: ${seen.plan?.[i.id] ? `now ${i.status.replace('_', ' ')}` : `new, ${i.status.replace('_', ' ')}`}; next, ${NEXT_STEP[i.status] ?? i.status}.`);
+  }
+  for (const id of Object.keys(seen.plan ?? {}).filter(x => !(x in next.plan))) {
+    const i = items.find(x => String(x.id) === String(id));
+    lines.push(`- Board #${id}${i ? ` ${i.title}` : ''}: off the open items${i ? ` (${i.archived ? 'archived' : i.status})` : ''}.`);
+  }
+  for (const n of notices) lines.push(`- Chiefmate's notice, ${formatDateTime(n.at)}: ${clip(n.text, 400)}`);
+  if (next.memory !== seen.memory) lines.push(memory ? `- The project's memory changed; now:\n${clip(memory, 3000)}` : "- The project's memory is now empty.");
+  if (!lines.length) return { text: '', seen: next };
+  const text = `## What changed since your previous turn (the latest state: it replaces what you read before)\n\n${lines.join('\n')}`;
+  return { text: text.length > CHANGES_MAX ? `${text.slice(0, CHANGES_MAX - 1)}…` : text, seen: next };
 }

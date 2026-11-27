@@ -2497,23 +2497,49 @@ try {
       writeFileSync(path.join(data, 'sessions', `${id}.json`), JSON.stringify({
         id, project, charge: true, status: 'open', mode: 'app', tool: 'claude', cwd: liveDir, toolSession: '11111111-1111-4111-8111-111111111111',
       }));
+      // A "Work now" session on Codex of the same project: resumed with the message alone, it gets the news too.
+      const cxId = 'smoke-work-codex';
+      writeFileSync(path.join(data, 'sessions', `${cxId}.json`), JSON.stringify({
+        id: cxId, project, status: 'open', mode: 'app', tool: 'codex', cwd: liveDir, toolSession: null, turns: 0, work: { copy: false, held: [], crew: [] },
+      }));
       sessions.sayToSession(id, 'First charge turn');
+      sessions.sayToSession(cxId, 'First work turn');
       await idle(id);
-      const firstPrompt = called().at(-1)?.prompt;
+      await idle(cxId);
+      const firstPrompt = called().findLast(x => x.tool !== 'codex')?.prompt;
       const request = charge.addRequest({ project, session: id, asked: 'Change the menu', plan: 'Fix the menu' }, config);
       const { run } = await charge.answerRequest(request.id, 'approve', { note: 'Please keep the layout.', title: 'Smoke menu', summary: 'Made up.' }, config);
       saveRun({ ...run, status: 'running' });
       sessions.sayToSession(id, 'Where is my request?');
       await idle(id);
       const resumed = called().at(-1);
-      expect(firstPrompt?.includes('Your requests to the manager') && !firstPrompt.includes(`- #${request.id},`)
-        && resumed?.args.includes('--resume') && resumed.prompt.includes('Where is my request?') && resumed.prompt.includes(`- #${request.id},`)
+      const news = 'What changed since your previous turn';
+      expect(firstPrompt?.includes('Your requests to the manager') && !firstPrompt.includes(`- #${request.id},`) && !firstPrompt.includes(news)
+        && resumed?.args.includes('--resume') && resumed.prompt.includes('Where is my request?') && resumed.prompt.includes(news) && resumed.prompt.includes(`- Request #${request.id},`)
         && resumed.prompt.includes('approved; the manager: Please keep the layout.') && resumed.prompt.includes(`(#log/${run.id}) (running)`),
-      'the resumed charge turn did not receive the latest request, the manager note and the linked run state in its input');
+      `the resumed charge turn did not receive the latest request, the manager note and the linked run state in its input: ${resumed?.prompt}`);
       expect(sessions.sessionHistory(id).items.some(e => e.kind === 'request' && e.request === request.id && e.status === 'approved' && e.run === run.id),
         'the original conversation did not receive the approval and its run link');
+      // Nothing new: the turn carries the message alone, without repeating the requests.
+      sessions.sayToSession(id, 'Thanks');
+      await idle(id);
+      const quiet = called().at(-1).prompt;
+      expect(!quiet.includes(news) && !quiet.includes('Your requests to the manager') && quiet.includes('Thanks'), `a resumed charge turn repeats what did not change: ${quiet}`);
+      // A notice from elsewhere in Chiefmate comes with the next turn, once.
+      sessions.noteSession(id, 'Smoke notice: the crew started.');
+      sessions.sayToSession(id, 'Any news?');
+      await idle(id);
+      const noticed = called().at(-1).prompt;
+      expect(noticed.includes(news) && noticed.includes('Smoke notice: the crew started.') && !noticed.includes(`- Request #${request.id},`), `a resumed charge turn did not get the notice alone: ${noticed}`);
+      sessions.sayToSession(cxId, 'Where do we stand?');
+      await idle(cxId);
+      const cxResumed = called().filter(x => x.tool === 'codex').at(-1);
+      expect(cxResumed?.args.slice(0, 2).join() === 'exec,resume' && cxResumed.prompt.includes(news) && cxResumed.prompt.includes(`- Request #${request.id},`)
+        && cxResumed.prompt.includes('Please keep the layout.') && cxResumed.prompt.includes('Where do we stand?'),
+      `the resumed Codex turn of a project's session did not receive what changed: ${cxResumed?.prompt}`);
       saveRun({ ...run, status: 'done', ended: new Date().toISOString() });
       await sessions.endSession(id);
+      writeFileSync(path.join(data, 'sessions', `${cxId}.json`), JSON.stringify({ ...sessions.readSession(cxId), work: undefined, status: 'ended' }));
     }
   } finally {
     process.env.CHIEFMATE_CLAUDE = path.join(data, 'no-claude.exe');

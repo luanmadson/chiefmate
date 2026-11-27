@@ -15,7 +15,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { stepMcp, userClaudeExcludes } from './access.mjs';
 import { browserServers } from './browsers.mjs';
-import { addRequest, chargeFolder, chargeProfile, chargeProject, chargeTurn, takeRequest } from './charge.mjs';
+import { addRequest, chargeFolder, chargeProfile, chargeProject, chargeTurn, takeRequest, turnChanges } from './charge.mjs';
 import { describeAction, environment, runClaude } from './claude.mjs';
 import { loadConfig } from './config.mjs';
 import { API, guardHooks, publishing } from './guard.mjs';
@@ -458,7 +458,8 @@ export function updateWork(id, fields) {
 
 /** A note in a session's history from elsewhere in Chiefmate (the manager's answer to a request of the agent in charge). */
 export function noteSession(id, text, extra = {}) {
-  if (readSession(id)) note(id, text, extra);
+  // A notice: the agent of a project's session reads it with its next turn (projectChanges).
+  if (readSession(id)) note(id, text, { notice: true, ...extra });
 }
 
 /**
@@ -626,11 +627,14 @@ export function deliverSession(id) {
       charge = { error: error.message };
     }
   }
+  const changes = projectChanges(config, session, turn);
+  // News goes in the turn's own text: a resumed conversation reads nothing newer than its first instructions (see turnChanges).
+  const withNews = (...lead) => (lead.some(Boolean) ? `${lead.filter(Boolean).join('\n\n')}\n\n## This turn\n\n${prompt}` : prompt);
   // One call of Claude Code; when its session is not where the turn count says (see SESSION_EXISTS), once more the other way.
   const claudeTurn = (resume, retried = false) => {
     if (charge?.error) throw new Error(charge.error);
     const run = runClaude({
-      dir: session.cwd, prompt: charge ? `${charge.requests}\n\n## This turn\n\n${prompt}` : prompt,
+      dir: session.cwd, prompt: withNews(charge && !resume ? charge.requests : '', changes),
       system: charge?.system ?? [appSystem(config.owner || 'the owner'), ...(session.work ? [workSystem(config, session)] : [])].join('\n'), model: charge?.model ?? session.model ?? config.default_model,
       tools: charge ? charge.tools : [...APP_TOOLS, ...mcp.tools, ...(session.allowed ?? []).filter(r => !ASK_FIRST.includes(r))],
       disallowed: charge ? [...charge.disallowed, ...ASK_FIRST] : ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r)), mcpServers: charge ? {} : browserServers(config, mcp.servers, sessionBrowser(session)),
@@ -648,7 +652,7 @@ export function deliverSession(id) {
   let promise;
   try {
     if (session.tool === 'codex') {
-      const run = runCodex({ session, prompt, log: rawLog(id), onEvent });
+      const run = runCodex({ session, prompt: withNews(changes), log: rawLog(id), onEvent });
       Object.assign(turn, { pid: run.pid ?? null, cancel: () => run.cancel(t('interrupted by you')) });
       promise = run.promise;
     } else {
@@ -659,6 +663,23 @@ export function deliverSession(id) {
   }
   promise.then(r => finishTurn(id, turn, r)).catch(error => finishTurn(id, turn, { ok: false, error: error.message }));
   return true;
+}
+
+/**
+ * What changed since the previous turn of a project's session (the agent in charge, "Work now"), as text for this
+ * turn's input ('' when nothing did, and on the first turn); the state read goes on "turn.seen", kept once the turn starts.
+ */
+function projectChanges(config, session, turn) {
+  if (!session.project || !(session.charge || session.work)) return '';
+  try {
+    const { items, next } = sessionHistory(session.id, session.seen?.history ?? Infinity);
+    const notices = session.seen ? items.filter(e => e.notice && e.kind !== 'request') : [];
+    const { text, seen } = turnChanges(config, session.project, session.seen ?? null, { notices, resumed: (session.turns ?? 0) > 0, sessions: listSessions() });
+    turn.seen = { ...seen, history: next };
+    return text;
+  } catch {
+    return '';
+  }
 }
 
 /**
@@ -711,7 +732,7 @@ function finishTurn(id, turn, r) {
   if (!session) return;
   // A turn that got to start counts: the next one resumes its session (Codex's thread, or Claude Code's own id).
   const started = session.tool === 'codex' ? r.session : turn.started || r.session ? session.toolSession : null;
-  Object.assign(session, { working: null, lastTurn: { at: now(), ok: !!r.ok }, ...(started ? { toolSession: started, turns: (session.turns ?? 0) + 1 } : {}) });
+  Object.assign(session, { working: null, lastTurn: { at: now(), ok: !!r.ok }, ...(started ? { toolSession: started, turns: (session.turns ?? 0) + 1, ...(turn.seen ? { seen: turn.seen } : {}) } : {}) });
   if (turn.pausing && r.interrupted && !turn.ending && !turn.interrupted) {
     // Paused for an update: the next turn carries on by itself (see deliverSession), after the restart.
     session.paused = now();
