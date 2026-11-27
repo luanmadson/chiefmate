@@ -18,7 +18,7 @@ import { requestsLine } from './charge.mjs';
 import { defectsLine, senderLabel } from './defects.mjs';
 import { planningLine } from './planning.mjs';
 import { radarLine } from './radar.mjs';
-import { focus, maxParallel, queued } from './queue.mjs';
+import { focus, maxParallel, queueManagerLines } from './queue.mjs';
 import { activeRun, ALWAYS_DISALLOWED, crewGuard, doingNow, liveRuns, prepareLibraries } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { listSessions, readSession, sessionsLine } from './sessions.mjs';
@@ -132,13 +132,9 @@ export function situation(libraries = []) {
       ? `Running (${going.length} of at most ${maxParallel(config)} at once, one per project): ${going.map(l => `${l.title} (project ${l.project}, step ${l.step ?? '-'}: ${l.agent ?? 'preparing'}${doingNow(l) ? `, ${doingNow(l)}` : ''}), run ${l.run}`).join('; ')}.`
       : `Running: nothing (up to ${maxParallel(config)} runs of different projects go on at once).`,
   );
-  const queue = queued();
-  lines.push(
-    queue.length
-      ? `Queue: ${queue.map(r => `${r.title} [${r.id}]${r.notBefore ? ` (not before ${formatDateTime(r.notBefore)})` : ''}`).join('; ')}.`
-      : 'Queue: empty.',
-  );
   const runs = listRuns();
+  // In the order it runs, with what holds each run and why, the owner's "Do now" and the latest changes (src/queue.mjs).
+  lines.push(...queueManagerLines(config, runs));
   const latest = runs.filter(r => !['queued', 'waiting'].includes(r.status)).slice(0, 5);
   lines.push('Latest runs:');
   for (const r of latest) {

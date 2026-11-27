@@ -408,6 +408,31 @@
       </div>
     </form>
   </dialog>
+  <!-- The queue's controls (drawQueue in ui/app.js): "Do now" and holding a run, with its reason -->
+  <dialog id="do-now-dialog" class="confirm" aria-labelledby="do-now-title">
+    <form method="dialog">
+      <div class="label" id="do-now-title" data-t="Do now">Do now</div>
+      <p id="do-now-text"></p>
+      <p class="hint" id="do-now-note" hidden></p>
+      <div class="actions wrap">
+        <button value="" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="all" class="button secondary" data-t="All the others">All the others</button>
+        <button value="project" class="button" id="do-now-project"></button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="hold-dialog" class="confirm" aria-labelledby="hold-title">
+    <form method="dialog">
+      <div class="label" id="hold-title" data-t="Hold this run">Hold this run</div>
+      <p id="hold-text"></p>
+      <label class="hold-reason"><span data-t="Why (optional, shown in the queue)">Why (optional, shown in the queue)</span>
+        <input id="hold-reason" type="text" maxlength="200" autocomplete="off" placeholder="For example: waiting for the client's answer" data-t-placeholder="For example: waiting for the client's answer"></label>
+      <div class="actions">
+        <button value="" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="hold" class="button" data-t="Hold">Hold</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="work-dialog" class="confirm">
     <form method="dialog">
       <div class="label" data-t="The crew is working on this project">The crew is working on this project</div>

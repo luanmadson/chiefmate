@@ -37,7 +37,7 @@ import { changeRadar, parseRadarStatus, RADAR_STATUSES, radarIdeas } from './rad
 import { deliverDevNotices, devState, openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
-import { cancel, focus, maxParallel, nudgeQueue, queued, resume } from './queue.mjs';
+import { cancel, cancelQueued, doNow, endDoNow, focus, holdRun, maxParallel, moveInQueue, nudgeQueue, queueControl, queued, queueMarks, resume } from './queue.mjs';
 import { activeRun, createRun, describeLater, doingNow, liveRuns, liveSpeech, needsBrief, outcomeLater, pauseLive, setRunLevel, stepSays } from './runs.mjs';
 import { speechView } from './speech.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
@@ -141,7 +141,7 @@ function readBody(req) {
 const summary = run => ({
   id: run.id, title: run.title, summary: run.summary ?? null, outcome: run.outcome ?? null, kind: run.kind, mission: run.mission, project: run.project, origin: run.origin, status: run.status,
   created: run.created, started: run.started, ended: run.ended, notBefore: run.notBefore, due: run.due ?? null, note: run.note, result: run.result,
-  pullRequest: run.pullRequest, needsYou: (run.requests ?? []).filter(r => r.status === 'open').length,
+  pullRequest: run.pullRequest, needsYou: (run.requests ?? []).filter(r => r.status === 'open').length, onHold: !!run.onHold,
   // The run's speech bubble lines (src/speech.mjs), while it has not ended: a paused or waiting run shows its last ones.
   speech: runEnded(run) ? null : speechView(run),
   steps: stepsOf(run).map(s => ({ agent: s.agent, status: s.status, review: s === run.review, role: s.role ?? null, task: s.task ?? null, tool: s.tool ?? null })),
@@ -374,7 +374,9 @@ function buildState() {
     // The agent's speech bubble and the run's latest lines (src/speech.mjs).
     speech: speechView(run, liveSpeech(l)),
   }));
-  const queue = queued();
+  const queue = queued(runs);
+  const control = queueControl(runs);
+  const doNowInForce = control.doNow;
   const conversation = readConversation();
   // The runs the app lists without a title and summary of their own (older ones) get them, one at a time.
   for (const r of [...queue, ...runs.slice(0, 30)]) if (needsBrief(r)) describeLater(r.id, r);
@@ -420,7 +422,10 @@ function buildState() {
     running,
     current: running[0] ?? null,
     parallel: { max: maxParallel(config) },
-    queue: queue.map(summary),
+    // In the order it runs, each run with what holds it and why, who placed it and whether it resumes first; and the
+    // owner's "Do now" in force with the latest changes to the queue (src/queue.mjs).
+    queue: queue.map(r => ({ ...summary(r), ...queueMarks(r, doNowInForce) })),
+    queueControl: control,
     history: runs.filter(r => !['queued', 'waiting'].includes(r.status) && !goingIds.has(r.id)).slice(0, 30).map(summary),
     usage: { limits: config.limits ?? {}, account: usage },
     computer: machine,
@@ -899,6 +904,29 @@ export function startServer() {
           return reply(res, 200, await syncPrompts());
         case '/api/cancel':
           return reply(res, 200, { status: cancel(body.id) });
+        case '/api/queue': {
+          // Changes to the queue (src/queue.mjs): move a run, hold it (with the reason) or release it, "Do now" and its
+          // end, cancel. The owner's, from the app with the owner's key; the manager never undoes the owner's changes.
+          const by = body.by === 'manager' ? 'manager' : 'owner';
+          const id = String(body.id ?? '');
+          switch (body.action) {
+            case 'move': {
+              const where = { before: body.before ?? null, after: body.after ?? null, top: !!body.top, up: !!body.up, down: !!body.down };
+              return reply(res, 200, { queue: moveInQueue(id, where, by).map(summary) });
+            }
+            case 'hold':
+            case 'release':
+              return reply(res, 200, summary(holdRun(id, body.action === 'hold', by, body.reason ?? null)));
+            case 'do-now':
+              return reply(res, 200, doNow(id, String(body.scope ?? ''), by));
+            case 'do-now-end':
+              return reply(res, 200, endDoNow(by));
+            case 'cancel':
+              return reply(res, 200, { status: cancelQueued(id, by) });
+            default:
+              return reply(res, 400, { error: t('Say "move", "hold", "release", "do-now", "do-now-end" or "cancel".') });
+          }
+        }
         case '/api/effort': {
           // An agent's effort, for the installation or one project (src/effort.mjs); it counts from the next step.
           const change = setEffort({ member: body.member, level: body.level, project: body.project || null, chat: !!body.chat, by: 'owner' });

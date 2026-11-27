@@ -386,7 +386,8 @@ textarea { resize: vertical; min-height: 64px; }
 .suggestion:hover { color: var(--text); border-color: var(--muted); }
 .operations-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 20px; align-items: start; }
 .side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-@media (max-width: 1100px) { .operations-layout { grid-template-columns: minmax(0, 1fr); } }
+/* below 1280 px the side column goes under the work: the queue's table needs the whole width (it never slides under it) */
+@media (max-width: 1280px) { .operations-layout { grid-template-columns: minmax(0, 1fr); } }
 .bridge-head { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 14px; align-items: center; padding-bottom: 14px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
 .bridge-name { font-size: 15px; font-weight: 600; color: var(--strong); }
 .bridge-head .hint { margin: 2px 0 6px; }
@@ -425,6 +426,50 @@ textarea { resize: vertical; min-height: 64px; }
 .table.queue tr.next td { background: var(--raised); }
 .table.queue tr.next td:first-child { box-shadow: inset 2px 0 0 var(--accent); color: var(--accent); }
 .tag { display: inline-block; margin-right: 8px; padding: 0 6px; font: 10.5px/1.7 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); border: 1px solid rgba(201, 164, 93, 0.5); vertical-align: 1px; }
+/* The queue's controls (drawQueue and queueControls in ui/app.js): the order, who holds a run and why, "Do now" */
+.tag.held { color: var(--warn); border-color: var(--warn); }
+.tag.do-now { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
+.tag.first { color: var(--muted); border-color: var(--line-strong); }
+.queue-why { display: block; margin-top: 2px; color: var(--warn); font-size: 12px; overflow-wrap: anywhere; }
+.table.queue tr[data-held] .primary, .queued-run[data-held] .name { color: var(--muted); }
+.table.queue tr[data-held] td:first-child, .queued-run[data-held] { box-shadow: inset 2px 0 0 var(--warn); }
+.queued-run[data-held] { padding-left: 8px; }
+/* the table keeps to its column: the start and the state wrap, the summary is cut short, the buttons wrap when narrow */
+.table.queue .run-line { max-width: 36ch; }
+.table.queue td.queue-start { min-width: 7em; color: var(--text); font-size: 12.5px; }
+.table.queue .state { white-space: normal; }
+.queue-actions, .queue-buttons { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px; }
+.table.queue td.queue-actions { display: table-cell; width: 1%; white-space: normal; }
+@media (min-width: 1000px) { .table.queue .queue-buttons { flex-wrap: nowrap; } }
+.queue-move { width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.queue-actions .button.small, .queue-buttons .button.small { min-height: 28px; }
+.project-run.queued-run .name { white-space: normal; }
+.queue-move svg { width: 12px; height: 12px; }
+.queue-menu { display: inline-block; text-align: left; }
+.queue-menu > summary.button { display: inline-flex; align-items: center; }
+.menu-item.danger { color: var(--error); }
+.queue-place { white-space: nowrap; }
+.queue-place[draggable="true"] { cursor: grab; }
+.queue-grip { display: inline-block; width: 6px; height: 10px; margin-right: 6px; vertical-align: -1px; background: radial-gradient(circle, var(--faint) 1px, transparent 1.2px) 0 0 / 3px 3.4px; }
+.queue-place:not([draggable="true"]) .queue-grip { visibility: hidden; }
+.queue-place[draggable="true"]:hover .queue-grip { background-image: radial-gradient(circle, var(--accent) 1px, transparent 1.2px); }
+.table.queue tr.dragging { opacity: 0.45; }
+.table.queue tr[data-drop="before"] > td { box-shadow: inset 0 2px 0 var(--accent); }
+.table.queue tr[data-drop="after"] > td { box-shadow: inset 0 -2px 0 var(--accent); }
+.do-now-band { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 8px 0 10px; padding: 9px 12px; background: var(--accent-bg); border: 1px solid rgba(201, 164, 93, 0.5); border-left: 2px solid var(--accent); }
+.do-now-band .tag { margin: 0; }
+.do-now-text { flex: 1 1 260px; min-width: 0; color: var(--text); }
+.do-now-text strong { color: var(--strong); font-weight: 600; }
+.queue-history { margin-top: 10px; }
+.hold-reason { display: grid; gap: 6px; margin: 4px 0 2px; font-size: 12px; color: var(--muted); }
+.hold-reason input { width: 100%; margin: 0; }
+.actions.wrap { flex-wrap: wrap; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+@media (pointer: coarse) {
+  .queue-grip { display: none; }
+  .queue-move { width: 44px; height: 44px; }
+  .queue-actions .button.small, .queue-buttons .button.small { min-height: 44px; }
+}
 
 /* Live: what is running now. Brass, discreet and continuous; still when the system asks for reduced motion. */
 .live-dot { display: inline-block; flex: none; width: 7px; height: 7px; background: var(--accent); animation: live-pulse 1.6s ease-in-out infinite; }
@@ -1251,6 +1296,17 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   .table:not(.inner) > tbody > tr > td.row-actions { margin-left: auto; }
   .table:not(.inner) > tbody > tr.selected { background: var(--raised); box-shadow: inset 2px 0 0 var(--accent); }
   .table:not(.inner) > tbody > tr.next { background: var(--raised); box-shadow: inset 2px 0 0 var(--accent); }
+  /* The queue: a held run's card has the amber edge (the card's, not its number's); when it starts on the left and
+     its controls on the right of the same line */
+  .table.queue tr.next td:first-child, .table.queue tr[data-held] td:first-child { box-shadow: none; }
+  .table.queue > tbody > tr[data-held] { box-shadow: inset 2px 0 0 var(--warn); }
+  .table.queue td.queue-place { align-self: flex-start; }
+  .table.queue td.queue-start { flex: 1 1 120px; min-width: 0; }
+  .table.queue td.queue-actions { flex: none; width: auto; }
+  .table.queue .queue-buttons { flex-wrap: nowrap; }
+  .queued-run { grid-template-columns: 30px minmax(0, 1fr); }
+  .queued-run .queue-actions { grid-column: 1 / -1; justify-self: end; }
+  .do-now-band .button { flex: 1 1 100%; }
   .table:not(.inner) > tbody > tr > td.num { font-size: 12px; color: var(--muted); }
   .table .run-line { max-width: 100%; white-space: normal; }
   .table.inner { display: block; overflow-x: auto; }
