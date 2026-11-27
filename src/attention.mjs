@@ -8,6 +8,7 @@
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
 import { loginWarning } from './claude.mjs';
 import { RAM_LOW, availableResets, current, loginText } from './plan.mjs';
+import { restoreSteps } from './quarantine.mjs';
 import { readState, saveState, settleRunOutside } from './store.mjs';
 import { LOGIN_MINUTES, readerSettings, readerStatus, signInNeeded } from './usagepage.mjs';
 import { ROOT } from './util.mjs';
@@ -45,7 +46,7 @@ export const mainPushNotice = (p, config) => ({
  * The notices now, most urgent first: { id, level, kind, title, text, view, project, run, at, seen, seenable }.
  * "view" is the app's place that deals with it; a request of a step carries what its buttons need ("I did it", or a question's options).
  */
-export function attentionItems({ config, runs = [], needs = [], usage = {}, machine, items = [], update = {}, questions = [], pushes = [], repos = [], lockdown = null, login = loginWarning() }) {
+export function attentionItems({ config, runs = [], needs = [], usage = {}, machine, items = [], update = {}, questions = [], pushes = [], repos = [], lockdown = null, login = loginWarning(), quarantine = [] }) {
   const list = [];
   const add = item => list.push({ project: null, run: null, at: null, seenable: true, ...item });
   // Urgent: the emergency lockdown (src/lockdown.mjs), until the owner releases it, and the security warnings of the day.
@@ -67,6 +68,14 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
       id: `needs:${n.run ?? n.session}:${n.id}`, level: 'urgent', kind: 'needs', title: n.kind === 'permission' ? t('Asks your permission') : n.options ? t('Asks you') : t('Needs you'),
       text: t('{task}: {what}', { task: n.title, what: n.explain?.summary ?? n.what }), view: 'operations', project: n.project ?? null, run: n.run ?? null, at: n.at, seenable: false,
       request: { id: n.id, kind: n.kind ?? null, run: n.run ?? null, session: n.session ?? null, url: n.url ?? null, openError: n.openError ?? null, agent: n.agent ?? null, explain: n.explain ?? null, options: n.options ?? null, recommend: n.recommend ?? null, why: n.why ?? null },
+    });
+  }
+  // Urgent: a file of a working copy the antivirus probably took (src/quarantine.mjs): its project's queue waits for it.
+  for (const q of quarantine) {
+    add({
+      id: `quarantine:${q.project}:${q.since}`, level: 'urgent', kind: 'quarantine', title: t('Antivirus probably quarantined a file'),
+      text: `${t('{path}. The queue of {project} waits for it.', { path: q.file, project: config?.projects?.[q.project]?.name ?? q.project })} ${restoreSteps(q.file)}`,
+      view: 'operations', project: q.project, run: q.run ?? null, at: q.since, seenable: false,
     });
   }
   // Urgent: a push the manager tried, for the owner to allow once or refuse (its card, src/decisions.mjs). The main

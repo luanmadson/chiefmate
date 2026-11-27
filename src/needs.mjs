@@ -6,13 +6,17 @@
 // over). A question (--options "A|B", --recommend, --why) always waits, with one button per option and a field where
 // the owner writes an explanation with the option, or an answer of their own instead. While it waits,
 // the step's time limit stands still. Past the longest wait, the command returns. Any open request closes when the run ends.
+// The manager handles the open calls too ("cli.mjs calls"): it marks one done on the owner's own words in its
+// conversation (confirmByOwnerWords), and parks a run that waits for the owner (parkRun), freeing its project's turn
+// for the next run in the queue; a parked run resumes first once the owner answers. In away mode, a call left without
+// an answer parks its run by itself (parkWaitingWhileAway).
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
-import { activeRun, liveOf } from './runs.mjs';
-import { listRuns, readRun, runEnded, saveRun, stepsOf } from './store.mjs';
+import { activeRun, liveOf, liveRuns, noteLive, pauseLive } from './runs.mjs';
+import { listRuns, readRun, readState, runEnded, saveRun, stepsOf } from './store.mjs';
 import { addSpeech } from './speech.mjs';
 import { agentSays } from './talk.mjs';
 import { openOwnerPage } from './usagepage.mjs';
@@ -20,8 +24,14 @@ import { clip, now } from './util.mjs';
 
 const OPTIONS_MAX = 6; // as the manager's questions (src/decisions.mjs)
 
-/** "needs_you": { "max_wait_minutes": 120 }: the longest a step waits for you before it goes on without you. */
-export const needsSettings = (config = loadConfig()) => ({ maxWaitMinutes: Math.max(1, Number(config.needs_you?.max_wait_minutes) || 120) });
+/**
+ * "needs_you": { "max_wait_minutes": 120, "park_after_minutes": 15 }: the longest a step waits for you before it goes
+ * on without you; in away mode, how long a call waits before its run is parked (0: never).
+ */
+export function needsSettings(config = loadConfig()) {
+  const park = Number(config.needs_you?.park_after_minutes ?? 15);
+  return { maxWaitMinutes: Math.max(1, Number(config.needs_you?.max_wait_minutes) || 120), parkAfterMinutes: Number.isFinite(park) && park >= 0 ? park : 15 };
+}
 
 // A run going on lives in memory (its steps save it as they go): requests are written to that same object.
 const runFor = id => activeRun(id) ?? readRun(id);
@@ -105,35 +115,134 @@ const findRequest = (runId, id) => {
   return { run, request };
 };
 
+/** Whether the run is parked (or being parked) on this request. */
+const parkedOn = (run, id) => run.parked?.request === id && (liveOf(run.id)?.pauseRequest === 'park' || run.status === 'paused');
+
 /** The waiting command asks every few seconds: while it does, within the longest wait, the step's clock stands still. */
 export function pollRequest(runId, id) {
   const { run, request } = findRequest(runId, id);
   const waited = Date.now() - Date.parse(request.at);
   const max = needsSettings().maxWaitMinutes * 60_000;
   const going = liveOf(run.id);
-  if (request.status === 'open' && waited < max && going) going.heldUntil = Date.now() + 20_000;
-  return { status: request.status, by: request.by ?? null, answer: request.answer ?? null, note: request.note ?? null, waitedMinutes: Math.floor(waited / 60_000), maxWaitMinutes: max / 60_000, timedOut: waited >= max };
+  const parked = request.status === 'open' && parkedOn(run, id);
+  if (request.status === 'open' && waited < max && going && !parked) going.heldUntil = Date.now() + 20_000;
+  return {
+    status: request.status, by: request.by ?? null, answer: request.answer ?? null, note: request.note ?? null, ownerSaid: request.ownerSaid ?? null, parked,
+    waitedMinutes: Math.floor(waited / 60_000), maxWaitMinutes: max / 60_000, timedOut: waited >= max,
+  };
 }
 
 /**
  * "I did it": the owner did it (or the agent's check succeeded); for a question, the option the owner chose and/or
  * what they wrote ("note": an explanation with the option, or an answer of their own instead of one).
  */
-export function finishRequest(runId, id, by = 'owner', answer = null, note = null) {
+export function finishRequest(runId, id, by = 'owner', answer = null, note = null, { ownerSaid = null } = {}) {
   const { run, request } = findRequest(runId, id);
   const given = answer == null || String(answer).trim() === '' ? null : answer;
   const choice = given == null ? null : request.options?.find(o => same(o, given));
   if (given != null && !choice) throw new Error(t('Answer with one of the options.'));
   if (request.status !== 'open') return request;
   const written = request.options && by === 'owner' ? clip(String(note ?? '').trim(), 2000) : '';
-  Object.assign(request, { status: 'done', done: now(), by }, choice ? { answer: choice } : {}, written ? { note: written } : {});
+  Object.assign(request, { status: 'done', done: now(), by }, choice ? { answer: choice } : {}, written ? { note: written } : {}, ownerSaid ? { ownerSaid } : {});
   // The owner's answer stays in the run's conversation (the agent's panel, the step's report, the manager).
-  if (choice || written) {
-    const text = [choice, written].filter(Boolean).join(' — ');
-    (run.talk ??= []).push({ id: randomUUID().slice(0, 8), at: now(), who: 'owner', step: request.step, agent: request.agent, text, status: 'delivered', delivered: now(), via: 'request', request: request.id });
+  if (choice || written || ownerSaid) {
+    const text = ownerSaid ? t('Told the manager in the conversation: "{words}"', { words: ownerSaid }) : [choice, written].filter(Boolean).join(' — ');
+    (run.talk ??= []).push({ id: randomUUID().slice(0, 8), at: now(), who: 'owner', step: request.step, agent: request.agent, text, status: 'delivered', delivered: now(), via: ownerSaid ? 'manager' : 'request', request: request.id });
+  }
+  if (ownerSaid) noteLive(run.id, t('The manager marked "{what}" done on your word in the conversation: "{words}"', { what: clip(request.what, 120), words: ownerSaid }));
+  // Parked on this request: back to the queue, ahead of the project's other runs.
+  if (run.parked?.request === request.id && run.status === 'paused' && !liveOf(run.id)) {
+    Object.assign(run, { status: 'queued', resumeFirst: true, note: t("You answered: it resumes first in its project's queue.") });
   }
   saveRun(run);
   return request;
+}
+
+// ---------- The manager's handling of the calls ----------
+
+// The owner's words are looked for in their messages to the manager of the last day.
+const WORDS_HOURS = 24;
+const plain = text => String(text ?? '').normalize('NFC').toLowerCase().replace(/\s+/g, ' ')
+  .replace(/^[\s"'\u201c\u201d\u2018\u2019\u00ab\u00bb]+|[\s"'\u201c\u201d\u2018\u2019\u00ab\u00bb.!?\u2026]+$/g, '');
+
+/**
+ * The owner's message (of the last day) where the words the manager quotes appear, or null.
+ * conversation: [{ who, text, at }] as kept by src/store.mjs ("you" is the owner).
+ */
+export function ownerWordsFound(words, conversation, at = Date.now()) {
+  const wanted = plain(words);
+  if (wanted.length < 2) return null;
+  const since = at - WORDS_HOURS * 3_600_000;
+  return [...conversation].reverse().find(m => m.who === 'you' && Date.parse(m.at) >= since && plain(m.text).includes(wanted)) ?? null;
+}
+
+/**
+ * The manager marks a call done on the owner's word in its conversation ("calls done <run> <id> --owner-said"): only
+ * while the manager is answering, never for a step, and only with words the owner actually wrote to it. Recorded in the
+ * request, the step's log and the run's conversation.
+ */
+export function confirmByOwnerWords(runId, id, words, { conversation = [], answering = false } = {}) {
+  if (!answering) throw new Error(t("Only the manager, while it answers the owner, marks a call done on the owner's word."));
+  const said = clip(String(words ?? '').trim(), 500);
+  if (!said) throw new Error(t("Give the owner's own words with --owner-said."));
+  const { run, request } = findRequest(runId, id);
+  if (request.status !== 'open') throw new Error(t('This call is no longer open.'));
+  if (!ownerWordsFound(said, conversation)) throw new Error(t("These words are not in the owner's messages to you of the last day: quote them as the owner wrote them."));
+  return { run: run.id, ...finishRequest(run.id, request.id, 'manager', null, null, { ownerSaid: said }) };
+}
+
+/**
+ * Parks a run that waits for the owner: its step pauses at a safe point (its work committed on its branch), the run
+ * leaves the queue's turn to the project's next run, and it resumes first once the request is answered. by: "manager",
+ * "owner" or "away" (the away mode's own). request: the call it waits on (the latest open one that waits, by default).
+ */
+export function parkRun(runId, { by = 'manager', request: requestId = null } = {}) {
+  const run = runFor(String(runId ?? ''));
+  if (!run) throw new Error(t('Run not found.'));
+  if (run.parked && run.status === 'paused') return { run: run.id, request: run.parked.request, parked: run.parked, already: true };
+  if (!liveOf(run.id)) throw new Error(t('Only a run going on can be parked.'));
+  const request = (run.requests ?? []).filter(r => r.status === 'open' && r.wait && (!requestId || r.id === requestId)).at(-1);
+  if (!request) throw new Error(t('This run is not waiting for you: nothing to park.'));
+  const open = () => runFor(run.id)?.requests?.find(r => r.id === request.id)?.status === 'open';
+  if (!pauseLive(run.id, 'park', { holdWhile: open })) throw new Error(t('This run is already pausing or stopping.'));
+  run.parked = { request: request.id, at: now(), by };
+  request.parked = now();
+  saveRun(run);
+  if (by !== 'manager') reportEvent('run_parked', `Run ${run.id} "${run.title}" (project ${run.project}) was parked${by === 'away' ? ' by away mode' : ' by the owner'}: it waited for the owner (${request.what}). Its project's next run takes the turn; it resumes first once the owner answers.`);
+  return { run: run.id, request: request.id, parked: run.parked };
+}
+
+let lastAwayCheck = 0;
+
+/**
+ * In away mode, the runs whose call has waited past "park_after_minutes" are parked, so their projects' queues go on.
+ * Checked at most once a minute (force: now). Returns the runs parked.
+ */
+export function parkWaitingWhileAway({ away = readState().away, settings = needsSettings(), at = Date.now(), force = false } = {}) {
+  if (!away || !settings.parkAfterMinutes) return [];
+  if (!force && at - lastAwayCheck < 60_000) return [];
+  lastAwayCheck = at;
+  const parked = [];
+  for (const l of liveRuns()) {
+    const run = activeRun(l.run);
+    if (!run || l.pauseRequest || l.cancelRequest) continue;
+    const old = (run.requests ?? []).filter(r => r.status === 'open' && r.wait && at - Date.parse(r.at) >= settings.parkAfterMinutes * 60_000).at(-1);
+    if (!old) continue;
+    try {
+      parked.push(parkRun(run.id, { by: 'away', request: old.id }));
+    } catch (error) {
+      console.error('Away mode:', error.message);
+    }
+  }
+  return parked;
+}
+
+/** The open calls of the runs not ended, oldest first, with whether each run is parked: for the manager and the summary. */
+export function openCalls(runs = listRuns()) {
+  return openRequests(runs).filter(r => r.run).map(r => {
+    const run = activeRun(r.run) ?? runs.find(x => x.id === r.run);
+    return { ...r, parked: !!run?.parked && run.parked.request === r.id && run.status === 'paused' };
+  }).reverse();
 }
 
 /** The open requests of every run, newest first, for the app. */

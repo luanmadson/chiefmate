@@ -1688,6 +1688,7 @@ const newsEvent = kind => ({
   idle: t('empty queue'), autopilot_report: t('autopilot report'), watchdog: t('watchdog'), lockdown: t('emergency lockdown'), security_warning: t('security warning'),
   away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'), power: t('power mode'),
   owner_working: t('you working now'), defect: t('defect reported'), agent_message: t('message from an agent'), focus: t('focus changed'),
+  run_parked: t('run parked'), quarantine: t('antivirus quarantine'),
 }[kind] ?? kind);
 
 // Who wrote an agent's message to the manager (a live session or a step of a run, from the command line).
@@ -2488,7 +2489,11 @@ async function refreshDetail(force = false) {
     ? `<div class="report"><div class="report-top"><strong>${esc(t('Asked of you'))}</strong></div>${r.requests.map(q => {
       const status = q.status === 'closed' ? [t('No longer needed'), 'neutral']
         : q.status === 'open' ? [t('Waiting for your action'), 'warn'] : [t('Done'), 'ok'];
-      return `<div>${stateHtml(status)} ${esc(q.what)}${q.url ? ` · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${q.status === 'open' ? `${requestWhy(q)} ${requestButtons(r.id, q, ' small')}${requestReply(r.id, q, ' small')}` : q.answer || q.note ? ` · ${esc(t('Your answer: {answer}', { answer: [q.answer, q.note].filter(Boolean).join(' — ') }))}` : ''}</div>`;
+      // Parked while it waited, or marked done by the manager on the owner's words in the conversation.
+      const parked = q.status === 'open' && r.parked?.request === q.id ? ` · ${esc(t('Parked: it resumes first once you answer'))}` : '';
+      const done = q.ownerSaid ? ` · ${esc(t('Marked done by the manager on your words: "{words}"', { words: q.ownerSaid }))}`
+        : q.answer || q.note ? ` · ${esc(t('Your answer: {answer}', { answer: [q.answer, q.note].filter(Boolean).join(' — ') }))}` : '';
+      return `<div>${stateHtml(status)} ${esc(q.what)}${q.url ? ` · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${parked}${q.status === 'open' ? `${requestWhy(q)} ${requestButtons(r.id, q, ' small')}${requestReply(r.id, q, ' small')}` : done}</div>`;
     }).join('')}</div>`
     : '';
   // The effort changes made while the run went on (they count from the step after them).

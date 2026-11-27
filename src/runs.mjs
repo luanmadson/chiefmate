@@ -20,6 +20,7 @@ import {
 } from './leads.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
+import { holdForQuarantine, lostFile, quarantinedBy, writtenSuspects } from './quarantine.mjs';
 import { builderSettings, projectInstructions, writtenInstructions } from './prompts.mjs';
 import { addSpeech, askedBy, speechRule } from './speech.mjs';
 import { listRuns, readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
@@ -49,6 +50,14 @@ export const livePublic = l => ({
   run: l.run, title: l.title, summary: l.summary ?? null, project: l.project, step: l.step, agent: l.agent, started: l.started, since: l.since, pid: l.pid,
   context: l.context, actions: l.actions, doing: doingNow(l),
 });
+
+/** Writes a line in the log of a run going on (the agent's panel). Returns false when it is not going on. */
+export function noteLive(id, text) {
+  const l = live.get(id);
+  if (!l) return false;
+  logAction(l, { type: 'action', text });
+  return true;
+}
 
 /** What the agent of a run going on is doing now, in plain words (one short line). */
 export const doingNow = l => (Date.now() < (l.heldUntil ?? 0) ? t('waiting for you') : l.doing ?? null);
@@ -272,11 +281,13 @@ export function pauseLive(id, why = 'update', { holdWhile = null } = {}) {
   const l = live.get(id);
   if (!l || l.cancelRequest || l.pauseRequest) return false;
   l.pauseRequest = why;
-  // "owner": paused for the owner's "Work now" session (src/worknow.mjs), held while holdWhile() says so.
+  // "owner": paused for the owner's "Work now" session (src/worknow.mjs), held while holdWhile() says so; "park": parked
+  // while it waits for the owner (src/needs.mjs), held while the request is open.
   l.holdWhile = holdWhile;
   l.process?.interrupt?.();
   l.preparing?.abort();
   const text = why === 'owner' ? t('Pausing at a safe point: you are working on this project now')
+    : why === 'park' ? t("Parking at a safe point while it waits for you: its project's turn goes to the next run in the queue")
     : why === 'standby' ? t('Pausing at a safe point: Chiefmate is going on standby')
     : why === 'focus' ? t('Pausing at a safe point: you paused this project, or put another in focus')
     : why === 'stop' ? t('Pausing at a safe point: Chiefmate is shutting down')
@@ -313,6 +324,8 @@ export function endLine(step, waitUntil = null) {
 /** The note of a run paused for an update or a power mode, until it resumes. */
 function pausedNote(why) {
   if (why === 'owner') return t('Paused at a safe point while you work on this project. It resumes by itself when your session ends.');
+  if (why === 'park') return t("Parked while it waits for you: its project's turn went to the next run in the queue. It resumes first once you answer.");
+  if (why === 'quarantine') return t('Paused: a file of its working copy was probably quarantined by the antivirus. It resumes by itself once the file can be read again.');
   if (why === 'standby') return t('Paused at a safe point for standby. It resumes by itself when Chiefmate is turned back on.');
   if (why === 'focus') return t('Paused at a safe point by your focus. It resumes by itself when its project is free again.');
   if (why === 'stop') return t('Paused at a safe point because Chiefmate was shut down. It resumes by itself at the next start.');
@@ -322,8 +335,10 @@ function pausedNote(why) {
 /**
  * Whether a run keeps its project's working copy while it is not going on: paused (or back in the queue) in the middle
  * of its work, or with its uncommitted work put aside (run.shelf). No other run of the project prepares the copy then.
+ * A run parked while it waits for the owner (src/needs.mjs) leaves the copy to the project's next run once its work is
+ * committed on its branch (run.parked.committed); it resumes after any run that keeps the copy.
  */
-export const holdsCopy = run => !!run?.prepared && ['queued', 'waiting', 'paused'].includes(run.status) && !!(run.resumeFirst || run.shelf);
+export const holdsCopy = run => !!run?.prepared && ['queued', 'waiting', 'paused'].includes(run.status) && !!(run.shelf || (run.resumeFirst && !run.parked?.committed));
 
 /** The other run of the same project that keeps the working copy (see holdsCopy), or null. */
 export const copyHolder = (run, runs = listRuns()) => runs.find(r => r.id !== run.id && r.project === run.project && holdsCopy(r)) ?? null;
@@ -337,17 +352,44 @@ export function branchNote(fresh, base) {
   return `While this run was paused, ${base} moved on by ${fresh.behind} commit(s). The run's branch had no commits of its own, so Chiefmate moved it to the current ${base} before resuming${fresh.restored ? ' and put your uncommitted work back on top of it' : ''}: the files now include the work merged meanwhile. Check what changed (git log ${fresh.from.slice(0, 7)}..HEAD) before you go on.`;
 }
 
-/** The next turn of a step resumed after an update of Chiefmate, with the owner's messages sent meanwhile. */
-export function updatedTurn(messages, config = loadConfig(), why = 'update', gitRecovery = '') {
+/**
+ * The next turn of a step resumed after an update of Chiefmate (or another pause), with the owner's messages sent
+ * meanwhile. about: what the pause itself left to say (the owner's answer to a parked request, the file restored).
+ */
+export function updatedTurn(messages, config = loadConfig(), why = 'update', gitRecovery = '', about = '') {
+  const owner = config.owner || 'The owner';
   const lines = [
-    why === 'update' ? 'Chiefmate was updated while you were working: your work was paused at a safe point so the new version could be installed, and this session now resumes.'
-      : why === 'owner' ? `${config.owner || 'The owner'} paused your work at a safe point to work on this project themselves, and this session now resumes. They may have changed the project meanwhile: check what changed on the main branch before you go on.`
+    why === 'park' ? `Chiefmate parked your run while it waited for ${owner}, so another run of this project could use its turn. Your uncommitted work was committed on your branch before that, and this session now resumes. ${about}`.trim()
+      : why === 'quarantine' ? `A file you wrote vanished or could not be read right after you wrote it, most likely quarantined by the antivirus${about ? ` (${about})` : ''}. Your work was paused until it could be read again, and this session now resumes. Check that the file is intact (write it again if it is not) before you go on.`
+      : why === 'update' ? 'Chiefmate was updated while you were working: your work was paused at a safe point so the new version could be installed, and this session now resumes.'
+      : why === 'owner' ? `${owner} paused your work at a safe point to work on this project themselves, and this session now resumes. They may have changed the project meanwhile: check what changed on the main branch before you go on.`
       : why === 'focus' ? 'Your project was paused by its owner (or another project was put in focus) while you were working: your work was paused at a safe point, and this session now resumes.'
       : `Chiefmate was ${why === 'standby' ? 'put on standby' : 'shut down'} by its owner while you were working: your work was paused at a safe point, and this session now resumes.`,
-    gitRecovery || 'Continue from where you left off. The branch, the files and this session are as you left them. A command that was still running when you were paused may have been cut off: check its result before you go on.',
+    gitRecovery || (why === 'park'
+      ? 'Meanwhile another run of this project may have used the working copy: your branch and its commits are as you left them. Check with git status and git log before you go on.'
+      : 'Continue from where you left off. The branch, the files and this session are as you left them. A command that was still running when you were paused may have been cut off: check its result before you go on.'),
     "When you finish, your last message is still the step's full report.",
   ];
   return messages.length ? `${lines.join('\n')}\n\n${ownerTurn(messages, config)}` : lines.join('\n');
+}
+
+/** The step's log line for a file the antivirus probably took. */
+const quarantineLine = lost => t('Probable antivirus quarantine: {path} {state} right after it was written. The project waits for it.', {
+  path: lost.file, state: lost.state === 'missing' ? t('vanished') : t('became unreadable'),
+});
+
+/** What a resumed step hears of its pause: the owner's answer to the request it was parked on, or the file restored. */
+export function pauseAbout(run, paused) {
+  if (paused?.why === 'quarantine') return paused.file ? `the file was ${paused.file}` : '';
+  if (paused?.why !== 'park') return '';
+  const request = run.requests?.find(r => r.id === paused.request);
+  if (!request) return '';
+  const what = `"${clip(request.what, 200)}"`;
+  if (request.status === 'open') return `The owner has not answered your request ${what} yet: the run was resumed without it. Go on with what you can and say in your report what is left for the owner.`;
+  if (request.ownerSaid) return `The owner answered your request ${what} in their conversation with the manager, who passed it on: "${request.ownerSaid}". Take it into account and go on.`;
+  if (request.answer || request.note) return `The owner answered your request ${what}: ${[request.answer, request.note].filter(Boolean).join(' — ')}. Take it into account and go on.`;
+  if (request.by === 'check') return `The check of your request ${what} succeeded. Go on.`;
+  return `The owner says they did what you asked: ${what}. Go on.`;
 }
 
 const usageLimits = { five_hour: 'pause_at_5h_window', seven_day: 'pause_at_plan_week' };
@@ -700,7 +742,7 @@ async function signInFirst(l, run, index, tool) {
   });
   logAction(l, { type: 'action', text: t('Waiting for you to sign in to {tool}', { tool: TOOL_NAMES[tool] }) });
   const until = Date.now() + needsSettings().maxWaitMinutes * 60_000;
-  while (Date.now() < until && !l.cancelRequest) {
+  while (Date.now() < until && !l.cancelRequest && !l.pauseRequest) {
     l.heldUntil = Date.now() + 20_000;
     await new Promise(resolve => setTimeout(resolve, 10_000));
     const done = run.requests?.find(r => r.id === request.id)?.status === 'done';
@@ -775,11 +817,21 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     logAction(l, { type: 'action', text: t('{tool} is not signed in on this computer: this step runs on Claude Code', { tool: TOOL_NAMES[choice.tool] }) });
   }
   if (tool !== 'claude' && !(await signInFirst(l, run, index, tool))) {
+    // Parked (or paused) while it waited for the sign-in: the step starts again when the run resumes.
+    if (l.pauseRequest && !l.cancelRequest) {
+      step.status = 'pending';
+      saveRun(run);
+      return { paused: true };
+    }
     Object.assign(step, { status: 'failed', ended: now(), error: l.cancelRequest ?? t('{tool} is not signed in on this computer.', { tool: TOOL_NAMES[tool] }) });
     saveRun(run);
     return {};
   }
 
+  // The files the step writes, and the other actions after them: one gone or unreadable at the end is probably the antivirus's.
+  const writes = [];
+  const commands = [];
+  let seq = 0;
   // Every step keeps its Claude Code session, so a message from the owner can resume it (src/talk.mjs).
   let session = paused ? { id: paused.session, resume: true } : { id: randomUUID() };
   const common = {
@@ -802,6 +854,11 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     isHeld: () => Date.now() < l.heldUntil,
     log: path.join(runDir(run.id), `${name}.jsonl`),
     onEvent: event => {
+      if (event.type === 'action') {
+        seq++;
+        if (event.file) writes.push({ file: path.resolve(dir, event.file), seq });
+        else commands.push({ text: event.text, seq });
+      }
       followContext(l, event);
       logAction(l, event);
       if (event.doing) l.doing = event.doing;
@@ -824,7 +881,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     const messages = pendingTalk(run, index + 1);
     for (const m of messages) Object.assign(m, { status: 'delivered', delivered: now(), via: 'resume' });
     if (messages.length) l.reply = messages.at(-1).id;
-    turn = updatedTurn(messages, config, paused.why ?? 'update', [gitRecovery, freshNote].filter(Boolean).join(' '));
+    turn = updatedTurn(messages, config, paused.why ?? 'update', [gitRecovery, freshNote].filter(Boolean).join(' '), pauseAbout(run, paused));
     addSpeech(run, { step: index + 1, agent: step.agent, by: 'auto', state: 'working', text: t("I'm back from the pause and going on where I stopped.") });
     logAction(l, { type: 'action', text: (paused.why ?? 'update') === 'update' ? t('Chiefmate was updated: the agent goes on in the same session') : t('Back from the pause: the agent goes on in the same session') });
   }
@@ -890,7 +947,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   }
   l.reply = null;
   if (pausedNow) {
-    Object.assign(step, { status: 'pending', paused: { session: r.session ?? l.session ?? session.id, spentMs, total, at: now(), why: l.pauseRequest } });
+    Object.assign(step, { status: 'pending', paused: { session: r.session ?? l.session ?? session.id, spentMs, total, at: now(), why: l.pauseRequest, ...(l.pauseRequest === 'park' ? { request: run.parked?.request ?? null } : {}) } });
     addSpeech(run, { step: index + 1, agent: step.agent, by: 'auto', state: 'waiting', text: pausedLine(l.pauseRequest) });
     logAction(l, { type: 'action', text: l.pauseRequest === 'update' ? t('Paused for the update: the step resumes in the same session afterwards') : t('Paused: the step resumes in the same session afterwards') });
     saveRun(run);
@@ -899,6 +956,18 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   Object.assign(r, total);
 
   const waitUntil = limitHit(r);
+  // A file the step wrote is gone or can't be read: probably quarantined by the antivirus. Nothing is committed (its
+  // absence would be), the project's queue waits, and the step resumes in the same session once the file is back.
+  const quarantined = lost => {
+    logAction(l, { type: 'action', text: quarantineLine(lost) });
+    holdForQuarantine({ project: run.project, file: lost.file, state: lost.state, run: run.id, step: index + 1, agent: step.agent, title: run.title });
+    Object.assign(step, { status: 'pending', ended: null, paused: { session: r.session ?? l.session ?? session.id, spentMs, total, at: now(), why: 'quarantine', file: lost.file } });
+    l.pauseRequest = 'quarantine';
+    saveRun(run);
+    return { paused: true };
+  };
+  const lost = !waitUntil && !l.cancelRequest && !r.canceled ? await lostFile(writtenSuspects(writes, commands, dir)).catch(() => null) : null;
+  if (lost) return quarantined(lost);
   // The final summary at the top of the report is kept apart (step.outcome): the app shows it first, the rest folded.
   const reportLang = finalReview ? project.language || config.language || 'en' : config.language || 'en';
   const { outcome, rest } = parseOutcome(r.text || '', [reportLang, config.language]);
@@ -917,7 +986,15 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   if (before) {
     const dropped = await discardSince(dir, before).catch(e => (step.error = `${step.error ?? ''} Discard: ${e.message}`.trim(), false));
     if (dropped) logAction(l, { type: 'action', text: t('The team lead changed files, which it may not do: the changes were dropped') });
-  } else await commitPending(dir, noTrace(project) ? run.title : `Chiefmate: ${t(agent.name)} (${run.title})`).catch(e => (step.error = `${step.error ?? ''} Commit: ${e.message}`.trim()));
+  } else {
+    // A commit refused over a file the antivirus probably took: the step waits for it, as above.
+    let blocked = null;
+    await commitPending(dir, noTrace(project) ? run.title : `Chiefmate: ${t(agent.name)} (${run.title})`).catch(async e => {
+      blocked = await quarantinedBy(e, dir).catch(() => null);
+      if (!blocked) step.error = `${step.error ?? ''} Commit: ${e.message}`.trim();
+    });
+    if (blocked && !waitUntil) return quarantined(blocked);
+  }
   saveRun(run);
   return { waitUntil };
 }
@@ -1030,8 +1107,9 @@ export async function execute(run) {
   const prLang = project?.language || config.language || 'en';
   if (live.has(run.id)) throw new Error(`Run ${run.id} is already going on.`);
   // A run paused in the middle of its work keeps the working copy: this one waits in the queue (the queue's own check
-  // in pickNext, repeated here).
-  const holder = run.prepared ? null : copyHolder(run);
+  // in pickNext, repeated here). So does a parked run that left the copy to the project's next run (see holdsCopy).
+  const released = !!run.parked?.committed && !run.shelf;
+  const holder = run.prepared && !released ? null : copyHolder(run);
   if (holder) {
     run.note = t('Waits for the paused run {id}, which keeps the working copy.', { id: holder.id });
     saveRun(run);
@@ -1048,15 +1126,28 @@ export async function execute(run) {
   Object.assign(run, { status: 'running', started: run.started ?? now(), notBefore: null, note: null });
   delete run.resumeFirst;
   delete run.limitWait;
+  // Parked until the owner answered (src/needs.mjs): its step knows the request (step.paused.request).
+  delete run.parked;
   saveRun(run);
 
   // Paused for an update of Chiefmate: back to the front of the queue, to resume as soon as the update is over. Always
   // "return await": the run stays in `live` (busy for the update, the power modes and the queue) until its work is put
   // aside and its record saved; a plain "return" would let the finally below drop it from `live` first.
   const pauseForUpdate = async () => {
+    // Parked for the owner's answer (src/needs.mjs): the project's next run takes the working copy, so what the step left
+    // uncommitted goes on its branch now; only then does the run leave the copy (run.parked.committed, see holdsCopy).
+    if (l.pauseRequest === 'park' && run.parked && run.prepared) {
+      try {
+        await commitPending(projectDir(run.project), noTrace(project) ? run.title : `Chiefmate: work in progress (${run.title})`);
+        run.parked.committed = true;
+      } catch (error) {
+        log(t("Couldn't commit the work before parking: {error}", { error: error.message }));
+      }
+    }
     // What the agent had not committed yet is put aside (a stash named after the run), so nothing done in the copy
-    // meanwhile can lose it; it goes back when the run resumes.
-    if (run.prepared && !run.shelf) {
+    // meanwhile can lose it; it goes back when the run resumes. Not for a file the antivirus probably took: the copy
+    // stays as the step left it while the project waits, so the file restored finds the step's work around it.
+    if (run.prepared && !run.shelf && l.pauseRequest !== 'quarantine') {
       try {
         const commit = await shelveWork(projectDir(run.project), run.id);
         if (commit) {
@@ -1067,8 +1158,9 @@ export async function execute(run) {
         log(t("Couldn't put aside the work not committed yet: {error}", { error: error.message }));
       }
     }
-    // Paused for the owner's session: held (not in the queue) while it is open; it goes back to the queue when it ends.
-    const held = l.pauseRequest === 'owner' && l.holdWhile?.() !== false;
+    // Paused for the owner's session (or parked for an answer): held (not in the queue) while it is open (or the request
+    // unanswered); it goes back to the queue when it ends.
+    const held = ['owner', 'park'].includes(l.pauseRequest) && l.holdWhile?.() !== false;
     Object.assign(run, { status: held ? 'paused' : 'queued', resumeFirst: true, note: pausedNote(l.pauseRequest) });
     saveRun(run);
   };
@@ -1122,6 +1214,9 @@ export async function execute(run) {
       const index = steps.findIndex(step => step.status === 'pending' || step.status === 'running');
       const step = steps[index];
       try {
+        // Parked with its work committed: another run of the project may have used the copy meanwhile, and what it left
+        // uncommitted there is not this run's work.
+        if (released) await discardSince(dir, await headCommit(dir));
         await checkoutBranch(dir, run.branch, operation => {
           const text = t('The unfinished Git {operation} was aborted before resuming: the commits are kept.', { operation });
           log(text);
@@ -1292,6 +1387,16 @@ export async function execute(run) {
     if (error?.name === 'AbortError' && l.pauseRequest && !l.cancelRequest) {
       log(t('Preparation stopped for the update: it starts over when the run resumes'));
       return await pauseForUpdate();
+    }
+    // A git step that met a file the antivirus probably took: the run waits in the queue instead of failing.
+    const lost = !l.cancelRequest && project ? await quarantinedBy(error, projectDir(run.project)).catch(() => null) : null;
+    if (lost) {
+      log(quarantineLine(lost));
+      for (const step of stepsOf(run)) if (step.status === 'failed' && step.error === error.message) Object.assign(step, { status: 'pending', ended: null, error: null });
+      holdForQuarantine({ project: run.project, file: lost.file, state: lost.state, run: run.id, title: run.title });
+      Object.assign(run, { status: 'queued', resumeFirst: true, note: pausedNote('quarantine') });
+      saveRun(run);
+      return;
     }
     Object.assign(run, { status: 'failed', ended: now(), result: error.message });
     saveRun(run);
