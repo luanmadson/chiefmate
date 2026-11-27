@@ -89,8 +89,15 @@ const within = (base, next) => {
   return !base || path.isAbsolute(p) ? p : path.join(base, p);
 };
 
-// Chiefmate's own commands that only carry a text to the manager: the text is not run.
-const MESSAGES = [['chat', 'say'], ['defect', 'report']];
+// Chiefmate's own commands whose words are only text (a message, an instruction for the crew, a note, a question): none
+// runs what it is given. needs-you only without --check, which a shell runs.
+const CLI_TEXT = new Set(['chat', 'defect', 'task', 'ask', 'mission', 'plan', 'request', 'ask-owner', 'gap', 'edit', 'guide', 'radar', 'session', 'needs-you']);
+// git's commands whose quoted words are only text (a message): with no option before them but -C <folder>, as a -c
+// could set an alias or an editor that runs a command.
+const GIT_TEXT = new Set(['commit', 'tag', 'notes', 'stash', 'merge']);
+// gh's commands whose quoted words are only text (a title, a body, a search, a query): not alias, config, extension or
+// codespace, which may keep or run a command.
+const GH_TEXT = new Set(['issue', 'pr', 'repo', 'api', 'search', 'run', 'workflow', 'release', 'label', 'status']);
 
 // A command that bash, PowerShell (Codex's shell on Windows) and tokens() all read as the same words, with nothing run
 // but its program: plain characters and spaces, or quoted text with nothing inside that one of them expands or reads
@@ -98,11 +105,27 @@ const MESSAGES = [['chat', 'say'], ['defect', 'report']];
 // quotes, no $'...'.
 const PLAIN_WORDS = /^(?:[\w./:=@,+ \t-]|'[^'\u2018-\u201f]*'|"(?:[^"\\$`\u2018-\u201f]|\\[^"\\$`\s\u2018-\u201f])*")*\s*$/;
 
-/** Whether the whole command is "node .../cli.mjs chat say <text>" (or defect report), alone and in plain words. */
-function isMessage(command) {
+/**
+ * Whether the quoted words of the whole command are only text for its program, never run: one command in plain words
+ * (PLAIN_WORDS), with nothing before its program, of Chiefmate's command line (CLI_TEXT: node .../cli.mjs task ...
+ * "<instruction>"), of git (GIT_TEXT: git commit -m "...") or of gh (GH_TEXT: gh issue create --body "...").
+ */
+function onlyText(command) {
   const words = tokens(command);
-  return !words.includes('|') && programName(words[0] ?? '') === 'node' && programName(words[1] ?? '') === 'cli.mjs'
-    && MESSAGES.some(([a, b]) => words[2] === a && words[3] === b) && PLAIN_WORDS.test(String(command));
+  if (words.includes('|') || !PLAIN_WORDS.test(String(command))) return false;
+  const { program, args, at } = programOf(words);
+  if (at !== 0) return false;
+  if (program === 'node') return programName(args[0] ?? '') === 'cli.mjs' && CLI_TEXT.has(args[1]) && !args.includes('--check');
+  let i = 0;
+  if (program === 'git') {
+    while (args[i] === '-C' && i + 1 < args.length) i += 2;
+    return GIT_TEXT.has(args[i]);
+  }
+  if (program === 'gh') {
+    while ((args[i] === '-R' || args[i] === '--repo') && i + 1 < args.length) i += 2;
+    return GH_TEXT.has(args[i]);
+  }
+  return false;
 }
 
 /** Where a simple command writes its standard output: the last file it is redirected to, or null (a stream, none). */
@@ -273,14 +296,15 @@ function withoutWrittenText(command) {
 /**
  * What a shell command would publish: [{ rule, part, dir }], one per finding. part: the command found, written plainly
  * ("git push origin main", with git's options before "push" taken out); dir: the folder it would run in, when the
- * command says (git -C, or a cd before it), relative to the folder of the session. The text of a message to the
- * manager (node .../cli.mjs chat say "...", when that is the whole command, in plain words) is not run, so it is not
- * looked at, nor the texts of heredocs written into files by a command that does nothing else (withoutWrittenText),
- * judged on the whole command only: inside "bash -c" the rest of the line could run the file.
+ * command says (git -C, or a cd before it), relative to the folder of the session. The quoted text of a command that
+ * only reads it as text (onlyText: a message or an instruction for Chiefmate's command line, a commit message, an
+ * issue's body), when that is the whole command, in plain words, is not run, so it is not looked at as a command, nor
+ * are the texts of heredocs written into files by a command that does nothing else (withoutWrittenText), judged on the
+ * whole command only: inside "bash -c" the rest of the line could run the file.
  */
 export function publishing(command, depth = 0) {
   const found = [];
-  if (depth > 4 || (depth === 0 && isMessage(command))) return found;
+  if (depth > 4) return found;
   const all = tokens(depth === 0 ? withoutWrittenText(command) : command);
   const commands = [];
   for (let i = 0, start = 0; i <= all.length; i++) {
@@ -289,11 +313,12 @@ export function publishing(command, depth = 0) {
       start = i + 1;
     }
   }
+  const text = depth === 0 && onlyText(command);
   let cd = null;
   const at = f => (cd ? { ...f, dir: within(cd, f.dir ?? '.') } : f);
   for (const words of commands) {
     // A quoted word with a command in it (bash -c "...", cmd /c "...", eval "..."): looked at as a command too.
-    for (const w of words) if (/\s/.test(w)) found.push(...publishing(w, depth + 1).map(at));
+    if (!text) for (const w of words) if (/\s/.test(w)) found.push(...publishing(w, depth + 1).map(at));
     if (CD.has(programName(words[0]))) {
       const to = words.slice(1).find(w => !w.startsWith('-'));
       if (to) cd = within(cd, to);
@@ -305,7 +330,8 @@ export function publishing(command, depth = 0) {
   return found.filter(f => !seen.has(`${f.rule} ${f.part}`) && seen.add(`${f.rule} ${f.part}`));
 }
 
-function inCommand(words, depth) {
+/** A command's program and its arguments: { program, args, at }, with variables (A=1) and wrappers (env, sudo...) taken off; at: where the program is. */
+function programOf(words) {
   let i = 0;
   // Variables set for the command (A=1 git push) and wrappers (env, sudo, xargs...), with their options.
   for (;;) {
@@ -318,9 +344,12 @@ function inCommand(words, depth) {
     }
     break;
   }
-  if (i >= words.length) return [];
-  const program = programName(words[i]);
-  const args = words.slice(i + 1);
+  return i >= words.length ? { program: null, args: [], at: i } : { program: programName(words[i]), args: words.slice(i + 1), at: i };
+}
+
+function inCommand(words, depth) {
+  const { program, args, at: i } = programOf(words);
+  if (!program) return [];
   if (SHELLS.has(program)) {
     // pwsh -Command git push, bash -c git push: the rest is the command.
     const at = args.findIndex(a => /^(-c|-lc|-ic|-command|\/c|\/k|-e|--exec|--)$/i.test(a));

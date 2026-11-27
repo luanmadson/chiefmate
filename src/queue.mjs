@@ -2,7 +2,7 @@
 // project, one run at a time, in the order requested. This is what keeps agents from setting off other agents.
 import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
-import { activeRun, cancelLive, doingNow, execute, holdsCopy, limitWaitCleared, live, liveRuns } from './runs.mjs';
+import { activeRun, cancelLive, doingNow, editRun, execute, holdsCopy, limitWaitCleared, live, liveRuns } from './runs.mjs';
 import { held } from './power.mjs';
 import { listRuns, readRun, readUsage, saveRun, stepsOf } from './store.mjs';
 import { isLocked } from './lockdown.mjs';
@@ -35,10 +35,64 @@ function recoverInterrupted() {
 export function queued(runs = listRuns()) {
   return runs
     .filter(r => r.status === 'queued' || r.status === 'waiting')
-    .sort((a, b) => (b.resumeFirst ? 1 : 0) - (a.resumeFirst ? 1 : 0) || a.created.localeCompare(b.created));
+    .sort((a, b) => (b.resumeFirst ? 1 : 0) - (a.resumeFirst ? 1 : 0) || rankOf(a) - rankOf(b) || a.created.localeCompare(b.created));
 }
 
-const ready = (run, at = Date.now()) => !run.notBefore || new Date(run.notBefore).getTime() <= at;
+// A run's place in the queue: the one the manager gave it (queue move), else its creation time, so new runs go last.
+const rankOf = run => (Number.isFinite(run.rank) ? run.rank : Date.parse(run.created) || 0);
+
+// A run on hold keeps its place but does not start until it is released (queue hold / release).
+const ready = (run, at = Date.now()) => !run.onHold && (!run.notBefore || new Date(run.notBefore).getTime() <= at);
+
+/** A run of the queue, for changing it: refused when it is not there, or already starting. */
+function inQueue(id) {
+  const run = readRun(String(id ?? ''));
+  if (!run) throw new Error(t('Run not found.'));
+  if (!['queued', 'waiting'].includes(run.status) || live.has(run.id) || starting.has(run.id)) {
+    throw new Error(t('This run is not waiting in the queue (it is {status}).', { status: live.has(run.id) || starting.has(run.id) ? 'running' : run.status }));
+  }
+  return run;
+}
+
+/**
+ * Moves a run in the queue: before another one ("before"), or to the top. The runs keep the order given from then
+ * on (new ones go last); one per project still runs at a time. Returns the queue, in order.
+ */
+export function moveInQueue(id, { before = null, top = false } = {}) {
+  const run = inQueue(id);
+  const order = queued().filter(r => r.id !== run.id);
+  let at = 0;
+  if (!top) {
+    if (!before) throw new Error(t('Say where: --before <run> or --top.'));
+    at = order.findIndex(r => r.id === String(before));
+    if (at < 0) throw new Error(t('{id} is not in the queue.', { id: String(before) }));
+  }
+  order.splice(at, 0, run);
+  // The runs paused for an update still go first (resumeFirst): they hold a working copy as their step left it.
+  order.forEach((r, i) => {
+    if (r.rank === i) return;
+    r.rank = i;
+    saveRun(r);
+  });
+  nudgeQueue();
+  return queued();
+}
+
+/** Holds a run of the queue without canceling it (hold true), or lets it go again (false). Returns the run. */
+export function holdRun(id, hold = true, by = 'manager') {
+  const run = inQueue(id);
+  if (hold) run.onHold = { at: now(), by };
+  else delete run.onHold;
+  saveRun(run);
+  if (!hold) nudgeQueue();
+  return run;
+}
+
+/** Changes a run still in the queue (src/runs.mjs, editRun), never one starting now. */
+export function editQueued(id, changes, options) {
+  inQueue(id);
+  return editRun(id, changes, options);
+}
 
 /**
  * Which runs of the queue start now: the oldest ready run of each project that has nothing going on, while there is
@@ -96,18 +150,22 @@ export function focus(config = loadConfig()) {
     .filter(Boolean);
   if (running.length) return { ...running[0], others: running.slice(1) };
   // a run of a project the owner's focus holds (src/steer.mjs) is never next: it waits for the focus to end; nor one
-  // that waits for a paused run of its project (copyHolders)
+  // that waits for a paused run of its project (copyHolders), nor one the manager holds (queue hold)
   const steer = readSteer();
   const runs = listRuns();
   const holders = copyHolders(runs);
-  const queue = queued(runs).filter(r => !holdReason(r.project, steer) && !waitsForCopy(r, holders));
+  const queue = queued(runs).filter(r => !r.onHold && !holdReason(r.project, steer) && !waitsForCopy(r, holders));
   const next = queue.find(r => ready(r)) ?? [...queue].sort((a, b) => a.notBefore.localeCompare(b.notBefore))[0];
   if (!next) return null;
   const agent = stepsOf(next).find(s => s.status === 'pending')?.agent ?? null;
   return { state: 'next', ...about(next), agent, status: next.status, notBefore: next.notBefore ?? null, others: [] };
 }
 
+// Only the process that started the queue (the server) runs it: never a command line, nor the smoke test's server.
+let queueStarted = false;
+
 function tick() {
+  if (!queueStarted) return;
   // While an update of Chiefmate is being installed, on standby or while Chiefmate stops, nothing starts: the queue
   // goes on after it. Nor in an emergency lockdown (src/lockdown.mjs), until the owner releases it.
   if (updating() || held() || isLocked()) return;
@@ -152,7 +210,10 @@ export const nudgeQueue = () => {
   }
 };
 
-export function startQueue() {
+/** Runs the queue in this process (the server's start). timer: false (tests) only lets nudgeQueue run it. */
+export function startQueue({ timer = true } = {}) {
+  queueStarted = true;
+  if (!timer) return;
   recoverInterrupted();
   setInterval(nudgeQueue, 5000);
   nudgeQueue();

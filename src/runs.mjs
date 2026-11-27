@@ -252,6 +252,107 @@ export function setRunLevel(id, value) {
   return run;
 }
 
+/** A member of the project's crew who may take a step: not the manager, and the team lead only for its own steps. */
+function stepAgent(run, step, agent, config) {
+  const id = String(agent ?? '').trim();
+  const crew = projectCrew(config, run.project);
+  if (!crew[id] || id === 'manager') throw new Error(t('{agent} is not in the crew of {project}.', { agent: id, project: run.project }));
+  if ((id === LEAD) !== (step.agent === LEAD)) throw new Error(t("The team lead's steps stay the team lead's: choose another member of the crew."));
+  return id;
+}
+
+/**
+ * Changes a run before it starts (queued, or waiting for the account's limit): { append (more instructions, added to
+ * every step's part), title, summary, agent (of its crew steps still to do, not the team lead's), tool (claude, codex
+ * or grok; "" for each member's own), level }. Returns the run.
+ */
+export function editRun(id, { append, title, summary, agent, tool, level } = {}, { by = 'manager', config = loadConfig() } = {}) {
+  const run = readRun(String(id ?? ''));
+  if (!run) throw new Error(t('Run not found.'));
+  if (live.has(run.id) || !['queued', 'waiting'].includes(run.status)) throw new Error(t('Only a run still in the queue can be changed (this one is {status}). To redo a step of a run that ended, use retry.', { status: run.status }));
+  const changes = [];
+  if (append != null && String(append).trim()) {
+    (run.additions ??= []).push({ at: now(), by, text: clip(String(append).trim(), 4000) });
+    changes.push('instruction');
+  }
+  const brief = { ...(run.briefBy ?? {}) };
+  if (title != null && String(title).trim()) {
+    run.title = clip(String(title).trim(), 80);
+    brief.title = 'given';
+    changes.push('title');
+  }
+  if (summary != null && String(summary).trim()) {
+    run.summary = clip(String(summary).trim(), 400);
+    brief.summary = 'given';
+    changes.push('summary');
+  }
+  if (agent != null) {
+    const todo = run.steps.filter(s => s.status === 'pending' && s.agent !== LEAD);
+    if (!todo.length) throw new Error(t('This run has no crew step to change the agent of: its team lead plans the tasks.'));
+    // Steps of different members are never all given to one: one of them changes with retry --step.
+    const members = [...new Set(todo.map(s => s.agent))];
+    if (members.length > 1) throw new Error(t('Its steps are for different members ({agents}): change one with retry <run> --step <n> --agent <member>.', { agents: members.join(', ') }));
+    for (const s of todo) s.agent = stepAgent(run, s, agent, config);
+    changes.push('agent');
+  }
+  if (tool != null) {
+    const chosen = parseTool(tool);
+    if (chosen) run.tool = chosen;
+    else delete run.tool;
+    for (const s of run.steps) delete s.toolAsked; // the run's choice covers every step now
+    changes.push('tool');
+  }
+  if (level != null) {
+    run.level = parseLevel(level);
+    changes.push('level');
+  }
+  if (!changes.length) throw new Error(t('Nothing to change: give --instruction-append, --title, --summary, --agent, --tool or --level.'));
+  run.briefBy = brief;
+  (run.edits ??= []).push({ at: now(), by, changes });
+  // A title or summary still being generated keeps what was given here.
+  described.set(run.id, { ...described.get(run.id), title: run.title, summary: run.summary, briefBy: run.briefBy, level: run.level });
+  saveRun(run);
+  return run;
+}
+
+/**
+ * Redoes one step of a run that stopped (failed, canceled or paused), or of one still waiting: step (from 1; by default
+ * the first one not done), with another agent or tool if given. The step and the ones after it that did not finish
+ * run again, and so do the reviews after it (the team lead's and the final one), even when done: the work they judged
+ * changes. The other steps done stay done. Returns the run, queued again.
+ */
+export function retryRun(id, { step, agent, tool } = {}, { by = 'manager', config = loadConfig() } = {}) {
+  const run = readRun(String(id ?? ''));
+  if (!run) throw new Error(t('Run not found.'));
+  if (live.has(run.id)) throw new Error(t('This run is going on: guide its agent instead, or cancel it first.'));
+  if (!['failed', 'canceled', 'paused', 'queued', 'waiting'].includes(run.status)) {
+    throw new Error(t('Only a run that failed, was canceled or paused (or still waits) can redo a step (this one is {status}): queue a new task instead.', { status: run.status }));
+  }
+  const steps = run.steps;
+  const left = steps.findIndex(s => s.status !== 'done');
+  const asked = step != null && step !== '';
+  // Every step done: the run stopped at its review, checks or delivery, which resume does again.
+  if (!asked && left < 0) throw new Error(t('Every step of this run is done: resume it to redo what stopped after them, or choose a step with --step.'));
+  const n = asked ? Number(step) : left + 1;
+  const target = steps[n - 1];
+  if (!Number.isInteger(n) || !target) throw new Error(t('Step {n} does not exist: this run has {count} step(s).', { n: step ?? '-', count: steps.length }));
+  if (agent != null && String(agent).trim()) target.agent = stepAgent(run, target, agent, config);
+  if (tool != null) {
+    const chosen = parseTool(tool);
+    if (chosen) target.toolAsked = chosen;
+    else delete target.toolAsked;
+  }
+  const reviewsAfter = steps.slice(n).filter(s => s.agent === LEAD && s.role === 'review');
+  for (const s of new Set([target, ...steps.slice(n).filter(s => s.status !== 'done'), ...reviewsAfter, ...(run.review ? [run.review] : [])])) {
+    s.status = 'pending';
+    delete s.paused;
+  }
+  (run.retries ??= []).push({ at: now(), by, step: n, agent: target.agent, ...(target.toolAsked ? { tool: target.toolAsked } : {}) });
+  Object.assign(run, { status: 'queued', notBefore: null, note: t('Step {n} runs again ({agent}).', { n, agent: target.agent }), ended: null });
+  saveRun(run);
+  return run;
+}
+
 /** Cancels a run going on: its agent stops now, and the run ends as canceled. Returns false when it is not going on. */
 export function cancelLive(id, reason) {
   const l = live.get(id);
@@ -477,6 +578,8 @@ export function promptParts({ run, step, project, previous, finalReview, changes
     finalReview ? '## What to do in this review' : step.agent === LEAD && step.role === 'plan' ? '## The request to plan' : '## Your part',
     step.part,
   ]);
+  // What the manager added to the run's instructions while it was in the queue (cli.mjs edit --instruction-append).
+  if (run.additions?.length) add('additions', 'Chiefmate (cli.mjs edit)', ['', '## Added by the manager before the run started', ...run.additions.map(a => a.text)]);
   // In a project with a team lead: the lead gets its memory and how to plan or review; the crew, the memory to read.
   const lead = agents?.[LEAD] ?? null;
   const memorySource = `data/projects/${run.project}/memory.md`;
