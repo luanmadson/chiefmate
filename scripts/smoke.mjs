@@ -2228,7 +2228,13 @@ try {
     'git push --force origin feature': 'forced', 'git push origin +feature': 'forced', 'git push --force-with-lease origin feature': 'forced',
     'git push --mirror origin': 'forced', 'git push --delete origin feature': 'forced', 'git push origin :feature': 'forced', 'git push -fu origin feature': 'forced',
     'git push origin main': 'main', 'git push origin HEAD:master': 'main', 'git push origin refs/heads/main': 'main',
-    'git push': 'shape', 'git push origin': 'shape', 'cd x && git push origin feature': 'shape', 'git -c a=b push origin feature': 'shape',
+    'git push -u origin feature 2>&1': 'ok', 'cd x && git push --set-upstream origin feature 2>/dev/null': 'ok', 'git push -u origin main 2>&1': 'main', 'git push -f origin feature 2>&1': 'forced',
+    'git push': 'shape', 'git push origin': 'shape', 'cd x; git push origin feature': 'shape', 'cd x | git push origin feature': 'shape', 'git -c a=b push origin feature': 'shape',
+    'git push origin feature > out.txt': 'shape', 'git push origin feature 2>&1 | tail': 'shape', 'cd $X && git push origin feature': 'shape',
+    // Redirections count only unquoted at the end: a quoted "2>&1" or ">" is one more branch for git. A backquote runs a
+    // command for the folder.
+    'git push origin feature "2>&1"': 'shape', "git push origin feature '>' nul": 'shape', 'git push 2>&1 origin feature': 'shape',
+    'git -C "`echo x`" push origin feature': 'shape', 'cd "`echo x`" && git push origin feature': 'shape',
     'git push origin $B': 'shape', 'git push --tags origin feature': 'shape', 'git push origin a b': 'shape', 'bash -c "git push origin feature"': 'shape',
   };
   const misjudged = Object.entries(kinds).filter(([c, k]) => (plainPush(c, repo).branch ? 'ok' : plainPush(c, repo).refused) !== k);
@@ -2256,8 +2262,11 @@ try {
   const other = path.join(pushDir, 'other');
   expect(!goes('git push origin other') && !goes('git push origin feature', other) && !goes('git push --force origin feature') && !goes('git push origin HEAD:feature'),
     'an allowed push let another branch, folder, source or a forced push through');
-  expect(goes('git push origin feature') && readPushes(pushesFile()).find(p => p.id === card.push)?.status === 'used' && !goes('git push origin feature'),
-    'the allowed push did not go once, or was not used up');
+  expect(!goes('git push -u local feature 2>&1') && !goes('git push -u origin main 2>&1') && !goes('git push -f origin feature 2>&1'),
+    'an allowed push let another remote, the main branch or a forced push through when written with -u or 2>&1');
+  // The same push written another way (-u, its messages redirected, a cd before it) is the push the owner allowed.
+  expect(goes(`cd ${JSON.stringify(repo)} && git push -u origin feature 2>&1`, pushDir) && readPushes(pushesFile()).find(p => p.id === card.push)?.status === 'used' && !goes('git push origin feature'),
+    'the allowed push did not go once in an equivalent form, or was not used up');
   // A grant for the main branch, or expired, lets nothing through; a refusal is recorded.
   const later = new Date(Date.now() + 600_000).toISOString();
   writeFileSync(pushesFile(), JSON.stringify([...readPushes(pushesFile()),
@@ -2503,6 +2512,17 @@ try {
       'gh api repos/a/b/pulls -f title=T': 'gh api', 'gh api -X POST repos/a/b/pulls': 'gh api', 'curl -X POST https://api.github.com/repos/a/b/pulls -d @pr.json': 'gh api',
       'git -C x remote set-url origin u': 'git remote', 'gh pr create --fill': 'gh pr',
       'git status && git log': '', 'git commit -m "explain git push"': '', 'gh api repos/a/b/pulls': '', 'curl https://api.github.com/repos/a/b': '',
+      // Only reading the remote or GitHub, and a message to the manager that only quotes a command, publish nothing.
+      'git remote -v': '', 'git -C x remote get-url origin': '', 'git remote show origin': '', 'echo "git remote -v"': '', 'gh pr list': '', 'gh pr -R a/b view 3': '', 'gh issue list': '', 'gh repo view': '',
+      'node src/cli.mjs chat say "Refused: git push -u origin x 2>&1; git remote add y z"': '', "node src/cli.mjs chat say 'run `git push origin x`'": '',
+      'node src/cli.mjs chat say "$(git push origin x)"': 'git push', 'node src/cli.mjs chat say "`git push origin x`"': 'git push', 'node src/cli.mjs chat say hi && git push origin x': 'git push',
+      'node C:/x/src/cli.mjs defect report "Refused: git push origin x; gh pr create.\nExpected: C:\\Users ok"': '',
+      // A message that bash or PowerShell would read another way (an escaped quote, $'...', a comment, $(...) after a
+      // backslash, curly quotes) is looked at whole: what runs after it is found.
+      'node src/cli.mjs chat say "x\\" "; git push origin x': 'git push', "node src/cli.mjs chat say $'x\\' '; git push origin x": 'git push',
+      'node src/cli.mjs chat say hi #"\ngit push origin x\n"': 'git push', 'node src/cli.mjs chat say "\\$(git push origin x)"': 'git push',
+      'node src/cli.mjs chat say "a\u201c; git push origin x;\u201d"': 'git push',
+      'git remote add y z': 'git remote', 'gh pr merge 3': 'gh pr',
     };
     const misread = Object.entries(guarded).filter(([c, r]) => rules(c) !== r);
     expect(!misread.length, `the guard misreads what a command publishes: ${misread.map(([c]) => `${c} -> ${rules(c) || '(nothing)'}`).join('; ')}`);
@@ -3425,6 +3445,8 @@ try {
   const hook = hookFor(['Bash(git push:*)'], path.join(temp, 'guard.jsonl'));
   const denies = (command, { cwd = temp, h = hook } = {}) => /"permissionDecision":"deny"/.test(execFileSync(h, { shell: true, encoding: 'utf8', cwd, input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', cwd, tool_input: { command } }) }));
   expect(denies('git push origin main') && denies('git push') && denies('git push --force origin feature') && !denies('git push origin feature/menu'), 'a "Work now" session may push to the main branch, or may not push a branch of the work once allowed');
+  expect(!denies('git push -u origin feature/menu 2>&1') && denies('git push -u origin main 2>&1') && denies('git push -f origin feature/menu 2>&1'),
+    'a "Work now" session may not push its branch with -u and 2>&1 once allowed, or may push the main branch or force that way');
   const repo = path.join(temp, 'repo');
   execFileSync('git', ['init', '-q', repo], { windowsHide: true });
   execFileSync('git', ['-C', repo, 'symbolic-ref', 'HEAD', 'refs/heads/main'], { windowsHide: true });

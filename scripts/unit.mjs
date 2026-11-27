@@ -13,7 +13,7 @@ import { readFeed } from '../src/claude.mjs';
 import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
-import { riskyCommand } from '../src/guard.mjs';
+import { plainPush, publishing, riskyCommand } from '../src/guard.mjs';
 import { checkSignals, engage, isLocked, readLockdown, recordSignal, refuseWhileLocked, release, RULES, weigh, WINDOW_MINUTES } from '../src/lockdown.mjs';
 import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
@@ -852,6 +852,21 @@ test("The lockdown's detection in a shell command: protected folders and deletio
     assert.deepEqual(kinds(`rm -rf ${bash(path.join(home, 'Documents'))}`), ['wide_delete']);
     assert.deepEqual(kinds(`rm -rf ${bash(path.join(tmp, 'scratch'))}`), []);
   }
+});
+
+test("A push's folder is the command's own (a cd before it, git -C), so its card names the right repository", () => {
+  const dirOf = command => publishing(command)[0]?.dir ?? null;
+  const other = path.join(temp, 'acervo');
+  assert.equal(path.resolve(dirOf(`cd "${other}" && git push origin main`)), other);
+  assert.equal(path.resolve(temp, dirOf('cd sub && git -C inner push origin x')), path.join(temp, 'sub', 'inner'));
+  assert.equal(dirOf('git push origin x'), null);
+  if (process.platform === 'win32') assert.equal(path.resolve(dirOf('cd /c/Users/x && git push origin y')), path.resolve('C:/Users/x'));
+  // The same push however it is written, the same folder; never the main branch, never forced.
+  const target = plainPush('git push origin feature', temp);
+  assert.deepEqual(plainPush('git push -u origin feature 2>&1', temp), target);
+  assert.deepEqual(plainPush(`cd "${temp}" && git push --set-upstream origin feature >/dev/null 2>&1`, os.tmpdir()), target);
+  assert.equal(plainPush('git push -u origin main 2>&1', temp).refused, 'main');
+  assert.equal(plainPush('git push --force-with-lease origin feature 2>&1', temp).refused, 'forced');
 });
 
 test('effort: each level from its place, the project only, the history and the run report', () => {
