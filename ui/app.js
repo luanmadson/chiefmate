@@ -3,6 +3,7 @@ import { offered, onThisComputer } from './afar.js';
 import { face } from './faces.js';
 import { language, locale, setLanguage, t, translatePage } from './i18n.js';
 import { Dictation, recognizer } from './voice.js';
+import { asksHtml, keepFolds, newFolds, toggleFold } from './asks.js';
 
 const $ = selector => document.querySelector(selector);
 let state = null;
@@ -1845,6 +1846,11 @@ function liveFeedHtml(x) {
   return html;
 }
 
+// The folds of the band of what the session asks (ui/asks.js), kept while its conversation is shown.
+let askFolds = newFolds(null);
+const askFacts = r => (r.explain ? permissionFacts(r.explain, r.id)
+  : `<span class="ask-full">${esc(t('The agent asks to: {what}', { what: r.what }))}</span><span class="hint">${esc(t('Allowed, it is told to go ahead; the permission lasts for this session.'))}</span>`);
+
 function drawLive() {
   const d = liveChat.data;
   if (!liveChat.id) return;
@@ -1880,12 +1886,11 @@ function drawLive() {
     }
   }
 
-  // What the agent asks of you: each permission, with Allow and Refuse.
-  const asks = (d?.requests ?? []).filter(r => r.kind === 'permission').map(r => `<div class="needs live-ask" role="alert">
-      <div class="needs-text"><span class="needs-label">${esc(t('Needs you'))}</span>${r.explain ? `<strong class="perm-what">${esc(r.explain.summary)}</strong>${permissionFacts(r.explain, r.id)}` : `${esc(t('The agent asks to: {what}', { what: r.what }))}<span class="hint">${esc(t('Allowed, it is told to go ahead; the permission lasts for this session.'))}</span>`}</div>
-      <span class="compose-buttons"><button type="button" class="button secondary small" data-live-refuse="${esc(r.id)}">${esc(t('Refuse'))}</button><button type="button" class="button small" data-live-allow="${esc(r.id)}">${esc(t('Allow'))}</button></span>
-    </div>`).join('');
-  draw('#live-asks', JSON.stringify([x.id, d?.requests ?? [], language()]), asks);
+  // What the agent asks of you: a compact band (ui/asks.js), each permission with Allow and Refuse.
+  const asks = (d?.requests ?? []).filter(r => r.kind === 'permission');
+  if (askFolds.session !== x.id) askFolds = newFolds(x.id);
+  askFolds = keepFolds(askFolds, asks);
+  draw('#live-asks', JSON.stringify([x.id, asks, askFolds, language()]), asksHtml(asks, askFolds, { t, esc, facts: askFacts }));
 
   const queue = d?.queue ?? [];
   $('#live-queue').hidden = !queue.length;
@@ -4663,6 +4668,14 @@ $('#live-interrupt').addEventListener('click', async () => {
   }
 });
 $('#live-body').addEventListener('click', async event => {
+  // The band of asks: the group or an ask's details fold and unfold; the focus stays on the toggle drawn again.
+  const fold = event.target.closest('[data-ask-fold]')?.dataset.askFold;
+  if (fold) {
+    askFolds = toggleFold(askFolds, fold);
+    drawLive();
+    [...$('#live-asks').querySelectorAll('[data-ask-fold]')].find(b => b.dataset.askFold === fold)?.focus();
+    return;
+  }
   const target = event.target.closest('[data-live-resume],[data-live-allow],[data-live-refuse],[data-live-unqueue]');
   if (!target || !liveChat.id) return;
   target.disabled = true;

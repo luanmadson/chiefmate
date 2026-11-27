@@ -1,6 +1,7 @@
 // Unit tests with no dependency (node:test): the file viewer's checks of paths, its choice among a project's copies and
 // its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation;
-// the emergency lockdown and its detection; each agent's effort; the redacted backup of the settings.
+// the band of what a live session asks; the emergency lockdown and its detection; each agent's effort; the redacted
+// backup of the settings.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -29,6 +30,7 @@ import { SAMPLE_CSV, sampleXlsx, zip } from './fixtures.mjs';
 import { compose, Dictation, nextState, recognizer, transcript } from '../ui/voice.js';
 import './away-ui.test.mjs';
 import { AFAR_VERSION, offered, ONLY_ON_PC } from '../ui/afar.js';
+import { asksHtml, asksLayout, GROUP_FROM, keepFolds, newFolds, toggleFold } from '../ui/asks.js';
 import { devLog, startDev } from '../src/projects.mjs';
 import { fromAfar } from '../src/server.mjs';
 
@@ -740,6 +742,71 @@ test("A process's start, as Windows PowerShell writes it", () => {
   assert.equal(startedAt({ value: '/Date(0)/' }), new Date(0).toISOString());
   assert.equal(startedAt(null), null);
   assert.equal(startedAt('nonsense'), null);
+});
+
+// ---------- What a live session asks (ui/asks.js): the compact band, its group and its folds ----------
+
+const askUi = {
+  t: (text, values = {}) => text.replace(/\{(\w+)\}/g, (_, k) => values[k]),
+  esc: s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'),
+  facts: a => `<p class="facts-of-${a.id}">${a.what}</p>`,
+};
+const ask = (id, summary) => ({ id, kind: 'permission', what: `run ${id}`, ...(summary ? { explain: { summary } } : {}) });
+const toggles = html => [...html.matchAll(/data-ask-fold="([^"]+)" aria-expanded="(true|false)"/g)].map(m => [m[1], m[2] === 'true']);
+
+test('Asks band: one ask is one line, its details folded until opened and folded again', () => {
+  const one = [ask('a1', 'Delete the build folder')];
+  let folds = newFolds('s1');
+  let html = asksHtml(one, folds, askUi);
+  assert.equal(asksLayout(one, folds).grouped, false);
+  assert.match(html, /Needs you/);
+  assert.match(html, /Delete the build folder/);
+  assert.match(html, /data-live-allow="a1"/);
+  assert.match(html, /data-live-refuse="a1"/);
+  assert.deepEqual(toggles(html), [['a1', false]]);
+  assert.doesNotMatch(html, /facts-of-a1/);
+  folds = toggleFold(folds, 'a1');
+  html = asksHtml(one, folds, askUi);
+  assert.deepEqual(toggles(html), [['a1', true]]);
+  assert.match(html, /<div class="ask-details" id="ask-a1"><p class="facts-of-a1">/);
+  folds = toggleFold(folds, 'a1');
+  assert.deepEqual(toggles(asksHtml(one, folds, askUi)), [['a1', false]]);
+  assert.equal(asksHtml([], folds, askUi), '');
+});
+
+test('Asks band: from two asks, one line with their number, unfolded into the lines and folded back', () => {
+  const two = [ask('a1', 'Delete the build folder'), ask('a2')];
+  let folds = newFolds('s1');
+  let html = asksHtml(two, folds, askUi);
+  assert.equal(GROUP_FROM, 2);
+  assert.deepEqual(asksLayout(two, folds), { grouped: true, expanded: false, count: 2, rows: [] });
+  assert.match(html, /2 permissions asked/);
+  assert.deepEqual(toggles(html), [['band', false]]);
+  assert.doesNotMatch(html, /data-live-allow/);
+  folds = toggleFold(folds, 'band');
+  html = asksHtml(two, folds, askUi);
+  assert.deepEqual(toggles(html), [['band', true], ['a1', false], ['a2', false]]);
+  assert.match(html, /The agent asks to: run a2/);
+  assert.equal((html.match(/data-live-allow=/g) ?? []).length, 2);
+  assert.equal((html.match(/Needs you/g) ?? []).length, 1, 'the label shows once, on the group line');
+  folds = toggleFold(folds, 'a2');
+  assert.deepEqual(toggles(asksHtml(two, folds, askUi)), [['band', true], ['a1', false], ['a2', true]]);
+  folds = toggleFold(folds, 'band');
+  html = asksHtml(two, folds, askUi);
+  assert.deepEqual(toggles(html), [['band', false]]);
+  assert.doesNotMatch(html, /facts-of-a2/);
+});
+
+test("Asks band: the folds don't change in place, and what was answered is forgotten", () => {
+  const folds = newFolds('s1');
+  const opened = toggleFold(toggleFold(folds, 'a1'), 'a2');
+  assert.deepEqual(folds, { session: 's1', band: false, open: [] });
+  assert.deepEqual(opened.open, ['a1', 'a2']);
+  assert.deepEqual(keepFolds(opened, [ask('a2')]).open, ['a2']);
+  const group = toggleFold(folds, 'band');
+  assert.equal(keepFolds(group, [ask('a1')]).band, true, 'the group stays open while asks remain');
+  assert.equal(keepFolds(group, []).band, false, 'once all are answered, the next ones come folded');
+  assert.match(asksHtml([ask('<x>', 'a "quoted" <b>')], folds, askUi), /data-ask-fold="&lt;x>"[^]*a &quot;quoted&quot; &lt;b>/);
 });
 
 // ---------- The emergency lockdown (src/lockdown.mjs): made-up signals and made-up actions, nothing stopped for real ----------

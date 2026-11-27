@@ -116,7 +116,7 @@ try {
     expect(state.crew?.some(a => a.id === 'manager'), 'the crew has no manager');
     const context = state.manager?.context;
     expect(typeof context?.renewAt === 'number' && typeof context.renewing === 'boolean', "/api/state has no context for the manager's conversation");
-    for (const file of ['/', '/app.js', '/faces.js', '/i18n.js', '/style.css', '/manifest.webmanifest', '/locales/pt-BR.json', '/icon-32.png']) {
+    for (const file of ['/', '/app.js', '/asks.js', '/faces.js', '/i18n.js', '/style.css', '/manifest.webmanifest', '/locales/pt-BR.json', '/icon-32.png']) {
       const r = await fetch(base + file);
       expect(r.ok, `${file} answered ${r.status}`);
     }
@@ -178,6 +178,10 @@ try {
     const voice = await (await fetch(`${base}/voice.js`)).text();
     expect(typeof state.ui?.voice_input === 'boolean' && html.includes('id="voice-notice"') && voice.includes('export class Dictation') && appJs.includes("from './voice.js'"),
       `dictation lacks its setting, notice or module: ${JSON.stringify(state.ui)}`);
+    // What a live session asks: a band of one line per ask (or one for the group), at most 40% of the column.
+    const asks = await (await fetch(`${base}/asks.js`)).text();
+    expect(asks.includes('export function asksHtml') && appJs.includes("from './asks.js'") && /#live-asks \{[^}]*max-height: 40%/.test(styles),
+      "the band of what a live session asks lacks its module, or may cover the conversation");
     // The autopilot's panel in the Usage section: its state, and limits refused before anything is saved.
     const ap = state.autopilot;
     expect(ap && typeof ap.enabled === 'boolean' && ap.stop_at_5h_window > 0 && (ap.week_pace === null || ap.week_pace > 0) && typeof ap.mode === 'string' && ap.now?.state && Array.isArray(ap.changes) && Array.isArray(ap.queued) && Array.isArray(ap.wakes) && (ap.enabled || ap.blocked?.reason === 'off'),

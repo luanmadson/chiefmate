@@ -802,10 +802,32 @@ a.menu-item { text-decoration: none; }
 .request-answer .msg-head { flex-wrap: wrap; }
 .request-answer .state { border: 1px solid currentColor; padding: 2px 6px; }
 .request-answer .msg-body { color: var(--text); overflow-wrap: anywhere; }
-.live-ask { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 16px; padding: 9px 18px; border-bottom: 1px solid var(--accent); }
-.live-ask .needs-text { flex: 1 1 320px; min-width: 0; }
-.live-ask .needs-label { display: block; color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }
-.live-ask .perm-what { display: block; color: var(--strong); }
+/* What the session asks of the owner (ui/asks.js): one line per ask, or one for the group, in brass. The details
+   unfold under their line, and the band takes at most 40% of the column: the conversation and the field stay in view. */
+#live-asks { flex: none; max-height: 40%; overflow-y: auto; }
+.live-asks-band { border-top: 1px solid var(--accent); background: var(--accent-bg); }
+.live-ask + .live-ask, .ask-list { border-top: 1px solid var(--line); }
+.live-ask-line { display: flex; align-items: center; gap: 10px; padding: 3px 12px 3px 4px; }
+.ask-toggle { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; min-height: 32px; padding: 4px 8px; background: none; border: 0; color: var(--strong); font: inherit; text-align: left; cursor: pointer; }
+.ask-toggle:hover .ask-what, .ask-toggle:focus-visible .ask-what { color: var(--accent); }
+.ask-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.fold-mark { flex: none; width: 6px; height: 6px; margin: 0 2px; border-right: 1.5px solid var(--accent); border-bottom: 1.5px solid var(--accent); transform: rotate(-45deg); }
+.live-ask[data-open] > .live-ask-line .fold-mark { transform: rotate(45deg); }
+.live-ask .needs-label { flex: none; color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }
+.ask-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-ask[data-open]:not(.live-ask-group) > .live-ask-line .ask-what { white-space: normal; overflow-wrap: anywhere; }
+.ask-more { flex: none; margin-left: auto; color: var(--muted); font-size: 12px; }
+.ask-list .live-ask-line { padding-left: 22px; }
+.ask-details { padding: 0 18px 10px 34px; }
+.ask-details .perm { margin-top: 0; }
+.ask-full { display: block; color: var(--strong); overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .live-ask-line { padding-right: 8px; }
+  .ask-list .live-ask-line { padding-left: 4px; }
+  .ask-details { padding: 0 10px 10px 16px; }
+  /* The line is for what is asked, or how many: the label stays for screen readers, the brass band says it */
+  .live-asks-band .needs-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
 /* A permission asked, in plain words: the facts in two columns, the risk as a tag in its color, the command folded */
 .perm { margin-top: 6px; font-size: 12.5px; }
 .perm-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 14px; margin: 0 0 4px; }
