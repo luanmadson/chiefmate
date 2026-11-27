@@ -915,7 +915,6 @@ async function askHidden(question) {
   });
 }
 
-/** A command refused to a step of a run: noted for the emergency lockdown's detection (src/lockdown.mjs), then refused. */
 // ---------- The manager's tools on the queue, the runs and its own gaps ----------
 
 /** An error for a command or action Chiefmate lacks: when the manager runs it, it is recorded as a tool gap (src/gaps.mjs). */
@@ -1016,6 +1015,7 @@ async function recordGapNow(what, example) {
   return (await apiOr('/api/gap', body, async () => ({ gap: await (await import('./gaps.mjs')).recordGap(body) }))).gap;
 }
 
+/** A command refused to a step of a run: noted for the emergency lockdown's detection (src/lockdown.mjs), then refused. */
 async function crewRefused(what, message) {
   (await import('./lockdown.mjs')).recordSignal('publish_refused', `cli.mjs ${what}`, { who: 'step', run: process.env.CHIEFMATE_RUN, step: process.env.CHIEFMATE_STEP, cwd: process.cwd(), command: `cli.mjs ${what}`, refused: true });
   throw new Error(message);
