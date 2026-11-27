@@ -385,7 +385,8 @@ export async function runDev(id, token, { background = false, config = loadConfi
   }
   let wasRunning = false;
   try {
-    const child = spawnCommand(plan.command, { cwd: plan.cwd, shell: true, stdio: ['inherit', 'pipe', 'pipe'] });
+    // In the background the launcher has no console, and Windows would give the command a visible one of its own.
+    const child = spawnCommand(plan.command, { cwd: plan.cwd, shell: true, stdio: [background ? 'ignore' : 'inherit', 'pipe', 'pipe'], windowsHide: background });
     const output = [
       [child.stdout, process.stdout, false],
       [child.stderr, process.stderr, true],

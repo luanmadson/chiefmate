@@ -2704,12 +2704,14 @@ try {
     expect(behind.background && behind.window === null && detached?.cwd === devClone && detached.args.join(' ') === `dev-run ${devProject} ${detached.args[2]} --background`
       && detached.log === path.join(data, 'projects', devProject, 'dev.log'), `the environment started from afar did not run in the background: ${JSON.stringify(detached)}`);
     const quiet = devChild();
-    const unseen = runDev(devProject, detached.args[2], { background: true, config: devConfig, spawnCommand: () => quiet, probe: async url => url.href === address });
+    let hidden;
+    const unseen = runDev(devProject, detached.args[2], { background: true, config: devConfig, spawnCommand: (command, options) => (hidden = options, quiet), probe: async url => url.href === address });
     try {
-      quiet.stdout.write(`  Local: ${address}
-`);
+      quiet.stdout.write(`  Local: ${address}\n`);
       for (let i = 0; i < 40 && !devState(devProject, projectConfig, machine).url; i++) await delay(50);
       expect(devState(devProject, projectConfig, machine).url === address, 'the address of the environment run in the background was not exposed');
+      // With no console of the launcher's, the command would get a visible one of its own.
+      expect(hidden?.windowsHide === true && hidden.stdio[0] === 'ignore', `the command run in the background may open a window: ${JSON.stringify(hidden)}`);
     } finally {
       closeDev(quiet, 0);
       await unseen;
