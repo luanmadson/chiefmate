@@ -1088,6 +1088,10 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   .statusbar { height: 28px; }
   .statusbar:not(.offline) .sb-run, .statusbar .sb-desk, .statusbar .sb-long, .statusbar:has(.sb-spare) :is(.sb-five, .sb-week) { display: none; }
   .statusbar .sb-short { display: inline; }
+  /* A lost connection or the lockdown is said whole, on two lines if needed, instead of scrolling sideways */
+  .statusbar.offline { height: auto; min-height: 28px; padding-block: 4px; white-space: normal; overflow: hidden; }
+  .statusbar.offline .group { flex: 1 1 auto; min-width: 0; }
+  .statusbar.offline .state { white-space: normal; }
 
   /* The bottom bar: Manager, Operations, Planning, Projects and More, each 56 px high, the marks on a line of their own */
   .nav { flex-wrap: wrap; overflow: visible; border-bottom: 0; border-top: 1px solid var(--line-strong); padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }

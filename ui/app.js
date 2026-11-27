@@ -5243,7 +5243,7 @@ async function openFile(ref, { gallery = null } = {}) {
  * phone), its path to copy, as it opens only on the computer. Not found: the path tried, with what the viewer said.
  */
 async function openOnComputer(file, viewerError = null) {
-  const here = onThisComputer();
+  const here = offered('file-open');
   try {
     const r = await api('/api/files/open', { path: file, dryRun: !here });
     if (!here) pathDialog(t('Opens on the computer'), r.path, t('This file opens on the computer where Chiefmate runs, not here: copy its path to find it there.'));
@@ -5293,7 +5293,7 @@ function drawViewer(token = viewer.token) {
     info.kind === 'image' ? `<button type="button" class="button secondary small" data-viewer="zoom" aria-pressed="${viewer.zoom}">${esc(viewer.zoom ? t('Fit to screen') : t('Actual size'))}</button>` : '',
     info.dir ? '' : `<a class="button secondary small" href="${esc(raw)}" target="_blank" rel="noopener"${downloads(info) ? ' download' : ''}>${esc(downloads(info) ? t('Download') : t('Open in a tab'))}</a>`,
     // With its own app (an HTML page shown as a page, not as its code), on this computer only.
-    info.ref.path && onThisComputer() ? `<button type="button" class="button secondary small" data-viewer="computer">${esc(t('Open on the computer'))}</button>` : '',
+    info.ref.path && offered('file-open') ? `<button type="button" class="button secondary small" data-viewer="computer">${esc(t('Open on the computer'))}</button>` : '',
   ].join('');
   const body = $('#viewer-body');
   body.dataset.kind = info.kind;

@@ -249,7 +249,8 @@ function openUi({ here = true, answer }) {
   const sent = [];
   const toasts = [];
   const open = runInNewContext(`${between('async function openOnComputer', "$('#path-dialog-copy')")} openOnComputer;`, {
-    $: selector => nodes[selector.slice(1)], onThisComputer: () => here, toast: text => toasts.push(text), baseName: p => p.split(/[\\/]/).pop(),
+    // The table of ui/afar.js itself, seen from the computer or from the phone.
+    $: selector => nodes[selector.slice(1)], offered: action => offered(action, here ? 'localhost' : 'pc.tailnet.ts.net'), toast: text => toasts.push(text), baseName: p => p.split(/[\\/]/).pop(),
     t: (text, values = {}) => text.replace(/\{(\w+)\}/g, (m, k) => values[k]),
     api: async (route, body) => {
       sent.push({ route, body });
