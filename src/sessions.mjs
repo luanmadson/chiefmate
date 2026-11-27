@@ -406,9 +406,10 @@ export async function runSession(id) {
 
 /**
  * Whether Claude Code saved the conversation of a session in a window (its file under ~/.claude/projects, whatever
- * folder name Claude Code gave it), so it can be carried on.
+ * folder name Claude Code gave it), so it can be carried on. Always ~/.claude: the window's Claude Code runs without
+ * CLAUDE_CONFIG_DIR (environment() in src/claude.mjs drops it).
  */
-export function savedConversation(session, home = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')) {
+export function savedConversation(session, home = path.join(os.homedir(), '.claude')) {
   if (session.tool !== 'claude' || !/^[\w-]+$/.test(session.toolSession ?? '')) return false;
   const projects = path.join(home, 'projects');
   try {

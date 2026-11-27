@@ -31,6 +31,9 @@ export const REBOOT_CONFIRM_MINUTES = 30;
 // as cut off by the computer going down: its tool was killed a moment before Chiefmate itself.
 const BEAT_MS = 60_000;
 const CUT_WINDOW_MS = 3 * 60_000;
+// How long a restart keeps Chiefmate off on purpose while the computer has not started again: past that, Windows did
+// not restart (a program held it, or it was canceled on its screen), and the watchdog brings Chiefmate back.
+const REBOOT_GRACE_MS = 15 * 60_000;
 const LOG_MAX = 50;
 // The longest the stop waits for the work going on to pause, and then for the manager's answer to end: past that, it
 // goes on (a run not paused yet starts its step over at the next start, as after any stop).
@@ -268,9 +271,11 @@ export const lastBeat = () => readJson(aliveFile(), null)?.at ?? null;
 
 /**
  * Whether Chiefmate is off on purpose (the watchdog leaves it off): stopped or shut down by the owner. A restart is
- * not, once the computer has started again: Chiefmate is meant to come back. boot: when the computer started (ms).
+ * not, once the computer has started again, nor when it has not within REBOOT_GRACE_MS (Windows held it): Chiefmate is
+ * meant to come back. boot: when the computer started (ms); at: now (ms).
  */
-export const offOnPurpose = (power, boot = bootTime()) => power?.mode === 'off' && !(power.target === 'reboot' && Date.parse(power.since) < boot);
+export const offOnPurpose = (power, boot = bootTime(), at = Date.now()) => power?.mode === 'off'
+  && !(power.target === 'reboot' && (Date.parse(power.since) < boot || at - Date.parse(power.since) > REBOOT_GRACE_MS));
 
 /**
  * Whether the computer went down while Chiefmate was running, without a stop from it (a power cut, a crash, Windows
@@ -282,15 +287,21 @@ export const cutOff = ({ power = readState().power, last = lastBeat(), boot = bo
  * After the computer went down without a stop: the runs it cut off go back to the front of the queue, where they
  * stopped (their working copy kept). Cut off: still "running" in its record, or failed within CUT_WINDOW_MS before
  * Chiefmate's last note of being alive (its tool killed a moment before Chiefmate) and before the computer's start.
- * last: that note (ISO); boot: the start (ms). Returns the ids.
+ * A run still running starts over only its steps cut off (running, or failed in that window): one that failed earlier
+ * for a reason of its own, or was skipped on purpose, stays so. A run that failed then comes back as a resume does
+ * (src/queue.mjs). last: that note (ISO); boot: the start (ms). Returns the ids.
  */
 export function recoverCutOff({ last, boot, runs = listRuns() }) {
   const from = Date.parse(last) - CUT_WINDOW_MS;
+  const cut = step => step.status === 'running' || (step.status === 'failed' && !(Date.parse(step.ended ?? '') < from));
   const ids = [];
   for (const r of runs) {
     const ended = Date.parse(r.ended ?? '');
-    if (r.status !== 'running' && !(r.status === 'failed' && ended >= from && ended <= boot)) continue;
-    for (const step of stepsOf(r)) if (['failed', 'running', 'skipped'].includes(step.status)) Object.assign(step, { status: 'pending', error: null });
+    const failedThen = r.status === 'failed' && ended >= from && ended <= boot;
+    if (r.status !== 'running' && !failedThen) continue;
+    for (const step of stepsOf(r)) {
+      if (failedThen ? ['failed', 'running', 'skipped'].includes(step.status) : cut(step)) Object.assign(step, { status: 'pending', error: null });
+    }
     Object.assign(r, {
       status: 'queued', resumeFirst: true, ended: null, result: null, notBefore: null,
       note: t('The computer went down in the middle of the work (a power cut or a crash). The run continues where it stopped.'),
@@ -333,11 +344,15 @@ export function startPower(options) {
     saveState(rest);
     standby = null;
     const paused = power.paused?.length ?? 0;
-    const restarted = power.target === 'reboot' && Date.parse(power.since) < boot;
+    const reboot = power.target === 'reboot';
+    const restarted = reboot && Date.parse(power.since) < boot;
     const windows = restarted ? options.reopenWindows?.(boot) ?? [] : [];
-    if (restarted) logPower({ action: 'reboot', outcome: 'back', by: power.by, reason: power.reason, paused, windows: windows.length });
-    const what = power.target === 'reboot' ? `${power.by === 'manager' ? 'you (the manager)' : 'the owner'} restarted the computer` : `the owner ${power.target === 'shutdown' ? 'shut the computer down' : 'stopped it'}`;
-    reportEvent('power', `Chiefmate started again after ${what} at ${formatDateTime(power.since)}${power.reason ? ` (${power.reason})` : ''}.${paused ? ` The ${paused} run(s) paused then resume now, first in the queue.` : ''}${windows.length ? ` ${windows.length} live session window(s) opened again.` : ''} Each mission missed meanwhile runs once now.`);
+    if (reboot) logPower({ action: 'reboot', outcome: restarted ? 'back' : 'not-restarted', by: power.by, reason: power.reason, paused, windows: windows.length });
+    const asker = power.by === 'manager' ? 'you (the manager)' : 'the owner';
+    const what = !reboot ? `the owner ${power.target === 'shutdown' ? 'shut the computer down' : 'stopped it'}` : restarted ? `${asker} restarted the computer` : `${asker} asked to restart the computer`;
+    // Windows did not restart (a program held it, or it was canceled on its screen): Chiefmate started again without it.
+    const held = reboot && !restarted ? ' Windows did not restart, though (a program held it, or the restart was canceled on its screen): what the restart was for may still be there.' : '';
+    reportEvent('power', `Chiefmate started again after ${what} at ${formatDateTime(power.since)}${power.reason ? ` (${power.reason})` : ''}.${held}${paused ? ` The ${paused} run(s) paused then resume now, first in the queue.` : ''}${windows.length ? ` ${windows.length} live session window(s) opened again.` : ''} Each mission missed meanwhile runs once now.`, { urgent: !!held });
     return;
   }
   if (!cutOff({ power, last, boot })) return;

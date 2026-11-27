@@ -106,12 +106,16 @@ export function questionNews(q) {
 
 /**
  * The manager's restart outside away mode: a question card, answered by the owner. Its first option starts the restart
- * (within REBOOT_CONFIRM_MINUTES); the other, or a discard, refuses it. One open at a time: asking again gives it.
- * runs: [{ title, project }]; sessions: [{ name }].
+ * (within REBOOT_CONFIRM_MINUTES); the other, or a discard, refuses it. One open at a time: asking again gives it, or
+ * replaces it once its confirmation is no longer valid. runs: [{ title, project }]; sessions: [{ name }].
  */
 export function askReboot({ by = 'manager', reason, runs = [], sessions = [] }, config = loadConfig()) {
   const open = openQuestions().find(q => q.reboot);
-  if (open) return open;
+  if (open && !staleReboot(open)) return open;
+  if (open) {
+    closeQuestion(open.id, null);
+    logPower({ action: 'reboot', outcome: 'expired', by: open.reboot.by, reason: open.reboot.reason, question: open.id });
+  }
   const yes = t('Restart now');
   const context = [
     t('Why: {reason}', { reason }),
@@ -119,11 +123,14 @@ export function askReboot({ by = 'manager', reason, runs = [], sessions = [] }, 
     sessions.length ? t('Live sessions open (they carry on after the restart, a window opens again): {list}', { list: sessions.map(s => s.name).join('; ') }) : '',
     t('Windows restarts after a {seconds}-second countdown, which you can cancel in the app. This confirmation is valid for {minutes} minutes.', { seconds: REBOOT_COUNTDOWN_S, minutes: REBOOT_CONFIRM_MINUTES }),
   ].filter(Boolean).join('\n');
-  return addQuestion({ question: t('The manager asks to restart the computer. Restart now?'), context, options: [yes, t('Not now')], level: 3, reboot: { by, reason, yes } }, config);
+  // "Don't restart", not "Not now": the card's own "Not now" only leaves it for later.
+  return addQuestion({ question: t('The manager asks to restart the computer. Restart now?'), context, options: [yes, t("Don't restart")], recommend: yes, level: 3, reboot: { by, reason, yes } }, config);
 }
 
 /** Whether the owner's answer to a restart's question is its first option (askReboot). */
 const rebootYes = (q, answer) => !!q?.reboot && same(answer, q.reboot.yes);
+/** Whether a restart's question is older than its confirmation may be (REBOOT_CONFIRM_MINUTES). */
+const staleReboot = (q, at = Date.now()) => at - Date.parse(q.at) > REBOOT_CONFIRM_MINUTES * 60_000;
 
 // ---------- The manager's pushes ----------
 // The guard refuses the manager every push. One it tried that could be allowed (a plain push of one branch, not the
@@ -566,9 +573,9 @@ export async function decide({ card, action, option, note, reason } = {}, cards 
     // A restart confirmed: still fresh, and nothing forbids it now (else the card stays open, with the reason).
     const asked = readQuestions().find(x => x.id === c.question);
     if (action === 'answer' && rebootYes(asked, option)) {
-      if (Date.now() - Date.parse(asked.at) > REBOOT_CONFIRM_MINUTES * 60_000) {
+      if (staleReboot(asked)) {
         closeQuestion(asked.id, null);
-        logPower({ action: 'reboot', outcome: 'expired', by: asked.reboot.by, reason: asked.reboot.reason });
+        logPower({ action: 'reboot', outcome: 'expired', by: asked.reboot.by, reason: asked.reboot.reason, question: asked.id });
         tell(`The owner confirmed your restart of the computer (question #${asked.id}) over ${REBOOT_CONFIRM_MINUTES} minutes after you asked: it was not done. Ask again if it is still needed.`);
         throw new Error(t('This restart was asked over {minutes} minutes ago: it was not done. The manager may ask again if it is still needed.', { minutes: REBOOT_CONFIRM_MINUTES }));
       }
@@ -585,6 +592,8 @@ export async function decide({ card, action, option, note, reason } = {}, cards 
           tell(`The owner confirmed your restart of the computer (question #${q.id}), but it could not start: ${error.message}`);
           throw error;
         }
+        // What the owner wrote with the yes reaches the manager too.
+        if (q.note) tell(questionNews(q));
         return { card: c.id, done: 'answered', answer: q.answer, note: q.note ?? null, run: null, reboot: true };
       }
       logPower({ action: 'reboot', outcome: 'refused', by: q.reboot.by, reason: q.reboot.reason, why: 'the owner did not confirm it' });

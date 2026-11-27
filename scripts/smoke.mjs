@@ -1485,23 +1485,37 @@ try {
     `a restart did not pause, count down, save who asked and why, and restart Windows: ${calls} ${JSON.stringify(off)}`);
   expect(power.powerOffCommand({ dryRun: true, target: 'reboot' }).args.join(' ') === '/r /t 0', "Windows' restart is forced or delayed");
   const since = Date.parse(off.since);
-  expect(power.offOnPurpose(off, since - 60_000) && !power.offOnPurpose(off, since + 60_000) && power.offOnPurpose({ ...off, target: 'shutdown' }, since + 60_000),
-    'the watchdog would leave off a Chiefmate whose computer restarted, or bring back one the owner shut down');
+  const late = since + 20 * 60_000;
+  expect(power.offOnPurpose(off, since - 60_000) && !power.offOnPurpose(off, since + 60_000) && power.offOnPurpose({ ...off, target: 'shutdown' }, since + 60_000)
+    && !power.offOnPurpose(off, since - 60_000, late) && power.offOnPurpose({ ...off, target: 'shutdown' }, since - 60_000, late),
+    'the watchdog would leave off a Chiefmate whose computer restarted (or never did), or bring back one the owner shut down');
   // Back after the restart: on again, the windows of the live sessions open again, the log says so.
   let reopenedAt = null;
   power.startPower({ ...hooks, boot: since + 30_000, reopenWindows: boot => ((reopenedAt = boot), ['smoke-window']) });
   expect(!readState().power && power.powerInfo().mode === 'on' && reopenedAt === since + 30_000 && power.powerLog().at(-1)?.outcome === 'back' && power.powerLog().at(-1).by === 'manager',
     `back from a restart, Chiefmate is not on, the windows did not open again or the log missed it: ${JSON.stringify(power.powerLog().at(-1))}`);
+  // A restart Windows did not make (a program held it): on again once the watchdog brings Chiefmate back, no window
+  // opened again (none was closed), and the log says it did not restart.
+  saveState({ ...readState(), power: off });
+  let reopenedAgain = false;
+  power.startPower({ ...hooks, boot: since - 60_000, reopenWindows: () => ((reopenedAgain = true), []) });
+  expect(!readState().power && power.powerInfo().mode === 'on' && !reopenedAgain && power.powerLog().at(-1)?.outcome === 'not-restarted',
+    `a restart Windows did not make was taken for one, or its windows opened again: ${JSON.stringify(power.powerLog().at(-1))}`);
 
   // The computer went down without a stop (a power cut): Chiefmate's last note of being alive is older than the
   // computer's start. The runs it cut off (still running, or failed a moment before) go back to the front of the queue;
-  // one that failed long before stays failed. The records already running or failed here are put back afterwards.
+  // one that failed long before stays failed, and so does a step of a running run that failed long before. The records
+  // already running or failed here are put back afterwards.
   const t0 = Date.now();
   const last = new Date(t0 - 10 * 60_000).toISOString();
   const boot = t0 - 5 * 60_000;
   const kept = listRuns().filter(r => ['running', 'failed'].includes(r.status));
   const cutRun = (id, status, ended, steps) => saveRun({ id, kind: 'task', project: 'Sample', title: id, status, created: new Date(t0 - 3600_000).toISOString(), ended, steps });
-  cutRun('smoke-cut-running', 'running', null, [{ agent: 'generalist', status: 'done' }, { agent: 'designer', status: 'running' }]);
+  cutRun('smoke-cut-running', 'running', null, [
+    { agent: 'writer', status: 'failed', ended: new Date(t0 - 60 * 60_000).toISOString(), error: 'a real error' },
+    { agent: 'generalist', status: 'failed', ended: new Date(t0 - 11 * 60_000).toISOString(), error: 'claude exited with code 1' },
+    { agent: 'designer', status: 'running' },
+  ]);
   cutRun('smoke-cut-failed', 'failed', new Date(t0 - 11 * 60_000).toISOString(), [{ agent: 'generalist', status: 'failed', error: 'claude exited with code 1' }, { agent: 'designer', status: 'pending' }]);
   cutRun('smoke-cut-old', 'failed', new Date(t0 - 60 * 60_000).toISOString(), [{ agent: 'generalist', status: 'failed', error: 'a real error' }]);
   expect(power.cutOff({ power: null, last, boot }) && !power.cutOff({ power: { mode: 'off' }, last, boot }) && !power.cutOff({ power: null, last: new Date(boot + 1000).toISOString(), boot }),
@@ -1510,7 +1524,7 @@ try {
   let windowsBack = null;
   power.startPower({ ...hooks, boot, reopenWindows: b => ((windowsBack = b), []) });
   const [running, failed, old] = ['smoke-cut-running', 'smoke-cut-failed', 'smoke-cut-old'].map(readRun);
-  expect(running.status === 'queued' && running.resumeFirst && running.cutOff?.was === 'running' && running.steps[1].status === 'pending'
+  expect(running.status === 'queued' && running.resumeFirst && running.cutOff?.was === 'running' && running.steps.map(s => s.status).join() === 'failed,pending,pending'
     && failed.status === 'queued' && failed.resumeFirst && !failed.ended && !failed.result && failed.steps[0].status === 'pending' && !failed.steps[0].error
     && old.status === 'failed' && windowsBack === boot && power.powerLog().at(-1)?.action === 'cut-off' && Date.parse(power.lastBeat()) > t0 - 1000,
     `the runs cut off by a power cut were not put back at the front of the queue, or an old failure was: ${JSON.stringify([running, failed, old].map(r => [r.status, r.resumeFirst, r.steps.map(s => s.status)]))}`);
@@ -1541,6 +1555,15 @@ try {
   writeJson(questionsPath, readJson(questionsPath, []).map(q => (q.id === stale.id ? { ...q, at: new Date(t0 - 31 * 60_000).toISOString() } : q)));
   const staleAnswer = await decisions.decide({ card: `question:${stale.id}`, action: 'answer', option: stale.reboot.yes }, cardsNow()).then(() => '', error => error.message);
   expect(staleAnswer && !power.stopping() && !decisions.openQuestions().some(q => q.id === stale.id), 'a restart confirmed over 30 minutes late began, or its card stayed');
+  // Asked again once the card's confirmation is no longer valid, a fresh card replaces it; its "no" is not the card's
+  // own "Not now", and the manager recommends the restart it asks for.
+  const older = decisions.askReboot({ by: 'manager', reason });
+  writeJson(questionsPath, readJson(questionsPath, []).map(q => (q.id === older.id ? { ...q, at: new Date(t0 - 31 * 60_000).toISOString() } : q)));
+  const fresh = decisions.askReboot({ by: 'manager', reason });
+  const { t: say } = await import(src('i18n.mjs'));
+  expect(fresh.id !== older.id && !decisions.openQuestions().some(q => q.id === older.id) && !fresh.options.includes(say('Not now')) && fresh.recommend === fresh.reboot.yes,
+    `a stale restart card was handed out again, or its options clash with the card's own "Not now": ${JSON.stringify([older.id, fresh])}`);
+  await decisions.decide({ card: `question:${fresh.id}`, action: 'discard' }, cardsNow());
   busy = 0;
 
   const at = Date.now();
