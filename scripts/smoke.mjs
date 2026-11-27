@@ -581,6 +581,9 @@ try {
       decisionRefused = /only adds and updates/.test(String(error.stderr));
     }
     expect(decisionRefused, "a step of a run made the owner's decision on a radar idea");
+    // A step and the manager update an idea without the owner's key (src/owner.mjs).
+    expect(/^Changed #3 /.test(cli(['radar', 'set', '3', '--summary', 'Updated by a step.'], { CHIEFMATE_RUN: 'x' })), 'a step could not update a radar idea');
+    expect(/^Changed #3 /.test(cli(['radar', 'set', '3', '--summary', 'Updated by the manager.'], { CHIEFMATE_MANAGER: '1' })), 'the manager could not update a radar idea');
 
     // The CLI sends the destination options to the running API. The queue is held while the approval is tested, and
     // the run it queues (in a real project) is canceled: a later part of this test wakes the queue up.

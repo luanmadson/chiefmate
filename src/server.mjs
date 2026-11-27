@@ -29,7 +29,7 @@ import { cancelStop, powerInfo, powerPreview, setStandby, stopSystem } from './p
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
 import { isOwner, OWNER_HEADER, openAppWindow, redeemCode } from './owner.mjs';
 import { changePlan, parseStatus, planItem, planItems, PRIORITIES, STATUSES } from './planning.mjs';
-import { changeRadar, RADAR_STATUSES, radarIdeas } from './radar.mjs';
+import { changeRadar, parseRadarStatus, RADAR_STATUSES, radarIdeas } from './radar.mjs';
 import { deliverDevNotices, devState, openProjectApp, projectInfo, startDev, stopDev } from './projects.mjs';
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
@@ -520,9 +520,12 @@ export function fromAfar(route, body) {
 // app and the owner's terminal send the key (src/owner.mjs). A route missing here needs the key.
 const PLAN_DECISIONS = ['triage', 'approve', 'later', 'discard', 'restore', 'order'];
 const DECIDED = ['proposed', 'triaged', 'approved', 'discarded'];
-const statusOf = text => {
+// The radar: the crew adds and updates ideas; deciding on one is the owner's (the manager's on the owner's word).
+const RADAR_DECISIONS = ['choose', 'later', 'discard', 'restore'];
+const RADAR_DECIDED = ['chosen', 'discarded', 'project'];
+const statusOf = (text, parse = parseStatus) => {
   try {
-    return parseStatus(text);
+    return parse(text);
   } catch {
     return null;
   }
@@ -543,7 +546,8 @@ const KEYLESS = {
   '/api/cancel': true,
   '/api/resume': true,
   '/api/planning': b => b.by === 'manager' || !(PLAN_DECISIONS.includes(b.action) || (b.status && DECIDED.includes(statusOf(b.status)))),
-  '/api/radar': b => ['manager', 'crew'].includes(b.by),
+  '/api/radar': b => b.by === 'manager'
+    || (b.by === 'crew' && !RADAR_DECISIONS.includes(b.action) && !(b.status && RADAR_DECIDED.includes(statusOf(b.status, parseRadarStatus)))),
   '/api/session': true,
   '/api/session/end': true,
   '/api/session/say': b => b.by === 'manager',

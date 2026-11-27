@@ -6,7 +6,7 @@ import { loadConfig, saveConfig } from './config.mjs';
 import { fullReport, outcomeMarkdown } from './digest.mjs';
 import { formatDateTime, formatDuration } from './i18n.mjs';
 import { notify } from './notify.mjs';
-import { ownerHeaders } from './owner.mjs';
+import { forAgent, ownerHeaders } from './owner.mjs';
 import { listRuns, readRun, stepsOf } from './store.mjs';
 import { DATA, ensureDir } from './util.mjs';
 
@@ -32,7 +32,7 @@ async function api(route, body) {
     body ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1', ...ownerHeaders() }, body: JSON.stringify(body) } : {},
   );
   const data = await r.json();
-  if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
+  if (!r.ok) throw new Error(data.owner ? `${data.error}\nIt goes only from the app, or from a command the owner runs in a terminal on this computer.` : data.error ?? `HTTP ${r.status}`);
   return data;
 }
 
@@ -635,7 +635,7 @@ async function radarCommand() {
       return;
     }
     case 'set':
-      show('Changed', await change({ action: 'set', id: which(), ...(await fields()), ...(option('--reason') !== undefined ? { reason: option('--reason') } : {}) }));
+      show('Changed', await change({ action: 'set', id: which(), ...(await fields()), ...(option('--reason') !== undefined ? { reason: option('--reason') } : {}), ...(by ? { by } : {}) }));
       return;
     case 'choose':
     case 'later':
@@ -1304,7 +1304,8 @@ async function main() {
       const lockdown = await import('./lockdown.mjs');
       if (words()[0] === 'status') return console.log(lockdownText(lockdown.lockdownView()));
       const reason = words().join(' ').trim();
-      const by = process.env.CHIEFMATE_MANAGER ? 'manager' : process.env.CHIEFMATE_RUN ? 'step' : 'owner';
+      // Anyone may engage it: an agent other than the manager (a live session too) goes as a step, without the owner's key.
+      const by = process.env.CHIEFMATE_MANAGER ? 'manager' : forAgent() ? 'step' : 'owner';
       // Without Chiefmate running, only the state is written: it holds from its next start.
       const state = await apiOr('/api/lockdown', { action: 'engage', reason, by, origin: 'cli' }, () => lockdown.engage({ reason, by, from: 'cli' }));
       console.log(lockdownText(state.lockdown ?? lockdown.lockdownView(state)));
