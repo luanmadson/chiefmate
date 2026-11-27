@@ -23,26 +23,29 @@ export function saveConfig(config) {
 export const FULL_BACKUP_DIR = path.join(DATA, 'config-backup');
 
 /**
- * With "backup_dir" in the settings (a folder of your own, such as one in a private repository), keeps an up-to-date
- * copy of the settings there, on every save and whenever Chiefmate starts: a redacted one (redactConfig), since that
- * folder is usually pushed somewhere. The full copy goes to FULL_BACKUP_DIR, on this computer only, and also to
- * "full_backup_dir" when set (a private folder off this computer, such as a synced cloud one), never inside git.
+ * With "backup_dir" or "full_backup_dir" in the settings, keeps up-to-date copies of the settings, on every save and
+ * whenever Chiefmate starts. In "backup_dir" (a folder of your own, such as one in a private repository), a redacted
+ * one (redactConfig), since that folder is usually pushed somewhere. The full copy goes to FULL_BACKUP_DIR, on this
+ * computer only, and to "full_backup_dir" when set (a private folder off this computer, such as a synced cloud one).
  */
 export function backupConfig(config = loadConfig(), { fullDir = FULL_BACKUP_DIR } = {}) {
   if (!config.backup_dir && !config.full_backup_dir) return;
   if (config.backup_dir) writeIfChanged(config.backup_dir, redactConfig(config));
   writeIfChanged(fullDir, config);
   if (!config.full_backup_dir) return;
-  const repo = gitRoot(config.full_backup_dir);
-  if (config.backup_dir && path.resolve(config.full_backup_dir) === path.resolve(config.backup_dir)) console.error('Settings backup: full_backup_dir is the same folder as backup_dir, so the full copy is not written there.');
-  else if (repo)console.error(`Settings backup: full_backup_dir is inside a git repository (${repo}), so the full copy is not written there.`);
+  const refused = refusedFullDir(config.full_backup_dir, config.backup_dir);
+  if (refused) console.error(`Settings backup: full_backup_dir ${refused}, so the full copy is not written there.`);
   else writeIfChanged(config.full_backup_dir, config);
 }
 
-/** The git working tree a folder is in (it or a parent has ".git"), or null: the full copy must not end up in one. */
-function gitRoot(dir) {
+/** Why "full_backup_dir" may not take the full copy, or null: not a path, backup_dir's own folder, or inside git. */
+function refusedFullDir(dir, redactedDir) {
+  if (typeof dir !== 'string') return 'is not a folder path';
+  // path.relative ignores the case on Windows, where "C:\Backup" and "c:\backup" are the same folder
+  if (typeof redactedDir === 'string' && redactedDir && path.relative(redactedDir, dir) === '') return 'is the same folder as backup_dir';
+  // a git working tree: the folder or a parent has ".git" (a folder, or a file in a worktree or submodule)
   for (let at = path.resolve(dir); ; at = path.dirname(at)) {
-    if (existsSync(path.join(at, '.git'))) return at;
+    if (existsSync(path.join(at, '.git'))) return `is inside a git repository (${at})`;
     if (path.dirname(at) === at) return null;
   }
 }
