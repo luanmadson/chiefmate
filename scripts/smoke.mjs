@@ -728,7 +728,13 @@ try {
     const copy = path.join(fixture, 'workspaces', 'demo');
     for (let n = 0; n < 200 && !(live.get(first.id)?.process && existsSync(path.join(copy, 'new.md'))); n++) await new Promise(r => setTimeout(r, 50));
     expect(pauseLive(first.id, 'owner', { holdWhile: () => true }), 'the run going on could not be paused');
+    // It leaves `live` (what the update, the power modes and the queue wait for) only once its work is put aside and
+    // its record saved.
+    let leftLive = null;
+    const watchLive = setInterval(() => (leftLive ??= live.has(first.id) ? null : readRun(first.id)), 1);
     await going;
+    clearInterval(watchLive);
+    expect(!leftLive || (leftLive.status === 'paused' && leftLive.shelf), `the paused run left "live" before its work was put aside: ${leftLive?.status}`);
     const paused = readRun(first.id);
     expect(paused.status === 'paused' && paused.shelf?.commit && paused.steps[0].paused,
       `the paused run did not keep its step and its uncommitted work: ${JSON.stringify({ status: paused.status, shelf: paused.shelf, note: paused.note })}`);

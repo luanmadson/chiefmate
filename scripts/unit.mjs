@@ -614,8 +614,13 @@ test("a branch with commits of its own, or a copy with changes, isn't moved; wor
   await assert.rejects(restoreShelf(third.dir, 'run-a', commit), /stash apply/);
   assert.equal(third.git('status', '--porcelain'), '');
   assert.equal(third.git('rev-parse', shelfRef('run-a')), commit);
-  // Back on the branch where it was, it applies.
+  // Back on the branch where it was, it applies; over changes already in the copy, it applies and cleans nothing.
   third.git('reset', '--hard', '-q', fresh.from);
+  write(path.join(third.dir, 'mine.md'), 'Mine\n');
+  await assert.rejects(restoreShelf(third.dir, 'run-a', commit), /changes not committed/);
+  assert.equal(lf(path.join(third.dir, 'mine.md')), 'Mine\n');
+  assert.equal(third.git('rev-parse', shelfRef('run-a')), commit);
+  rmSync(path.join(third.dir, 'mine.md'));
   await restoreShelf(third.dir, 'run-a', commit);
   assert.equal(lf(path.join(third.dir, 'app.md')), 'App by A\n');
 });

@@ -1917,6 +1917,7 @@
   "On pause": "Pausado",
   "Nothing running": "Nada em execução",
   "git stash apply failed: {output}": "o git stash apply falhou: {output}",
+  "The working copy has changes not committed yet: the work put aside was not put back over them.": "A cópia de trabalho tem alterações ainda sem commit: o trabalho guardado não foi devolvido por cima delas.",
   "Waits for the paused run {id}, which keeps the working copy.": "Espera a tarefa pausada {id}, que está com a cópia de trabalho.",
   "The work not committed yet was put aside until the run resumes.": "O trabalho ainda sem commit foi guardado até a tarefa ser retomada.",
   "Couldn't put aside the work not committed yet: {error}": "Não foi possível guardar o trabalho ainda sem commit: {error}",

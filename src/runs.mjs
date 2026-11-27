@@ -1007,7 +1007,9 @@ export async function execute(run) {
   delete run.limitWait;
   saveRun(run);
 
-  // Paused for an update of Chiefmate: back to the front of the queue, to resume as soon as the update is over.
+  // Paused for an update of Chiefmate: back to the front of the queue, to resume as soon as the update is over. Always
+  // "return await": the run stays in `live` (busy for the update, the power modes and the queue) until its work is put
+  // aside and its record saved; a plain "return" would let the finally below drop it from `live` first.
   const pauseForUpdate = async () => {
     // What the agent had not committed yet is put aside (a stash named after the run), so nothing done in the copy
     // meanwhile can lose it; it goes back when the run resumes.
@@ -1052,7 +1054,7 @@ export async function execute(run) {
       if (pending) await Promise.race([pending, new Promise(resolve => setTimeout(resolve, 20_000))]);
       notify(t('Chiefmate started'), run.summary ? clip(`${run.title}. ${run.summary}`, 250) : run.title);
     }
-    if (l.pauseRequest) return pauseForUpdate();
+    if (l.pauseRequest) return await pauseForUpdate();
     let dir;
     if (!run.prepared) {
       // A pause for an update stops the preparation at once (see pauseLive): it starts over when the run resumes.
@@ -1148,7 +1150,7 @@ export async function execute(run) {
       const order = [...run.steps.map(step => ({ step, finalReview: false })), ...(run.review ? [{ step: run.review, finalReview: true }] : [])];
       const index = order.findIndex(x => x.step.status === 'pending' || x.step.status === 'running');
       if (index < 0 || l.cancelRequest) break;
-      if (l.pauseRequest) return pauseForUpdate();
+      if (l.pauseRequest) return await pauseForUpdate();
       const { step, finalReview } = order[index];
       const limit = checkLimits(run, config);
       if (limit) return wait(limit.waitUntil, limit.note, limit.limitWait);
@@ -1156,7 +1158,7 @@ export async function execute(run) {
       const reviewFrom = finalReview ? await headCommit(dir).catch(() => null) : null;
       const { waitUntil, paused } = await runStep({ l, run, step, index, dir, project, config, agents, libraries, base, finalReview });
       if (reviewFrom && step.status === 'done') step.commits = await commitSubjects(dir, reviewFrom).catch(() => []);
-      if (paused && !l.cancelRequest) return pauseForUpdate();
+      if (paused && !l.cancelRequest) return await pauseForUpdate();
       if (waitUntil) return wait(waitUntil, t('Your account reached its limit in the middle of a step'));
       if (step.agent === LEAD) afterLead(run, step, agents, log);
     }
@@ -1246,7 +1248,7 @@ export async function execute(run) {
   } catch (error) {
     if (error?.name === 'AbortError' && l.pauseRequest && !l.cancelRequest) {
       log(t('Preparation stopped for the update: it starts over when the run resumes'));
-      return pauseForUpdate();
+      return await pauseForUpdate();
     }
     Object.assign(run, { status: 'failed', ended: now(), result: error.message });
     saveRun(run);

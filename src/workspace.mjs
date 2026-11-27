@@ -148,9 +148,11 @@ export async function shelveWork(dir, id) {
 
 /**
  * Puts a paused run's work back (see shelveWork) on the working copy, which must be clean, then drops its stash and
- * ref. When it doesn't apply cleanly, the copy is cleaned again, the stash kept, and it throws.
+ * ref. When it doesn't apply cleanly, the copy is cleaned again, the stash kept, and it throws. A copy with changes
+ * already (the work put back just before a crash, say) is left as it is: it throws without applying or cleaning.
  */
 export async function restoreShelf(dir, id, commit) {
+  if (await git(dir, 'status', '--porcelain')) throw new Error(t('The working copy has changes not committed yet: the work put aside was not put back over them.'));
   const r = await run('git', ['stash', 'apply', commit], dir);
   if (r.code !== 0) {
     await git(dir, 'reset', '--hard', '-q');
