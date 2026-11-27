@@ -22,7 +22,7 @@ import { LEAD, memoryInfo } from './leads.mjs';
 import { engage, isLocked, lockdownView, recordSignal, release } from './lockdown.mjs';
 import { closeBrowser, focusBrowser, openBrowsers } from './browsers.mjs';
 import { computer, latestProcesses, processes, stoppable, stopProject } from './machine.mjs';
-import { agentSender, chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
+import { agentSender, chat, editPending, interruptManager, limitWait, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
 import { closeDefect, reportDefect } from './defects.mjs';
 import { closeReplaced, mergeRun, previewClose, previewMerge } from './merge.mjs';
 import { awayInfo, reportEvent, setAway } from './news.mjs';
@@ -444,6 +444,8 @@ function buildState() {
     manager: {
       messages: conversation.slice(-80), responding: chat.responding, interrupting: chat.interrupting, since: chat.since, partial: chat.partial,
       actions: chat.actions.slice(-12), lastAction: chat.actions.at(-1) ?? null, pending: readPending(), context: managerContext(),
+      // An answer cut off by the plan's usage limit, while it waits for the renewal: { at, until, window, items }, else null.
+      cut: limitWait(),
     },
     // The emergency lockdown (src/lockdown.mjs): whether it is on, why, its evidence and the security warnings of the day.
     lockdown: security,
