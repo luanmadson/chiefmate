@@ -15,16 +15,52 @@ const signatures = {};
 let selectedRun = null;
 let detail = null;
 
+// The owner's local key (src/owner.mjs), kept in this browser for the app's own address: the commands that are the
+// owner's carry it on this computer. The app gets it once, in a window Chiefmate opens with a pairing code.
+const OWNER_KEY = 'chiefmate-owner-key';
+let windowAsked = false;
+
 async function api(route, body) {
+  const owner = body && onThisComputer() ? localStorage.getItem(OWNER_KEY) : null;
   const r = await fetch(
     route,
     body
-      ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1' }, body: JSON.stringify(body) }
+      ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1', ...(owner ? { 'x-chiefmate-owner': owner } : {}) }, body: JSON.stringify(body) }
       : { cache: 'no-store' },
   );
   const data = await r.json().catch(() => ({}));
+  if (r.status === 403 && data.owner) {
+    // No key here, or one Chiefmate no longer has: a window with a new pairing code opens.
+    if (owner) localStorage.removeItem(OWNER_KEY);
+    askOwnerWindow();
+    throw Object.assign(new Error(t('This is yours to do: Chiefmate is opening the app again to recognize you. Try again in the new window.')), { status: r.status, data });
+  }
   if (!r.ok) throw Object.assign(new Error(data.error || t('Error {code}', { code: r.status })), { status: r.status, data });
   return data;
+}
+
+/** Asks Chiefmate for a window of the app with a pairing code, once per page, on this computer only. */
+function askOwnerWindow() {
+  if (windowAsked || !onThisComputer()) return;
+  windowAsked = true;
+  api('/api/owner/window', { section: location.hash.slice(1) }).catch(() => {});
+}
+
+/** Trades the pairing code of a window Chiefmate opened ("?pair=") for the key; without a key, asks for such a window. */
+async function pairOwner() {
+  if (!onThisComputer()) return;
+  const code = new URLSearchParams(location.search).get('pair');
+  if (!code) {
+    if (!localStorage.getItem(OWNER_KEY)) askOwnerWindow();
+    return;
+  }
+  history.replaceState(null, '', location.pathname + location.hash);
+  windowAsked = true; // a window opened to pair never asks for another
+  try {
+    localStorage.setItem(OWNER_KEY, (await api('/api/owner/pair', { code })).key);
+  } catch (error) {
+    toast(error.message);
+  }
 }
 
 function toast(text) {
@@ -5689,6 +5725,7 @@ document.addEventListener('keydown', event => {
 // Another page: the dictation stops there
 window.addEventListener('hashchange', () => dictations.forEach((d, field) => stopDictation(field)));
 
+pairOwner();
 showView();
 drawClock();
 setInterval(drawClock, 15_000);
