@@ -155,7 +155,24 @@ try {
     const machine = await (await fetch(`${base}/api/computer`)).json();
     expect(machine.memory?.total > 0 && Array.isArray(machine.projects), '/api/computer has no memory or projects');
     // Commands that must refuse without changing anything (the settings are the installation's own).
-    const post = (route, body) => fetch(base + route, { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1' }, body: JSON.stringify(body) });
+    // The owner's commands carry the owner's key, as the app and the owner's terminal do (src/owner.mjs).
+    const { ownerKey, OWNER_HEADER } = await import('../src/owner.mjs');
+    const ownerHeader = { [OWNER_HEADER]: ownerKey(path.join(data, 'security')) };
+    const keyless = (route, body, more = {}) => fetch(base + route, { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1', ...more }, body: JSON.stringify(body) });
+    const post = (route, body) => keyless(route, body, ownerHeader);
+    // Without the key (any other program of this computer), what is the owner's is refused and changes nothing; what an
+    // agent may do goes on; a pairing code must be one the server gave; and the app's window opens nothing here.
+    for (const [route, body, more] of [['/api/lockdown', { action: 'release', confirm: true }], ['/api/manager', { message: 'As the owner' }],
+      ['/api/decide', { card: 'none', action: 'approve' }], ['/api/away', { on: true }, { [OWNER_HEADER]: 'made-up' }]]) {
+      const r = await keyless(route, body, more);
+      const answer = await r.json().catch(() => ({}));
+      expect(r.status === 403 && answer.owner === true, `${route} without the owner's key answered ${r.status} instead of 403`);
+    }
+    expect((await (await fetch(`${base}/api/state`)).json()).away === null, "a command without the owner's key changed the state");
+    expect((await keyless('/api/needs-you/poll', { run: 'smoke-feed', id: 'old-request' })).ok, "an agent's command was refused without the owner's key");
+    expect((await keyless('/api/owner/pair', { code: 'made-up' })).status === 403, 'a made-up pairing code was taken');
+    const appWindow = await (await keyless('/api/owner/window', { section: 'operations' })).json();
+    expect(appWindow.dryRun === true && !appWindow.opened, `the smoke test's Chiefmate opened the app's window: ${JSON.stringify(appWindow)}`);
     // Attention: the board's item waiting for the owner (#7) is an important notice; marked as seen, it fades.
     const proposal = state.attention.items.find(i => i.id.startsWith('plan:7:'));
     expect(proposal?.level === 'important' && proposal.kind === 'proposal' && !proposal.seen && state.attention.counts.important >= 1 && state.attention.top,
