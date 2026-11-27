@@ -420,10 +420,16 @@ try {
     expect(lockedMerge.status === 400 && /lockdown|emergência/i.test((await lockedMerge.json()).error ?? ''), 'a merge was not refused in the lockdown');
     expect((await ask(remote.port, '/api/state', tailnet)).status === 423, 'the remote access answered in the lockdown');
     expect((await ask(remote.port, '/api/lockdown', command, { action: 'release', confirm: true })).status === 403, 'the lockdown was released through the remote access');
+    // The phone's lockdown screen: it reads the lockdown and sends the owner's note, even with the rest off.
+    const phoneView = await ask(remote.port, '/api/lockdown', tailnet);
+    expect(phoneView.status === 200 && JSON.parse(phoneView.text).lockdown?.active === true, `the phone could not read the lockdown: ${phoneView.status}`);
+    const phoneNote = await ask(remote.port, '/api/lockdown', command, { action: 'note', note: 'Seen from the phone' });
+    expect(phoneNote.status === 200 && JSON.parse(phoneNote.text).lockdown?.notes?.at(-1)?.from === 'remote', `the phone's note was not kept: ${phoneNote.status} ${phoneNote.text}`);
+    expect(lockState.watch?.members?.length === 3, `the emergency watch is not in the org chart: ${JSON.stringify(lockState.watch)}`);
     expect((await post('/api/lockdown', { action: 'release' })).status === 400, "the lockdown was released without the owner's confirmation");
-    const released = await post('/api/lockdown', { action: 'release', confirm: true });
+    const released = await post('/api/lockdown', { action: 'release', confirm: true, note: 'Released in the smoke test' });
     const afterRelease = await (await fetch(`${base}/api/state`)).json();
-    expect(released.ok && !afterRelease.lockdown?.active && afterRelease.lockdown?.last?.reason === 'Smoke test', 'the owner could not release the lockdown on this computer');
+    expect(released.ok && !afterRelease.lockdown?.active && afterRelease.lockdown?.last?.reason === 'Smoke test' && afterRelease.lockdown.last.notes?.length === 2, 'the owner could not release the lockdown on this computer, or the notes were lost');
     expect((await ask(remote.port, '/api/state', tailnet)).status === 200, 'the remote access stayed off after the release');
     // The refused requests above (a login not allowed, an unknown address) became signals for the detection.
     const signals = readFileSync(path.join(data, 'security', 'signals.jsonl'), 'utf8');
@@ -1688,9 +1694,15 @@ try {
     const lockedRefused = refuses('git status');
     rmSync(path.join(security, 'lockdown.json'));
     const profileRefused = refuses(`ls "${path.join(data, 'browser-profile')}"`);
-    const protectedNoted = readFileSync(path.join(security, 'signals.jsonl'), 'utf8').includes('"kind":"protected_access"');
+    const protectedNoted = readFileSync(path.join(security, 'signals.jsonl'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+      .some(s => s.kind === 'protected_access' && s.refused === true && s.cwd && s.command?.startsWith('ls '));
     expect(lockedRefused && !refuses('git status') && profileRefused && protectedNoted,
       `the guard misjudged the lockdown or a protected folder: ${JSON.stringify({ lockedRefused, profileRefused, protectedNoted })}`);
+    // A folder a command creates outside the agent's own is noted, for the emergency watch (src/sentinel.mjs).
+    const outside = path.join(guardDir, 'made-outside');
+    execFileSync(hook, { shell: true, encoding: 'utf8', input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 'm', tool_input: { command: `mkdir "${outside.replaceAll('\\', '/')}"` }, cwd: path.join(guardDir, 'work') }) });
+    const created = readFileSync(path.join(security, 'created.jsonl'), 'utf8');
+    expect(created.includes(JSON.stringify(outside).slice(1, -1)), `the folder made outside the agent's own was not noted: ${created}`);
   } finally {
     rmSync(guardDir, { recursive: true, force: true });
   }
