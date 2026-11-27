@@ -696,10 +696,71 @@ function lockdownBand() {
   return `<div class="lockdown-band" role="alert">
       <strong>${esc(t('EMERGENCY LOCKDOWN'))}</strong>
       <span>${esc(t('Since {time}: {reason}', { time: shortDate(l.since), reason: l.reason ?? '' }))}</span>
-      <span class="lockdown-note">${esc(t('Everything is stopped. Pushes, merges, new repositories, external actions and the remote access are refused.'))}</span>
+      <span class="lockdown-note">${esc(watchLine(l) || t('Everything is stopped. Pushes, merges, new repositories, external actions and the remote access are refused.'))}</span>
       ${action}
     </div>`;
 }
+
+/** What the emergency watch (src/sentinel.mjs) is doing about the alarm, in one line, or ''. */
+function watchLine(l) {
+  const s = l?.sentinel;
+  if (s?.status === 'reviewing') return t('Everything is stopped. Sentinel (Emergency watch) is checking whether it is a false alarm.');
+  if (s?.status === 'escalated') return t('Sentinel (Emergency watch) kept everything stopped: it needs you.');
+  return '';
+}
+
+const VERDICT_NAMES = () => ({ false_alarm: t('false alarm'), real: t('real'), uncertain: t('uncertain') });
+const yesNo = v => (v === null || v === undefined ? t("couldn't check") : v ? t('yes') : t('no'));
+
+/** The emergency watch's report: who, what ran or was refused, what was checked, each analyst's verdict and why it stays. */
+function watchReportHtml(s) {
+  if (!s || s.status === 'off') return '';
+  if (s.status === 'reviewing') return `<p class="lockdown-watch">${esc(t('Sentinel (Emergency watch) is checking it now: the checks in code, then two analysts. Everything stays stopped meanwhile.'))}</p>`;
+  const people = (s.incident?.involved ?? []).map(x => `<li>
+      <strong>${esc(x.agent ? `${t(x.agent.name)}${x.agent.title ? ` (${t(x.agent.title)})` : ''}` : x.who ?? '—')}</strong>
+      ${esc([x.projectName && t('project: {name}', { name: x.projectName }), x.task && t('task: {title}', { title: x.task }), x.step && t('step {n} of {total}', { n: x.step, total: x.steps ?? '?' })].filter(Boolean).join(' · '))}
+      <div><code>${esc(x.command)}</code></div>
+      <div class="muted">${esc([x.cwd && t('in {folder}', { folder: x.cwd }), x.refused ? t('refused by the guard') : t('it ran')].filter(Boolean).join(' · '))}</div>
+    </li>`).join('');
+  const c = s.checks ?? {};
+  const changes = c.protected === null || c.protected === undefined ? t("couldn't check") : c.protected.length ? c.protected.map(x => `${x.path} (${x.what})`).join('; ') : t('none');
+  const out = c.outbound === null || c.outbound === undefined ? t("couldn't check") : c.outbound.length ? c.outbound.map(x => x.command).join('; ') : t('none');
+  const types = { own_folder_delete: t('deleting a folder the same step created'), github_read: t('reading GitHub with a command taken for a publication') };
+  const checks = [
+    [t('Refused or harmless'), yesNo(c.refused || c.harmless)],
+    [t('Changes in protected places'), changes],
+    [t('Sent out'), out],
+    [t('Kind of alarm'), types[c.type] ?? t('not on the list the watch may release')],
+    [t('Second alarm in 24 h'), yesNo(c.repeat)],
+    [t('Involves the manager'), yesNo(c.manager)],
+  ].map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+  const tools = { claude: 'Claude Code', codex: 'Codex' };
+  const verdicts = (s.verdicts ?? []).map((v, i) => `<li><strong>${esc(t('Analyst {letter}', { letter: 'AB'[i] }))}</strong> (${esc(tools[v.tool] ?? v.tool)}): ${esc(VERDICT_NAMES()[v.verdict] ?? v.verdict)}, ${esc(t('confidence {n}%', { n: Math.round((v.confidence ?? 0) * 100) }))}${v.reason ? ` · ${esc(v.reason)}` : ''}${v.error ? ` <span class="muted">(${esc(v.error)})</span>` : ''}</li>`).join('');
+  const why = (s.decision?.reasons ?? []).map(r => reasonName(r)).join('; ');
+  return `<div class="lockdown-watch">
+      <div class="label">${esc(t('Sentinel (Emergency watch)'))}</div>
+      ${s.status === 'escalated' ? `<p><strong>${esc(t('Kept stopped for you'))}:</strong> ${esc(why)}</p>` : ''}
+      ${people ? `<ul class="lockdown-evidence">${people}</ul>` : ''}
+      <dl class="facts">${checks}</dl>
+      ${verdicts ? `<ul class="lockdown-evidence">${verdicts}</ul>` : ''}
+    </div>`;
+}
+
+/** Why the watch kept the lockdown, in words (src/sentinel.mjs, REASONS). */
+const reasonName = key => ({
+  ran: t('the command ran and is not known to be harmless'),
+  protected_unknown: t("the protected places couldn't be compared with their state before"),
+  protected_changed: t('something changed in a protected place'),
+  outbound_unknown: t("it couldn't check whether anything was sent out"),
+  outbound: t('something may have been sent out'),
+  type: t('this kind of alarm is not on the list the watch may release'),
+  analysts: t('the analysts did not both say false alarm'),
+  analysts_disagree: t('the analysts disagree'),
+  repeat: t('it is the second alarm within {hours} hours', { hours: 24 }),
+  manager: t('it involves the manager'),
+  new_evidence: t('more evidence came while it reviewed'),
+  error: t('its review failed'),
+}[key] ?? key);
 
 /** What triggered the lockdown and what it stopped, for the owner to read before releasing it. */
 function lockdownSummaryHtml(l) {
@@ -707,12 +768,21 @@ function lockdownSummaryHtml(l) {
   const where = { app: t('the app'), remote: t('the remote access'), cli: t('the command line'), detection: t('the detection') }[l.from] ?? l.from;
   const names = { runs: t('runs'), manager: t("manager's answer"), sessions: t('live session turns'), browsers: t('browsers') };
   const stopped = Object.entries(l.stopped ?? {}).filter(([k]) => names[k]).map(([k, n]) => `${names[k]}: ${n}`).join(' · ') || t('nothing was going on');
-  const evidence = (l.evidence ?? []).map(e => `<li><span class="muted">${esc(shortDate(e.at))}</span> ${esc(e.what)}${e.who ? ` (${esc(e.who)})` : ''}: <code>${esc(e.detail)}</code></li>`).join('');
+  const evidence = (l.evidence ?? []).map(e => `<li><span class="muted">${esc(shortDate(e.at))}</span> ${esc(e.what)}${e.who ? ` (${esc(e.who)})` : ''}: <code>${esc(e.command ?? e.detail)}</code>${e.cwd ? ` <span class="muted">${esc(t('in {folder}', { folder: e.cwd }))}</span>` : ''}</li>`).join('');
+  const notes = (l.notes ?? []).map(n => `<li><span class="muted">${esc(shortDate(n.at))}</span> ${esc(n.text)}</li>`).join('');
   return `<p>${esc(t('Since {time}, engaged by {who} from {where}.', { time: shortDate(l.since), who, where }))}</p>
     <p><strong>${esc(t('Reason'))}:</strong> ${esc(l.reason ?? '')}</p>
     <p><strong>${esc(t('What was stopped'))}:</strong> ${esc(stopped)}</p>
     ${evidence ? `<div class="label">${esc(t('Evidence'))}</div><ul class="lockdown-evidence">${evidence}</ul>` : ''}
+    ${watchReportHtml(l.sentinel)}
+    ${notes ? `<div class="label">${esc(t('Your notes'))}</div><ul class="lockdown-evidence">${notes}</ul>` : ''}
     <p class="muted">${esc(t('After the release, the queue goes on. The runs it stopped stay canceled until you resume them.'))}</p>`;
+}
+
+/** Sends the owner's note on the alarm: kept in its record, and told to the manager as the owner's message. */
+async function sendLockdownNote(note) {
+  await api('/api/lockdown', { action: 'note', note });
+  toast(t('Note sent: it is in the alarm record and goes to the manager.'));
 }
 
 document.addEventListener('click', event => {
@@ -723,13 +793,21 @@ document.addEventListener('click', event => {
   $('#lockdown-summary').innerHTML = lockdownSummaryHtml(l);
   $('#lockdown-reviewed').checked = false;
   $('#lockdown-release').disabled = true;
+  $('#lockdown-note').value = '';
   dialog.returnValue = '';
   dialog.showModal();
   dialog.addEventListener('close', async () => {
-    if (dialog.returnValue !== 'yes' || !$('#lockdown-reviewed').checked) return;
+    const note = $('#lockdown-note').value.trim();
     try {
-      await api('/api/lockdown', { action: 'release', confirm: true });
-      toast(t('Lockdown released: the queue goes on.'));
+      if (dialog.returnValue === 'note' && note) {
+        await sendLockdownNote(note);
+      } else if (dialog.returnValue === 'yes' && $('#lockdown-reviewed').checked) {
+        await api('/api/lockdown', { action: 'release', confirm: true, note });
+        toast(t('Lockdown released: the queue goes on.'));
+      } else if (note) {
+        // Kept locked, with a note: the note still goes.
+        await sendLockdownNote(note);
+      }
       refresh();
     } catch (error) {
       toast(error.message);
@@ -739,6 +817,59 @@ document.addEventListener('click', event => {
 $('#lockdown-reviewed').addEventListener('change', event => {
   $('#lockdown-release').disabled = !event.target.checked;
 });
+
+/**
+ * The phone's screen during a lockdown (the remote access answers 423 to everything else): what triggered it, the
+ * watch's report and a field for the owner's note; the release stays on the computer. Returns whether it was drawn.
+ */
+async function drawLockdownScreen() {
+  let data;
+  try {
+    const r = await fetch('/api/lockdown', { cache: 'no-store' });
+    if (!r.ok) return false;
+    data = await r.json();
+  } catch {
+    return false;
+  }
+  const l = data.lockdown;
+  if (!l?.active) return false;
+  if (!started) {
+    await setLanguage(data.language);
+    translatePage();
+  }
+  let screen = $('#lockdown-screen');
+  if (!screen) {
+    screen = document.createElement('section');
+    screen.id = 'lockdown-screen';
+    screen.className = 'lockdown-screen';
+    screen.setAttribute('role', 'alert');
+    screen.innerHTML = `<div class="lockdown-band"><strong>${esc(t('EMERGENCY LOCKDOWN'))}</strong><span class="lockdown-note">${esc(t('Release it on the computer where Chiefmate runs.'))}</span></div>
+      <div class="lockdown-screen-body"><div data-lockdown-screen-summary></div>
+        <label class="label" for="lockdown-screen-note">${esc(t('Your note (it goes to the manager and stays in the alarm record)'))}</label>
+        <textarea id="lockdown-screen-note" rows="3"></textarea>
+        <div class="actions left"><button type="button" class="button" data-lockdown-screen-send>${esc(t('Send note'))}</button></div>
+      </div>`;
+    document.body.append(screen);
+    screen.querySelector('[data-lockdown-screen-send]').addEventListener('click', async () => {
+      const field = $('#lockdown-screen-note');
+      if (!field.value.trim()) return;
+      try {
+        await sendLockdownNote(field.value.trim());
+        field.value = '';
+        drawLockdownScreen();
+      } catch (error) {
+        toast(error.message);
+      }
+    });
+  }
+  const html = lockdownSummaryHtml(l);
+  const box = screen.querySelector('[data-lockdown-screen-summary]');
+  if (box.drawn !== html) {
+    box.innerHTML = html;
+    box.drawn = html;
+  }
+  return true;
+}
 
 // ---------- Power modes (src/power.mjs): standby, stop Chiefmate, shut the computer down ----------
 
@@ -2237,8 +2368,19 @@ function drawTeams() {
     <div class="team">
       <div class="team-top"><h3>${projectLink(team.project, team.name)}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>
       ${teamBody(team)}
-    </div>`).join('')}</div>`;
+    </div>`).join('')}${watchTeamHtml(state.watch)}</div>`;
   if (!pickingEffort('#teams')) draw('#teams', html, html);
+}
+
+/** The emergency watch (src/sentinel.mjs), its own team: the Sentinel and its two analysts, each with name and role. */
+function watchTeamHtml(w) {
+  if (!w) return '';
+  const look = { sentinel: { color: '#c96a5d', face: 'cap' }, 'analyst-a': { color: '#8a93a0' }, 'analyst-b': { color: '#8a93a0' } };
+  const members = w.members.map(m => `<div class="team-member">${face({ ...m, ...look[m.id] }, online ? (m.status === 'working' ? 'working' : 'idle') : 'offline', 30)}<div><div class="name">${esc(`${m.name} (${m.title})`)}</div><div class="hint">${esc(m.role)}</div></div><div class="team-side">${stateHtml(m.status === 'working' ? [t('Reviewing an alarm'), 'warn'] : [t('On watch'), 'ok'])}</div></div>`).join('');
+  return `<div class="team">
+      <div class="team-top"><h3>${esc(t('Emergency watch'))}</h3><span class="hint">${esc(w.on ? t('Reviews every automatic alarm') : t('Off: every alarm waits for you'))}</span></div>
+      ${members}
+    </div>`;
 }
 
 function drawPromptBuilder() {
@@ -4608,7 +4750,7 @@ async function fetchState() {
   const r = await fetch('/api/state', { cache: 'no-store', headers: stateTag && state ? { 'if-none-match': stateTag } : {} });
   if (r.status === 304) return state;
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || t('Error {code}', { code: r.status }));
+  if (!r.ok) throw Object.assign(new Error(data.error || t('Error {code}', { code: r.status })), { status: r.status });
   stateTag = r.headers.get('etag');
   return data;
 }
@@ -4617,10 +4759,13 @@ async function refresh() {
   let next;
   try {
     next = await fetchState();
-  } catch {
+  } catch (error) {
+    // Through the remote access, an emergency lockdown answers 423: the phone gets the lockdown's own screen.
+    if (error.status === 423 && await drawLockdownScreen()) return;
     drawOffline();
     return;
   }
+  $('#lockdown-screen')?.remove();
   const fresh = next !== state;
   if (!started) {
     await setLanguage(next.language);

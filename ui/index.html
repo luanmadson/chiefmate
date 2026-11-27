@@ -423,9 +423,12 @@
     <form method="dialog">
       <div class="label" data-t="Release the emergency lockdown">Release the emergency lockdown</div>
       <div id="lockdown-summary"></div>
+      <label class="label" for="lockdown-note" data-t="Your note (it goes to the manager and stays in the alarm record)">Your note (it goes to the manager and stays in the alarm record)</label>
+      <textarea id="lockdown-note" rows="3"></textarea>
       <label class="lockdown-check"><input type="checkbox" id="lockdown-reviewed"> <span data-t="I reviewed what triggered it and want everything to go on.">I reviewed what triggered it and want everything to go on.</span></label>
       <div class="actions">
         <button value="no" class="button secondary" data-t="Keep it locked">Keep it locked</button>
+        <button value="note" class="button secondary" data-t="Send note only">Send note only</button>
         <button value="yes" class="button lockdown-release" id="lockdown-release" disabled data-t="Release">Release</button>
       </div>
     </form>
