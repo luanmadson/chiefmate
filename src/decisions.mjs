@@ -22,6 +22,7 @@ import { GRANT_MINUTES, plainPush, pushFacts, readPushes, repoOf, samePath } fro
 import { formatDateTime, t } from './i18n.mjs';
 import { discardRun, mergeRun, prNumber, verdict } from './merge.mjs';
 import { refuseWhileLocked } from './lockdown.mjs';
+import { logPower, REBOOT_CONFIRM_MINUTES, REBOOT_COUNTDOWN_S, rebootRefusal, stopSystem } from './power.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { decideItem } from './planning.mjs';
@@ -46,7 +47,7 @@ export const mergedByOwner = (config, project) => config?.projects?.[project]?.m
  * recommend (one of the options), project, level (the approval level, 1 to 3) }. It waits as a card until answered or
  * discarded.
  */
-export function addQuestion({ question, context, options, recommend, project, level, request = null } = {}, config = loadConfig()) {
+export function addQuestion({ question, context, options, recommend, project, level, request = null, reboot = null } = {}, config = loadConfig()) {
   const text = clip(question, 300);
   if (!text) throw new Error('The question is missing.');
   const list = (Array.isArray(options) ? options : String(options ?? '').split('|')).map(o => clip(o, 60)).filter(Boolean);
@@ -64,6 +65,8 @@ export function addQuestion({ question, context, options, recommend, project, le
     options: choices, recommend: recommended ?? null, project: id || null, level: approval, at: now(), status: 'open', answer: null, answered_at: null,
     // A request of a project's agent in charge, taken to the owner (src/charge.mjs): the answer decides it.
     ...(request != null ? { request: Number(request) } : {}),
+    // A restart of the computer the manager asked for (askReboot): its first option starts it.
+    ...(reboot ? { reboot } : {}),
   };
   saveQuestions([...questions, q]);
   return q;
@@ -98,6 +101,29 @@ export function questionNews(q) {
   if (!q.answer) return `The owner answered ${asked} from the app in their own words, choosing none of the options: "${q.note}".${mine}`;
   return `The owner answered ${asked} from the app: "${q.answer}".${q.note ? ` And wrote: "${q.note}".` : ''}${mine}`;
 }
+
+// ---------- A restart of the computer the manager asks for ----------
+
+/**
+ * The manager's restart outside away mode: a question card, answered by the owner. Its first option starts the restart
+ * (within REBOOT_CONFIRM_MINUTES); the other, or a discard, refuses it. One open at a time: asking again gives it.
+ * runs: [{ title, project }]; sessions: [{ name }].
+ */
+export function askReboot({ by = 'manager', reason, runs = [], sessions = [] }, config = loadConfig()) {
+  const open = openQuestions().find(q => q.reboot);
+  if (open) return open;
+  const yes = t('Restart now');
+  const context = [
+    t('Why: {reason}', { reason }),
+    runs.length ? t('Runs that pause at a safe point and resume first after the restart: {list}', { list: runs.map(r => `${r.title} (${r.project})`).join('; ') }) : t('No run is going on.'),
+    sessions.length ? t('Live sessions open (they carry on after the restart, a window opens again): {list}', { list: sessions.map(s => s.name).join('; ') }) : '',
+    t('Windows restarts after a {seconds}-second countdown, which you can cancel in the app. This confirmation is valid for {minutes} minutes.', { seconds: REBOOT_COUNTDOWN_S, minutes: REBOOT_CONFIRM_MINUTES }),
+  ].filter(Boolean).join('\n');
+  return addQuestion({ question: t('The manager asks to restart the computer. Restart now?'), context, options: [yes, t('Not now')], level: 3, reboot: { by, reason, yes } }, config);
+}
+
+/** Whether the owner's answer to a restart's question is its first option (askReboot). */
+const rebootYes = (q, answer) => !!q?.reboot && same(answer, q.reboot.yes);
 
 // ---------- The manager's pushes ----------
 // The guard refuses the manager every push. One it tried that could be allowed (a plain push of one branch, not the
@@ -537,7 +563,32 @@ export async function decide({ card, action, option, note, reason } = {}, cards 
     return { card: c.id, done: r.status };
   } else if (c.kind === 'question' && ['answer', 'discard'].includes(action)) {
     if (action === 'answer' && !String(option ?? '').trim() && !String(note ?? '').trim()) throw new Error(t('Choose an option or write your answer.'));
+    // A restart confirmed: still fresh, and nothing forbids it now (else the card stays open, with the reason).
+    const asked = readQuestions().find(x => x.id === c.question);
+    if (action === 'answer' && rebootYes(asked, option)) {
+      if (Date.now() - Date.parse(asked.at) > REBOOT_CONFIRM_MINUTES * 60_000) {
+        closeQuestion(asked.id, null);
+        logPower({ action: 'reboot', outcome: 'expired', by: asked.reboot.by, reason: asked.reboot.reason });
+        tell(`The owner confirmed your restart of the computer (question #${asked.id}) over ${REBOOT_CONFIRM_MINUTES} minutes after you asked: it was not done. Ask again if it is still needed.`);
+        throw new Error(t('This restart was asked over {minutes} minutes ago: it was not done. The manager may ask again if it is still needed.', { minutes: REBOOT_CONFIRM_MINUTES }));
+      }
+      const refusal = rebootRefusal({ reason: asked.reboot.reason });
+      if (refusal) throw new Error(refusal);
+    }
     const q = action === 'answer' ? closeQuestion(c.question, option ?? null, note) : closeQuestion(c.question, null);
+    if (q.reboot) {
+      if (rebootYes(q, q.answer)) {
+        try {
+          stopSystem('reboot', { by: q.reboot.by, reason: q.reboot.reason, confirmedBy: 'owner' });
+        } catch (error) {
+          logPower({ action: 'reboot', outcome: 'failed', by: q.reboot.by, reason: q.reboot.reason, why: error.message });
+          tell(`The owner confirmed your restart of the computer (question #${q.id}), but it could not start: ${error.message}`);
+          throw error;
+        }
+        return { card: c.id, done: 'answered', answer: q.answer, note: q.note ?? null, run: null, reboot: true };
+      }
+      logPower({ action: 'reboot', outcome: 'refused', by: q.reboot.by, reason: q.reboot.reason, why: 'the owner did not confirm it' });
+    }
     // A request of an agent in charge follows the answer by itself: authorized, on hold or refused.
     const followed = q.request ? await ownerAnswered(q).then(x => x.request, error => ({ error: error.message })) : null;
     const request = !followed ? '' : followed.error

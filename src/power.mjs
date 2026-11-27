@@ -4,19 +4,34 @@
 // - stop: everything pauses at a safe point (as for an update), the state is saved, the crew's browsers and processes
 //   close and Chiefmate ends; the watchdog leaves it off. The next start resumes what was paused.
 // - shutdown: the same, then Windows shuts down after a countdown the owner can cancel in the app.
+// - reboot: the same, then Windows restarts after a longer countdown; the manager may ask for it ("cli.mjs reboot").
+//   Back after the restart, the paused runs resume first and the live sessions' windows open again.
+// A computer that went down without a stop (a power cut, a crash) is found at the next start (startPower): the runs it
+// cut off go back to the front of the queue, never counted as failed.
 // Standby and "off" are kept in data/state.json ("power"); the stop going on lives in memory.
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { loadConfig } from './config.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
-import { readState, saveState } from './store.mjs';
-import { now } from './util.mjs';
+import { listRuns, readState, saveRun, saveState, stepsOf } from './store.mjs';
+import { clip, DATA, now, readJson, writeJson } from './util.mjs';
 import { run } from './workspace.mjs';
 
 /** The seconds the owner has to cancel before Windows shuts down. */
 export const COUNTDOWN_S = 60;
+/** The seconds of warning before Windows restarts. */
+export const REBOOT_COUNTDOWN_S = 120;
+/** How long the owner's confirmation of a restart the manager asked for stays valid. */
+export const REBOOT_CONFIRM_MINUTES = 30;
+// How often Chiefmate notes it is alive (data/alive.json), and how long before its last note a run that failed counts
+// as cut off by the computer going down: its tool was killed a moment before Chiefmate itself.
+const BEAT_MS = 60_000;
+const CUT_WINDOW_MS = 3 * 60_000;
+const LOG_MAX = 50;
 // The longest the stop waits for the work going on to pause, and then for the manager's answer to end: past that, it
 // goes on (a run not paused yet starts its step over at the next start, as after any stop).
 const MAX_WAIT_MS = 15 * 60_000;
@@ -27,7 +42,8 @@ const owner = (config = loadConfig()) => config.owner || 'the owner';
 
 // What this Chiefmate does around a stop, given by startPower (none in the smoke test).
 let hooks = null;
-// The stop going on: { target: "stop" or "shutdown", since, stage, paused, sessions, waitingFor, countdownUntil }.
+// The stop going on: { target: "stop", "shutdown" or "reboot", since, by, reason, stage, paused, sessions, waitingFor,
+// countdownUntil }.
 let job = null;
 // Standby, as kept in data/state.json: { mode: "standby", since, paused }, or null. Read once, then kept here.
 let standby;
@@ -44,14 +60,14 @@ export const held = () => !!job || !!standbyNow();
 export const stopping = () => !!job;
 
 /**
- * What the app shows at the top: mode "on", "standby" or "stopping"; since; for a stop, target ("stop" or
- * "shutdown"), stage ("pausing", "manager", "countdown" or "closing"), countdownUntil, the runs and live sessions
- * paused for it and the runs it still waits for ({ run, title, project, doing }).
+ * What the app shows at the top: mode "on", "standby" or "stopping"; since; for a stop, target ("stop", "shutdown" or
+ * "reboot"), who asked for it and why, stage ("pausing", "manager", "countdown" or "closing"), countdownUntil, the
+ * runs and live sessions paused for it and the runs it still waits for ({ run, title, project, doing }).
  */
 export function powerInfo() {
   if (job) {
     return {
-      mode: 'stopping', since: job.since, target: job.target, stage: job.stage, countdownUntil: job.countdownUntil ?? null,
+      mode: 'stopping', since: job.since, target: job.target, by: job.by, reason: job.reason, stage: job.stage, countdownUntil: job.countdownUntil ?? null,
       paused: job.paused.length, sessions: job.sessions.length, waitingFor: job.waitingFor,
     };
   }
@@ -84,17 +100,29 @@ export function setStandby(on, config = loadConfig()) {
 }
 
 /**
- * Stops Chiefmate ("stop") or shuts the computer down ("shutdown"), at a safe point: see shutDown. Refused while an
- * update is installed. Returns powerInfo().
+ * Stops Chiefmate ("stop"), shuts the computer down ("shutdown") or restarts it ("reboot"), at a safe point: see
+ * shutDown. by: "owner" or "manager"; reason: why (a restart needs one). Refused while an update is installed, and a
+ * restart while a live session's turn goes on (rebootRefusal). Returns powerInfo().
  */
-export function stopSystem(target = 'stop') {
+export function stopSystem(target = 'stop', { by = 'owner', reason = '', confirmedBy = null } = {}) {
   if (!hooks) throw new Error(t('Shutting down is off in this Chiefmate.'));
-  if (!['stop', 'shutdown'].includes(target)) throw new Error(t('Unknown power mode.'));
-  if (target === 'shutdown' && process.platform !== 'win32') throw new Error(t('Shutting the computer down works on Windows only.'));
+  if (!['stop', 'shutdown', 'reboot'].includes(target)) throw new Error(t('Unknown power mode.'));
+  if (target !== 'stop' && process.platform !== 'win32' && !hooks.anyPlatform) throw new Error(t('Shutting the computer down works on Windows only.'));
   if (job) return powerInfo();
   if (hooks.updating?.()) throw new Error(t('An update of Chiefmate is being installed: shut down once it is over.'));
-  job = { target, since: now(), stage: 'pausing', paused: [], sessions: [], waitingFor: [], countdownUntil: null, canceled: false };
+  const why = clip(String(reason ?? '').trim(), 300);
+  if (target === 'reboot') {
+    const refusal = rebootRefusal({ reason: why });
+    if (refusal) throw new Error(refusal);
+  }
+  job = { target, since: now(), by, reason: why, confirmedBy, stage: 'pausing', paused: [], sessions: [], waitingFor: [], countdownUntil: null, canceled: false };
   const mine = job;
+  if (target === 'reboot') {
+    logPower({ action: 'reboot', outcome: 'started', by, reason: why, confirmedBy });
+    const seconds = Math.round((hooks.countdownMs ?? REBOOT_COUNTDOWN_S * 1000) / 1000);
+    notify(t('The computer restarts'), t('Chiefmate pauses the work at a safe point and restarts Windows in about {seconds} seconds ({reason}). To cancel, open Chiefmate.', { seconds, reason: why }), 'chiefmate:operations', { urgent: true });
+    reportEvent('power', `${by === 'manager' ? 'You (the manager)' : owner()} asked to restart the computer${confirmedBy ? `, confirmed by ${owner()} in the app` : ''}: ${why}. The runs and the live sessions' turns pause at a safe point, then Windows restarts after a ${seconds}-second countdown. Everything resumes once Chiefmate is back.`, { urgent: true });
+  }
   shutDown(mine, hooks).catch(error => {
     console.error('Power:', error);
     if (job === mine) release(mine, hooks);
@@ -106,6 +134,10 @@ export function stopSystem(target = 'stop') {
 export function cancelStop() {
   if (!job) return powerInfo();
   if (job.stage === 'closing') throw new Error(t('Too late to cancel: Chiefmate is closing.'));
+  if (job.target === 'reboot') {
+    logPower({ action: 'reboot', outcome: 'canceled', by: job.by, reason: job.reason });
+    reportEvent('power', `${owner()} canceled the restart of the computer (${job.reason}): the work paused for it resumes now.`, { urgent: true });
+  }
   release(job, hooks);
   return powerInfo();
 }
@@ -125,9 +157,10 @@ function release(j, h) {
 export async function shutDown(j, h = hooks) {
   const config = loadConfig();
   const deadline = Date.now() + MAX_WAIT_MS;
+  const why = j.target === 'reboot' ? 'reboot' : 'stop';
   do {
-    for (const id of h.pauseRuns('stop')) if (!j.paused.includes(id)) j.paused.push(id);
-    for (const id of h.pauseSessions?.('stop') ?? []) if (!j.sessions.includes(id)) j.sessions.push(id);
+    for (const id of h.pauseRuns(why)) if (!j.paused.includes(id)) j.paused.push(id);
+    for (const id of h.pauseSessions?.(why) ?? []) if (!j.sessions.includes(id)) j.sessions.push(id);
     await sleep(h.pollMs ?? 1000);
     if (j.canceled) return false;
     j.waitingFor = h.crewWaiting?.() ?? [];
@@ -140,11 +173,12 @@ export async function shutDown(j, h = hooks) {
     await sleep(h.pollMs ?? 1000);
     if (j.canceled) return false;
   }
-  if (j.target === 'shutdown') {
+  if (j.target !== 'stop') {
     j.stage = 'countdown';
-    const ms = h.countdownMs ?? COUNTDOWN_S * 1000;
+    const reboot = j.target === 'reboot';
+    const ms = h.countdownMs ?? (reboot ? REBOOT_COUNTDOWN_S : COUNTDOWN_S) * 1000;
     j.countdownUntil = new Date(Date.now() + ms).toISOString();
-    notify(t('The computer shuts down'), t('In {seconds} seconds, once Chiefmate has closed. To cancel, open Chiefmate.', { seconds: Math.round(ms / 1000) }), 'chiefmate:operations', { urgent: true });
+    notify(reboot ? t('The computer restarts') : t('The computer shuts down'), t('In {seconds} seconds, once Chiefmate has closed. To cancel, open Chiefmate.', { seconds: Math.round(ms / 1000) }), 'chiefmate:operations', { urgent: true });
     while (Date.now() < Date.parse(j.countdownUntil)) {
       await sleep(Math.min(500, h.pollMs ?? 500));
       if (j.canceled) return false;
@@ -152,23 +186,25 @@ export async function shutDown(j, h = hooks) {
   }
   j.stage = 'closing';
   const { power, ...rest } = readState();
-  saveState({ ...rest, power: { mode: 'off', since: now(), target: j.target, paused: j.paused, sessions: j.sessions } });
-  const what = j.target === 'shutdown' ? 'shut the computer down' : 'stopped Chiefmate';
-  reportEvent('power', `${owner(config)} ${what} from the app at ${formatDateTime(new Date())}.${j.paused.length ? ` ${j.paused.length} run(s) paused at a safe point resume at the next start.` : ''}${j.sessions.length ? ` ${j.sessions.length} live session(s) paused carry on then.` : ''}`, { config, later: true });
+  saveState({ ...rest, power: { mode: 'off', since: now(), target: j.target, by: j.by, reason: j.reason, paused: j.paused, sessions: j.sessions } });
+  const what = j.target === 'reboot' ? 'restarted the computer' : j.target === 'shutdown' ? 'shut the computer down' : 'stopped Chiefmate';
+  const who = j.by === 'manager' ? `You (the manager)${j.confirmedBy ? `, with ${owner(config)}'s confirmation,` : ''}` : owner(config);
+  reportEvent('power', `${who} ${what} at ${formatDateTime(new Date())}${j.reason ? ` (${j.reason})` : ''}.${j.paused.length ? ` ${j.paused.length} run(s) paused at a safe point resume at the next start.` : ''}${j.sessions.length ? ` ${j.sessions.length} live session(s) paused carry on then.` : ''}`, { config, later: true });
+  if (j.target === 'reboot') logPower({ action: 'reboot', outcome: 'restarting', by: j.by, reason: j.reason, paused: j.paused.length, sessions: j.sessions.length });
   await h.closeBrowsers?.().catch(error => console.error('Power:', error.message));
   await h.stopCrew?.().catch(error => console.error('Power:', error.message));
-  if (j.target === 'shutdown') await h.powerOff();
+  if (j.target !== 'stop') await h.powerOff(j.target);
   await h.finish();
   return true;
 }
 
 /**
- * Windows' own shutdown, right away and without forcing: a program with unsaved work can still hold it (Windows then
- * asks the owner). dryRun: only the command.
+ * Windows' own shutdown ("shutdown") or restart ("reboot"), right away and without forcing: a program with unsaved work
+ * can still hold it (Windows then asks the owner). dryRun: only the command.
  */
-export function powerOffCommand({ dryRun = false } = {}) {
+export function powerOffCommand({ dryRun = false, target = 'shutdown' } = {}) {
   const exe = `${process.env.SystemRoot ?? 'C:\\Windows'}\\System32\\shutdown.exe`;
-  const args = ['/s', '/t', '0'];
+  const args = [target === 'reboot' ? '/r' : '/s', '/t', '0'];
   if (dryRun) return { command: exe, args };
   return new Promise((resolve, reject) => {
     const child = spawn(existsSync(exe) ? exe : 'shutdown', args, { windowsHide: true, detached: true, stdio: 'ignore' });
@@ -196,18 +232,117 @@ export async function powerPreview({ runs = [], sessions = [] } = {}) {
 }
 
 /**
+ * Why the computer may not restart now, or null: no reason given, or a live session's turn going on (the owner's work
+ * is never cut off in the middle).
+ */
+export function rebootRefusal({ reason = '' } = {}, h = hooks) {
+  if (!String(reason ?? '').trim()) return t('Say why the computer should restart (--reason).');
+  if (h?.sessionsBusy?.()) return t("A live session's turn is going on: the computer does not restart in the middle of it. Try again once it ends.");
+  return null;
+}
+
+/**
+ * Notes a step of a restart in data/state.json ("power_log", the latest LOG_MAX): { action, outcome (asked, started,
+ * canceled, refused, restarting, back), by, reason, ... }. Returns the entry.
+ */
+export function logPower(entry) {
+  const state = readState();
+  const item = { at: now(), ...entry };
+  saveState({ ...state, power_log: [...(state.power_log ?? []), item].slice(-LOG_MAX) });
+  return item;
+}
+
+/** The restarts asked for and how each went, oldest first. */
+export const powerLog = () => readState().power_log ?? [];
+
+const aliveFile = () => path.join(DATA, 'alive.json');
+
+/** When this computer started (ms). */
+export const bootTime = () => Date.now() - os.uptime() * 1000;
+
+/** Notes that Chiefmate is alive now (data/alive.json): the next start compares it with when the computer started. */
+export const beat = (at = now()) => writeJson(aliveFile(), { at, pid: process.pid });
+
+/** When Chiefmate last noted it was alive, or null. */
+export const lastBeat = () => readJson(aliveFile(), null)?.at ?? null;
+
+/**
+ * Whether Chiefmate is off on purpose (the watchdog leaves it off): stopped or shut down by the owner. A restart is
+ * not, once the computer has started again: Chiefmate is meant to come back. boot: when the computer started (ms).
+ */
+export const offOnPurpose = (power, boot = bootTime()) => power?.mode === 'off' && !(power.target === 'reboot' && Date.parse(power.since) < boot);
+
+/**
+ * Whether the computer went down while Chiefmate was running, without a stop from it (a power cut, a crash, Windows
+ * restarting by itself): Chiefmate's last note of being alive is older than the computer's start.
+ */
+export const cutOff = ({ power = readState().power, last = lastBeat(), boot = bootTime() } = {}) => power?.mode !== 'off' && !!last && Date.parse(last) < boot;
+
+/**
+ * After the computer went down without a stop: the runs it cut off go back to the front of the queue, where they
+ * stopped (their working copy kept). Cut off: still "running" in its record, or failed within CUT_WINDOW_MS before
+ * Chiefmate's last note of being alive (its tool killed a moment before Chiefmate) and before the computer's start.
+ * last: that note (ISO); boot: the start (ms). Returns the ids.
+ */
+export function recoverCutOff({ last, boot, runs = listRuns() }) {
+  const from = Date.parse(last) - CUT_WINDOW_MS;
+  const ids = [];
+  for (const r of runs) {
+    const ended = Date.parse(r.ended ?? '');
+    if (r.status !== 'running' && !(r.status === 'failed' && ended >= from && ended <= boot)) continue;
+    for (const step of stepsOf(r)) if (['failed', 'running', 'skipped'].includes(step.status)) Object.assign(step, { status: 'pending', error: null });
+    Object.assign(r, {
+      status: 'queued', resumeFirst: true, ended: null, result: null, notBefore: null,
+      note: t('The computer went down in the middle of the work (a power cut or a crash). The run continues where it stopped.'),
+      cutOff: { at: last, boot: new Date(boot).toISOString(), was: r.status },
+    });
+    saveRun(r);
+    ids.push(r.id);
+  }
+  return ids;
+}
+
+let beating = null;
+
+/**
  * Starts the power modes. options: those of startUpdates (pauseRuns(why), crewBusy, crewWaiting, pauseSessions,
- * sessionsBusy, managerAnswering, interruptManager, resume), with updating(), closeBrowsers(), stopCrew(), powerOff()
- * and finish() (closes the server and ends the process). A Chiefmate stopped from the app is "on" again here, and the
- * manager hears of what resumes.
+ * sessionsBusy, managerAnswering, interruptManager, resume), with updating(), closeBrowsers(), stopCrew(),
+ * powerOff(target), finish() (closes the server and ends the process) and reopenWindows(boot) (the live sessions'
+ * windows the restart closed; returns their ids). A Chiefmate stopped is "on" again here; after a restart, or after the
+ * computer went down without a stop, the work it cut off resumes first and the windows open again. The manager hears
+ * of what resumes. options.boot: when the computer started (ms), for the tests.
  */
 export function startPower(options) {
   hooks = options;
+  const boot = options.boot ?? bootTime();
+  const last = lastBeat();
+  clearInterval(beating);
+  beat();
+  beating = setInterval(() => {
+    try {
+      beat();
+    } catch (error) {
+      console.error('Power:', error.message);
+    }
+  }, BEAT_MS);
+  beating.unref?.();
   const state = readState();
-  if (state.power?.mode !== 'off') return;
-  const { power, ...rest } = state;
-  saveState(rest);
-  standby = null;
-  const paused = power.paused?.length ?? 0;
-  reportEvent('power', `Chiefmate started again after the owner ${power.target === 'shutdown' ? 'shut the computer down' : 'stopped it'} at ${formatDateTime(power.since)}.${paused ? ` The ${paused} run(s) paused then resume now.` : ''} Each mission missed meanwhile runs once now.`);
+  const power = state.power;
+  if (power?.mode === 'off') {
+    const { power: _off, ...rest } = state;
+    saveState(rest);
+    standby = null;
+    const paused = power.paused?.length ?? 0;
+    const restarted = power.target === 'reboot' && Date.parse(power.since) < boot;
+    const windows = restarted ? options.reopenWindows?.(boot) ?? [] : [];
+    if (restarted) logPower({ action: 'reboot', outcome: 'back', by: power.by, reason: power.reason, paused, windows: windows.length });
+    const what = power.target === 'reboot' ? `${power.by === 'manager' ? 'you (the manager)' : 'the owner'} restarted the computer` : `the owner ${power.target === 'shutdown' ? 'shut the computer down' : 'stopped it'}`;
+    reportEvent('power', `Chiefmate started again after ${what} at ${formatDateTime(power.since)}${power.reason ? ` (${power.reason})` : ''}.${paused ? ` The ${paused} run(s) paused then resume now, first in the queue.` : ''}${windows.length ? ` ${windows.length} live session window(s) opened again.` : ''} Each mission missed meanwhile runs once now.`);
+    return;
+  }
+  if (!cutOff({ power, last, boot })) return;
+  const runs = recoverCutOff({ last, boot });
+  const windows = options.reopenWindows?.(boot) ?? [];
+  logPower({ action: 'cut-off', outcome: 'back', by: 'none', reason: `the computer went down without a stop after ${formatDateTime(last)}`, runs: runs.length, windows: windows.length });
+  reportEvent('power', `The computer went down without a stop from Chiefmate (a power cut, a crash or Windows restarting by itself) after ${formatDateTime(last)}, and Chiefmate is back. ${runs.length ? `The ${runs.length} run(s) it cut off (${runs.join(', ')}) resume now, first in the queue; none counts as failed.` : 'No run was cut off.'}${windows.length ? ` ${windows.length} live session window(s) opened again.` : ''} The live sessions in the app keep their conversation. Each mission missed meanwhile runs once now.`, { urgent: true });
 }

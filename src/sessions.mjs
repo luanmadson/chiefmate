@@ -214,8 +214,10 @@ export const withManager = (text, config, id) => `${String(text ?? '').trimEnd()
  * crew's steps do (no user settings, hooks, plugins, skills, ~/.claude/CLAUDE.md or MCP servers of their own), with
  * the external tools released to the session (see sessionMcp).
  * Codex has no option to skip its own configuration (~/.codex): it gets the folder (-C) and the model.
+ * A Claude Code window with its own conversation id (session.toolSession) starts it (--session-id), or, with resume,
+ * carries it on (--resume) after the computer restarted.
  */
-export function sessionArgs(session, config, prompt, servers = sessionMcp(config, session).servers) {
+export function sessionArgs(session, config, prompt, servers = sessionMcp(config, session).servers, { resume = false } = {}) {
   const first = prompt ? [prompt] : [];
   if (session.tool === 'codex') return [...(session.model ? ['-m', session.model] : []), '-C', session.cwd, ...first];
   const settings = { claudeMdExcludes: userClaudeExcludes() };
@@ -223,7 +225,8 @@ export function sessionArgs(session, config, prompt, servers = sessionMcp(config
   // --mcp-config takes a list: the options after it end it, so the message is not read as one more file.
   return [
     '--setting-sources', 'project,local', '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: servers }),
-    ...(session.model ? ['--model', session.model] : []), '--settings', JSON.stringify(settings), ...first,
+    ...(session.model ? ['--model', session.model] : []), '--settings', JSON.stringify(settings),
+    ...(session.toolSession ? [resume ? '--resume' : '--session-id', session.toolSession] : []), ...first,
   ];
 }
 
@@ -350,6 +353,8 @@ export async function openSession(profileId, { origin = 'app', prompt: written =
     ...(profile.work ? { member: profile.member, memberName: profile.memberName, memberRole: profile.memberRole, work: { copy: !!work.copy, held: [], crew: (work.crew ?? []).map(c => c.run) } } : {}),
     // The tool's own session: Claude Code's is chosen here (--session-id), Codex gives its thread id on the first turn.
     ...(mode === 'app' ? { toolSession: profile.tool === 'claude' ? randomUUID() : null, turns: 0, queue: [], allowed: [] } : {}),
+    // In a window, Claude Code's own id too: after a restart of the computer, the window opens again in that conversation.
+    ...(mode === 'window' && profile.tool === 'claude' ? { toolSession: randomUUID() } : {}),
   };
   if (profile.tool === 'codex' && !(await codexSignedIn())) {
     const what = t('Sign in to Codex for the session "{name}": run "codex login" in a terminal (it opens your browser). The session opens by itself once you are signed in.', { name: profile.name });
@@ -370,14 +375,16 @@ export async function runSession(id) {
   const config = loadConfig();
   const tool = session.command?.command ? session.command : toolCommand(session.tool);
   let prompt = null;
-  if (session.firstMessage) {
+  // Opened again after the computer restarted: Claude Code carries on its conversation when it was saved.
+  const resume = !!session.reopened && savedConversation(session);
+  if (session.firstMessage && !resume) {
     const text = readFileSync(promptFile(id), 'utf8').trim();
     prompt = text.length <= MAX_PROMPT_ARG ? text : `Read the file ${promptFile(id)} whole and follow it: it opens this session.`;
   }
   saveSession({ ...session, status: 'open', pid: process.pid, opened: now() });
   console.log(`Chiefmate: ${session.name} (${session.tool}) in ${session.cwd}\n`);
   process.on('SIGINT', () => {}); // Ctrl+C belongs to the agent
-  const child = spawn(tool.command, [...tool.prefix, ...sessionArgs(session, config, prompt, browserServers(config, sessionMcp(config, session).servers, sessionBrowser(session)))], {
+  const child = spawn(tool.command, [...tool.prefix, ...sessionArgs(session, config, prompt, browserServers(config, sessionMcp(config, session).servers, sessionBrowser(session)), { resume })], {
     cwd: session.cwd, stdio: 'inherit', env: session.tool === 'claude' ? environment(sessionEnv(id)) : codexEnvironment(sessionEnv(id)),
   });
   const code = await new Promise(resolve => {
@@ -395,6 +402,40 @@ export async function runSession(id) {
     await new Promise(resolve => process.stdin.once('data', resolve));
   }
   process.exit(0);
+}
+
+/**
+ * Whether Claude Code saved the conversation of a session in a window (its file under ~/.claude/projects, whatever
+ * folder name Claude Code gave it), so it can be carried on.
+ */
+export function savedConversation(session, home = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')) {
+  if (session.tool !== 'claude' || !/^[\w-]+$/.test(session.toolSession ?? '')) return false;
+  const projects = path.join(home, 'projects');
+  try {
+    return readdirSync(projects).some(dir => existsSync(path.join(projects, dir, `${session.toolSession}.jsonl`)));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * After the computer restarted (a restart from Chiefmate, or a power cut or crash): the sessions in a window still open
+ * then lost their window. Each opens again in its folder: Claude Code in the same conversation when it was saved, else
+ * (and Codex, which can't be pointed at its own) a new one with the first message. Not in an emergency lockdown, and
+ * only on Windows. boot: when the computer started (ms). dryRun: only the ids. Returns the ids.
+ */
+export function reopenWindows(boot, { dryRun = false } = {}) {
+  if (isLocked() || (process.platform !== 'win32' && !dryRun)) return [];
+  const lost = listSessions().filter(s => s.mode === 'window' && ['starting', 'open'].includes(s.status) && Date.parse(s.opened ?? s.started ?? s.created) < boot);
+  if (dryRun) return lost.map(s => s.id);
+  for (const s of lost) {
+    try {
+      saveSession({ ...s, status: 'starting', started: now(), reopened: now(), pid: null, window: openWindow(s) });
+    } catch (error) {
+      console.error('Sessions:', error.message);
+    }
+  }
+  return lost.map(s => s.id);
 }
 
 /** Ends a session: stops its turn going on (in the app) or its window's process, and everything they started. */
@@ -733,7 +774,7 @@ export function pauseSessionTurns(why = 'update') {
   for (const [id, turn] of live) {
     if (turn.pausing || turn.ending || turn.interrupted || !turn.interrupt()) continue;
     turn.pausing = true;
-    note(id, why === 'stop' ? t('Pausing at a safe point: Chiefmate is shutting down, and the agent carries on by itself at the next start.') : t('Pausing at a safe point for an update of Chiefmate: the agent carries on by itself after the restart.'));
+    note(id, why === 'reboot' ? t('Pausing at a safe point: the computer is restarting, and the agent carries on by itself once Chiefmate is back.') : why === 'stop' ? t('Pausing at a safe point: Chiefmate is shutting down, and the agent carries on by itself at the next start.') : t('Pausing at a safe point for an update of Chiefmate: the agent carries on by itself after the restart.'));
     asked.push(id);
   }
   return asked;
