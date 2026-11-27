@@ -25,12 +25,26 @@ export const FULL_BACKUP_DIR = path.join(DATA, 'config-backup');
 /**
  * With "backup_dir" in the settings (a folder of your own, such as one in a private repository), keeps an up-to-date
  * copy of the settings there, on every save and whenever Chiefmate starts: a redacted one (redactConfig), since that
- * folder is usually pushed somewhere. The full copy goes to FULL_BACKUP_DIR, on this computer only.
+ * folder is usually pushed somewhere. The full copy goes to FULL_BACKUP_DIR, on this computer only, and also to
+ * "full_backup_dir" when set (a private folder off this computer, such as a synced cloud one), never inside git.
  */
 export function backupConfig(config = loadConfig(), { fullDir = FULL_BACKUP_DIR } = {}) {
-  if (!config.backup_dir) return;
-  writeIfChanged(config.backup_dir, redactConfig(config));
+  if (!config.backup_dir && !config.full_backup_dir) return;
+  if (config.backup_dir) writeIfChanged(config.backup_dir, redactConfig(config));
   writeIfChanged(fullDir, config);
+  if (!config.full_backup_dir) return;
+  const repo = gitRoot(config.full_backup_dir);
+  if (config.backup_dir && path.resolve(config.full_backup_dir) === path.resolve(config.backup_dir)) console.error('Settings backup: full_backup_dir is the same folder as backup_dir, so the full copy is not written there.');
+  else if (repo)console.error(`Settings backup: full_backup_dir is inside a git repository (${repo}), so the full copy is not written there.`);
+  else writeIfChanged(config.full_backup_dir, config);
+}
+
+/** The git working tree a folder is in (it or a parent has ".git"), or null: the full copy must not end up in one. */
+function gitRoot(dir) {
+  for (let at = path.resolve(dir); ; at = path.dirname(at)) {
+    if (existsSync(path.join(at, '.git'))) return at;
+    if (path.dirname(at) === at) return null;
+  }
 }
 
 function writeIfChanged(dir, value) {
@@ -90,7 +104,7 @@ export function redactConfig(config) {
     return scrub(value);
   };
   return {
-    backup_note: 'Redacted copy: notes, instructions, secrets and personal data are replaced by markers. The full copy stays on the computer, in data/config-backup/chiefmate.json of the installation.',
+    backup_note: 'Redacted copy: notes, instructions, secrets and personal data are replaced by markers. The full copy stays on the computer, in data/config-backup/chiefmate.json of the installation, and in full_backup_dir when set.',
     ...walk(config),
   };
 }
