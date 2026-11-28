@@ -872,7 +872,7 @@ async function agentsCommand() {
     return a;
   };
   const describe = a => [
-    `${a.key.padEnd(20)} ${a.name} · based on ${a.base} · ${a.rank} · ${a.status} · ${a.projects.join(', ') || 'no project'} · ${a.tool === 'claude' ? '' : `${a.tool} `}${a.model ?? 'default model'}, effort ${a.effort ?? 'default'}`,
+    `${a.key.padEnd(20)} ${a.name} · ${a.kind === 'role' ? 'base agent' : `based on ${a.base}`} · ${a.rank} · ${a.status} · ${a.projects.join(', ') || 'no project'} · ${a.tool === 'claude' ? '' : `${a.tool} `}${a.model ?? 'default model'}, effort ${a.effort ?? 'default'}`,
     ...(a.specialty ? [`  ${a.specialty}`] : []),
     `  record: ${recordLine(a.record.all)}${a.record.defects ? `; ${a.record.defects} defect(s) of Chiefmate reported` : ''}`,
     ...(a.proposal ? [`  waiting for the owner: rank ${a.proposal.from} → ${a.proposal.to} (question #${a.proposal.question})`] : []),
