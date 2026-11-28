@@ -51,6 +51,7 @@ import './away-ui.test.mjs';
 import { AFAR_VERSION, offered, ONLY_ON_PC } from '../ui/afar.js';
 import { asksHtml, asksLayout, GROUP_FROM, keepFolds, newFolds, toggleFold } from '../ui/asks.js';
 import { announce, blinkTitle, callsLayout, callsOf, chime, keepChoice, NOTIFY_KEY, notifyCalls, notifyOn, notifyState, SOUND_KEY, soundOn, waitLine } from '../ui/calls.js';
+import { EVENT_TONES, eventTone, MARKS, RANK, strongest, takeMark, toneBadge, toneIcon, toneOf } from '../ui/tones.js';
 import { devLog, startDev } from '../src/projects.mjs';
 import { connectionOwner, fromAfar, fromServe, isTailscaleService, ownAddresses, ownerOnly, remoteRefusal, tailnetSource } from '../src/server.mjs';
 import { forAgent, isOwner, openAppWindow, OWNER_HEADER, ownerHeaders, ownerKey, pairingCode, redeemCode } from '../src/owner.mjs';
@@ -1065,6 +1066,62 @@ test("A process's start, as Windows PowerShell writes it", () => {
   assert.equal(startedAt({ value: '/Date(0)/' }), new Date(0).toISOString());
   assert.equal(startedAt(null), null);
   assert.equal(startedAt('nonsense'), null);
+});
+
+// ---------- The kinds of message in the conversation (ui/tones.js): the events' kinds, the manager's marks, the badges ----------
+
+test("every news event has a kind in the conversation, and a notice takes the one that matters most", () => {
+  for (const kind of [...NEWS_EVENTS, 'agent_message']) assert.ok(RANK.includes(EVENT_TONES[kind]), `the event ${kind} has no kind in ui/tones.js`);
+  assert.deepEqual(Object.keys(EVENT_TONES).filter(k => k !== 'agent_message' && !NEWS_EVENTS.includes(k)), [], 'a kind for an event that does not exist');
+  const notice = news => toneOf({ who: 'manager', text: 'A notice.', news });
+  assert.equal(notice(['run_finished']), 'done');
+  assert.equal(notice(['merged', 'update_installed']), 'done', 'merged and installed: done');
+  assert.equal(notice(['run_finished', 'pr_ready']), 'needs', 'a pull request waiting for approval needs the owner');
+  assert.equal(notice(['needs_you']), 'needs');
+  assert.equal(notice(['needs_you', 'run_failed']), 'failure', 'a failure beats a call');
+  assert.equal(notice(['run_failed', 'lockdown']), 'alarm', 'the emergency lockdown beats a failure');
+  assert.equal(notice(['plan_proposed', 'owner_request', 'agent_message']), 'info', 'what only informs');
+  assert.equal(notice(['run_failed', 'pr_ready', 'back']), 'report', 'the summary of the time away tells the rest, so it stays a summary');
+  assert.equal(notice(['autopilot_report']), 'report');
+  assert.equal(notice(['something_new']), 'info', 'an event with no kind yet only informs');
+  assert.equal(eventTone('constructor'), 'info', "an object's own names are no events");
+  assert.equal(strongest([]), null);
+});
+
+test("the manager's mark: its kind wins over the events, and it is not shown", () => {
+  assert.deepEqual(takeMark('[needs-you] Sign in to GitHub.'), { tone: 'needs', text: 'Sign in to GitHub.' });
+  assert.deepEqual(takeMark('  [Done]\n\nMerged.'), { tone: 'done', text: 'Merged.' }, 'on a line of its own, in any case');
+  assert.equal(takeMark('[needs you] Choose.').tone, 'needs', 'a space for the hyphen');
+  assert.deepEqual(takeMark('[PR #34] is ready'), { tone: null, text: '[PR #34] is ready' }, 'any other bracket stays text');
+  assert.deepEqual(takeMark('[constructor] x'), { tone: null, text: '[constructor] x' });
+  assert.deepEqual(takeMark('Merged [done]'), { tone: null, text: 'Merged [done]' }, 'only at the start');
+  assert.deepEqual(takeMark(null), { tone: null, text: '' });
+  for (const [mark, tone] of Object.entries(MARKS)) assert.equal(takeMark(`[${mark}] x`).tone, tone);
+  assert.equal(toneOf({ who: 'manager', text: '[done] The lockdown was released.', news: ['lockdown'] }), 'done', 'the mark wins over the events');
+  assert.equal(toneOf({ who: 'manager', text: '[report] While you were away…', news: ['back', 'run_failed'] }), 'report');
+  assert.equal(toneOf({ who: 'manager', text: 'Here is the plan.' }), null, 'a plain answer has no kind');
+  assert.equal(toneOf({ who: 'manager', text: '[needs-you] Choose one.' }), 'needs', 'an answer with a mark');
+  assert.equal(toneOf({ who: 'manager', text: "I couldn't answer: timeout", error: 'timeout' }), 'failure', 'an answer that failed');
+  assert.equal(toneOf({ who: 'manager', text: '[done] Half an answer', error: 'timeout' }), 'failure', 'a failure is never shown as done');
+  assert.equal(toneOf({ who: 'system', text: 'New conversation. The manager keeps only its notes.' }), 'system');
+  assert.equal(toneOf({ who: 'you', text: '[done] mine' }), null, "the owner's messages keep their words");
+  assert.equal(toneOf({ who: 'agent', text: '[failure] x', sender: { agent: 'Designer' } }), null, "an agent's message is not the manager's");
+  // The manager's instructions name every mark the app reads.
+  const instructions = readFileSync(path.join(import.meta.dirname, '..', 'agents', 'manager.md'), 'utf8');
+  for (const mark of Object.keys(MARKS)) assert.ok(instructions.includes(`\`[${mark}]\``), `agents/manager.md does not name the mark [${mark}]`);
+});
+
+test('a badge says its kind with a word and an icon of its own, so it reads without color', () => {
+  const t = text => `«${text}»`;
+  const esc = s => String(s).replace(/</g, '&lt;');
+  const words = Object.fromEntries(RANK.map(tone => [tone, toneBadge(tone, { t, esc }).match(/«([^»]+)»/)?.[1]]));
+  assert.deepEqual(words, { report: 'Summary', alarm: 'Alarm', failure: 'Failure', needs: 'Action needed', done: 'Completed', info: 'Info', system: 'System' });
+  for (const tone of RANK) assert.match(toneBadge(tone, { t, esc }), /^<span class="tone-badge"><svg class="tone-icon" viewBox="0 0 16 16" aria-hidden="true">/);
+  assert.equal(new Set(RANK.map(toneIcon)).size, RANK.length, 'two kinds share an icon');
+  assert.equal(toneBadge(null, { t, esc }), '');
+  assert.equal(toneBadge('constructor', { t, esc }), '');
+  assert.equal(toneIcon('nonsense'), '');
+  assert.equal(toneIcon('constructor'), '');
 });
 
 // ---------- The crew's calls (ui/calls.js): the call bar's order and words, the announcements, sound and notification ----------
