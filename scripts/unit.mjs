@@ -35,7 +35,7 @@ import {
   changeSession, checkSpending, effectiveLimits, forecast, projectsWithWork, readSpending, SAFETY, sessionMode, sessionNow, SPEND_TO, spendingStatus,
 } from '../src/spending.mjs';
 import { HELD_WHILE_AWAY, NEWS_EVENTS } from '../src/news.mjs';
-import { fixFor, fixState, mergesCleanly } from '../src/merge.mjs';
+import { fixFor, fixState, mergesCleanly, queueFix } from '../src/merge.mjs';
 import { askedTool, copyHolder, endLine, holdsCopy, limitWaitCleared, pausedLine, stepTool } from '../src/runs.mjs';
 import { addSpeech, askedBy, SPEECH_KEEP, SPEECH_MAX, SPEECH_SHOWN, speechLine, speechNow, speechRule, speechView } from '../src/speech.mjs';
 import {
@@ -2714,4 +2714,11 @@ test("a conflict's fix: found by its mark or by the manager's instruction naming
     [null, { status: 'queued' }, { status: 'waiting' }, { status: 'running' }, { status: 'paused' }, { status: 'done' }, { status: 'done', merged: {} }, { status: 'done', discarded: {} }, { status: 'failed' }].map(fixState),
     ['manager', 'queued', 'queued', 'running', 'running', 'ready', 'merged', 'stopped', 'stopped'],
   );
+});
+
+test("the owner's Approve that failed goes only with Chiefmate's own fix, never with a run that just names the old one", () => {
+  const old = { id: 'r1', project: 'p', branch: 'chiefmate/r1', pullRequest: 'https://github.com/o/r/pull/41', ended: '2026-11-27T10:00:00.000Z' };
+  const named = { id: 'm1', project: 'p', status: 'queued', created: '2026-11-27T11:00:00.000Z', instruction: 'A follow-up of PR #41: another feature' };
+  const found = queueFix(old, { approved: { at: '2026-11-27T10:30:00.000Z' }, config: { projects: { p: {} } }, runs: [named] });
+  assert.deepEqual([found.fix?.id, found.queued, found.fix?.ownerApproved], ['m1', false, undefined]);
 });

@@ -1263,7 +1263,7 @@ try {
       writeFileSync(path.join(work, 'a.txt'), 'one\n');
       r('add', '-A');
       r('commit', '-qm', 'one');
-      for (const [branch, file, text] of [['cm/pr', 'a.txt', 'branch\n'], ['cm/named', 'a.txt', 'named\n'], ['cm/clean', 'b.txt', 'new\n']]) {
+      for (const [branch, file, text] of [['cm/pr', 'a.txt', 'branch\n'], ['cm/named', 'a.txt', 'named\n'], ['cm/clean', 'b.txt', 'new\n'], ['cm/failed', 'a.txt', 'failed\n']]) {
         r('checkout', '-qb', branch, 'main');
         writeFileSync(path.join(work, file), text);
         r('add', '-A');
@@ -1280,6 +1280,10 @@ try {
         keepRun({ id, project: 'cp', title: `Waiting ${n}`, status: 'done', branch, pullRequest: `https://github.com/o/r/pull/${n}`, created: ended, ended, level: 2 });
       }
       keepRun({ id: 'smoke-manager-fix', project: 'cp', title: 'PR #42 without conflict', status: 'queued', created: new Date(Date.now() + 1000).toISOString(), instruction: 'Bring cm/named up to date with main (PR #42).' });
+      // An Approve that failed on that conflict was told already (merge_failed), its fix queued: no news again.
+      keepRun({ id: 'smoke-pr-failed', project: 'cp', title: 'Waiting 44', status: 'done', branch: 'cm/failed', pullRequest: 'https://github.com/o/r/pull/44', created: ended, ended, level: 2,
+        mergeFailed: { at: ended, by: 'owner', how: 'pr', base: 'main', conflict: true, why: 'not mergeable' } });
+      keepRun({ id: 'smoke-failed-fix', project: 'cp', title: 'PR #44 without conflict', status: 'queued', created: new Date(Date.now() + 1000).toISOString(), fixOf: 'smoke-pr-failed' });
       const workspacesDir = path.join(repo, 'workspaces');
       mkdirSync(workspacesDir);
       const found = await checkDeliveries({ config: checkConfig, project: 'cp', workspaces: workspacesDir });
@@ -1287,13 +1291,15 @@ try {
       const queued = allRuns().filter(x => x.fixOf === 'smoke-pr-conflict');
       expect(byRun('smoke-pr-conflict')?.clean === false && byRun('smoke-pr-conflict').queued && byRun('smoke-pr-conflict').files.join() === 'a.txt' && queued.length === 1 && queued[0].level === 2
         && runNow('smoke-pr-conflict').conflict?.files.join() === 'a.txt' && byRun('smoke-pr-named')?.fix === 'smoke-manager-fix' && !byRun('smoke-pr-named').queued
-        && byRun('smoke-pr-clean')?.clean === true && !runNow('smoke-pr-clean').conflict && existsSync(path.join(workspacesDir, '.merge-check', 'cp', 'HEAD')),
+        && byRun('smoke-pr-clean')?.clean === true && !runNow('smoke-pr-clean').conflict && existsSync(path.join(workspacesDir, '.merge-check', 'cp', 'HEAD'))
+        && byRun('smoke-pr-failed')?.clean === false && byRun('smoke-pr-failed').fix === 'smoke-failed-fix' && !byRun('smoke-pr-failed').queued,
       `the pull requests that no longer merge were not found, or their fix was queued twice: ${JSON.stringify(found)} ${JSON.stringify(queued)}`);
       expect((await checkDeliveries({ config: checkConfig, project: 'cp', workspaces: workspacesDir })).length === 0 && allRuns().filter(x => x.fixOf === 'smoke-pr-conflict').length === 1,
         'a second check with nothing moved checked again, or queued another fix');
       const toldConflict = await news.flushNews();
       const conflictEvents = toldConflict?.events.filter(e => e.kind === 'conflict') ?? [];
       expect(conflictEvents.length === 2 && conflictEvents.some(e => e.text.includes('Chiefmate queued its fix at once')) && conflictEvents.some(e => e.text.includes('smoke-manager-fix'))
+        && !conflictEvents.some(e => e.text.includes('smoke-pr-failed'))
         && composeMessage('Owner', [toldConflict]).includes('For the conflict events'), `the manager was not told of the pull requests in conflict: ${JSON.stringify(toldConflict)}`);
       if (toldConflict) removePending(toldConflict.id);
       const conflictCard = decisionCards({ config: checkConfig, attention: [{ id: 'pr:smoke-pr-conflict', kind: 'pr', level: 'important', run: 'smoke-pr-conflict' }], items: [], questions: [], pushes: [], repos: [] })[0];
@@ -4372,11 +4378,21 @@ try {
     git('add', '.');
     git('commit', '-q', '-m', 'the run');
     git('checkout', '-q', 'main');
+    // A branch that changes the file the owner changes: their changes clash with it, not the branch with main.
+    git('checkout', '-q', '-b', 'work/clash');
+    writeFileSync(path.join(clone, 'a.txt'), 'the branch\n');
+    git('commit', '-q', '-am', 'the clash');
+    git('checkout', '-q', 'main');
     writeFileSync(path.join(clone, 'a.txt'), 'the owner\n');
     writeFileSync(path.join(clone, 'scratch.txt'), 'untracked\n');
     saveRun({ id: 'smoke-save', kind: 'task', project: 'save-sample', title: 'Save first', status: 'done', created: at, branch: 'work/save', base: 'main', delivered: clone, steps: [] });
+    saveRun({ id: 'smoke-clash', kind: 'task', project: 'save-sample', title: 'Clash', status: 'done', created: at, branch: 'work/clash', base: 'main', delivered: clone, steps: [] });
     const config = { projects: { 'save-sample': { local_clone: clone, main_branch: 'main', deliver: 'local' } } };
     expect(await mergeRun('smoke-save', { by: 'manager' }, config).then(() => false, e => e.pending === true), 'a clone with changes was merged without saving them');
+    // The owner's changes clashing with the branch are theirs to settle: never a conflict of the branch, with a fix queued.
+    const clash = await mergeRun('smoke-clash', { by: 'manager', savePending: true }, config).then(() => null, e => e);
+    expect(clash?.pending && !clash.conflict && readRun('smoke-clash').mergeFailed?.conflict === false && !listRuns().some(r => r.fixOf === 'smoke-clash'),
+      `the owner's changes clashing with a branch were taken for its conflict: ${clash?.message} ${JSON.stringify(readRun('smoke-clash').mergeFailed)}`);
     const merged = await mergeRun('smoke-save', { by: 'manager', savePending: true }, config);
     const subjects = git('log', '--format=%s', '-3').trim().split('\n');
     expect(merged.saved?.files?.join() === 'a.txt' && readRun('smoke-save').merged?.saved?.commit === merged.saved.commit && /a\.txt/.test(merged.savedNote), `the saved changes are not in the merge's report: ${JSON.stringify(merged.saved)}`);

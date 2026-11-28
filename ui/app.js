@@ -1704,7 +1704,9 @@ const decisionKind = c => ({ merge: c.thirdParty ? t('Waiting for a third-party 
 const managerSettles = c => c.approval === 1 || !!c.approvedBefore;
 const approvalBadge = c => {
   if (c.approvedBefore) return `<span class="decision-approval" data-approval="approved">${esc(t('Approved by you'))}</span>`;
-  const text = { 1: t('Level 1 · the manager settles it'), 2: t('Level 2 · needs you'), 3: t('Level 3 · only you') }[c.approval] ?? t('Level ?');
+  // A card with no Approve now waits (for its fix, or the manager): its level, without "needs you".
+  const text = c.hold ? t('Level {level} · on hold', { level: c.approval ?? '?' })
+    : { 1: t('Level 1 · the manager settles it'), 2: t('Level 2 · needs you'), 3: t('Level 3 · only you') }[c.approval] ?? t('Level ?');
   return `<span class="decision-approval" data-approval="${esc(c.approval ?? 'none')}">${esc(text)}</span>`;
 };
 

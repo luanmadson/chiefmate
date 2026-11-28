@@ -99,7 +99,7 @@ export async function savePendingFirst({ dir, branch }) {
   const gitDir = (await git(dir, 'rev-parse', '--absolute-git-dir')).output.trim();
   const busy = ['MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD', 'REVERT_HEAD'].some(marker => existsSync(path.join(gitDir, marker)));
   if (busy || lines.some(l => /^(?:U.|.U|AA|DD)\s/.test(l))) {
-    throw Object.assign(new Error(t('{path} has a merge or another operation under way, or files in conflict: nothing was saved or merged.', { path: dir })), { conflict: true });
+    throw Object.assign(new Error(t('{path} has a merge or another operation under way, or files in conflict: nothing was saved or merged.', { path: dir })), { conflict: true, pending: true });
   }
   const files = lines.map(l => l.slice(3).replace(/^.* -> /, '').replace(/^"|"$/g, ''));
   const snapshot = object((await git(dir, 'stash', 'create')).output);
@@ -108,7 +108,7 @@ export async function savePendingFirst({ dir, branch }) {
   if (check.code !== 0) {
     const said = check.output.split(/\r?\n/).filter(l => l.trim() && !/^warning:/.test(l) && !/^[0-9a-f]{40,64}$/.test(l));
     const detail = clip(said.join(' ').trim() || check.output, 400);
-    throw Object.assign(new Error(t('Your changes in {path} conflict with the branch {branch}: nothing was saved or merged. {output}', { path: dir, branch, output: detail })), { conflict: true, detail });
+    throw Object.assign(new Error(t('Your changes in {path} conflict with the branch {branch}: nothing was saved or merged. {output}', { path: dir, branch, output: detail })), { conflict: true, pending: true, detail });
   }
   const saved = await git(dir, 'commit', '-a', '-q', '-m', SAVE_MESSAGE);
   if (saved.code !== 0) throw new Error(t("Couldn't save the changes of {path}: {output}", { path: dir, output: clip(saved.output, 300) }));
@@ -253,6 +253,8 @@ export async function mergeRun(id, { by = 'owner', savePending = false } = {}, c
       const settled = await resolveLocal(run, config);
       if (settled) return settled;
     }
+    // The owner's own changes in the clone (savePendingFirst) are theirs to settle, never a conflict of the branch to fix.
+    if (error.pending) error.conflict = false;
     const fixed = recordFailure(run, where, error, by, config);
     if (fixed.queued) nudgeQueue();
     const fix = fixed.fix ? ` ${t('Chiefmate queued the fix of the conflict: "{title}". Its card shows how it goes.', { title: fixed.fix.title })}` : '';
@@ -308,11 +310,6 @@ export async function discardRun(id, config = loadConfig()) {
 /** A pull request's number, from its address. */
 export const prNumber = url => /\/pull\/(\d+)/.exec(String(url ?? ''))?.[1] ?? null;
 
-/**
- * Why the newer run replaces the old one, or throws: both finished, of the same project, the old one's pull request
- * neither merged nor closed, the newer one's still alive, and the newer run either works on the same board item or its
- * instruction names the old run (its id, branch or pull request), as the fix of a conflict does.
- */
 /** What in a run's instruction names the old run (its id, branch, pull request, or "PR #<n>"), or null. */
 function namedIn(text, old) {
   const number = prNumber(old.pullRequest);
@@ -320,6 +317,11 @@ function namedIn(text, old) {
     ?? (number && new RegExp(`(PR|pull request) #${number}\\b`, 'i').test(text) ? `#${number}` : null);
 }
 
+/**
+ * Why the newer run replaces the old one, or throws: both finished, of the same project, the old one's pull request
+ * neither merged nor closed, the newer one's still alive, and the newer run either works on the same board item, is the
+ * fix of the old one, or its instruction names the old run (its id, branch or pull request), as the fix of a conflict does.
+ */
 function replacement(old, newer) {
   if (!old || !newer) throw new Error(t('Run not found.'));
   if (old.id === newer.id) throw new Error(t('A run does not replace itself.'));
@@ -407,14 +409,15 @@ function fixInstruction(old, { base, files, clone }) {
 /**
  * Queues the fix of a run's conflict with its base branch, unless it has one (fixFor): a task with the manager's review,
  * at the run's level and for its board item. "approved" ({ at }: the owner's Approve that failed on the conflict) goes
- * with it ("ownerApproved"), so the manager merges it after its review; a fix already there and not ended gets it too.
+ * with it ("ownerApproved"), so the manager merges it after its review; Chiefmate's own fix already there and not ended
+ * gets it too, never a run found by its instruction naming the old one (the manager's, whose content may be anything).
  * Returns { fix, queued }.
  */
 export function queueFix(old, { base, files = [], approved = null, config = loadConfig(), runs = listRuns() } = {}) {
   const mark = approved ? { run: old.id, at: approved.at } : null;
   const existing = fixFor(old, runs);
   if (existing) {
-    const open = !existing.merged && !existing.discarded && !['failed', 'canceled'].includes(existing.status);
+    const open = existing.fixOf === old.id && !existing.merged && !existing.discarded && !['failed', 'canceled'].includes(existing.status);
     return { fix: mark && open && !existing.ownerApproved ? setRunFields(existing.id, { ownerApproved: mark }) : existing, queued: false };
   }
   const crew = projectCrew(config, old.project);
@@ -493,12 +496,22 @@ export async function checkDeliveries({ config = loadConfig(), project = null, w
         const result = await mergesCleanly(dir, tips.base, tips.head);
         const fresh = result && readRun(r.id);
         if (!fresh || fresh.merged || fresh.discarded) continue;
-        const known = !!fresh.conflict;
+        // Already told: a conflict found before, or an Approve that failed on one (merge_failed), not found clean since.
+        const failed = fresh.mergeFailed?.conflict && !(fresh.mergeCheck?.clean && String(fresh.mergeCheck.at) > String(fresh.mergeFailed.at));
+        const known = !!fresh.conflict || !!failed;
         fresh.mergeCheck = { at: now(), base: tips.base, head: tips.head, clean: result.clean };
         if (result.clean) delete fresh.conflict;
         else fresh.conflict = { at: fresh.conflict?.at ?? now(), base, files: result.files.slice(0, 50) };
         saveRun(fresh);
-        const fixed = result.clean ? {} : queueFix(fresh, { base, files: result.files, config });
+        let fixed = {};
+        if (!result.clean) {
+          try {
+            fixed = queueFix(fresh, { base, files: result.files, config });
+          } catch (error) {
+            console.error(`Merge check: the fix of ${fresh.id}:`, error.message);
+            fixed = { fix: null, error: error.message };
+          }
+        }
         if (fixed.queued) nudgeQueue();
         if (!result.clean && !known) {
           const files = result.files.length ? ` (files in conflict: ${clip(result.files.join(', '), 300)})` : '';

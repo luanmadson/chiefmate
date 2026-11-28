@@ -14,4 +14,6 @@
 | Fix ready: [computer](card-6-failed-fix-ready-desktop-pt-BR.png) · [phone](card-6-failed-fix-ready-phone-pt-BR.png) | **Correção pronta:** (a brass square): its card waits for the manager. |
 | The fix you already approved: [computer](card-7-fix-approved-by-you-desktop-pt-BR.png) · [phone](card-7-fix-approved-by-you-phone-pt-BR.png) | **Aprovado por você** in place of the level; "Você já aprovou o conteúdo; o Gerente junta depois da revisão." It folds with the manager's cards; **Aprovar** stays for you. |
 
+Changed after the captures, in the manager's review: the cards with no Approve now show their level as **Nível 2 · em espera** instead of **Nível 2 · precisa de você**, which said the opposite of the progress beside it.
+
 Not captured: **Correção juntada** (a green square, for the minutes until GitHub marks the old pull request as merged and its card leaves), **Correção parada; aguardando o Gerente** (the fix failed), and the toast of a click on a stale page ("Já aprovado: nada foi tentado de novo…").
