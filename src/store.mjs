@@ -1,11 +1,14 @@
 // What Chiefmate keeps: runs, account usage, the conversation with the manager, notifications and the schedule state.
 import { readdirSync } from 'node:fs';
 import path from 'node:path';
+import { accountData, defaultAccount } from './accounts.mjs';
 import { DATA, ensureDir, now, readJson, RUNS, writeJson } from './util.mjs';
 
 ensureDir(RUNS);
-const USAGE_FILE = path.join(DATA, 'usage.json');
-export const USAGE_WINDOWS = path.join(DATA, 'usage-windows');
+// Each Claude account's usage is its own (src/accounts.mjs): Claude Code's own configuration keeps these files in the
+// data folder, as before accounts; another account, in data/accounts/<id>.
+const usageFile = account => path.join(accountData(account), 'usage.json');
+export const usageWindows = account => path.join(accountData(account), 'usage-windows');
 const STATE_FILE = path.join(DATA, 'state.json');
 const CONVERSATION_FILE = path.join(DATA, 'manager', 'conversation.json');
 const PENDING_FILE = path.join(DATA, 'manager', 'pending.json');
@@ -71,10 +74,11 @@ export const stepsOf = run => [...(run.steps ?? []), ...(run.review ? [run.revie
 
 // ---------- Account usage (the plan's 5-hour and 7-day windows) ----------
 
-export const readUsage = () => readJson(USAGE_FILE, {});
+/** An account's usage (src/accounts.mjs; the default one when none is given). */
+export const readUsage = (account = defaultAccount()) => readJson(usageFile(account), {});
 
-/** Keeps what Claude Code reports in the rate_limit_event of every run. */
-export function recordUsage(info) {
+/** Keeps what Claude Code reports in the rate_limit_event of every run, as the usage of the account it ran on. */
+export function recordUsage(info, account = defaultAccount()) {
   const windows = info?.unifiedWindows ?? {};
   const window = w => w && { used: w.utilization, resets: w.resetsAt ? new Date(w.resetsAt * 1000).toISOString() : null, status: w.status };
   const usage = {
@@ -84,13 +88,13 @@ export function recordUsage(info) {
     seven_day: window(windows.seven_day),
     overage: info?.isUsingOverage ?? false,
   };
-  writeJson(USAGE_FILE, usage);
+  writeJson(usageFile(account), usage);
   for (const kind of ['five_hour', 'seven_day']) {
     const sample = usage[kind];
     const end = Date.parse(sample?.resets);
     if (!Number.isFinite(end) || !Number.isFinite(sample?.used)) continue;
     try {
-      writeJson(path.join(USAGE_WINDOWS, kind, `${end}.json`), sample);
+      writeJson(path.join(usageWindows(account), kind, `${end}.json`), sample);
     } catch (error) {
       console.error('Recording a cost window:', error.message);
     }

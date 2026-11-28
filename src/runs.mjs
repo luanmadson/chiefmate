@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { instructionFiles, stepAccess, stepMcp } from './access.mjs';
+import { findAccount, projectAccount } from './accounts.mjs';
 import { browserServers, closeAfterRun } from './browsers.mjs';
 import { contextWindow, runClaude } from './claude.mjs';
 import { loadConfig, projectCrew } from './config.mjs';
@@ -528,24 +529,33 @@ function limitNote(window, percent, lang) {
 function checkLimits(run, config) {
   if (run.ignoreLimits) return null;
   let limits;
+  let latest = config;
   try {
-    limits = effectiveLimits(loadConfig());
+    latest = loadConfig();
   } catch {
-    limits = effectiveLimits(config);
+    // the settings the run started with
   }
-  const usage = readUsage();
+  // Only the usage of the project's own account counts (src/accounts.mjs): another account running out holds nothing here.
+  const account = projectAccount(latest, run.project);
+  limits = effectiveLimits(latest, undefined, undefined, account);
+  const usage = readUsage(account);
   const window = blockingWindow(limits, usage);
   if (!window) return null;
   const w = usage[window];
   const note = limitNote(window, formatPercent(w.used));
-  return { note, waitUntil: w.resets, limitWait: { window, ceiling: limits[usageLimits[window]] } };
+  return { note, waitUntil: w.resets, limitWait: { window, ceiling: limits[usageLimits[window]], account: account.id } };
 }
 
 /**
  * Whether a run waiting for a configured limit goes back to the queue before the reset: its limit was raised (or taken
  * out) above the current usage and no window blocks it. A wait for the account running out is never cleared here.
+ * A wait holds only for the Claude account it was made on (src/accounts.mjs): with its project now on another account
+ * ("account": the project's account now, its limits and usage given), it goes back as soon as that account has room,
+ * the running out included. legacy: the account a wait recorded before accounts was made on.
  */
-export function limitWaitCleared(run, limits, usage) {
+export function limitWaitCleared(run, limits, usage, account = null, legacy = null) {
+  const waitedOn = run.limitWait?.account ?? legacy;
+  if (account && waitedOn && waitedOn !== account.id) return !blockingWindow(limits, usage);
   // Older runs only recorded the reason in the translated note.
   const percent = run.limitWait ? null : run.note?.match(/-?\d+%/)?.[0];
   const window = run.limitWait?.window ?? (percent && Object.keys(usageLimits).find(window =>
@@ -558,10 +568,10 @@ export function limitWaitCleared(run, limits, usage) {
     && !blockingWindow(limits, usage);
 }
 
-/** If the account ran out in the middle of a step, the step starts over once the limit resets. */
-function limitHit(result) {
+/** If the account the step ran on ran out in the middle of it, the step starts over once that account's limit resets. */
+function limitHit(result, account) {
   if (result.ok || result.canceled) return null;
-  const usage = readUsage();
+  const usage = readUsage(account);
   const rejected = usage.status === 'rejected' || /usage limit|rate limit|limit reached/i.test(result.error ?? '');
   if (!rejected) return null;
   const resets = [usage.five_hour, usage.seven_day].filter(w => w?.status === 'rejected' && w.resets).map(w => w.resets);
@@ -915,12 +925,14 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   if (l.pauseRequest) return { paused: true };
   // A step paused for an update of Chiefmate resumes its own Claude Code session, with its clock and its counts.
   const paused = step.paused ?? null;
+  // The Claude account it runs on (src/accounts.mjs): the project's; a paused step keeps the one its session is on.
+  const account = paused && step.account ? findAccount(config, step.account) : projectAccount(config, run.project);
   step.costActivity ??= legacyStepCosts(step);
   delete step.paused;
   // Told once: a later resume finds, and tells, an operation of its own.
   delete step.gitRecovery;
   delete step.freshBase;
-  Object.assign(step, { status: 'running', started: paused ? step.started ?? now() : now(), error: null, model, tool, effort: toolEffort(tool, agent.effort), promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null });
+  Object.assign(step, { status: 'running', started: paused ? step.started ?? now() : now(), error: null, model, tool, effort: toolEffort(tool, agent.effort), promptBlocks: built?.blocks ?? null, adaptations: built?.adaptations ?? null, ...(tool === 'claude' ? { account: account.id } : {}) });
   Object.assign(l, {
     step: index + 1, agent: step.agent, started: now(), context: { used: 0, window: contextWindow(model), compactions: 0 }, actions: [], heldUntil: 0, talking: false, reply: null, session: null,
     doing: finalReview ? t('reviewing the work') : step.role === 'plan' ? t('planning the request') : t('getting started'),
@@ -959,6 +971,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   let session = paused ? { id: paused.session, resume: true } : { id: randomUUID() };
   const common = {
     dir,
+    account,
     system: agent.instructions,
     model,
     effort: agent.effort,
@@ -1043,7 +1056,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     total.durationMs += r.durationMs ?? 0;
     total.subagents += r.subagents ?? 0;
     // The session paused for an update is gone (or never started): the step starts over, as it did before pauses.
-    if (resuming && !r.ok && !r.canceled && !r.interrupted && !r.turns && !r.text && !l.cancelRequest && !limitHit(r)) {
+    if (resuming && !r.ok && !r.canceled && !r.interrupted && !r.turns && !r.text && !l.cancelRequest && !limitHit(r, account)) {
       resuming = false;
       session = { id: randomUUID() };
       turn = prompt;
@@ -1065,7 +1078,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
       l.talking = false;
       break;
     }
-    if (l.cancelRequest || r.canceled || limitHit(r) || (!r.ok && !r.interrupted)) {
+    if (l.cancelRequest || r.canceled || limitHit(r, account) || (!r.ok && !r.interrupted)) {
       l.talking = false;
       for (const m of messages) Object.assign(m, { status: 'undelivered' });
       saveRun(run);
@@ -1088,7 +1101,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   }
   Object.assign(r, total);
 
-  const waitUntil = limitHit(r);
+  const waitUntil = limitHit(r, account);
   // A file the step wrote is gone or can't be read: probably quarantined by the antivirus. Nothing is committed (its
   // absence would be), the project's queue waits, and the step resumes in the same session once the file is back.
   const quarantined = lost => {
@@ -1432,7 +1445,8 @@ export async function execute(run) {
       const { waitUntil, paused } = await runStep({ l, run, step, index, dir, project, config, agents, libraries, base, finalReview });
       if (reviewFrom && step.status === 'done') step.commits = await commitSubjects(dir, reviewFrom).catch(() => []);
       if (paused && !l.cancelRequest) return await pauseForUpdate();
-      if (waitUntil) return wait(waitUntil, t('Your account reached its limit in the middle of a step'));
+      // the account it ran out on (src/accounts.mjs): only that account's reset, or the project moved to another account, ends the wait
+      if (waitUntil) return wait(waitUntil, t('Your account reached its limit in the middle of a step'), { account: step.account ?? projectAccount(config, run.project).id });
       if (step.agent === LEAD) afterLead(run, step, agents, log);
     }
     const planning = run.steps.find(s => s.agent === LEAD && s.role === 'plan');

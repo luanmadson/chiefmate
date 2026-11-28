@@ -7,9 +7,13 @@
 // which one it is), reads once more, and the app keeps a single "Sign in to claude.ai" card with a button to reopen it.
 // A page a step asks the owner to see (needs-you, src/needs.mjs) opens in a window on the same profile, with the same
 // time limit while the reading is on: both warn WARN_MINUTES before closing, and wait while the owner is using them.
+// Each Claude account (src/accounts.mjs) is read on a profile of its own, signed in to that account: Claude Code's own
+// configuration on the profile from before accounts (data/browser-profile), another account in data/accounts/<id>, each
+// with its own status and sign-in window. A request's page always opens on the first profile.
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
+import { accountData, findAccount, listAccounts, manyAccounts } from './accounts.mjs';
 import { loadConfig, saveConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { isLocked } from './lockdown.mjs';
@@ -18,9 +22,25 @@ import { readState } from './store.mjs';
 import { DATA, ensureDir, now, readJson, writeJson } from './util.mjs';
 
 export const PROFILE_DIR = path.join(DATA, 'browser-profile');
-const STATUS_FILE = path.join(DATA, 'usage-page.json');
-const LOGIN_FILE = path.join(DATA, 'usage-login.json');
 const OWNER_FILE = path.join(DATA, 'owner-window.json');
+
+/** The account read when none is given: Claude Code's own configuration, whose profile is the one from before accounts. */
+export const readerAccount = (config, id = null) => {
+  if (id) return findAccount(config, id);
+  let c;
+  try {
+    c = config ?? loadConfig();
+  } catch {
+    c = {};
+  }
+  return listAccounts(c).find(a => !a.configDir) ?? listAccounts(c).find(a => a.default);
+};
+/** An account's reading: its browser profile, its status and its sign-in window. */
+const filesOf = account => {
+  const dir = accountData(account ?? readerAccount());
+  return { profile: path.join(dir, 'browser-profile'), status: path.join(dir, 'usage-page.json'), login: path.join(dir, 'usage-login.json') };
+};
+export const profileOf = account => filesOf(account).profile;
 const USAGE_PAGE = 'https://claude.ai/settings/usage';
 const LOGIN_PAGE = 'https://claude.ai/login';
 export const LOGIN_MINUTES = 10;
@@ -42,9 +62,9 @@ export const readerSettings = (config = loadConfig()) => ({
   everyHours: Math.max(2, Number(config.usage_reader?.every_hours) || 4),
 });
 
-/** What the latest reading found: { attempted, ok, read_at, five_hour, seven_day, grants, excerpt, error, warning }. */
-export const readerStatus = () => readJson(STATUS_FILE, {});
-export const signedIn = () => existsSync(PROFILE_DIR);
+/** What the latest reading of an account found: { attempted, ok, read_at, five_hour, seven_day, grants, excerpt, error, warning }. */
+export const readerStatus = account => readJson(filesOf(account).status, {});
+export const signedIn = account => existsSync(filesOf(account).profile);
 
 export function browserPath(config) {
   if (config.usage_reader?.browser) return config.usage_reader.browser;
@@ -65,8 +85,8 @@ function needBrowser(config) {
 
 // ---------- The sign-in window ----------
 
-/** The sign-in window opened last: { pid, image, opened, closed, timed_out }. */
-export const loginState = () => readJson(LOGIN_FILE, {});
+/** An account's sign-in window opened last: { pid, image, opened, closed, timed_out }. */
+export const loginState = account => readJson(filesOf(account).login, {});
 const loginOpen = (login = loginState()) => !!login.pid && !login.closed;
 
 function startWindow(browser, args) {
@@ -89,12 +109,12 @@ function windowAlive({ pid, image }) {
 }
 
 /** The process was started on the reading profile (its command line names it), not another program given its number. */
-function onProfile(pid) {
+function onProfile(pid, profile = PROFILE_DIR) {
   if (process.platform !== 'win32') return Promise.resolve(true);
   const script = `(Get-CimInstance Win32_Process -Filter 'ProcessId=${Number(pid)}').CommandLine`;
   return new Promise(resolve =>
     execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 15_000 }, (error, stdout) =>
-      resolve(!error && String(stdout).toLowerCase().includes(PROFILE_DIR.toLowerCase())),
+      resolve(!error && String(stdout).toLowerCase().includes(profile.toLowerCase())),
     ),
   );
 }
@@ -104,11 +124,11 @@ function onProfile(pid) {
  * the reading profile is in use, and only a process on that profile: once the window is gone, its number may already be
  * the owner's own browser.
  */
-async function closeWindow(login) {
-  if (!profileInUse() || !(await onProfile(login.pid))) return;
+async function closeWindow(login, profile = PROFILE_DIR) {
+  if (!profileInUse(profile) || !(await onProfile(login.pid, profile))) return;
   spawnSync('taskkill', ['/PID', String(login.pid), '/T'], { windowsHide: true });
   for (let i = 0; i < 20 && windowAlive(login); i++) await sleep(250);
-  if (windowAlive(login) && profileInUse()) spawnSync('taskkill', ['/PID', String(login.pid), '/T', '/F'], { windowsHide: true });
+  if (windowAlive(login) && profileInUse(profile)) spawnSync('taskkill', ['/PID', String(login.pid), '/T', '/F'], { windowsHide: true });
 }
 
 // Windows' own calls: the process of the window in front, and the time since the owner last typed or moved the mouse.
@@ -132,8 +152,8 @@ function windowInUse(win) {
 }
 
 const WINDOWS = {
-  login: { file: LOGIN_FILE, target: 'chiefmate:usage', title: () => t('The claude.ai sign-in window closes soon') },
-  owner: { file: OWNER_FILE, target: 'chiefmate:operations', title: () => t("The window opened for a step's request closes soon") },
+  login: { file: account => filesOf(account).login, profile: account => filesOf(account).profile, target: 'chiefmate:usage', title: () => t('The claude.ai sign-in window closes soon') },
+  owner: { file: () => OWNER_FILE, profile: () => PROFILE_DIR, target: 'chiefmate:operations', title: () => t("The window opened for a step's request closes soon") },
 };
 
 const warnOwner = kind => () =>
@@ -143,13 +163,14 @@ const warnOwner = kind => () =>
  * Starts the browser on the reading profile with an address, and notes its window so the server closes it after
  * LOGIN_MINUTES. Opened again while it is still open, it only brings it forward; "restart" gives it the full time again.
  */
-function openWindow(kind, url, config, { start = startWindow, alive = windowAlive, restart = false } = {}) {
-  const { file } = WINDOWS[kind];
+function openWindow(kind, url, config, { start = startWindow, alive = windowAlive, restart = false, account = null } = {}) {
+  const file = WINDOWS[kind].file(account);
+  const profile = WINDOWS[kind].profile(account);
   const browser = needBrowser(config);
-  ensureDir(PROFILE_DIR);
+  ensureDir(profile);
   const before = readJson(file, {});
   const already = loginOpen(before) && alive(before);
-  const pid = start(browser, [`--user-data-dir=${PROFILE_DIR}`, '--no-first-run', '--no-default-browser-check', url]);
+  const pid = start(browser, [`--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', url]);
   if (already) {
     if (!restart) return before;
     const again = { ...before, opened: now(), warned: null };
@@ -162,8 +183,11 @@ function openWindow(kind, url, config, { start = startWindow, alive = windowAliv
   return opened;
 }
 
-/** A window for you to sign in to claude.ai. "start" and "alive" stand in for the browser and Windows in the tests. */
-export const openLogin = (config = loadConfig(), stand = {}) => openWindow('login', LOGIN_PAGE, config, stand);
+/**
+ * A window for you to sign in to claude.ai, on the profile of one account (the first one when not given). "start" and
+ * "alive" stand in for the browser and Windows in the tests.
+ */
+export const openLogin = (config = loadConfig(), stand = {}, account = null) => openWindow('login', LOGIN_PAGE, config, { ...stand, account: account ?? readerAccount(config) });
 
 /** A page a step asks you to see (needs-you): each new one gives the window the full time again. */
 export const openOwnerPage = (url, config = loadConfig(), stand = {}) => openWindow('owner', url, config, { ...stand, restart: true });
@@ -180,11 +204,13 @@ const minding = new Map();
  * Returns "open", "warned", "closed" or "timed_out", or null with no window open.
  * "alive", "close", "inUse" and "warn" stand in for Windows and its notifications in the tests.
  */
-function mindWindow(kind, { at = Date.now(), timed = true, alive = windowAlive, close = closeWindow, inUse = windowInUse, warn = warnOwner(kind) } = {}) {
-  const { file } = WINDOWS[kind];
+function mindWindow(kind, { at = Date.now(), timed = true, alive = windowAlive, close = closeWindow, inUse = windowInUse, warn = warnOwner(kind), account = null } = {}) {
+  const file = WINDOWS[kind].file(account);
+  const profile = WINDOWS[kind].profile(account);
+  const key = `${kind}:${file}`;
   const win = readJson(file, {});
   if (!loginOpen(win)) return Promise.resolve(null);
-  if (minding.has(kind)) return minding.get(kind);
+  if (minding.has(key)) return minding.get(key);
   const when = new Date(at).toISOString();
   const work = (async () => {
     if (!alive(win)) {
@@ -204,31 +230,33 @@ function mindWindow(kind, { at = Date.now(), timed = true, alive = windowAlive, 
     if (await (async () => inUse(win))().catch(() => false)) return 'open';
     const fresh = readJson(file, {}); // a new page meanwhile gave it the full time again
     if (fresh.opened !== win.opened || fresh.warned !== win.warned) return 'open';
-    await close(win);
+    await close(win, profile);
     writeJson(file, { ...win, closed: when, timed_out: true });
     return 'timed_out';
-  })().finally(() => minding.delete(kind));
-  minding.set(kind, work);
+  })().finally(() => minding.delete(key));
+  minding.set(key, work);
   return work;
 }
 
-export const checkLogin = stand => mindWindow('login', stand);
+export const checkLogin = (stand, account = null) => mindWindow('login', { ...stand, account });
 export const checkOwnerWindow = stand => mindWindow('owner', stand);
 
 /**
  * The reading needs you to sign in: never signed in, signed out, or the sign-in window closed by its time limit with
  * no reading since. Not while the window is open: it is there for that.
  */
-export function signInNeeded(status = readerStatus(), login = loginState()) {
+export function signInNeeded(status = undefined, login = undefined, account = null) {
+  status ??= readerStatus(account);
+  login ??= loginState(account);
   if (loginOpen(login)) return false;
-  if (!signedIn()) return true;
+  if (!signedIn(account)) return true;
   if (status.ok === false && SIGN_IN_CAUSES.includes(status.cause)) return true;
   return !!login.timed_out && (Date.parse(login.closed) || 0) > (Date.parse(status.attempted ?? '') || 0);
 }
 
 /** While the browser runs on the profile (the sign-in window, say), Windows keeps its lockfile from being removed. */
-function profileInUse() {
-  const lock = path.join(PROFILE_DIR, 'lockfile');
+function profileInUse(profile = PROFILE_DIR) {
+  const lock = path.join(profile, 'lockfile');
   if (!existsSync(lock)) return false;
   try {
     rmSync(lock);
@@ -277,17 +305,18 @@ async function waitFor(check, ms) {
   return null;
 }
 
-/** Opens the usage page with no window and returns its address and text. */
-async function browse(config) {
+/** Opens the usage page with no window, on an account's profile, and returns its address and text. */
+async function browse(config, account = null) {
   if (typeof WebSocket !== 'function') throw new Error(t('This version of Node.js has no WebSocket. Update to Node.js 22 or newer.'));
   const browser = needBrowser(config);
-  if (!signedIn()) throw failure('not_signed_in', t('Not signed in yet. Run: node src/cli.mjs claude-login'));
-  if (profileInUse()) throw failure('profile_open', t('The browser with the reading profile is open (the sign-in window?). Close it and try again.'));
-  const portFile = path.join(PROFILE_DIR, 'DevToolsActivePort');
+  const profile = profileOf(account);
+  if (!signedIn(account)) throw failure('not_signed_in', t('Not signed in yet. Run: node src/cli.mjs claude-login'));
+  if (profileInUse(profile)) throw failure('profile_open', t('The browser with the reading profile is open (the sign-in window?). Close it and try again.'));
+  const portFile = path.join(profile, 'DevToolsActivePort');
   rmSync(portFile, { force: true });
   const child = spawn(
     browser,
-    ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${PROFILE_DIR}`, '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--mute-audio', 'about:blank'],
+    ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--mute-audio', 'about:blank'],
     { stdio: 'ignore', windowsHide: true },
   );
   child.on('error', () => {});
@@ -363,14 +392,19 @@ export function parseUsagePage(text) {
   return { five_hour, seven_day, grants, excerpt: lines.filter(l => /%|reset|redefini|expir|venc/i.test(l)).slice(0, 12) };
 }
 
-/** The page's count of free resets wins: entries read before are replaced; the ones you recorded by hand are kept. */
-function applyGrants(grants, at) {
+/**
+ * The page's count of free resets wins: entries read before are replaced; the ones you recorded by hand are kept. Only
+ * the resets of the account read are touched (src/accounts.mjs): another account's stay as they are.
+ */
+function applyGrants(grants, at, account = readerAccount()) {
   const config = loadConfig();
   const list = config.plan_resets ?? [];
-  const kept = list.filter(g => g.source !== 'claude.ai' || g.used);
-  const manual = kept.filter(g => !g.used && (!g.expires || Date.parse(g.expires) > Date.now())).length;
+  const legacy = readerAccount(config).id;
+  const mine = g => (g.account ?? legacy) === account.id;
+  const kept = list.filter(g => !mine(g) || g.source !== 'claude.ai' || g.used);
+  const manual = kept.filter(g => mine(g) && !g.used && (!g.expires || Date.parse(g.expires) > Date.now())).length;
   const added = Array.from({ length: Math.max(0, grants.count - manual) }, () => ({
-    kind: 'full', expires: grants.expires, used: false, note: 'Read on claude.ai', source: 'claude.ai', read_at: at,
+    kind: 'full', expires: grants.expires, used: false, note: 'Read on claude.ai', source: 'claude.ai', read_at: at, account: account.id,
   }));
   config.plan_resets = [...kept, ...added];
   saveConfig(config);
@@ -382,13 +416,13 @@ let reading = null;
  * Reads the page now (one reading at a time). Keeps the latest values when it fails, and a page with no limit to read
  * is a failure too ("no_data"). "open" stands in for the browser in the tests.
  */
-export function readUsagePage(config = loadConfig(), { open = browse } = {}) {
+export function readUsagePage(config = loadConfig(), { open = browse, account = readerAccount(config) } = {}) {
   if (isLocked()) return Promise.reject(new Error(t('Refused: Chiefmate is in emergency lockdown ({what}). Only the owner can release it, in the app or the command line on this computer.', { what: t('reading claude.ai') })));
   reading ??= (async () => {
-    const before = readerStatus();
+    const before = readerStatus(account);
     const status = { ...before, attempted: now() };
     try {
-      const page = await open(config);
+      const page = await open(config, account);
       if (/\/(login|signin|logout)\b/.test(new URL(page.url || USAGE_PAGE).pathname)) {
         throw failure('signed_out', t('The reading profile is signed out of claude.ai. Run: node src/cli.mjs claude-login'));
       }
@@ -399,11 +433,11 @@ export function readUsagePage(config = loadConfig(), { open = browse } = {}) {
       }
       Object.assign(status, { ok: true, error: null, cause: null, failing_since: null, read_at: now(), ...found });
       status.warning = !found.grants ? t("The page didn't show free resets: the record you keep by hand stays.") : null;
-      if (found.grants) applyGrants(found.grants, status.read_at);
+      if (found.grants) applyGrants(found.grants, status.read_at, account);
     } catch (error) {
       Object.assign(status, failed(before, error, status.attempted));
     }
-    writeJson(STATUS_FILE, status);
+    writeJson(filesOf(account).status, status);
     return status;
   })().finally(() => (reading = null));
   return reading;
@@ -436,10 +470,26 @@ export function readingDue({ status = {}, login = {}, everyHours, away = false, 
  */
 export function readWhenDue(config) {
   const { enabled, everyHours } = readerSettings(config);
+  const accounts = readerAccounts(config);
   // A request's page only gives way to the reading: with the reading off, it stays open until you close it.
-  const open = [loginOpen() && checkLogin(), loginOpen(ownerWindowState()) && checkOwnerWindow({ timed: enabled })].filter(Boolean);
+  const open = [
+    ...accounts.map(account => loginOpen(loginState(account)) && checkLogin({}, account)),
+    loginOpen(ownerWindowState()) && checkOwnerWindow({ timed: enabled }),
+  ].filter(Boolean);
   for (const check of open) check.catch(error => console.error('Browser window:', error.message));
-  if (open.length) return;
-  if (!enabled || reading || !signedIn()) return;
-  if (readingDue({ status: readerStatus(), login: loginState(), everyHours, away: !!readState().away })) readUsagePage(config).catch(() => {});
+  if (open.length || !enabled || reading) return;
+  // one account at a time, each on its own profile, when its time has come
+  const due = accounts.find(account => signedIn(account) && readingDue({ status: readerStatus(account), login: loginState(account), everyHours, away: !!readState().away }));
+  if (due) readUsagePage(config, { account: due }).catch(() => {});
 }
+
+/** The accounts read: each Claude account, the one of Claude Code's own configuration first. */
+export function readerAccounts(config = loadConfig()) {
+  const first = readerAccount(config);
+  return [first, ...listAccounts(config).filter(a => a.id !== first.id)];
+}
+
+/** Each account's reading, for the app with several accounts: [{ account, name, signedIn, status, signIn, login }]. */
+export const readerStates = (config = loadConfig()) => (manyAccounts(config) ? readerAccounts(config).map(a => ({
+  account: a.id, name: a.name, signedIn: signedIn(a), status: readerStatus(a), signIn: signInNeeded(undefined, undefined, a), login: loginState(a),
+})) : []);

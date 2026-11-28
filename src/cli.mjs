@@ -1,5 +1,6 @@
 // Chiefmate's command line. The manager uses these commands to queue work; you can use them too.
-import { openSync, writeSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, openSync, writeSync } from 'node:fs';
 import path from 'node:path';
 import { format } from 'node:util';
 import { loadConfig, saveConfig } from './config.mjs';
@@ -305,10 +306,18 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs ram                          the projects running on this computer and the memory each one uses
   node src/cli.mjs stop-project <id> [--yes]    lists, then (with --yes) stops a project's processes on this computer
   node src/cli.mjs reset-grant [list]           the plan's free resets you recorded
-  node src/cli.mjs reset-grant add <expires> ["<note>"]
-                                                records a free reset (expires: YYYY-MM-DD)
+  node src/cli.mjs reset-grant add <expires> ["<note>"] [--account <id>]
+                                                records a free reset (expires: YYYY-MM-DD) of a Claude account (the
+                                                default one when not given)
   node src/cli.mjs reset-grant used <n>         marks free reset number n as used (remove <n> deletes it)
-  node src/cli.mjs claude-login                 opens a browser window to sign in to claude.ai, for the optional usage reading
+  node src/cli.mjs claude-login [--account <id>]
+                                                opens a browser window to sign in to claude.ai, for the optional usage
+                                                reading (of one Claude account: each has a browser profile of its own)
+  node src/cli.mjs accounts                     the Claude accounts: each one's configuration folder, usage, session
+                                                and projects
+  node src/cli.mjs account-login <id> [--dry-run]
+                                                signs in to a Claude account: Claude Code's own sign-in, in your
+                                                browser, on the account's configuration folder (CLAUDE_CONFIG_DIR)
   node src/cli.mjs autopilot [on|off] [--mode save|normal|all] [--week-pace 1.2|all] [--window-5h 0.85]
                            [--quiet 23:00-07:00|off] [--report 08:00|off] [--session save|normal|all]
                                                 the autopilot: when a project's queue empties, the manager puts its next
@@ -1842,24 +1851,71 @@ async function main() {
     }
     case 'reset-grant': {
       const { changeResets, planResets } = await import('./plan.mjs');
-      const [action = 'list', ...args] = rest;
+      const [action = 'list', ...given] = rest;
+      // --account <id>: the Claude account the reset is of (src/accounts.mjs; the default one when not given)
+      const args = given.filter((a, i) => a !== '--account' && given[i - 1] !== '--account');
       let list;
       if (action === 'list') list = planResets();
-      else if (action === 'add') list = changeResets({ action, expires: args[0], note: args.slice(1).join(' ') });
+      else if (action === 'add') list = changeResets({ action, expires: args[0], note: args.slice(1).join(' '), account: option('--account') });
       else if (action === 'used' || action === 'remove') list = changeResets({ action, index: args[0] });
       else throw new Error('Use: reset-grant [list] | add <expires> ["<note>"] | used <n> | remove <n>');
       for (const g of list) {
         const status = g.used ? 'used' : g.available ? 'available' : 'expired';
-        console.log(`${String(g.index).padStart(2)}. ${status.padEnd(9)} ${g.expires ? `expires ${formatDateTime(g.expires)}` : 'expiry unknown'}${g.note ? `  ${g.note}` : ''}${g.source === 'claude.ai' ? '  (read on claude.ai)' : ''}`);
+        console.log(`${String(g.index).padStart(2)}. ${status.padEnd(9)} ${g.expires ? `expires ${formatDateTime(g.expires)}` : 'expiry unknown'}  account ${g.account}${g.note ? `  ${g.note}` : ''}${g.source === 'claude.ai' ? '  (read on claude.ai)' : ''}`);
       }
       if (!list.length) console.log('No free resets recorded.');
       return;
     }
+    case 'accounts': {
+      const { accountLabel, listAccounts, projectAccount } = await import('./accounts.mjs');
+      const { readUsage } = await import('./store.mjs');
+      const { sessionNow } = await import('./spending.mjs');
+      const config = loadConfig();
+      const pct = v => (typeof v === 'number' ? `${Math.round(v * 100)}%` : '-');
+      for (const a of listAccounts(config)) {
+        const u = readUsage(a);
+        const s = sessionNow(config, undefined, Date.now(), a);
+        const projects = Object.keys(config.projects ?? {}).filter(id => projectAccount(config, id).id === a.id);
+        console.log(`${accountLabel(a)}${a.default ? ' [default]' : ''}: ${a.configDir ? `configuration ${a.configDir}` : "Claude Code's own configuration"}`);
+        console.log(`  5-hour window ${pct(u.five_hour?.used)}${u.five_hour?.resets ? ` (resets ${formatDateTime(u.five_hour.resets)})` : ''}; plan week ${pct(u.seven_day?.used)}${u.seven_day?.resets ? ` (resets ${formatDateTime(u.seven_day.resets)})` : ''}`);
+        console.log(`  session: mode ${s.mode}, ${s.parallel} run(s) at a time, pausing at ${pct(s.limit)}${s.boost ? `, spending all until ${formatDateTime(s.boost.until)}` : ''}`);
+        console.log(`  projects: ${projects.join(', ') || 'none'}`);
+      }
+      return;
+    }
+    case 'account-login': {
+      // Claude Code's own sign-in, in this terminal: it opens the browser, on the account's configuration folder.
+      const { accountEnv, findAccount } = await import('./accounts.mjs');
+      const { loginProcess } = await import('./claude.mjs');
+      const config = loadConfig();
+      const account = findAccount(config, rest[0]);
+      if (!rest[0] || account.missing) throw new Error('Use: account-login <account id> (the ids: node src/cli.mjs accounts)');
+      accountEnv(account);
+      const { file, args, env } = loginProcess(account);
+      if (has('--dry-run')) {
+        console.log(JSON.stringify({ account: account.id, configDir: account.configDir, command: [file, ...args] }, null, 2));
+        return;
+      }
+      if (account.configDir) mkdirSync(account.configDir, { recursive: true });
+      console.log(`Signing in to the Claude account "${account.name}"${account.configDir ? ` (configuration ${account.configDir})` : ''}. Follow Claude Code in your browser.\n`);
+      const r = spawnSync(file, args, { stdio: 'inherit', env });
+      // the server reads the sign-in again, so the app shows it at once
+      await api('/api/accounts', { check: account.id }).catch(() => {});
+      console.log(r.status === 0 ? '\nDone: the account is signed in.' : `\nClaude Code's sign-in ended with code ${r.status ?? '?'}.`);
+      if (has('--window')) {
+        console.log('Press Enter to close this window.');
+        await new Promise(resolve => process.stdin.once('data', resolve));
+      }
+      return;
+    }
     case 'claude-login': {
-      const { LOGIN_MINUTES, openLogin, PROFILE_DIR } = await import('./usagepage.mjs');
-      openLogin();
-      console.log(`A browser window opened with Chiefmate's own profile (${PROFILE_DIR}).
-Sign in to claude.ai there, then close the window. With Chiefmate running, it closes by itself after ${LOGIN_MINUTES} minutes.
+      const { LOGIN_MINUTES, openLogin, profileOf, readerAccount } = await import('./usagepage.mjs');
+      // --account <id>: the profile of that Claude account (each account is read on a profile of its own)
+      const account = readerAccount(undefined, option('--account') ?? null);
+      if (account.missing) throw new Error(`Unknown Claude account: ${account.id} (the ids: node src/cli.mjs accounts)`);
+      openLogin(undefined, {}, account);
+      console.log(`A browser window opened with Chiefmate's own profile for the account ${account.id} (${profileOf(account)}).
+Sign in to claude.ai there with that account, then close the window. With Chiefmate running, it closes by itself after ${LOGIN_MINUTES} minutes.
 The reading is off until you turn it on: node src/cli.mjs usage-reader on`);
       return;
     }
@@ -1890,13 +1946,17 @@ The reading is off until you turn it on: node src/cli.mjs usage-reader on`);
         saveConfig(config);
       } else if (action === 'now') {
         const start = Date.now() - 1000;
-        await apiOr('/api/usage-reader', { read: true }, () => reader.readUsagePage());
+        const account = reader.readerAccount(undefined, option('--account') ?? null);
+        await apiOr('/api/usage-reader', { read: true, ...(option('--account') ? { account: account.id } : {}) }, () => reader.readUsagePage(undefined, { account }));
         // Through the server, the reading goes on there: its result is written when it ends (wait up to two minutes).
-        for (let i = 0; i < 120 && !(Date.parse(reader.readerStatus().attempted ?? '') >= start); i++) await new Promise(r => setTimeout(r, 1000));
+        for (let i = 0; i < 120 && !(Date.parse(reader.readerStatus(account).attempted ?? '') >= start); i++) await new Promise(r => setTimeout(r, 1000));
       }
       const { enabled, everyHours } = reader.readerSettings();
-      console.log(`Reading of claude.ai: ${enabled ? `on, every ${everyHours} h` : 'off'}${reader.signedIn() ? '' : ' (not signed in: node src/cli.mjs claude-login)'}`);
-      console.log(JSON.stringify(reader.readerStatus(), null, 2));
+      console.log(`Reading of claude.ai: ${enabled ? `on, every ${everyHours} h` : 'off'}`);
+      for (const account of reader.readerAccounts()) {
+        console.log(`Account ${account.id}${reader.signedIn(account) ? '' : ` (not signed in: node src/cli.mjs claude-login --account ${account.id})`}:`);
+        console.log(JSON.stringify(reader.readerStatus(account), null, 2));
+      }
       return;
     }
     case 'watch': {

@@ -6,6 +6,8 @@ export const ONLY_ON_PC = {
   'project-open': { route: '/api/project/open', body: { app: 'folder' } },
   'project-vscode': { route: '/api/project/open', body: { app: 'vscode' } },
   'browser-focus': { route: '/api/browser', body: { action: 'focus' } },
+  // A Claude account's sign-in window (Claude Code's own sign-in, in the browser of the computer).
+  'account-login': { route: '/api/accounts', body: { login: 'main' } },
   // A file of your user folder: from afar, only found ("dryRun"), its path shown to copy.
   'file-open': { route: '/api/files/open', body: { path: 'Documents\\notes.md' } },
 };

@@ -16,6 +16,7 @@ import { createInterface } from 'node:readline';
 import { denyRules, stepMcp, userClaudeExcludes } from './access.mjs';
 import { browserServers } from './browsers.mjs';
 import { addRequest, chargeFolder, chargeProfile, chargeProject, chargeTurn, takeRequest, turnChanges } from './charge.mjs';
+import { accountEnv, accountHome, findAccount, openingAccount, sessionAccount } from './accounts.mjs';
 import { describeAction, environment, runClaude } from './claude.mjs';
 import { loadConfig } from './config.mjs';
 import { costActivity } from './costs.mjs';
@@ -75,6 +76,7 @@ export function sessionProfiles(config = loadConfig()) {
     id, name: p?.name ?? id, tool: String(p?.tool ?? 'claude').toLowerCase(), project: p?.project ?? null, library_folder: p?.library_folder ?? null,
     prompt_blocks: (Array.isArray(p?.prompt_blocks) ? p.prompt_blocks : String(p?.prompt_blocks ?? '').split(',')).map(b => String(b).trim()).filter(Boolean),
     model: p?.model ?? null, cwd: p?.cwd ?? null, mcp: Array.isArray(p?.mcp) ? p.mcp.map(String) : [], auto: false,
+    account: p?.account ? String(p.account) : null,
   }));
   return [...configured, ...autoProfiles(config, configured)];
 }
@@ -303,6 +305,18 @@ export function openConsole(name, cwd, args, onError = error => console.error(er
   return 'powershell';
 }
 
+/**
+ * A window where the owner signs in to a Claude account ("cli.mjs account-login <id> --window": Claude Code's own
+ * sign-in, in the browser), from the app's Usage section. dryRun: only what it would run.
+ */
+export function openAccountLogin(config, id, { dryRun = false } = {}) {
+  const account = findAccount(config, id);
+  if (!id || account.missing) throw new Error(t('Unknown Claude account: {id}', { id: String(id ?? '') }));
+  const args = ['account-login', account.id, '--window'];
+  if (dryRun) return { account: account.id, args, opened: null };
+  return { account: account.id, args, opened: openConsole(t('Sign in to {name}', { name: account.name }), ROOT, args) };
+}
+
 /** Opens the session's window. */
 const openWindow = session => openConsole(session.name, session.cwd, ['session-run', session.id]);
 
@@ -327,7 +341,7 @@ function launch(session) {
  * that one ("existing"). When Codex is not signed in, asks the owner to sign in (as a step's "needs-you" does) and
  * starts the session once that is done.
  */
-export async function openSession(profileId, { origin = 'app', prompt: written = null, window = false, work = null, config = loadConfig() } = {}) {
+export async function openSession(profileId, { origin = 'app', prompt: written = null, window = false, work = null, account: chosen = null, config = loadConfig() } = {}) {
   refuseWhileLocked(t('live session'));
   // "Work now" opens only from the owner's click on the project's page (openWork in src/worknow.mjs), in the app.
   if (findProfile(config, profileId)?.work && (!work || window || written)) throw new Error(t('"Work now" opens only from the button on the project\'s page.'));
@@ -339,6 +353,9 @@ export async function openSession(profileId, { origin = 'app', prompt: written =
   if (open) return { ...open, existing: true };
   // Resolved here and kept in the record: the window (Windows Terminal) doesn't get Chiefmate's environment.
   const command = toolCommand(profile.tool);
+  // The Claude account it runs on, kept for its whole life (its conversation is in that account's configuration).
+  const account = profile.tool === 'claude' ? openingAccount(config, profile, chosen) : null;
+  if (account) accountEnv(account);
   ensureDir(SESSIONS);
   const base = `${stamp()}-${slug(profile.id)}`;
   let id = base;
@@ -350,7 +367,7 @@ export async function openSession(profileId, { origin = 'app', prompt: written =
     cwd: folder.dir, readOnlyCopy: folder.copy, model: profile.model ?? (profile.tool === 'claude' ? config.default_model ?? null : null), command, blocks: prompt.written ? ['(written in the prompt builder)'] : prompt.blocks, missing: prompt.missing,
     // In a window, the first message always goes: it carries the manager's address (in the app, it goes with the owner's first message).
     firstMessage: prompt.blocksGiven || (mode === 'window' && !profile.charge),
-    origin, created: now(), status: 'starting', requests: [], mode, ...(profile.charge ? { charge: true, member: profile.member } : {}),
+    origin, created: now(), status: 'starting', requests: [], mode, ...(account ? { account: account.id } : {}), ...(profile.charge ? { charge: true, member: profile.member } : {}),
     ...(profile.work ? { member: profile.member, memberName: profile.memberName, memberRole: profile.memberRole, work: { copy: !!work.copy, held: [], crew: (work.crew ?? []).map(c => c.run) } } : {}),
     // The tool's own session: Claude Code's is chosen here (--session-id), Codex gives its thread id on the first turn.
     ...(mode === 'app' ? { toolSession: profile.tool === 'claude' ? randomUUID() : null, turns: 0, queue: [], allowed: [] } : {}),
@@ -385,8 +402,10 @@ export async function runSession(id) {
   saveSession({ ...session, status: 'open', pid: process.pid, opened: now() });
   console.log(`Chiefmate: ${session.name} (${session.tool}) in ${session.cwd}\n`);
   process.on('SIGINT', () => {}); // Ctrl+C belongs to the agent
+  // Claude Code on the session's account (src/accounts.mjs): its CLAUDE_CONFIG_DIR, never another account in its place.
+  const env = session.tool === 'claude' ? environment({ ...sessionEnv(id), ...accountEnv(sessionAccount(config, session)) }) : codexEnvironment(sessionEnv(id));
   const child = spawn(tool.command, [...tool.prefix, ...sessionArgs(session, config, prompt, browserServers(config, sessionMcp(config, session).servers, sessionBrowser(session)), { resume })], {
-    cwd: session.cwd, stdio: 'inherit', env: session.tool === 'claude' ? environment(sessionEnv(id)) : codexEnvironment(sessionEnv(id)),
+    cwd: session.cwd, stdio: 'inherit', env,
   });
   const code = await new Promise(resolve => {
     child.on('error', error => {
@@ -406,11 +425,11 @@ export async function runSession(id) {
 }
 
 /**
- * Whether Claude Code saved the conversation of a session in a window (its file under ~/.claude/projects, whatever
- * folder name Claude Code gave it), so it can be carried on. Always ~/.claude: the window's Claude Code runs without
- * CLAUDE_CONFIG_DIR (environment() in src/claude.mjs drops it).
+ * Whether Claude Code saved the conversation of a session in a window (its file under the projects folder of its
+ * account's configuration, ~/.claude or the account's CLAUDE_CONFIG_DIR, whatever folder name Claude Code gave it), so
+ * it can be carried on.
  */
-export function savedConversation(session, home = path.join(os.homedir(), '.claude')) {
+export function savedConversation(session, home = accountHome(sessionAccount(undefined, session), os.homedir())) {
   if (session.tool !== 'claude' || !/^[\w-]+$/.test(session.toolSession ?? '')) return false;
   const projects = path.join(home, 'projects');
   try {
@@ -711,7 +730,7 @@ export function deliverSession(id) {
       tools: charge ? charge.tools : [...APP_TOOLS, ...mcp.tools, ...(session.allowed ?? []).filter(r => !ASK_FIRST.includes(r))],
       disallowed: [...(charge ? [...charge.disallowed, ...ASK_FIRST] : ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r) && !(granted && r === PUSH))), ...denyRules(ownerKeyFile(), false), ...denyRules(secretsFolder())], mcpServers: charge ? {} : browserServers(config, mcp.servers, sessionBrowser(session)),
       addDirs: charge?.addDirs ?? [], hooks: guardHooks({ log: guardLog(id), allowed: charge ? [] : session.allowed ?? [], who: 'session', noMain: !!session.work, ...mainCard }),
-      attribution: config.attribution !== false, maxMinutes: TURN_MINUTES, env: sessionEnv(id),
+      attribution: config.attribution !== false, maxMinutes: TURN_MINUTES, env: sessionEnv(id), account: sessionAccount(config, session),
       session: { id: session.toolSession, resume }, log: rawLog(id), onEvent,
     });
     Object.assign(turn, { pid: run.pid ?? null, cancel: () => run.cancel(t('interrupted by you')), interrupt: () => run.interrupt() });

@@ -2242,10 +2242,10 @@ test("Claude Code's sign-in: only its expiry is read, warned 3 days before its e
 
   // A read that fails, or finds the sign-in gone, keeps the expiry known; a sign-in with no expiry (an API key) clears it.
   const failed = Object.assign(new Error('Command failed'), { code: 1 });
-  assert.deepEqual(loginRead(info, failed, '', 'now'), { expires, checked: 'now', error: 'Command failed' });
+  assert.deepEqual(loginRead(info, failed, '', 'now'), { expires, checked: 'now', error: 'Command failed', signedOut: false });
   assert.equal(loginRead(info, failed, JSON.stringify({ loggedIn: false, loginExpiresAt: null }), 'now').expires, expires);
   assert.equal(loginRead(info, null, JSON.stringify({ loggedIn: true, loginExpiresAt: null }), 'now').expires, null);
-  assert.deepEqual(loginRead(info, null, JSON.stringify({ ...status, loginExpiresAt: '2027-01-04T10:00:00.000Z' }), 'now'), { expires: '2027-01-04T10:00:00.000Z', checked: 'now', error: null });
+  assert.deepEqual(loginRead(info, null, JSON.stringify({ ...status, loginExpiresAt: '2027-01-04T10:00:00.000Z' }), 'now'), { expires: '2027-01-04T10:00:00.000Z', checked: 'now', error: null, signedOut: false });
 
   // Asked again at the start, after a failed read, once a day, and hourly within the warning (so a renewal shows soon).
   assert.equal(loginDue({ checked: null }), true);
@@ -2906,4 +2906,129 @@ test("the session's spare near its renewal: spent alone while the owner is away,
   const end = checkSpending({ config, usage: renewed, at: later, runs, capacity: 3, file: away, report, note, away: true });
   assert.equal(end.ended?.until, resets);
   assert.deepEqual([sessionNow(config, readSpending(away), later).mode, effectiveLimits(config, readSpending(away), later).pause_at_5h_window], ['save', SAFETY]);
+});
+
+// ---------- The Claude accounts (src/accounts.mjs): each project on its own, with its own limits and sign-in ----------
+
+test('Claude accounts: the list, the default, each project and session on its own account, never another in its place', async () => {
+  const { accountData, accountEnv, findAccount, listAccounts, managerAccount, openingAccount, projectAccount, sessionAccount } = await import('../src/accounts.mjs');
+  const { DATA } = await import('../src/util.mjs');
+  // with no list, one account: Claude Code's own configuration, as before accounts
+  const single = listAccounts({});
+  assert.equal(single.length, 1);
+  assert.deepEqual([single[0].id, single[0].configDir, single[0].default], ['main', null, true]);
+  assert.deepEqual(accountEnv(single[0]), {});
+  assert.equal(accountData(single[0]), DATA, "Claude Code's own configuration keeps its usage where it was");
+
+  const dir = path.join(temp, 'claude-max');
+  const config = {
+    accounts: [{ id: 'team', name: 'Team' }, { id: 'Max', name: 'Max', config_dir: dir }, { id: 'max', name: 'twice' }, { id: 'bad id!' }],
+    default_account: 'max', manager_account: 'team', sessions_account: 'team',
+    projects: { site: {}, office: { account: 'team' }, lab: { account: 'max', sessions_account: 'max' }, typo: { account: 'maxx' } },
+  };
+  const list = listAccounts(config);
+  assert.deepEqual(list.map(a => a.id), ['team', 'max'], 'an id seen before or invalid was kept');
+  assert.equal(list.find(a => a.default).id, 'max');
+  assert.equal(path.resolve(list[1].configDir), path.resolve(dir));
+  assert.deepEqual(accountEnv(list[1]), { CLAUDE_CONFIG_DIR: path.resolve(dir) });
+  assert.equal(accountData(list[1]), path.join(DATA, 'accounts', 'max'));
+  assert.equal(projectAccount(config, 'site').id, 'max', 'a project without "account" is on the default one');
+  assert.equal(projectAccount(config, 'office').id, 'team');
+  assert.equal(managerAccount(config).id, 'team');
+  // an account missing from the settings never runs, and no other account runs in its place
+  const typo = projectAccount(config, 'typo');
+  assert.ok(typo.missing);
+  assert.throws(() => accountEnv(typo), /not in the settings/);
+  assert.ok(findAccount(config, 'nobody').missing);
+  // the owner's sessions: the choice, the profile, the project's sessions_account, the general one, then the project's
+  assert.equal(openingAccount(config, { project: 'site' }).id, 'team', 'the sessions keep to the general sessions_account');
+  assert.equal(openingAccount(config, { project: 'lab' }).id, 'max');
+  assert.equal(openingAccount(config, { project: 'site', account: 'max' }).id, 'max');
+  assert.equal(openingAccount(config, { project: 'office' }, 'max').id, 'max');
+  assert.equal(openingAccount({ ...config, sessions_account: undefined }, { project: 'site' }).id, 'max', "without sessions_account, the project's account");
+  // a session keeps the account it opened on; one from before accounts stays on Claude Code's own configuration
+  assert.equal(sessionAccount(config, { account: 'max' }).id, 'max');
+  assert.equal(sessionAccount(config, {}).id, 'team');
+});
+
+test('Claude accounts: a limit holds only its own account, and each account has its own session and runs at once', async () => {
+  const { withinAccounts } = await import('../src/queue.mjs');
+  const { listAccounts } = await import('../src/accounts.mjs');
+  const dir = id => path.join(temp, `claude-${id}`);
+  const config = {
+    max_parallel: 3, limits: { pause_at_5h_window: 0.85, pause_at_plan_week: 0.9 },
+    accounts: [
+      { id: 'team', name: 'Team', config_dir: dir('team'), max_parallel: 1, pause_at_5h_window: 0.5, pause_at_plan_week: 0.8 },
+      { id: 'max', name: 'Max', config_dir: dir('max'), max_parallel: 4, pause_at_5h_window: 0.97 },
+    ],
+    projects: { a: { account: 'team' }, b: { account: 'team' }, c: { account: 'max' }, d: { account: 'max' }, e: { account: 'max' } },
+  };
+  const [team, max] = listAccounts(config);
+  assert.deepEqual([sessionNow(config, {}, Date.now(), team).parallel, sessionNow(config, {}, Date.now(), team).limit], [1, 0.5]);
+  assert.deepEqual([sessionNow(config, {}, Date.now(), max).parallel, sessionNow(config, {}, Date.now(), max).mode], [4, 'all']);
+  assert.equal(effectiveLimits(config, {}, Date.now(), team).pause_at_plan_week, 0.8, "the account's own week pause");
+  assert.equal(effectiveLimits(config, {}, Date.now(), max).pause_at_plan_week, 0.9, 'the general week pause');
+  // the queue: Team has one run going on, so its other project waits, while Max starts its three
+  const picked = ['a', 'b', 'c', 'd', 'e'].map(project => ({ id: project, project }));
+  assert.deepEqual(withinAccounts(picked, ['a'], config).map(r => r.project), ['c', 'd', 'e']);
+  assert.deepEqual(withinAccounts(picked, [], config).map(r => r.project), ['a', 'c', 'd', 'e']);
+  // a project on an account missing from the settings is not left waiting unseen: it starts, and its step stops with the message
+  const typo = { ...config, projects: { ...config.projects, f: { account: 'maxx' } } };
+  assert.deepEqual(withinAccounts([...picked, { id: 'f', project: 'f' }], ['a'], typo).map(r => r.project), ['c', 'd', 'e', 'f']);
+  // the autopilot stops each project at its own account's session: Max spends all, Team keeps its own stop
+  const { autopilotSettings } = await import('../src/autopilot.mjs');
+  const pilot = { ...config, autopilot: { enabled: true, stop_at_5h_window: 0.85 } };
+  assert.deepEqual([autopilotSettings(pilot, team).window_stop, autopilotSettings(pilot, max).window_stop], [0.85, 0.97]);
+
+  // a run held by the week of Team goes back to the queue once its project is on Max, with Max under its limits
+  const resets = new Date(Date.now() + 3600_000).toISOString();
+  const run = { status: 'waiting', notBefore: resets, limitWait: { window: 'seven_day', ceiling: 0.8, account: 'team' } };
+  const limits = effectiveLimits(config, {}, Date.now(), max);
+  const roomy = { five_hour: { used: 0.2, resets }, seven_day: { used: 0.4, resets } };
+  const full = { five_hour: { used: 0.2, resets }, seven_day: { used: 0.95, resets } };
+  assert.equal(limitWaitCleared(run, limits, roomy, max), true);
+  assert.equal(limitWaitCleared(run, limits, full, max), false, 'a full Max still holds the run');
+  assert.equal(limitWaitCleared(run, effectiveLimits(config, {}, Date.now(), team), roomy, team), false, 'the same account waits for its reset (or a raised limit)');
+  // a wait from before accounts was made on the legacy account; running out mid-step too
+  const ranOut = { status: 'waiting', note: 'Your account reached its limit in the middle of a step' };
+  assert.equal(limitWaitCleared(ranOut, limits, roomy, max, 'team'), true);
+  assert.equal(limitWaitCleared(ranOut, limits, roomy, team, 'team'), false);
+
+  // each account's session changes on its own entry; the boost and the offer in its own file
+  let saved = null;
+  const file = path.join(temp, 'spending-max.json');
+  changeSession({ mode: 'save', account: 'max' }, { config, save: c => (saved = c), file, usage: roomy, note: () => {} });
+  assert.deepEqual([saved.accounts[1].max_parallel, saved.accounts[1].pause_at_5h_window, saved.accounts[0].max_parallel, saved.max_parallel], [1, null, 1, 3]);
+  assert.throws(() => changeSession({ mode: 'all', account: 'nobody' }, { config, save: () => {}, file, note: () => {} }), /Unknown Claude account/);
+});
+
+test("Claude accounts: each account's sign-in is warned on its own, a new one asks to sign in, with its own command", async () => {
+  const { loginWarnings } = await import('../src/claude.mjs');
+  const config = { accounts: [{ id: 'team', name: 'Team' }, { id: 'max', name: 'Max', config_dir: path.join(temp, 'claude-max') }] };
+  const at = Date.parse('2026-12-01T12:00:00.000Z');
+  const infos = { team: { expires: '2026-12-05T12:00:00.000Z', checked: 'x' }, max: { expires: null, checked: 'x', signedOut: true } };
+  const warned = loginWarnings(config, at, infos);
+  assert.deepEqual(warned.map(w => [w.account.id, w.warning.step]), [['team', '1d'], ['max', 'signed_out']]);
+  const line = loginLine('the owner', undefined, at, { config, infos });
+  assert.ok(line.includes('node src/cli.mjs account-login max') && line.includes(LOGIN_RENEW) && line.includes('Team'));
+  const text = loginText({ step: 'signed_out' }, warned[1].account);
+  assert.ok(text.title.includes('Max') && text.text.includes('account-login max'));
+  // Claude Code's own configuration is never "signed out" here: its expiry warns, as before accounts
+  assert.deepEqual(loginWarnings(config, at, { team: { signedOut: true, expires: null } }), []);
+  assert.equal(loginRead({}, Object.assign(new Error('x'), { code: 1 }), JSON.stringify({ loggedIn: false, loginExpiresAt: null }), 'now').signedOut, true);
+});
+
+test('Claude accounts: each free reset is of its own account; one recorded before accounts is of the first configuration', async () => {
+  const { availableResets, planResets } = await import('../src/plan.mjs');
+  const { listAccounts } = await import('../src/accounts.mjs');
+  const later = new Date(Date.now() + 5 * 86400_000).toISOString();
+  const config = {
+    accounts: [{ id: 'team', name: 'Team' }, { id: 'max', name: 'Max', config_dir: path.join(temp, 'claude-max') }], default_account: 'max',
+    plan_resets: [{ kind: 'full', expires: later, used: false }, { kind: 'full', expires: later, used: false, account: 'max' }],
+  };
+  assert.deepEqual(planResets(config).map(g => g.account), ['team', 'max'], "a reset from before accounts stays on Claude Code's own configuration");
+  const [team, max] = listAccounts(config);
+  assert.deepEqual(availableResets(config, max).map(g => g.index), [2]);
+  assert.deepEqual(availableResets(config, team).map(g => g.index), [1]);
+  assert.equal(availableResets(config).length, 2);
 });

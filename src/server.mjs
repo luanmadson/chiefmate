@@ -10,7 +10,8 @@ import { attentionArchive, attentionItems, attentionSummary, markSeen } from './
 import { autopilotStatus, changeAutopilot } from './autopilot.mjs';
 import { answerRequest, chargeProfileId, inCharge, openMatters, projectRequests } from './charge.mjs';
 import { openWork, releaseWork, workNotesView } from './worknow.mjs';
-import { checkClaude, checkLogin, claudeInfo, readFeed } from './claude.mjs';
+import { findAccount } from './accounts.mjs';
+import { checkClaude, checkLogin, claudeInfo, loginStates, readFeed } from './claude.mjs';
 import { EFFORTS, loadAgents, loadConfig, projectCrew, projectEfforts, projectLead, saveConfig } from './config.mjs';
 import { effortHistory, effortSource, runEffortChanges, setEffort } from './effort.mjs';
 import { agentTool, runTools, toolModel } from './tools.mjs';
@@ -39,7 +40,7 @@ import { deliverDevNotices, devState, openProjectApp, projectInfo, startDev, sto
 import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, cancelQueued, doNow, editQueued, endDoNow, focus, holdRun, maxParallel, moveInQueue, nudgeQueue, queueControl, queueInTurn, queueMarks, resume } from './queue.mjs';
-import { changeSession, spendingStatus } from './spending.mjs';
+import { accountsStatus, changeSession, spendingStatus } from './spending.mjs';
 import { changeExpense, projectCosts } from './costs.mjs';
 import { activeRun, createRun, describeLater, doingNow, liveRuns, liveSpeech, needsBrief, outcomeLater, pauseLive, retryRun, setRunLevel, stepSays } from './runs.mjs';
 import { speechView } from './speech.mjs';
@@ -47,13 +48,13 @@ import { closeGap, recordGap } from './gaps.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { changeSteer, steerView } from './steer.mjs';
 import {
-  answerPermission, endSession, finishSessionRequest, interruptSession, listSessions, openSession, planSession, profileFor, removeQueued, resumeSession, sayToSession, withManager,
+  answerPermission, endSession, finishSessionRequest, interruptSession, listSessions, openAccountLogin, openSession, planSession, profileFor, removeQueued, resumeSession, sayToSession, withManager,
   sessionRequests, sessionsState, sessionView,
 } from './sessions.mjs';
 import { talkTo } from './talk.mjs';
 import { listRuns, readConversation, readNotifications, readPending, readRun, readUsage, runDir, runEnded, stepsOf } from './store.mjs';
 import { checkNow, updateInfo, updateMode, updateNow } from './update.mjs';
-import { browserPath, isReading, loginState, openLogin, readerSettings, readerStatus, readUsagePage, signedIn, signInNeeded } from './usagepage.mjs';
+import { browserPath, isReading, loginState, openLogin, readerAccount, readerSettings, readerStates, readerStatus, readUsagePage, signedIn, signInNeeded } from './usagepage.mjs';
 import { clip, now, ROOT, VERSION } from './util.mjs';
 import { projectDir } from './workspace.mjs';
 
@@ -394,7 +395,10 @@ function buildState() {
   const repos = openRepoRequests();
   const security = lockdownView();
   const spending = spendingStatus(config, { usage, runs, items });
-  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo, questions, pushes, repos, lockdown: security, quarantine: quarantineList(), spare: spending.offer });
+  // Each Claude account (src/accounts.mjs): its usage, session, estimate, offer, projects and sign-in, for the app's panel.
+  const logins = loginStates(config);
+  const accounts = accountsStatus(config, { runs, items }).map(a => ({ ...a, login: logins.find(l => l.id === a.id) ?? null }));
+  const attention = attentionItems({ config, runs, needs, usage, machine, items, update: updateInfo, questions, pushes, repos, lockdown: security, quarantine: quarantineList(), spare: accounts.length > 1 ? accounts.map(a => a.offer).filter(Boolean) : spending.offer });
   const lastOf = id => runs.find(r => r.mission === id && !['queued', 'waiting'].includes(r.status));
   return {
     now: now(),
@@ -436,6 +440,7 @@ function buildState() {
     queueControl: control,
     history: runs.filter(r => !['queued', 'waiting'].includes(r.status) && !goingIds.has(r.id)).slice(0, 30).map(summary),
     usage: { limits: config.limits ?? {}, account: usage },
+    accounts,
     computer: machine,
     // The crew's browsers open (src/browsers.mjs): project, task, since when and whether the task still goes on.
     browsers: openBrowsers(config, latestProcesses()),
@@ -444,6 +449,8 @@ function buildState() {
       resets: planResets(config),
       pace: weekPace(usage),
       reader: { ...readerSettings(config), signedIn: signedIn(), reading: isReading(), status: readerStatus(), signIn: signInNeeded(), login: loginState() },
+      // with several Claude accounts, each one's reading, on a browser profile of its own (src/usagepage.mjs)
+      readers: readerStates(config),
     },
     // The autopilot (src/autopilot.mjs): its settings, whether it may act now and what it did today.
     autopilot: autopilotStatus(config, usage, new Date(), runs),
@@ -598,6 +605,8 @@ export function fromAfar(route, body) {
       return { body, refused: true };
     case '/api/browser':
       return { body, refused: body.action === 'focus' };
+    case '/api/accounts':
+      return { body, refused: !!body.login };
     default:
       return { body };
   }
@@ -665,6 +674,8 @@ const KEYLESS = {
   '/api/update-check': true,
   '/api/update-now': b => !b.interruptManager,
   '/api/usage-reader': b => b.read === true && b.enabled === undefined && !b.login,
+  // Reading an account's sign-in again (after "cli.mjs account-login" in a window); only reads.
+  '/api/accounts': b => !!b.check && !b.login,
   '/api/watchdog': true,
   // Opening the app's window, and the trade of its pairing code for the key.
   '/api/owner/window': true,
@@ -1147,10 +1158,21 @@ export function startServer() {
           const { paused } = changeSteer(body, { by, live, pause: id => pauseLive(id, 'focus') });
           return reply(res, 200, { steer: steerView(), paused });
         }
-        case '/api/spending':
-          // The session's mode, runs at once and pause, "Spend all until" the renewal and "Not now" (src/spending.mjs).
+        case '/api/spending': {
+          // The session's mode, runs at once and pause, "Spend all until" the renewal and "Not now" (src/spending.mjs),
+          // of one Claude account ("account"; the default one when not given).
           changeSession(body, { by: remote ? `remote:${String(req.headers['tailscale-user-login'] ?? '').trim().toLowerCase()}` : 'app' });
-          return reply(res, 200, spendingStatus());
+          const config = loadConfig();
+          return reply(res, 200, spendingStatus(config, { account: findAccount(config, body.account) }));
+        }
+        case '/api/accounts': {
+          // The Claude accounts (src/accounts.mjs): the sign-in window of one ("login"), its sign-in read again ("check").
+          const config = loadConfig();
+          if (body.check) checkLogin({ only: findAccount(config, body.check).id, config });
+          const opened = body.login ? openAccountLogin(config, body.login, { dryRun: !!body.dryRun }) : null;
+          if (opened?.opened) for (const delay of [60_000, 180_000, 420_000, 900_000]) setTimeout(() => checkLogin({ only: opened.account }), delay).unref();
+          return reply(res, 200, { accounts: loginStates(config), ...(opened ? { opened } : {}) });
+        }
         case '/api/costs': {
           const { projects } = loadConfig();
           return reply(res, 200, projectCosts({ projects, weeks: body.weeks, project: body.project, sessions: listSessions() }));
@@ -1189,11 +1211,13 @@ export function startServer() {
             config.usage_reader = { ...config.usage_reader, enabled: !!body.enabled };
             saveConfig(config);
           }
-          // The sign-in window, from the app's card (it closes by itself after a few minutes).
-          if (body.login) openLogin();
+          // The sign-in window, from the app's card (it closes by itself after a few minutes), of one account's profile.
+          const account = readerAccount(undefined, body.account ?? null);
+          if (account.missing) return reply(res, 400, { error: t('Unknown Claude account: {id}', { id: account.id }) });
+          if (body.login) openLogin(undefined, {}, account);
           if (body.read) {
-            if (!signedIn()) return reply(res, 400, { error: t('Not signed in yet. Run: node src/cli.mjs claude-login') });
-            readUsagePage().catch(() => {});
+            if (!signedIn(account)) return reply(res, 400, { error: t('Not signed in yet. Run: node src/cli.mjs claude-login') });
+            readUsagePage(undefined, { account }).catch(() => {});
           }
           return reply(res, 200, { ...readerSettings(), reading: isReading() });
         }

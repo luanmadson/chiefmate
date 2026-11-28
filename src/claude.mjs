@@ -4,6 +4,7 @@ import { closeSync, createWriteStream, existsSync, fstatSync, openSync, readSync
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { userClaudeExcludes } from './access.mjs';
+import { accountEnv, accountLabel, listAccounts, managerAccount, manyAccounts } from './accounts.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { recordUsage } from './store.mjs';
 import { clip, now } from './util.mjs';
@@ -59,21 +60,27 @@ export const LOGIN_WARN = 3 * DAY;
 export const LOGIN_URGENT = DAY;
 export const LOGIN_RENEW = 'claude auth login';
 
-/** When the sign-in expires, as Claude Code itself reports it. Checked when Chiefmate starts and once a day. */
+/**
+ * Each account's sign-in (src/accounts.mjs), by account id: { expires, checked, error, signedOut }. Checked when
+ * Chiefmate starts and once a day. "loginInfo" is the default account's, for older readers.
+ */
+export const logins = {};
 export const loginInfo = { expires: null, checked: null, error: null };
+
+function parseStatus(text) {
+  try {
+    return JSON.parse(String(text ?? ''));
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The expiry in the output of `claude auth status --json`, and nothing else: the account's details (e-mail,
  * organization, plan) are never kept. An expiry missing or unreadable is null.
  */
 export function parseLoginStatus(text) {
-  let status;
-  try {
-    status = JSON.parse(String(text ?? ''));
-  } catch {
-    return null;
-  }
-  const at = Date.parse(status?.loginExpiresAt ?? '');
+  const at = Date.parse(parseStatus(text)?.loginExpiresAt ?? '');
   return Number.isNaN(at) ? null : new Date(at).toISOString();
 }
 
@@ -90,19 +97,41 @@ export function loginDue(info = loginInfo, at = Date.now()) {
 /**
  * The sign-in's facts after a read. The command ends with an error when signed out, with its JSON still on stdout.
  * A read that fails or finds no sign-in keeps the last expiry known, so the warning stays until a new sign-in shows its own.
+ * "signedOut": Claude Code says no one is signed in on that configuration (a new account, before its first sign-in).
  */
 export function loginRead(info, error, stdout, at = now()) {
   const expires = parseLoginStatus(stdout);
-  return { expires: expires ?? (error ? info.expires : null), checked: at, error: expires || !error ? null : error.message };
+  const signedOut = parseStatus(stdout)?.loggedIn === false;
+  return { expires: expires ?? (error ? info.expires : null), checked: at, error: expires || !error ? null : error.message, signedOut };
 }
 
-/** Asks Claude Code when its sign-in expires (`claude auth status --json`; it reads only, nothing changes). */
-export function checkLogin({ force = false } = {}) {
-  if (!force && !loginDue()) return;
+/**
+ * Asks Claude Code when each account's sign-in expires (`claude auth status --json`, with the account's
+ * CLAUDE_CONFIG_DIR; it reads only, nothing changes). "only": one account's id, asked now.
+ */
+export function checkLogin({ force = false, only = null, config } = {}) {
   const [file, first] = command();
-  execFile(file, [...first, 'auth', 'status', '--json'], { timeout: 30_000, windowsHide: true, env: environment() }, (error, stdout) => {
-    Object.assign(loginInfo, loginRead(loginInfo, error, stdout));
-  });
+  const accounts = listAccounts(config);
+  for (const account of accounts) {
+    if (only && account.id !== only) continue;
+    const info = (logins[account.id] ??= { expires: null, checked: null, error: null });
+    if (!force && !only && !loginDue(info)) continue;
+    execFile(file, [...first, 'auth', 'status', '--json'], { timeout: 30_000, windowsHide: true, env: environment(accountEnv(account)) }, (error, stdout) => {
+      Object.assign(info, loginRead(info, error, stdout));
+      if (account.default) Object.assign(loginInfo, info);
+    });
+  }
+  // an account taken out of the settings takes its sign-in with it
+  for (const id of Object.keys(logins)) if (!accounts.some(a => a.id === id)) delete logins[id];
+}
+
+/**
+ * How to sign an account in: Claude Code's own sign-in for a Claude subscription ("auth login --claudeai", which opens
+ * the browser), with the account's CLAUDE_CONFIG_DIR. Chiefmate never sees the password nor the credentials.
+ */
+export function loginProcess(account) {
+  const [file, first] = command();
+  return { file, args: [...first, 'auth', 'login', '--claudeai'], env: environment(accountEnv(account)) };
 }
 
 /** The earliest end of a sign-in, LOGIN_EARLY before the expiry Claude Code reports. */
@@ -119,12 +148,48 @@ export function loginWarning(info = loginInfo, at = Date.now()) {
   return { expires: info.expires, left, step: left <= 0 ? 'expired' : left - LOGIN_EARLY <= LOGIN_URGENT ? '1d' : '3d' };
 }
 
-/** One line for the manager's situation while the warning lasts, else null. */
-export function loginLine(owner = 'the owner', info = loginInfo, at = Date.now()) {
+/** The command that signs an account in: Claude Code's own for its own configuration, else Chiefmate's. */
+export const loginCommand = account => (account?.configDir ? `node src/cli.mjs account-login ${account.id}` : LOGIN_RENEW);
+
+/**
+ * Each account's sign-in that needs the owner now: [{ account, warning }], with loginWarning's warning, or
+ * { step: "signed_out" } for an account with a folder of its own that no one signed in to yet (Claude Code's own
+ * configuration is warned by its expiry, as before accounts). The default account first.
+ */
+export function loginWarnings(config, at = Date.now(), infos = logins) {
+  return listAccounts(config).flatMap(account => {
+    const info = infos[account.id] ?? (account.default ? loginInfo : null);
+    if (!info) return [];
+    if (info.signedOut && account.configDir) return [{ account, warning: { step: 'signed_out', expires: null, left: null } }];
+    const warning = loginWarning(info, at);
+    return warning ? [{ account, warning }] : [];
+  });
+}
+
+/** Each account's sign-in, for the app's Usage section: [{ id, name, default, configDir, expires, checked, signedOut, warning }]. */
+export function loginStates(config, at = Date.now(), infos = logins) {
+  const warnings = loginWarnings(config, at, infos);
+  return listAccounts(config).map(a => {
+    const info = infos[a.id] ?? (a.default ? loginInfo : {});
+    return { ...a, expires: info.expires ?? null, checked: info.checked ?? null, signedOut: !!info.signedOut, warning: warnings.find(w => w.account.id === a.id)?.warning ?? null };
+  });
+}
+
+const whenEnds = w => (w.step === 'expired' ? `expired ${formatDateTime(w.expires)}` : `may end from ${formatDateTime(loginFrom(w.expires))} on, by ${formatDateTime(w.expires)} at the latest`);
+
+/** One line for the manager's situation while a warning lasts, else null; with several accounts, one per account warned. */
+export function loginLine(owner = 'the owner', info = loginInfo, at = Date.now(), { config, infos } = {}) {
+  if (infos || manyAccounts(config)) {
+    const lines = loginWarnings(config, at, infos ?? logins).map(({ account, warning: w }) => {
+      const name = `the Claude account ${accountLabel(account)}`;
+      if (w.step === 'signed_out') return `No one is signed in to ${name} yet: its projects can't run until ${owner} signs in, with the account's Sign in button in the app's Usage section or "${loginCommand(account)}" in a terminal on this computer.`;
+      return `Claude Code's sign-in to ${name} ${whenEnds(w)}: without it, the work on that account stops. Only ${owner} can renew it, by running "${loginCommand(account)}" in a terminal; remind them${w.step === '3d' ? '' : ' now'}.`;
+    });
+    return lines.length ? lines.join(' ') : null;
+  }
   const w = loginWarning(info, at);
   if (!w) return null;
-  const when = w.step === 'expired' ? `expired ${formatDateTime(w.expires)}` : `may end from ${formatDateTime(loginFrom(w.expires))} on, by ${formatDateTime(w.expires)} at the latest`;
-  return `Claude Code's sign-in on this computer ${when}: without it the crew and you stop. Only ${owner} can renew it, by running "${LOGIN_RENEW}" in a terminal; remind them${w.step === '3d' ? '' : ' now'}.`;
+  return `Claude Code's sign-in on this computer ${whenEnds(w)}: without it the crew and you stop. Only ${owner} can renew it, by running "${LOGIN_RENEW}" in a terminal; remind them${w.step === '3d' ? '' : ' now'}.`;
 }
 
 /** The file a file tool writes (Write, Edit, MultiEdit, NotebookEdit), or null. */
@@ -262,7 +327,8 @@ export function claudeArgs({ model, effort, tools = [], disallowed = [], addDirs
  * as the guard of a live session: see guard.mjs), env (more environment
  * variables), attribution (false: commits and pull requests don't credit Claude), maxMinutes, isHeld() (true while
  * the agent waits for the owner: that time doesn't count against maxMinutes), session ({ id, resume }),
- * log (a .jsonl file), onEvent(event).
+ * log (a .jsonl file), onEvent(event), account (src/accounts.mjs: the Claude account it runs on, its usage recorded as
+ * that account's; the manager's when not given; one missing from the settings never runs).
  *
  * Nothing of the user's own Claude Code configuration reaches the agent, by the owner's decision and with no option to
  * turn it on: no user settings, hooks, plugins or skills (--setting-sources project,local), no ~/.claude/CLAUDE.md or
@@ -278,6 +344,14 @@ export function runClaude(options) {
   const {
     dir, prompt, system, model, env = {}, maxMinutes = 60, isHeld = () => false, log, onEvent = () => {}, spentMs = 0,
   } = options;
+  // The account it runs on (src/accounts.mjs): the one given, else the manager's (Chiefmate's own short calls).
+  const account = options.account ?? managerAccount();
+  let accountVars;
+  try {
+    accountVars = accountEnv(account);
+  } catch (error) {
+    return { promise: Promise.resolve({ ok: false, canceled: false, interrupted: false, spentMs, text: '', error: error.message, tokens: {}, denials: [] }), cancel() {}, interrupt: () => false, pid: null, args: [] };
+  }
   let systemFile = null;
   if (system) {
     systemFile = `${log}.instructions.md`;
@@ -286,7 +360,7 @@ export function runClaude(options) {
   const args = claudeArgs({ ...options, systemFile });
 
   const [file, before] = command();
-  const child = spawn(file, [...before, ...args], { cwd: dir, env: environment(env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  const child = spawn(file, [...before, ...args], { cwd: dir, env: environment({ ...env, ...accountVars }), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   const logStream = log ? createWriteStream(log, { flags: 'a' }) : null;
   let cancelReason = null;
   let final = null;
@@ -357,8 +431,8 @@ export function runClaude(options) {
       for (const block of event.message?.content ?? []) if (block?.type === 'tool_result') inFlight.delete(block.tool_use_id);
       if (interrupting && !inFlight.size) stop(child);
     } else if (event.type === 'rate_limit_event') {
-      recordUsage(event.rate_limit_info);
-      onEvent({ type: 'usage', info: event.rate_limit_info });
+      recordUsage(event.rate_limit_info, account);
+      onEvent({ type: 'usage', info: event.rate_limit_info, account: account.id });
     } else if (event.type === 'result') {
       final = event;
       const models = event.modelUsage ?? {};

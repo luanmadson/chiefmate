@@ -328,6 +328,15 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .track span { display: block; height: 100%; background: var(--ok); }
 .track span.high { background: var(--warn); }
 .track span.critical { background: var(--error); }
+/* The Claude accounts side by side (Usage): one card each, thin lines, square corners. */
+.accounts-panel { margin-bottom: 16px; }
+.accounts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 12px; }
+.account-card { border: 1px solid var(--line); background: var(--raised); padding: 12px 14px; min-width: 0; }
+.account-card .tabs { margin: 4px 0 8px; }
+.account-card > .hint { margin-top: 4px; }
+.account-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+.account-head strong { color: var(--strong); font-weight: 600; }
+.account-head .button { margin-left: auto; }
 
 /* Faces */
 .face { display: block; flex: none; }
