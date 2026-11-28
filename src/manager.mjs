@@ -2,17 +2,18 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { agentsView, teamLines } from './agents.mjs';
 import { staleLine } from './attention.mjs';
 import { loginLine, runClaude } from './claude.mjs';
-import { loadAgents, loadConfig, projectCrew, projectEfforts, projectLead } from './config.mjs';
+import { loadAgents, loadConfig, projectEfforts, projectLead } from './config.mjs';
 import { effortChangeLine, effortHistory } from './effort.mjs';
 import { formatDateTime, formatDuration, formatNumber, formatPercent, t } from './i18n.mjs';
-import { LEAD, leadSituation } from './leads.mjs';
+import { leadSituation } from './leads.mjs';
 import { processes } from './machine.mjs';
 import { autopilotLine, weekLine } from './autopilot.mjs';
 import { awayInfo, awayLine } from './news.mjs';
 import { computerLine, planLine } from './plan.mjs';
-import { pushesFile, pushesLine, pushRequestsFrom, questionsLine, reposLine } from './decisions.mjs';
+import { openQuestions, pushesFile, pushesLine, pushRequestsFrom, questionsLine, reposLine } from './decisions.mjs';
 import { gapsLine } from './gaps.mjs';
 import { mainPushTargets, PR, PUSH, readPushes, REPO } from './guard.mjs';
 import { requestsLine } from './charge.mjs';
@@ -200,10 +201,12 @@ export function situation(libraries = []) {
   if (efforts.length) lines.push(`Effort set for one project only: ${efforts.map(([id]) => `${id} (${Object.entries(projectEfforts(config, id)).map(([m, e]) => `${m} ${e}`).join(', ')})`).join('; ')}.`);
   const lastEfforts = effortHistory().slice(-3);
   if (lastEfforts.length) lines.push(`Latest effort changes: ${lastEfforts.map(effortChangeLine).join('; ')}.`);
-  // Missions and tasks of a project with a crew of its own take only its members (you, the manager, stay global).
-  for (const [id, p] of Object.entries(config.projects ?? {}).filter(([, p]) => p.crew)) {
-    const team = Object.values(projectCrew(config, id, agents)).filter(a => a.id !== 'manager' && a.id !== LEAD);
-    lines.push(`Crew of project ${id} (only these take its tasks): ${team.map(a => `${a.id} (${a.name}${a.base !== a.id ? `, based on ${a.base}` : ''})`).join(', ') || 'none'}.`);
+  // The agents by project, with their names, ranks and records, and the proposals of a rank (src/agents.mjs). A project
+  // with a crew of its own takes only its members (you, the manager, stay global).
+  try {
+    lines.push(...teamLines(config, agentsView({ config, runs, agents, questions: openQuestions() }), config.owner || 'the owner'));
+  } catch (error) {
+    lines.push(`Agents: could not be read (${error.message}).`);
   }
   // The team leads (src/leads.mjs): one line each, with what it is on now. They only run when their project has work.
   const projectRun = id => going.map(l => activeRun(l.run)).find(r => r?.project === id) ?? null;

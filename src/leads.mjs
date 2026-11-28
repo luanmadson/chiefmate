@@ -55,11 +55,17 @@ function lastBlock(text, name) {
 
 const cut = (text, b) => `${text.slice(0, b.start)}${text.slice(b.end)}`.replace(/\n{3,}/g, '\n\n').trim();
 
+/** The last block fenced as ~~~<name> in a report, taken out of it: { body (trimmed, or null when none or empty), report }. */
+export function takeBlock(report, name) {
+  const text = String(report ?? '');
+  const b = lastBlock(text, name);
+  return b && b.body.trim() ? { body: b.body.trim(), report: cut(text, b) } : { body: null, report: text };
+}
+
 /** The project memory the lead returned, taken out of its report: { memory (or null), report }. */
 export function takeMemory(report) {
-  const text = String(report ?? '');
-  const b = lastBlock(text, 'project-memory');
-  return b && b.body.trim() ? { memory: b.body.trim(), report: cut(text, b) } : { memory: null, report: text };
+  const { body, report: rest } = takeBlock(report, 'project-memory');
+  return { memory: body, report: rest };
 }
 
 /**
@@ -91,8 +97,8 @@ export function parsePlan(report, members) {
   return { tasks, note: clip(data?.note ?? '', 400), dropped, error: null };
 }
 
-/** The crew that takes a lead's tasks: the project's crew without the manager and the lead. */
-export const taskTakers = agents => Object.fromEntries(Object.entries(agents).filter(([id]) => id !== 'manager' && id !== LEAD));
+/** The crew that takes a lead's tasks: the project's crew without the manager, the lead and the inactive members. */
+export const taskTakers = agents => Object.fromEntries(Object.entries(agents).filter(([id, a]) => id !== 'manager' && id !== LEAD && a?.status !== 'inactive'));
 
 /**
  * Puts the lead's plan in the run: its tasks become steps right after the planning step, linked to the request, then

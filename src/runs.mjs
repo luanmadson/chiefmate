@@ -5,8 +5,9 @@ import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { instructionFiles, stepAccess, stepMcp } from './access.mjs';
 import { browserServers, closeAfterRun } from './browsers.mjs';
+import { agentKey, agentMemoryLines, memoryOn, readAgentMemory, saveAgentMemory, takeAgentMemory } from './agents.mjs';
 import { contextWindow, runClaude } from './claude.mjs';
-import { loadConfig, projectCrew } from './config.mjs';
+import { loadConfig, memberId, projectCrew } from './config.mjs';
 import { currentEffort, effortChangeLine, runEffortChanges } from './effort.mjs';
 import { guardHooks } from './guard.mjs';
 import { askOwner, finishRequest, needsSettings } from './needs.mjs';
@@ -26,7 +27,7 @@ import { addSpeech, askedBy, speechRule } from './speech.mjs';
 import { effectiveLimits } from './spending.mjs';
 import { listRuns, readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
-import { chooseTool, GROK_DENY, LOGIN_COMMAND, parseTool, qualityRecords, recordQuality, runTool, signedIn, TOOL_NAMES, toolEffort, toolModel } from './tools.mjs';
+import { chooseTool, GROK_DENY, LOGIN_COMMAND, parseTool, recordQuality, runTool, signedIn, stepRecords, TOOL_NAMES, toolEffort, toolModel } from './tools.mjs';
 import { clip, languageName, now, parseLevel, ROOT, slug, stamp } from './util.mjs';
 import {
   advanceClone, baseBranch, changedFiles, checkoutBranch, commitPending, commitSubjects, createBranch, deliverToClone, discardSince, freeBranch, freshenBranch, headCommit,
@@ -145,10 +146,11 @@ export function createRun({
     title = mission.name;
     const agents = projectCrew(config, project);
     for (const s of [...mission.steps, ...(mission.review ? [mission.review] : [])]) {
-      if (!agents[s.agent] || s.agent === LEAD) throw new Error(t('{agent} is not in the crew of {project}.', { agent: s.agent, project }));
+      const id = memberId(s.agent, project);
+      if (!agents[id] || id === LEAD) throw new Error(t('{agent} is not in the crew of {project}.', { agent: s.agent, project }));
     }
     // A mission's step may name its own tool ("tool" in the step); --tool covers the steps without one.
-    steps = mission.steps.map(s => ({ agent: s.agent, part: s.part, status: 'pending', ...(parseTool(s.tool) ? { toolAsked: parseTool(s.tool) } : {}) }));
+    steps = mission.steps.map(s => ({ agent: memberId(s.agent, project), part: s.part, status: 'pending', ...(parseTool(s.tool) ? { toolAsked: parseTool(s.tool) } : {}) }));
     finalReview = mission.review ? { agent: mission.review.agent, part: mission.review.part, status: 'pending' } : null;
   } else if (kind === 'ask') {
     // A request for a project's team lead: it plans the tasks, the crew does them, the lead and then the manager review.
@@ -162,6 +164,8 @@ export function createRun({
   } else {
     if (!config.projects?.[projectId]) throw new Error(t('Unknown project: {id}', { id: projectId }));
     const agents = projectCrew(config, projectId);
+    // An agent's key ("<member>@<project>", src/agents.mjs) names the member of that project.
+    agent = memberId(agent, projectId);
     if (agent === LEAD) throw new Error(t('The team lead takes requests, not tasks: use "ask".'));
     if (!agents[agent]) throw new Error(t('{agent} is not in the crew of {project}.', { agent, project: projectId }));
     // A task sent from the app's prompt builder carries its prompt: the instruction may then be left out.
@@ -264,7 +268,7 @@ export function setRunLevel(id, value) {
 
 /** A member of the project's crew who may take a step: not the manager, and the team lead only for its own steps. */
 function stepAgent(run, step, agent, config) {
-  const id = String(agent ?? '').trim();
+  const id = memberId(agent, run.project);
   const crew = projectCrew(config, run.project);
   if (!crew[id] || id === 'manager') throw new Error(t('{agent} is not in the crew of {project}.', { agent: id, project: run.project }));
   if ((id === LEAD) !== (step.agent === LEAD)) throw new Error(t("The team lead's steps stay the team lead's: choose another member of the crew."));
@@ -356,6 +360,7 @@ export function retryRun(id, { step, agent, tool } = {}, { by = 'manager', confi
   for (const s of new Set([target, ...steps.slice(n).filter(s => s.status !== 'done'), ...reviewsAfter, ...(run.review ? [run.review] : [])])) {
     s.status = 'pending';
     delete s.paused;
+    delete s.recorded; // redone: a new attempt for its agent's record
   }
   (run.retries ??= []).push({ at: now(), by, step: n, agent: target.agent, ...(target.toolAsked ? { tool: target.toolAsked } : {}) });
   Object.assign(run, { status: 'queued', notBefore: null, note: t('Step {n} runs again ({agent}).', { n, agent: target.agent }), ended: null });
@@ -639,6 +644,13 @@ export function promptParts({ run, step, project, previous, finalReview, changes
     add('memory', memorySource, lines.slice(0, 3));
     add('lead', 'Chiefmate (src/leads.mjs)', lines.slice(3));
   } else if (lead && !finalReview) add('memory', memorySource, memberLines({ run, step, lead, memory: readMemory(run.project) }));
+  // Each crew member's own memory in this project (src/agents.mjs): read here, returned updated at the end of its step.
+  const keeper = memoryKeeper(config, run, step, finalReview);
+  if (keeper) {
+    add('agent-memory', `data/agents/${keeper}/memory/${run.project}.md`, agentMemoryLines({
+      memory: readAgentMemory(keeper, run.project), name: agents?.[step.agent]?.name ?? step.agent, projectName: project.name ?? run.project,
+    }));
+  }
   if (project.playbook && run.kind === 'mission') {
     add('playbook', `projects.${run.project}.playbook`, ['', `This mission's playbook is \`${project.playbook}\`. Read it before you start and do only your part.`]);
   }
@@ -661,10 +673,13 @@ export function promptParts({ run, step, project, previous, finalReview, changes
       `3. Run the checks: ${(project.checks ?? []).map(c => `\`${c}\``).join(', ') || 'the ones the project and its documentation describe, as far as this machine allows'}.`,
       `4. Your last message presents the work for approval${local ? ', as the note that goes with the branch' : ', as the pull request text'}, in markdown and in ${languageName(prLanguage)}, starting with the final summary the rules below describe. End it with a section titled "${t("Manager's verdict", {}, prLanguage)}": what you fixed, the risks and your recommendation (approve, approve with caveats, or do not approve).`,
     );
-    // The tools' quality record (src/tools.mjs) keeps this line: did the work done on Codex or Grok need fixing?
-    const onTools = [...new Set(run.steps.filter(s => s.tool && s.tool !== 'claude' && ['done', 'failed'].includes(s.status)).map(s => TOOL_NAMES[s.tool] ?? s.tool))];
-    if (onTools.length) {
-      lines.push(`5. Part of this work ran on ${onTools.join(' and ')}, not on Claude Code. In your verdict, write one line that starts with "Corrections:" saying, in a few words, what you had to fix in that work, or "Corrections: none".`);
+    // The steps register (src/tools.mjs) keeps this line: what the review had to fix in each member's work, for the
+    // agents' records (src/agents.mjs) and how each tool does.
+    const crewSteps = run.steps.filter(s => s.agent !== LEAD && s.agent !== 'manager' && ['done', 'failed'].includes(s.status));
+    if (crewSteps.length) {
+      const members = [...new Set(crewSteps.map(s => s.agent))];
+      const onTools = [...new Set(crewSteps.filter(s => s.tool && s.tool !== 'claude').map(s => TOOL_NAMES[s.tool] ?? s.tool))];
+      lines.push(`5. In your verdict, write one line that starts with "Corrections:" saying, in a few words, what you had to fix in the crew's work${members.length > 1 ? `, member by member, each by its id (for example "Corrections: ${members[0]}: two claims without a source; ${members[1]}: none")` : ''}, or "Corrections: none". It goes to each agent's record${onTools.length ? ` and to each tool's (part of this work ran on ${onTools.join(' and ')}, not on Claude Code)` : ''}, so keep it honest.`);
     }
     lines.push(
       '',
@@ -698,6 +713,10 @@ export function promptParts({ run, step, project, previous, finalReview, changes
 }
 
 const stepPrompt = args => promptParts(args).flatMap(p => p.lines).join('\n');
+
+/** The agent whose own memory a step reads and returns (src/agents.mjs): a crew member's, never the manager's or a team lead's. */
+const memoryKeeper = (config, run, step, finalReview) =>
+  (!finalReview && step.agent !== LEAD && step.agent !== 'manager' && memoryOn(config) ? agentKey(config, run.project, step.agent) : null);
 
 /**
  * The tool a step runs on (src/tools.mjs, chooseTool): the one chosen for its task, else the member's; the final review
@@ -754,7 +773,7 @@ function followContext(l, event) {
 }
 
 /** The base agent of a crew member (a project's crew can rename agents), for the project's per-agent notes. */
-const agentBase = (id, run, config) => projectCrew(config, run.project)[id]?.base ?? id;
+const agentBase = (id, run, config) => projectCrew(config, run.project, undefined, { inactive: true })[id]?.base ?? id;
 
 // A fence longer than any run of backticks in the text, so the text shows whole.
 const fence = text => '`'.repeat(Math.max(3, ...(String(text).match(/`+/g) ?? []).map(m => m.length + 1)));
@@ -1080,9 +1099,27 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   };
   const lost = !waitUntil && !l.cancelRequest && !r.canceled ? await lostFile(writtenSuspects(writes, commands, dir)).catch(() => null) : null;
   if (lost) return quarantined(lost);
+  // The memory a crew member returned at the end of its last message (src/agents.mjs): saved once its step is done,
+  // and never left in its report.
+  let said = r.text || '';
+  const keeper = memoryKeeper(config, run, step, finalReview);
+  if (keeper) {
+    const taken = takeAgentMemory(said);
+    said = taken.report;
+    if (taken.memory && r.ok && !waitUntil) {
+      try {
+        step.agentMemory = saveAgentMemory(keeper, run.project, taken.memory);
+        logAction(l, { type: 'action', text: step.agentMemory.trimmed
+          ? t('{agent} updated its memory of this project, cut to its ceiling', { agent: t(agent.name ?? step.agent) })
+          : t('{agent} updated its memory of this project', { agent: t(agent.name ?? step.agent) }) });
+      } catch (error) {
+        logAction(l, { type: 'action', text: t("Couldn't save the agent's memory: {error}", { error: error.message }) });
+      }
+    }
+  }
   // The final summary at the top of the report is kept apart (step.outcome): the app shows it first, the rest folded.
   const reportLang = finalReview ? project.language || config.language || 'en' : config.language || 'en';
-  const { outcome, rest } = parseOutcome(r.text || '', [reportLang, config.language]);
+  const { outcome, rest } = parseOutcome(said, [reportLang, config.language]);
   Object.assign(step, {
     status: waitUntil ? 'pending' : r.ok ? 'done' : 'failed', ended: waitUntil ? null : now(), tokens: r.tokens, turns: r.turns,
     durationMs: r.durationMs, report: rest + talkSection(run, index + 1, id => t(agents[id]?.name ?? id), config), error: r.error ?? null, subagents: r.subagents, actions: l.actions.length,
@@ -1214,7 +1251,8 @@ function aboutRun(run) {
 /** Runs (or resumes) a run until the end, a pause for a limit, or a cancellation. */
 export async function execute(run) {
   const config = loadConfig();
-  const agents = projectCrew(config, run.project);
+  // A member deactivated after the run was queued still does its steps: it only takes no new work.
+  const agents = projectCrew(config, run.project, undefined, { inactive: true });
   const project = config.projects?.[run.project];
   const prLang = project?.language || config.language || 'en';
   if (live.has(run.id)) throw new Error(`Run ${run.id} is already going on.`);
@@ -1517,17 +1555,21 @@ export async function execute(run) {
   } finally {
     live.delete(run.id);
     closeAfterRun();
-    // A run that ended with steps on Codex or Grok: how each did, for the manager's choice of tools (node src/cli.mjs tools).
-    if (['done', 'failed'].includes(run.status) && !run.qualityRecorded) {
+    // Each crew step that ran, once (a step redone by retry again, as a new attempt): how it did, for its agent's record
+    // (src/agents.mjs) and for the manager's choice of tools (node src/cli.mjs tools).
+    if (['done', 'failed'].includes(run.status)) {
       try {
-        const records = qualityRecords(run, run.review?.commits ?? []);
+        const fresh = s => !s.recorded;
+        const names = Object.fromEntries(Object.entries(agents).map(([id, a]) => [id, a.name ?? id]));
+        const records = stepRecords(run, run.review?.commits ?? [], { who: id => agentKey(config, run.project, id), names, only: fresh });
         if (records.length) {
           recordQuality(records);
-          run.qualityRecorded = true;
+          for (const s of run.steps) if (s.agent !== 'manager' && s.agent !== LEAD && ['done', 'failed'].includes(s.status)) s.recorded = true;
+          if (records.some(r => r.tool !== 'claude')) run.qualityRecorded = true;
           saveRun(run);
         }
       } catch (error) {
-        console.error('Tools quality:', error.message);
+        console.error('Steps record:', error.message);
       }
     }
     // A run that failed or was canceled gets its final summary too, in the background.

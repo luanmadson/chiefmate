@@ -6,6 +6,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
+import { agentMemoryText, agentPerformance, agentRecords, agentSettings, agentsView, changeAgent, findAgent, rankProposal } from './agents.mjs';
 import { attentionArchive, attentionItems, attentionSummary, markSeen } from './attention.mjs';
 import { autopilotStatus, changeAutopilot } from './autopilot.mjs';
 import { answerRequest, chargeProfileId, inCharge, openMatters, projectRequests } from './charge.mjs';
@@ -171,12 +172,16 @@ function teams(config, agents, general, runs, going, queue, conversation) {
     const own = projectEfforts(config, id);
     const effortOf = a => (EFFORTS.includes(own[a.id]) ? { ...a, effort: own[a.id], effortFrom: 'project' } : a);
     if (lead) lead.effortFrom = effortSource(config, id, leader);
-    if (!p.crew) return { project: id, name: p.name ?? id, own: false, lead, members: general.filter(a => a.id !== 'manager').map(effortOf) };
+    // Its members who take work (an inactive one takes none); "key" names the agent behind each (src/agents.mjs).
     const team = Object.fromEntries(Object.entries(projectCrew(config, id, agents)).filter(([key]) => key !== 'manager' && key !== LEAD));
-    const members = crew(team, config, runs.filter(mine), going.filter(mine), queue.filter(mine), []).map(m => ({
-      ...m, base: team[m.id].base, extra: !!p.crew?.[m.id]?.extra_instructions, mcp: team[m.id].mcp ?? [], effortFrom: effortSource(config, id, team[m.id]),
-    }));
-    return { project: id, name: p.name ?? id, own: true, lead, members };
+    const facts = (m, key, extra) => ({ ...m, key, base: team[m.id].base, extra, mcp: team[m.id].mcp ?? [], effortFrom: effortSource(config, id, team[m.id]) });
+    // The agents of the settings keep their id in every project: their presence counts on every run.
+    const explicit = Object.fromEntries(Object.entries(team).filter(([, m]) => m.explicit));
+    const theirs = crew(explicit, config, runs, going, queue, []).map(m => facts(m, m.id, !!config.agents?.[m.id]?.instructions));
+    if (!p.crew) return { project: id, name: p.name ?? id, own: false, lead, members: [...general.filter(a => a.id !== 'manager' && team[a.id] && !team[a.id].explicit).map(effortOf).map(a => ({ ...a, key: a.id })), ...theirs] };
+    const others = Object.fromEntries(Object.entries(team).filter(([, m]) => !m.explicit));
+    const members = crew(others, config, runs.filter(mine), going.filter(mine), queue.filter(mine), []).map(m => facts(m, `${m.id}@${id}`, !!p.crew?.[m.id]?.extra_instructions));
+    return { project: id, name: p.name ?? id, own: true, lead, members: [...members, ...theirs] };
   });
 }
 
@@ -335,6 +340,8 @@ function crew(agents, config, runs, going, queue, conversation) {
       effort: agent.effort ?? null, effortFrom: effortSource(config, agent.project ?? null, agent), maxMinutes: agent.max_minutes ?? null,
       ...(agent.id === 'manager' ? { chatEffort: agent.chat_effort ?? agent.effort ?? null } : {}),
       color: agent.color ?? null, face: agent.face ?? null, status, run, last, week, waitingFor,
+      // Its rank and whether it was deactivated (src/agents.mjs): an inactive agent takes no new work.
+      rank: agent.rank ?? null, inactive: agent.status === 'inactive',
       // The runs this member is at work on now: a click on it opens its panel.
       runs: working.map(r => r.id),
     };
@@ -418,6 +425,8 @@ function buildState() {
     crew: (general = crew(agents, config, runs, going.map(x => x.run), queue, conversation)),
     effortHistory: effortHistory().slice(-12).reverse(),
     teams: teams(config, agents, general, runs, going.map(x => x.run), queue, conversation),
+    // The agents as entities (src/agents.mjs): each one's facts, record, rank, the manager's proposal and memory.
+    agents: agentsView({ config, runs, agents, questions }),
     needs,
     prompts: { ...builderStatus(config), syncing: isSyncing(), cdp: !!config.browser_cdp },
     focus: focus(config),
@@ -650,6 +659,8 @@ const KEYLESS = {
   '/api/gap': b => b.by === 'manager',
   // What a restart of the computer would stop, and the manager's restart (src/power.mjs); never the owner's own.
   '/api/power': b => b.action === 'preview' || (b.action === 'reboot' && b.by === 'manager'),
+  // The agents (src/agents.mjs): the manager adjusts them and proposes a rank; hiring, the status and the rank are the owner's.
+  '/api/agents': b => b.by === 'manager' && (b.action === 'propose' || (b.action === 'set' && !['rank', 'status'].some(k => k in (b.fields ?? {})))),
   '/api/merge': b => !!b.preview || b.by === 'manager',
   '/api/close-pr': b => !!b.preview || b.by === 'manager',
   '/api/lockdown': b => b.action === 'engage' && ['manager', 'step'].includes(b.by),
@@ -732,6 +743,10 @@ export function startServer() {
         if (url.pathname === '/api/lockdown') return reply(res, 200, { lockdown: lockdownView(), language: loadConfig().language || 'en' });
         // The notices that no longer need the owner, most recent first (the app's "Archived").
         if (url.pathname === '/api/attention/archived') return reply(res, 200, { items: attentionArchive() });
+        // An agent's memory in one of its projects, for its card in the Crew section (src/agents.mjs).
+        if (url.pathname === '/api/agents/memory') return reply(res, 200, agentMemoryText(loadConfig(), url.searchParams.get('key'), url.searchParams.get('project')));
+        // An agent's own settings, for the app's "Adjust".
+        if (url.pathname === '/api/agents/settings') return reply(res, 200, agentSettings(loadConfig(), url.searchParams.get('key')));
         if (url.pathname === '/api/computer') {
           await processes(5000);
           return reply(res, 200, computer());
@@ -992,6 +1007,20 @@ export function startServer() {
           // An agent's effort, for the installation or one project (src/effort.mjs); it counts from the next step.
           const change = setEffort({ member: body.member, level: body.level, project: body.project || null, chat: !!body.chat, by: 'owner' });
           return reply(res, 200, change);
+        }
+        case '/api/agents': {
+          // The agents (src/agents.mjs): hiring, adjusting, deactivating and activating one, and the manager's proposal of
+          // a rank, which becomes the owner's question card (its first option applies it).
+          const config = loadConfig();
+          const by = body.by === 'manager' ? 'manager' : 'owner';
+          if (body.action === 'propose') {
+            const a = findAgent(config, body.key, body.project || null);
+            if (!a) throw new Error(t('Unknown agent: {id}', { id: body.key ?? '' }));
+            const stats = agentPerformance(agentRecords({ config }).filter(r => r.who === a.key)).recent;
+            const q = addQuestion(rankProposal(a, String(body.rank ?? '').trim(), body.why, { stats, by, open: openQuestions() }), config);
+            return reply(res, 200, { question: q.id, agent: a.key, name: a.name, from: q.rank.from, to: q.rank.to });
+          }
+          return reply(res, 200, changeAgent({ action: body.action, key: body.key, project: body.project || null, fields: body.fields ?? {}, by }));
         }
         case '/api/level': {
           // The manager's approval level for a run (cli.mjs level), shown on the owner's decision card.

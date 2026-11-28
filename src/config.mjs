@@ -190,7 +190,7 @@ function withProjectEfforts(team, config, projectId) {
 }
 
 /** A project's "crew" setting as [member id, settings] pairs: a list of agent ids, or { "<member id>": { ... } }. */
-function memberSpecs(crew) {
+export function memberSpecs(crew) {
   if (Array.isArray(crew)) return crew.map(x => (typeof x === 'string' ? [x, {}] : [x?.id ?? x?.agent, x ?? {}])).filter(([id]) => id);
   return Object.entries(crew ?? {}).map(([id, spec]) => [id, spec ?? {}]);
 }
@@ -200,27 +200,81 @@ function memberSpecs(crew) {
  * { "<member id>": { "agent": "<base agent, the member id by default>", "name": "...", "extra_instructions": "...",
  * "model": "...", "effort": "high", "max_minutes": 60, "mcp": ["playwright"] } } or simply ["generalist", "designer"].
  * Without it, the general crew. Each member keeps its base agent's face and instructions.
+ * The agents of the settings ("agents", docs/agents.md) that list the project join its crew, either way; one with the id
+ * of a member of the project's own crew takes its place.
  * "projects.<id>.effort" ({ "<member id>": "<level>" }) sets the effort of any member for this project only, the manager's
  * reviews of its runs included.
+ * A member with "status": "inactive" takes no new work, so it is left out; inactive: true keeps it (a run already
+ * queued for it still runs).
  */
-export function projectCrew(config = loadConfig(), projectId, agents = loadAgents(config)) {
+export function projectCrew(config = loadConfig(), projectId, agents = loadAgents(config), { inactive = false } = {}) {
   const project = config.projects?.[projectId];
   const lead = projectLead(config, projectId, agents);
-  if (!project?.crew) return withProjectEfforts(lead ? { ...agents, lead } : agents, config, projectId);
-  const team = agents.manager ? { manager: agents.manager } : {};
-  if (lead) team.lead = lead;
-  for (const [id, spec] of memberSpecs(project.crew)) {
-    const baseId = spec.agent ?? id;
-    const base = agents[baseId];
-    if (!base || baseId === 'manager' || id === 'lead') continue;
-    const { agent: _base, id: _id, extra_instructions: extra, ...settings } = spec;
-    const instructionParts = [
-      ...partsOf(base),
-      ...(extra ? [{ key: 'project-member', source: `projects.${projectId}.crew.${id}.extra_instructions`, text: `\n\n## Notes for this project's crew (${project.name ?? projectId})\n\n${extra}` }] : []),
-    ];
-    team[id] = { ...base, ...settings, id, base: baseId, project: projectId, instructions: joinParts(instructionParts), instructionParts };
+  let team;
+  if (!project?.crew) team = lead ? { ...agents, lead } : { ...agents };
+  else {
+    team = agents.manager ? { manager: agents.manager } : {};
+    if (lead) team.lead = lead;
+    for (const [id, spec] of memberSpecs(project.crew)) {
+      const baseId = spec.agent ?? id;
+      const base = agents[baseId];
+      if (!base || baseId === 'manager' || id === 'lead') continue;
+      const { agent: _base, id: _id, extra_instructions: extra, ...settings } = spec;
+      const instructionParts = [
+        ...partsOf(base),
+        ...(extra ? [{ key: 'project-member', source: `projects.${projectId}.crew.${id}.extra_instructions`, text: `\n\n## Notes for this project's crew (${project.name ?? projectId})\n\n${extra}` }] : []),
+      ];
+      team[id] = { ...base, ...settings, id, base: baseId, project: projectId, instructions: joinParts(instructionParts), instructionParts };
+    }
   }
+  if (project) {
+    for (const [id, spec] of Object.entries(config.agents ?? {})) {
+      if (!(spec?.projects ?? []).includes(projectId)) continue;
+      const member = explicitAgent(config, id, agents, projectId);
+      if (member) team[id] = member;
+    }
+  }
+  if (!inactive) for (const [id, m] of Object.entries(team)) if (id !== 'manager' && m.status === 'inactive') delete team[id];
   return withProjectEfforts(team, config, projectId);
+}
+
+/** A member's id in a project's crew, from what a person wrote: an agent's key "<member>@<project>" counts for that project. */
+export function memberId(agent, projectId) {
+  const id = String(agent ?? '').trim();
+  return projectId && id.endsWith(`@${projectId}`) ? id.slice(0, -projectId.length - 1) : id;
+}
+
+// The ids an agent of the settings may not take: the manager, the team lead and the agents' files (the roles).
+export const reservedAgentId = (id, agents) => id === 'manager' || id === 'lead' || Object.hasOwn(agents, id);
+
+const RANK_WORDS = { junior: 'junior', mid: 'mid-level', senior: 'senior', lead: 'team lead' };
+
+/**
+ * An agent of the settings ("agents.<id>", docs/agents.md) as a crew member: its base agent's face, tools and
+ * instructions, its own name, specialty, rank and instructions, and its own model, effort, tool and time limit over the
+ * base's. projectId: the project it works in now (its notes and memory are that project's). null when the id is
+ * reserved or its base is not an agent (the manager is never a base).
+ */
+export function explicitAgent(config, id, agents = loadAgents(config), projectId = null) {
+  const spec = config.agents?.[id];
+  if (!spec || typeof spec !== 'object' || reservedAgentId(id, agents)) return null;
+  const { base: baseId, projects, instructions, specialty, name, rank, status, hired_at: hired, ...settings } = spec;
+  const base = agents[baseId];
+  if (!base || baseId === 'manager') return null;
+  const shown = name || id;
+  const who = [`In this crew you are ${shown} (\`${id}\`): the role above is your base.`];
+  if (specialty) who.push(`Your specialty: ${specialty}.`);
+  who.push(`Your rank: ${RANK_WORDS[rank] ?? RANK_WORDS.mid}.`);
+  const instructionParts = [
+    ...partsOf(base),
+    { key: 'agent-identity', source: `agents.${id}`, text: `\n\n## Who you are\n\n${who.join(' ')}` },
+    ...(instructions ? [{ key: 'agent-own', source: `agents.${id}.instructions`, text: `\n\n## Your own instructions\n\n${instructions}` }] : []),
+  ];
+  return {
+    ...base, ...settings, id, name: shown, base: baseId, explicit: true, specialty: specialty || null, rank: rank || null, status: status || 'active',
+    hired_at: hired || null, projects: Array.isArray(projects) ? projects : [], role: specialty || base.role,
+    ...(projectId ? { project: projectId } : {}), instructions: joinParts(instructionParts), instructionParts,
+  };
 }
 
 // The lead reads and judges; it never changes the project's files.
