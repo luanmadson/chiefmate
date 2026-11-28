@@ -801,6 +801,7 @@ function drawChatTop() {
 
 function showView() {
   const view = currentView();
+  if (view === 'usage' && started) drawProjectCosts();
   const run = pageRun();
   if (run && selectedRun !== run) {
     selectedRun = run;
@@ -5919,6 +5920,138 @@ async function fetchState() {
   return data;
 }
 
+const costsForm = $('#costs-form');
+let costsLoading = false;
+let costsReload = false;
+let costsReadAt = -Infinity;
+let costsSignature;
+const costNumber = value => new Intl.NumberFormat(locale(), { maximumFractionDigits: 2 }).format(value);
+const costMoney = (currency, value) => new Intl.NumberFormat(locale(), {
+  style: 'currency', currency, currencyDisplay: 'code', minimumFractionDigits: 2, maximumFractionDigits: 2,
+}).format(value / 100);
+const costMoneyTotals = expenses => Object.entries(expenses).map(([code, value]) => costMoney(code, value)).join(' · ') || '—';
+const costEstimate = (usage, kind, source) => usage[kind]?.[source] != null
+  ? t('{value} pp', { value: costNumber(usage[kind][source]) }) : '—';
+const costDate = date => new Intl.DateTimeFormat(locale(), { dateStyle: 'medium', timeZone: 'UTC' }).format(new Date(date));
+
+function costWeek(row) {
+  return esc(t('{runs} runs · {agents} h of agent work · {sessions} live sessions · {turns} h in app turns · {windows} h with terminal windows open', {
+    runs: row.runs, agents: costNumber(row.agentHours), sessions: row.sessions, turns: costNumber(row.liveHours), windows: costNumber(row.windowHours),
+  }));
+}
+
+function costUsage(usage) {
+  return esc(t('5-hour / plan week · agents {agent5h} / {agentWeek} · live {live5h} / {liveWeek}', {
+    agent5h: costEstimate(usage, 'five_hour', 'agents'), agentWeek: costEstimate(usage, 'seven_day', 'agents'),
+    live5h: costEstimate(usage, 'five_hour', 'live'), liveWeek: costEstimate(usage, 'seven_day', 'live'),
+  }));
+}
+
+// The weeks' agent and app turn hours on the common scale, oldest first; the current week in full brass.
+function costChart(weeks, max) {
+  const bars = weeks.map((w, i) => {
+    const hours = w.agentHours + w.liveHours;
+    return `<span class="${i ? '' : 'current'}" style="height:${Math.round(Math.min(1, hours / max) * 100)}%" title="${esc(`${costDate(w.from)}: ${costNumber(hours)} h`)}"></span>`;
+  });
+  return `<div class="cost-chart" role="img" aria-label="${esc(t('Agent and app turn hours'))}">${bars.reverse().join('')}</div>`;
+}
+
+function costProject(row, max) {
+  const [current] = row.weeks;
+  const frequencies = { once: t('Once'), weekly: t('Weekly'), monthly: t('Monthly'), yearly: t('Yearly') };
+  return `<article class="cost-project">
+    <h3>${esc(row.name)}</h3>
+    ${costChart(row.weeks, max)}
+    <p>${costWeek(current)}</p>
+    <p>${esc(t('Estimated usage in current windows'))} · ${costUsage(row.currentUsage)}</p>
+    <p>${esc(t('Scheduled this week: {total}', { total: costMoneyTotals(current.expenses) }))}</p>
+    <details data-cost-project="${esc(row.project)}">
+      <summary>${esc(t('Weekly details and expenses'))}</summary>
+      <ul class="cost-weeks">
+        ${row.weeks.map(w => `<li>
+          <strong>${esc(costDate(w.from))}</strong>
+          <span>${costWeek(w)}</span>
+          <span>${costUsage(w.usage)}</span>
+          <span>${esc(t('Scheduled expenses: {total}', { total: costMoneyTotals(w.expenses) }))}</span>
+        </li>`).join('')}
+      </ul>
+      ${row.expenses.length ? `<ul class="cost-expenses">${row.expenses.map(e => `<li>
+        <span>${esc(e.name)} · ${esc(costMoney(e.currency, e.minor))} · ${esc(frequencies[e.frequency])}
+          · ${esc(t('First due: {date}', { date: costDate(e.due) }))}
+          ${e.nextDue ? `· ${esc(t('Next due: {date}', { date: costDate(e.nextDue) }))}` : ''}</span>
+        <button class="button secondary small" type="button" data-cost-remove="${esc(e.id)}">${esc(t('Remove'))}</button>
+      </li>`).join('')}</ul>` : ''}
+    </details>
+  </article>`;
+}
+
+async function drawProjectCosts(force = false) {
+  if (costsLoading) {
+    costsReload ||= force;
+    return;
+  }
+  if (!force && Date.now() - costsReadAt < 60_000) return;
+  costsLoading = true;
+  const status = $('#costs-status');
+  if (!costsSignature) status.textContent = t('Loading project costs…');
+  try {
+    const { projects } = await api('/api/costs', {});
+    const signature = JSON.stringify(projects);
+    if (signature !== costsSignature || force) {
+      const open = new Set([...document.querySelectorAll('[data-cost-project][open]')].map(el => el.dataset.costProject));
+      const max = projects.reduce((highest, p) => p.weeks.reduce((n, w) => Math.max(n, w.agentHours + w.liveHours), highest), 1);
+      $('#costs-summary').innerHTML = projects.map(p => costProject(p, max)).join('');
+      for (const el of document.querySelectorAll('[data-cost-project]')) el.open = open.has(el.dataset.costProject);
+      const select = costsForm.elements.project;
+      const selected = select.value;
+      select.innerHTML = projects.filter(p => p.configured).map(p => `<option value="${esc(p.project)}">${esc(p.name)}</option>`).join('');
+      if ([...select.options].some(o => o.value === selected)) select.value = selected;
+      $('#costs-entry').hidden = !select.options.length;
+      costsSignature = signature;
+    }
+    status.textContent = projects.length
+      ? t('Bars: agent and app turn hours per week, oldest to newest; the current week is filled. Usage is an estimate in percentage points, from recorded Claude tokens.')
+      : t('No project costs yet.');
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    costsLoading = false;
+    costsReadAt = Date.now();
+    if (costsReload) {
+      costsReload = false;
+      drawProjectCosts(true);
+    }
+  }
+}
+
+async function saveProjectExpense(body) {
+  try {
+    await api('/api/costs/expense', body);
+    if (body.action === 'add') costsForm.reset();
+    await drawProjectCosts(true);
+  } catch (error) {
+    $('#costs-status').textContent = error.message;
+  }
+}
+
+costsForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  const submit = event.submitter;
+  if (submit) submit.disabled = true;
+  try {
+    await saveProjectExpense({ action: 'add', ...Object.fromEntries(new FormData(costsForm)) });
+  } finally {
+    if (submit) submit.disabled = false;
+  }
+});
+
+$('#costs-summary').addEventListener('click', async event => {
+  const remove = event.target.closest('[data-cost-remove]');
+  if (remove && window.confirm(t('Remove this expense and its scheduled occurrences?'))) {
+    await saveProjectExpense({ action: 'remove', id: remove.dataset.costRemove });
+  }
+});
+
 async function refresh() {
   let next;
   try {
@@ -5959,6 +6092,7 @@ async function refresh() {
     location.reload();
     return;
   }
+  if (currentView() === 'usage') drawProjectCosts();
   state = next;
   online = true;
   if (fresh && state.now) skew = new Date(state.now).getTime() - Date.now();

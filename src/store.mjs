@@ -5,6 +5,7 @@ import { DATA, ensureDir, now, readJson, RUNS, writeJson } from './util.mjs';
 
 ensureDir(RUNS);
 const USAGE_FILE = path.join(DATA, 'usage.json');
+export const USAGE_WINDOWS = path.join(DATA, 'usage-windows');
 const STATE_FILE = path.join(DATA, 'state.json');
 const CONVERSATION_FILE = path.join(DATA, 'manager', 'conversation.json');
 const PENDING_FILE = path.join(DATA, 'manager', 'pending.json');
@@ -76,13 +77,24 @@ export const readUsage = () => readJson(USAGE_FILE, {});
 export function recordUsage(info) {
   const windows = info?.unifiedWindows ?? {};
   const window = w => w && { used: w.utilization, resets: w.resetsAt ? new Date(w.resetsAt * 1000).toISOString() : null, status: w.status };
-  writeJson(USAGE_FILE, {
+  const usage = {
     updated: now(),
     status: info?.status,
     five_hour: window(windows.five_hour),
     seven_day: window(windows.seven_day),
     overage: info?.isUsingOverage ?? false,
-  });
+  };
+  writeJson(USAGE_FILE, usage);
+  for (const kind of ['five_hour', 'seven_day']) {
+    const sample = usage[kind];
+    const end = Date.parse(sample?.resets);
+    if (!Number.isFinite(end) || !Number.isFinite(sample?.used)) continue;
+    try {
+      writeJson(path.join(USAGE_WINDOWS, kind, `${end}.json`), sample);
+    } catch (error) {
+      console.error('Recording a cost window:', error.message);
+    }
+  }
 }
 
 // ---------- State (schedule, reminders already sent, the manager's session) ----------

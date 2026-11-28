@@ -16,6 +16,7 @@ import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE
 import { describeDoing, LOGIN_RENEW, loginDue, loginLine, loginRead, loginWarning, parseLoginStatus, readFeed } from '../src/claude.mjs';
 import { loginText } from '../src/plan.mjs';
 import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
+import { changeExpense, costActivity, listExpenses, nextExpenseDate, projectCosts } from '../src/costs.mjs';
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, opening, openOnComputer, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
 import { createdPaths, guardHooks, mainPushTarget, mainPushTargets, plainPush, publishing, riskyCommand } from '../src/guard.mjs';
@@ -58,6 +59,64 @@ import { forAgent, isOwner, openAppWindow, OWNER_HEADER, ownerHeaders, ownerKey,
 const windows = process.platform === 'win32';
 const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-unit-'));
 after(() => rmSync(temp, { recursive: true, force: true }));
+
+test('project costs split a run at Monday and estimate account usage before filtering projects', () => {
+  const monday = new Date(2026, 10, 23).getTime();
+  const hour = 3_600_000;
+  const iso = offset => new Date(monday + offset * hour).toISOString();
+  const projects = { alpha: {}, beta: {} };
+  const runs = [
+    { project: 'alpha', steps: [{ tool: 'claude', started: iso(-1), ended: iso(1), durationMs: 2 * hour, tokens: { cacheRead: 100 } }] },
+    { project: 'beta', steps: [{ started: iso(1), costActivity: [
+      costActivity({ durationMs: hour, tokens: { input: 100 } }, 'claude', iso(1), iso(2)),
+      costActivity({ durationMs: hour, tokens: { input: 900 } }, 'codex', iso(2), iso(3)),
+    ] }] },
+    { project: 'alpha', created: iso(1), steps: [{}] },
+  ];
+  const sessions = [
+    { project: 'alpha', mode: 'app', started: iso(1), costActivity: [costActivity({ durationMs: hour, tokens: { output: 100 } }, 'claude', iso(1), iso(2))] },
+    { project: 'alpha', mode: 'window', started: iso(-2), ended: iso(2), status: 'ended' },
+  ];
+  const samples = { five_hour: [{ used: 0.6, resets: iso(4) }], seven_day: [{ used: 0.9, resets: iso(8) }] };
+  const options = { projects, project: 'alpha', at: monday + 3 * hour, weeks: 2, runs, sessions, expenses: [], samples };
+  const [alpha] = projectCosts(options).projects;
+  assert.deepEqual(alpha.currentUsage, { five_hour: { agents: 20, live: 20 }, seven_day: { agents: 30, live: 30 } });
+  const [current, previous] = alpha.weeks;
+  assert.deepEqual([current.from, current.runs, current.agentHours, current.sessions, current.liveHours, current.windowHours], ['2026-11-23', 1, 1, 2, 1, 2]);
+  assert.deepEqual([previous.from, previous.runs, previous.agentHours, previous.sessions, previous.windowHours], ['2026-11-16', 1, 1, 1, 2]);
+  assert.deepEqual(current.usage.five_hour, { agents: 10, live: 20 });
+  assert.deepEqual(previous.usage.five_hour, { agents: 10 });
+  const beta = projectCosts({ ...options, project: 'beta', at: monday + 9 * hour }).projects[0];
+  assert.equal(beta.weeks[0].agentHours, 2);
+  assert.deepEqual(beta.currentUsage, {});
+  assert.throws(() => projectCosts({ ...options, weeks: 0 }));
+  assert.throws(() => projectCosts({ ...options, project: 'missing' }));
+});
+
+test('project costs keep recurring expenses by currency and reject invalid entries', () => {
+  const dir = path.join(temp, 'expense-fixture');
+  const projects = { alpha: {} };
+  const options = { dir, projects, by: 'manager' };
+  assert.deepEqual(listExpenses(dir), []);
+  const body = { action: 'add', project: 'alpha', name: 'Hosting', amount: '12.34', currency: 'usd', frequency: 'monthly', due: '2026-01-31' };
+  const monthly = changeExpense(body, options);
+  const once = changeExpense({ ...body, currency: 'EUR', frequency: 'once', due: '2026-02-27' }, options);
+  assert.equal(monthly.by, 'manager');
+  assert.equal(nextExpenseDate(monthly, '2026-02-23'), '2026-02-28');
+  assert.equal(nextExpenseDate(monthly, '2026-03-01'), '2026-03-31');
+  assert.equal(nextExpenseDate({ frequency: 'yearly', due: '2024-02-29' }, '2026-02-25'), '2026-02-28');
+  assert.equal(nextExpenseDate({ frequency: 'weekly', due: '2026-02-20' }, '2026-02-24'), '2026-02-27');
+  assert.equal(nextExpenseDate(once, '2026-02-28'), null);
+  assert.throws(() => changeExpense({ ...body, due: '2026-02-30' }, options));
+  assert.throws(() => changeExpense({ ...body, amount: '-1' }, options));
+  assert.throws(() => changeExpense({ action: 'remove', id: '../other' }, options));
+  const report = projectCosts({ projects, weeks: 1, at: +new Date(2026, 1, 26), runs: [], samples: {}, expenses: listExpenses(dir) });
+  assert.deepEqual(report.projects[0].weeks[0].expenses, { USD: 1234, EUR: 1234 });
+  changeExpense({ action: 'remove', id: once.id }, options);
+  assert.deepEqual(listExpenses(dir), [monthly]);
+  assert.equal(ownerOnly('/api/costs'), true);
+  assert.equal(ownerOnly('/api/costs/expense', { action: 'add', by: 'manager' }), true);
+});
 
 // A project's working copy, its clone, a library, a folder outside every root and Chiefmate's own data folder.
 const workspaces = path.join(temp, 'workspaces');

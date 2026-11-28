@@ -24,6 +24,7 @@ import { holdForQuarantine, lostFile, quarantinedBy, writtenSuspects } from './q
 import { builderSettings, projectInstructions, writtenInstructions } from './prompts.mjs';
 import { addSpeech, askedBy, speechRule } from './speech.mjs';
 import { effectiveLimits } from './spending.mjs';
+import { costActivity, legacyStepCosts } from './costs.mjs';
 import { listRuns, readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
 import { chooseTool, GROK_DENY, LOGIN_COMMAND, parseTool, qualityRecords, recordQuality, runTool, signedIn, TOOL_NAMES, toolEffort, toolModel } from './tools.mjs';
@@ -354,6 +355,7 @@ export function retryRun(id, { step, agent, tool } = {}, { by = 'manager', confi
   }
   const reviewsAfter = steps.slice(n).filter(s => s.agent === LEAD && s.role === 'review');
   for (const s of new Set([target, ...steps.slice(n).filter(s => s.status !== 'done'), ...reviewsAfter, ...(run.review ? [run.review] : [])])) {
+    s.costActivity ??= legacyStepCosts(s);
     s.status = 'pending';
     delete s.paused;
   }
@@ -911,6 +913,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   if (l.pauseRequest) return { paused: true };
   // A step paused for an update of Chiefmate resumes its own Claude Code session, with its clock and its counts.
   const paused = step.paused ?? null;
+  step.costActivity ??= legacyStepCosts(step);
   delete step.paused;
   // Told once: a later resume finds, and tells, an operation of its own.
   delete step.gitRecovery;
@@ -1006,6 +1009,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   let pausedNow = false;
   l.talking = true;
   for (;;) {
+    const costStarted = now();
     const proc = tool === 'claude' ? runClaude({ ...common, prompt: turn, session, spentMs }) : runTool(tool, { ...common, prompt: turn, session, spentMs });
     if (!session.resume) {
       try {
@@ -1021,6 +1025,15 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     r = await proc.promise;
     l.process = null;
     l.pid = null;
+    const activity = costActivity(r, tool, costStarted, now(), r.durationMs || (r.spentMs ?? spentMs) - spentMs);
+    if (activity.durationMs || activity.tokens) {
+      step.costActivity.push(activity);
+      try {
+        saveRun(run);
+      } catch (error) {
+        console.error('Recording step costs:', error.message);
+      }
+    }
     spentMs = r.spentMs ?? spentMs;
     for (const k of Object.keys(total.tokens)) total.tokens[k] += r.tokens?.[k] ?? 0;
     total.turns += r.turns ?? 0;

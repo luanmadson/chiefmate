@@ -276,6 +276,11 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs project-pause <project> [--for 2h | --until 08:00] [--pause-running]
   node src/cli.mjs project-resume <project>     pauses one project (no new run starts there), or frees it
   node src/cli.mjs history [n]                  the latest runs
+  node src/cli.mjs costs [--project <id>] [--weeks n]
+                                                weekly project costs as JSON (8 weeks by default)
+  node src/cli.mjs costs add --project <id> --name "<name>" --amount <value> --currency <code>
+                            --frequency once|weekly|monthly|yearly --due YYYY-MM-DD
+  node src/cli.mjs costs remove <expense-id>     removes an entered expense
   node src/cli.mjs report <id>                  the report of each step of a run
   node src/cli.mjs context <id> [step]          what each step received: prompt, model, tools, folders, MCP servers
   node src/cli.mjs project-context <project> [member] [--short] [--json]
@@ -1377,6 +1382,29 @@ async function main() {
     case 'resume':
       console.log((await api('/api/resume', { id: rest[0], ignoreLimits: has('--ignore-limits') })).status);
       return;
+    case 'costs': {
+      const manager = !!process.env.CHIEFMATE_MANAGER;
+      if (forAgent() && !manager) throw new Error("Project costs are available to the owner and the manager.");
+      const { changeExpense, projectCosts } = await import('./costs.mjs');
+      const { projects } = loadConfig();
+      const project = option('--project');
+      const weeks = option('--weeks');
+      if ((has('--project') && (!project || project.startsWith('--'))) || (has('--weeks') && weeks == null)) {
+        throw new Error('Provide an ID after --project and a number after --weeks.');
+      }
+      let result;
+      if (rest[0] === 'add' || rest[0] === 'remove') {
+        result = changeExpense({
+          action: rest[0], id: rest[1], project, name: option('--name'), amount: option('--amount'),
+          currency: option('--currency'), frequency: option('--frequency'), due: option('--due'),
+        }, { projects, by: manager ? 'manager' : 'owner' });
+      } else {
+        const { listSessions } = await import('./sessions.mjs');
+        result = projectCosts({ projects, project, weeks, sessions: listSessions() });
+      }
+      console.log(JSON.stringify(result, null, 2));
+      break;
+    }
     case 'history':
       for (const r of listRuns().slice(0, Number(rest[0]) || 10)) {
         console.log(`${formatDateTime(r.created)}  ${r.status.padEnd(9)} ${work(r).padStart(10)}  ${r.title} [${r.id}]${r.pullRequest ? `  ${r.pullRequest}` : ''}`);
