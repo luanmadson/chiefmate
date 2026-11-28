@@ -122,8 +122,10 @@ export function qualityRecords(run, reviewCommits = []) {
   const review = run.review && ['done', 'failed'].includes(run.review.status) ? run.review : null;
   const said = review ? correctionLine(review.report) : null;
   const saidNone = !said || /^(none|nothing|no|nenhum|nenhuma|nada|n[aã]o)\b/i.test(said);
-  const corrected = review ? reviewCommits.length > 0 || !saidNone : null;
-  const note = !review ? '' : said && !saidNone ? said : reviewCommits.length ? clip(reviewCommits.join('; '), 200) : '';
+  // A run its team lead reviewed (delegated review, src/leads.mjs): corrected when the lead sent the work back.
+  const fixes = !review && run.review?.delegated ? run.steps.filter(s => s.fix) : null;
+  const corrected = fixes ? fixes.length > 0 : review ? reviewCommits.length > 0 || !saidNone : null;
+  const note = fixes ? clip(fixes.map(s => s.part).join('; '), 200) : !review ? '' : said && !saidNone ? said : reviewCommits.length ? clip(reviewCommits.join('; '), 200) : '';
   return ran.map(s => ({
     at: now(), run: run.id, project: run.project, tool: s.tool, agent: s.agent, kind: run.kind, mission: run.mission ?? null,
     task: clip(run.title, 100), chosen: (s.toolAsked ?? run.tool) ? 'task' : 'member', status: s.status, durationMs: s.durationMs ?? null,

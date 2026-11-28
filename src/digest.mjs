@@ -127,6 +127,27 @@ export const fullReport = step => (step.outcome ? `${outcomeMarkdown(step.outcom
 /** One line of a final summary, for a notification or the manager: what changes, and what the owner must do. */
 export const outcomeLine = (outcome, lang) => [outcome?.change, outcome?.needs ? t('Needs you: {what}', { what: outcome.needs }, lang) : ''].filter(Boolean).join(' ');
 
+/** The verdict's headings: the manager's final review, or a team lead's in a delegated review (src/leads.mjs). */
+const VERDICTS = { manager: "Manager's verdict", lead: "Team lead's verdict" };
+
+/**
+ * The verdict section of the text that goes to the owner (a pull request's, or the note of a branch), in English or
+ * Portuguese: { text, by ('manager' or 'lead') }, or null when it has none.
+ */
+export function verdictIn(text) {
+  const source = String(text ?? '');
+  for (const [by, title] of Object.entries(VERDICTS)) {
+    const titles = [...new Set(['en', 'pt-BR'].map(lang => t(title, {}, lang)))].map(s => s.replace(/[.*+?^${}()|[\]\\']/g, '\\$&'));
+    const found = source.match(new RegExp(`^(#+)\\s*(?:${titles.join('|')})\\s*$`, 'im'));
+    if (!found) continue;
+    const after = source.slice(found.index + found[0].length);
+    const end = after.search(new RegExp(`^#{1,${found[1].length}}\\s`, 'm'));
+    const body = clip((end < 0 ? after : after.slice(0, end)).trim(), 1200);
+    if (body) return { text: body, by };
+  }
+  return null;
+}
+
 const key = s => String(s ?? '').toLowerCase().replace(/[#*_:`\s]+/g, ' ').trim();
 /** "Needs you?" as text: null for no, else what the owner must do. */
 function needsOf(text) {

@@ -12,6 +12,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
+import { verdictIn } from './digest.mjs';
 import { t } from './i18n.mjs';
 import { refuseWhileLocked } from './lockdown.mjs';
 import { reportEvent } from './news.mjs';
@@ -37,18 +38,15 @@ async function target(run, config) {
   return { kind: 'local', dir, branch: run.branch, base: run.base ?? await baseBranch(project) };
 }
 
-/** The final review's verdict, from the pull request text Chiefmate wrote (in either language). */
-export function verdict(run) {
+/**
+ * The final review's verdict, from the pull request text Chiefmate wrote (in either language): the manager's, or the
+ * team lead's in a delegated review. verdictOf gives who wrote it too ({ text, by }).
+ */
+export function verdictOf(run) {
   const file = path.join(runDir(run.id), 'pull-request.md');
-  if (!existsSync(file)) return null;
-  const text = readFileSync(file, 'utf8');
-  const titles = [...new Set(['en', 'pt-BR'].map(lang => t("Manager's verdict", {}, lang)))].map(s => s.replace(/[.*+?^${}()|[\]\\']/g, '\\$&'));
-  const found = text.match(new RegExp(`^(#+)\\s*(?:${titles.join('|')})\\s*$`, 'im'));
-  if (!found) return null;
-  const after = text.slice(found.index + found[0].length);
-  const end = after.search(new RegExp(`^#{1,${found[1].length}}\\s`, 'm'));
-  return clip((end < 0 ? after : after.slice(0, end)).trim(), 1200) || null;
+  return existsSync(file) ? verdictIn(readFileSync(file, 'utf8')) : null;
 }
+export const verdict = run => verdictOf(run)?.text ?? null;
 
 /** What a merge of the run would do, without doing it. */
 export async function previewMerge(id, config = loadConfig()) {
@@ -56,7 +54,7 @@ export async function previewMerge(id, config = loadConfig()) {
   const where = await target(run, config);
   return {
     run: run.id, title: run.title, project: run.project, ...where,
-    failedChecks: (run.checks ?? []).filter(c => !c.ok).length, verdict: verdict(run),
+    failedChecks: (run.checks ?? []).filter(c => !c.ok).length, verdict: verdict(run), verdictBy: verdictOf(run)?.by ?? null,
   };
 }
 

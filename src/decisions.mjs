@@ -22,7 +22,7 @@ import { ownerAnswered } from './charge.mjs';
 import { loadConfig } from './config.mjs';
 import { GRANT_MINUTES, logPush, mainPushTarget, mainPushTargets, plainPush, pushesFile, pushFacts, readPushes, repoOf, samePath } from './guard.mjs';
 import { formatDateTime, t } from './i18n.mjs';
-import { discardRun, mergeRun, prNumber, verdict } from './merge.mjs';
+import { discardRun, mergeRun, prNumber, verdictOf } from './merge.mjs';
 import { refuseWhileLocked } from './lockdown.mjs';
 import { logPower, REBOOT_CONFIRM_MINUTES, REBOOT_COUNTDOWN_S, rebootRefusal, stopSystem } from './power.mjs';
 import { reportEvent } from './news.mjs';
@@ -370,12 +370,15 @@ export function reposLine() {
 // ---------- The cards ----------
 
 const projectName = (config, id) => config.projects?.[id]?.name ?? id ?? '';
+// The name of a project's team lead ("lead" in its settings; projectLead in src/config.mjs gives the same default).
+const projectLeadName = (config, id) => (typeof config.projects?.[id]?.lead === 'object' && config.projects[id].lead?.name) || 'Team lead';
 const firstLine = text => String(text ?? '').split('\n').map(l => l.trim()).find(Boolean) ?? '';
 const plainVerdict = text => String(text ?? '').replace(/[*_`>#]/g, '').replace(/\s+/g, ' ').trim();
 const verdicts = new Map(); // run id -> the final review's verdict, read once (the file doesn't change after the run)
 
 /**
- * The recommendation in the manager's verdict, which also says what it fixed and the risks: { short, text }. "short"
+ * The recommendation in the final review's verdict (the manager's, or the team lead's in a delegated review), which
+ * also says what it fixed or checked and the risks: { short, text }. "short"
  * is the verdict alone ("Approve with caveats"), "text" the recommendation's own words. Looked for after a
  * "Recommendation:" label (in English or Portuguese), else in the verdict's last paragraph.
  */
@@ -397,8 +400,9 @@ export function verdictRecommendation(review) {
   return { short: short || clip(text.split(/[.:;,(]/)[0], 60), text: clip(text, 240) };
 }
 
+/** The final review's verdict and who wrote it ({ text, by: 'manager' or 'lead' }), or null. */
 function runVerdict(run) {
-  if (!verdicts.has(run.id)) verdicts.set(run.id, verdict(run));
+  if (!verdicts.has(run.id)) verdicts.set(run.id, verdictOf(run));
   return verdicts.get(run.id);
 }
 
@@ -420,11 +424,15 @@ function mergeCard(notice, run, item, config) {
   // A branch left in the crew's working copy (no local_clone) is merged by hand, not from here (src/merge.mjs).
   const inClone = !!run.pullRequest || !!localDeliveryClone(run, config);
   const failed = (run.checks ?? []).filter(c => !c.ok).length;
-  const review = runVerdict(run);
+  const found = runVerdict(run);
+  const review = found?.text ?? null;
+  // A level 1 run its team lead reviewed (delegated review, src/leads.mjs): the verdict is the lead's.
+  const byLead = found?.by === 'lead' || !!run.review?.delegated;
   const needs = run.outcome?.needs && !/^(no|não|nao|none|nenhum)\b/i.test(run.outcome.needs) ? run.outcome.needs : '';
   const risk = [
     failed ? t('{count} check(s) failed: look at them before approving.', { count: failed }) : (run.checks ?? []).length ? t('The checks passed.') : '',
-    review ? '' : t('No final review by the manager.'),
+    review ? '' : byLead ? t('No verdict from the team lead was found.') : t('No final review by the manager.'),
+    byLead ? t('Reviewed by the team lead {lead} (delegated review, level 1), not by the manager.', { lead: t(projectLeadName(config, project)) }) : '',
     needs,
   ].filter(Boolean).join(' ');
   const how = run.pullRequest ? t('Chiefmate merges the pull request on GitHub.') : t('Chiefmate merges the branch into the branch checked out in your clone; nothing is sent to GitHub.');
@@ -435,7 +443,8 @@ function mergeCard(notice, run, item, config) {
     change: !byOwner ? '' : inClone ? [how, run.outcome?.change].filter(Boolean).join(' ') : t("The branch is in the crew's working copy, not in a clone of yours (local_clone): merge it by hand."),
     risk: risk || t('No risk noted.'),
     recommend: advice?.text ?? '', recommendShort: advice?.short ?? '',
-    detail: [review ? `${t("Manager's verdict")}:\n${review}` : '', run.outcome?.done?.length ? `${t('What was done')}:\n- ${run.outcome.done.join('\n- ')}` : ''].filter(Boolean).join('\n\n'),
+    detail: [review ? `${byLead ? t("Team lead's verdict") : t("Manager's verdict")}:\n${review}` : '', run.outcome?.done?.length ? `${t('What was done')}:\n- ${run.outcome.done.join('\n- ')}` : ''].filter(Boolean).join('\n\n'),
+    reviewedBy: byLead ? 'lead' : review ? 'manager' : null,
     url: run.pullRequest ?? null, run: run.id, item: item?.id ?? null, approve: byOwner && inClone, thirdParty: !byOwner,
     approval: run.level ?? item?.level ?? null,
   };

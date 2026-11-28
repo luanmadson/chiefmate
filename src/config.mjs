@@ -228,23 +228,29 @@ const LEAD_NO_EDIT = ['Edit', 'Write', 'NotebookEdit', 'MultiEdit'];
 
 /**
  * A project's team lead, from "projects.<id>.lead": { "name": "...", "agent": "<base agent, manager by default>",
- * "extra_instructions": "...", "model": "...", "max_minutes": 30 }. It is a member of the project's crew with the id
- * "lead": it keeps the project's memory, plans the requests sent with "ask" and reviews the crew's work first
+ * "extra_instructions": "...", "model": "...", "max_minutes": 30, "delegated_review": true }. It is a member of the
+ * project's crew with the id "lead": it keeps the project's memory, plans the requests sent with "ask", reviews the
+ * crew's work (the final review of the level 1 runs, unless "delegated_review" is false) and hears its crew first
  * (src/leads.mjs). It sees only its project. null when the project has no lead.
  */
 export function projectLead(config, projectId, agents = loadAgents(config)) {
   const project = config.projects?.[projectId];
   const spec = project?.lead === true ? {} : project?.lead;
   if (!spec || typeof spec !== 'object') return null;
-  const { agent: baseId = 'manager', name, extra_instructions: extra, ...settings } = spec;
+  const { agent: baseId = 'manager', name, extra_instructions: extra, delegated_review: delegated, ...settings } = spec;
   const base = agents[baseId] ?? agents.manager;
   if (!base) return null;
   const projectName = project.name ?? projectId;
-  const role = `In this run you work only as the team lead of the project ${projectName}: not as Chiefmate's manager, and not as any other agent the instructions above describe. You don't talk to ${config.owner || 'the owner'}, you don't queue work with Chiefmate's command line (proposing items for the planning board, as the crew's rules say, is fine) and you don't look at other projects: you see only this project, its working copy and its own documentation.
-- You keep the project's memory: the decisions, the history, ${config.owner || 'the owner'}'s preferences in this project and what was tried. Chiefmate gives it to you in each prompt and saves the version you return.
+  const owner = config.owner || 'the owner';
+  const review = delegated === false
+    ? `- You do the first review of the crew's work and write your opinion for the manager, who does the final review and talks with ${owner}.`
+    : `- You review the crew's work. In a level 1 run your review is the final one (delegated review): you approve it, and your report becomes the text that goes to ${owner}; you send it back to the crew with what to fix; or you escalate it to the manager. In any other run you do the first review and write your opinion for the manager, who does the final review and talks with ${owner}.`;
+  const role = `In this run you work only as the team lead of the project ${projectName}: not as Chiefmate's manager, and not as any other agent the instructions above describe. You don't talk to ${owner}, you don't queue work with Chiefmate's command line (proposing items for the planning board, as the crew's rules say, is fine) and you don't look at other projects: you see only this project, its working copy and its own documentation.
+- You answer to the manager, and the project's crew answers to you: what its members write to the manager (their messages and the defects they report) reaches you first. You answer what you can settle and pass on to the manager only what is the manager's to decide.
+- You keep the project's memory: the decisions, the history, ${owner}'s preferences in this project and what was tried. Chiefmate gives it to you in each prompt and saves the version you return.
 - You plan each request sent to this project into a few tasks for the project's crew.
-- You do the first review of the crew's work and write your opinion for the manager, who does the final review and talks with ${config.owner || 'the owner'}.
-- You read, search and run commands that change nothing. You never edit, write or commit the project's files.`;
+${review}
+- You read, search and run commands that change nothing. You never edit, write or commit the project's files, and you never merge, push or publish anything: the merge is the manager's to decide, with ${owner}'s authorization.`;
   const instructionParts = [
     ...partsOf(base),
     { key: 'lead-role', source: 'Chiefmate (src/config.mjs, projectLead)', text: `\n\n## Your role here: team lead of ${projectName}\n\n${role}` },
@@ -256,7 +262,9 @@ export function projectLead(config, projectId, agents = loadAgents(config)) {
     id: 'lead',
     name: name || 'Team lead',
     title: 'Team lead',
-    role: "Keeps the project's memory, plans each request into tasks for the crew and reviews their work first.",
+    role: delegated === false
+      ? "Keeps the project's memory, plans each request into tasks for the crew, reviews their work first and hears them first."
+      : "Keeps the project's memory, plans each request into tasks for the crew, reviews their work (the final review of level 1 runs) and hears them first.",
     base: base.id,
     project: projectId,
     lead: true,

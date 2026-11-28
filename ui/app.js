@@ -382,8 +382,32 @@ const faceState = agent => (online ? agent.status ?? 'idle' : 'offline');
 const stepFace = step => ({
   running: step.review || step.role === 'review' ? 'reviewing' : step.role === 'plan' ? 'planning' : 'working', done: 'done', failed: 'failed', pending: 'queued',
 })[step.status] ?? 'still';
-/** A step's role, said after its agent's name: the final review, or a team lead's planning or first review. */
-const stepRole = s => (s.review ? t('review') : s.role === 'plan' ? t('planning') : s.role === 'review' ? t('first review') : '');
+/**
+ * A step's role, said after its agent's name: the final review (skipped when the team lead's was the final one), a
+ * team lead's planning, first review or final review (delegated review, with its round), or a fix it sent back.
+ */
+const stepRole = s => (s.review ? (s.delegated ? t('review, left to the team lead') : t('review'))
+  : s.role === 'plan' ? t('planning')
+    : s.role === 'review' ? (s.final ? t('final review, round {round}', { round: s.round ?? 1 }) : t('first review'))
+      : s.fix ? t('fix asked by the team lead') : '');
+
+/** Why the manager reviews a run its team lead reviewed first (ESCALATIONS in src/leads.mjs; the same words as the server's). */
+const escalationText = why => ({
+  lead: t('the team lead asked for it'), checks: t("the project's checks failed"), rounds: t('{count} rounds of fixes were not enough', { count: state?.leadRounds ?? 2 }),
+  level: t('the run is no longer level 1'), failed: t("the team lead's review failed"), unclear: t("the team lead's review gave no clear decision"),
+})[why] ?? why;
+
+/** Who reviewed a run (reviewedBy in src/leads.mjs), in words: the team lead in a delegated review, or the manager. */
+function reviewerText(r) {
+  const b = r.reviewedBy;
+  if (!b) return t('No review');
+  const who = agentName(b.agent, r.project);
+  if (b.agent === 'lead') {
+    return b.delegated ? t('{lead}, final review of a level 1 run ({count} round(s))', { lead: who, count: b.rounds }) : t('{lead}, first review only', { lead: who });
+  }
+  if (b.why) return t('{manager}, after {lead}: {why}', { manager: who, lead: agentName('lead', r.project), why: escalationText(b.why) });
+  return b.rounds ? t('{manager}, after the first review by {lead}', { manager: who, lead: agentName('lead', r.project) }) : who;
+}
 /** What kind of run: a mission, a request to a project's team lead, or a one-off task. */
 const kindLabel = kind => (kind === 'mission' ? t('Mission') : kind === 'ask' ? t('Request') : t('Task'));
 
@@ -1834,6 +1858,7 @@ const newsEvent = kind => ({
   away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'), power: t('power mode'),
   owner_working: t('you working now'), defect: t('defect reported'), agent_message: t('message from an agent'), focus: t('focus changed'),
   run_parked: t('run parked'), quarantine: t('antivirus quarantine'), session_spare: t('session with usage to spare'),
+  lead_forward: t('passed on by a team lead'),
 }[kind] ?? kind);
 
 // Who wrote an agent's message to the manager (a live session or a step of a run, from the command line).
@@ -2366,14 +2391,16 @@ function drawRun(a) {
 
 /**
  * What a project's team lead decided in a run: the request, the tasks it planned for the crew (with what it left out
- * and why) and, after its first review, its opinion for the manager. Empty for a run without a lead.
+ * and why), its final review's rounds in a level 1 run (delegated review) and its opinion or last review. Empty for a
+ * run without a lead.
  */
 function leadPlan(a) {
   const plan = a.lead?.plan;
   const planning = a.steps.some(s => s.role === 'plan' && s.status === 'running');
   if (!a.request && !a.lead) return '';
   const who = agentName('lead', a.project);
-  const parts = [`<div class="label">${esc(t("{lead}'s plan", { lead: who }))}</div>`];
+  // A task or a mission has no planning step: only a request (or a plan already made) has a plan to show.
+  const parts = a.request || plan ? [`<div class="label">${esc(t("{lead}'s plan", { lead: who }))}</div>`] : [];
   if (a.request) parts.push(`<p class="lead-request">${esc(a.request)}</p>`);
   if (plan) {
     parts.push(plan.tasks.length
@@ -2382,8 +2409,17 @@ function leadPlan(a) {
     if (plan.note) parts.push(`<div class="hint">${esc(plan.note)}</div>`);
     if (plan.error) parts.push(`<div class="hint">${esc(t('Problem with the plan: {error}', { error: plan.error }))}</div>`);
     if (plan.dropped?.length) parts.push(`<div class="hint">${esc(t('Left out: {list}', { list: plan.dropped.join('; ') }))}</div>`);
-  } else parts.push(`<div class="hint">${esc(planning ? t('Planning the request into tasks for the crew…') : t('The plan comes after the planning step.'))}</div>`);
-  if (a.lead?.opinion) parts.push(`<div class="label">${esc(t("{lead}'s opinion", { lead: who }))}</div><div class="hint lead-opinion">${esc(a.lead.opinion)}</div>`);
+  } else if (a.request) parts.push(`<div class="hint">${esc(planning ? t('Planning the request into tasks for the crew…') : t('The plan comes after the planning step.'))}</div>`);
+  // Its final review in a level 1 run (delegated review): each round's decision, and why the manager took it over.
+  const reviews = a.lead?.reviews ?? [];
+  if (reviews.length) {
+    const decided = r => (r.decision === 'approve' ? t('approved: it goes to you without the manager\'s review, once the checks pass')
+      : r.decision === 'return' ? t('sent back to the crew: {list}', { list: r.fixes.map(x => `${agentName(x.agent, a.project)} (${x.part})`).join('; ') })
+        : r.decision === 'escalate' ? t('handed to the manager') : t('no clear decision'));
+    parts.push(`<div class="label">${esc(t("{lead}'s final review", { lead: who }))}</div><ol class="lead-tasks">${reviews.map(r => `<li><span class="num">${esc(String(r.round))}</span><div><span class="hint">${esc(decided(r))}${r.note ? ` · ${esc(r.note)}` : ''}</span></div></li>`).join('')}</ol>`);
+  }
+  if (a.lead?.escalated) parts.push(`<div class="hint">${esc(t('The manager reviews it after all: {why}', { why: escalationText(a.lead.escalated.why) }))}</div>`);
+  if (a.lead?.opinion) parts.push(`<div class="label">${esc(reviews.length ? t("{lead}'s last review", { lead: who }) : t("{lead}'s opinion", { lead: who }))}</div><div class="hint lead-opinion">${esc(a.lead.opinion)}</div>`);
   return `<div class="lead-plan">${parts.join('')}</div>`;
 }
 
@@ -2766,14 +2802,47 @@ function teamLead(a, project, bubbles = false) {
     a.base ? t('Based on {agent}', { agent: agentName(a.base) }) : '',
     a.extra ? t('with instructions for this project') : '',
     a.memory ? t('memory: {count} line(s), updated {when}', { count: a.memory.lines, when: relative(a.memory.updated) }) : t('no memory yet'),
+    // Its review: the final one of level 1 runs (delegated review) or a first one; and what its crew wrote to it.
+    a.delegated ? t('final review of level 1 runs') : t('first review only'),
+    a.open ? t('{count} open from the crew', { count: a.open }) : '',
   ];
   return `<div class="team-member team-lead"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 34)}<div><div class="name">${esc(t(a.name))} <span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></div><div class="hint">${esc(facts.filter(Boolean).join(' · '))}</div>${bubbles ? speechBubble(speechFor(a.id, project)) : ''}</div><div class="team-side">${effortPick(a, { project })}${stateHtml(agentStatus(a))}</div></div>`;
+}
+
+/**
+ * Who answers to whom in a project: its crew to its team lead, when it has one, the lead to the manager, the manager
+ * to you; with who reviews and who hears the crew first.
+ */
+function teamChain(team) {
+  const manager = t(member('manager').name ?? 'Manager');
+  const links = [t('Crew'), ...(team.lead ? [t(team.lead.name)] : []), manager, t('You')];
+  const how = !team.lead ? t('No team lead: the crew writes to the manager, who reviews its work.')
+    : team.lead.delegated ? t('The team lead hears the crew first and does the final review of level 1 runs; the manager reviews the rest and decides the merges with you.')
+      : t('The team lead hears the crew first and reviews its work first; the manager does the final review.');
+  return `<div class="team-chain"><span class="label">${esc(t('Who answers to whom'))}</span><span class="chain">${links.map(x => `<span>${esc(x)}</span>`).join('<span class="arrow" aria-hidden="true">→</span>')}</span><div class="hint">${esc(how)}</div></div>`;
+}
+
+/** What the crew wrote to its team lead (the open ones first), and what the lead did with it. */
+function leadInbox(team) {
+  const lead = team.lead;
+  if (!lead) return '';
+  const state = x => ({
+    open: [t('Open'), 'warn'], answered: [t('Answered by the lead'), 'ok'], forwarded: [t('Passed on to the manager'), 'info'], taken: [t('Taken by the manager'), 'neutral'],
+  })[x.status] ?? [x.status, 'neutral'];
+  const items = (lead.inbox ?? []).map(x => `<li>
+      <div>${stateHtml(state(x))} <span class="hint">${esc([x.kind === 'defect' ? t('defect') : t('message'), agentName(x.agent, team.project), shortDate(x.at)].filter(Boolean).join(' · '))}</span></div>
+      <div class="inbox-text">${esc(x.text)}</div>
+      ${x.answer ? `<div class="hint">${esc(t('Answer: {text}', { text: x.answer }))}</div>` : ''}${x.forward ? `<div class="hint">${esc(t('To the manager: {text}', { text: x.forward }))}</div>` : ''}
+    </li>`);
+  return `<div class="lead-inbox"><div class="label">${esc(t('Messages from the crew to {lead} ({count} open)', { lead: t(lead.name), count: lead.open ?? 0 }))}</div>${items.length
+    ? `<ul>${items.join('')}</ul>`
+    : `<div class="hint">${esc(t('Nothing yet: what the crew writes to the manager comes here first, and the lead answers it at its next step.'))}</div>`}</div>`;
 }
 
 /** A project's crew: its lead, then its members, each with what it is doing (with bubbles: its speech bubble too). */
 function teamBody(team, bubbles = false) {
   const members = team.members.map(a => `<div class="team-member"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 30)}<div><div class="name">${esc(t(a.name))} <span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></div><div class="hint">${esc([a.base && a.base !== a.id ? t('Based on {agent}', { agent: agentName(a.base) }) : t(a.title ?? ''), a.extra ? t('with instructions for this project') : '', (a.mcp ?? []).length ? t('tools: {list}', { list: a.mcp.join(', ') }) : ''].filter(Boolean).join(' · '))}</div>${bubbles ? speechBubble(speechFor(a.id, team.project)) : ''}</div><div class="team-side">${effortPick(a, { project: team.project })}${stateHtml(agentStatus(a))}</div></div>`);
-  return `${team.lead ? teamLead(team.lead, team.project, bubbles) : ''}${members.join('') || `<div class="hint">${esc(t('No members.'))}</div>`}`;
+  return `${teamChain(team)}${team.lead ? teamLead(team.lead, team.project, bubbles) : ''}${members.join('') || `<div class="hint">${esc(t('No members.'))}</div>`}`;
 }
 
 function drawTeams() {
@@ -3020,7 +3089,7 @@ async function refreshDetail(force = false) {
   const html = `
     <h2>${esc(r.title)}</h2>
     ${r.summary ? `<p class="run-summary">${esc(r.summary)}</p>` : ''}
-    <div class="hint">${stateHtml(runLabel({ ...r, needsYou: (r.requests ?? []).filter(x => x.status === 'open').length }))} · <span class="num">${shortDate(r.created)}</span> · ${esc(projectName(r.project))}${(brief?.tools ?? []).length ? ` · ${esc(runToolsLabel(brief).join(' · '))}` : ''} · ${esc(originLabel(r.origin))}${r.started ? ` · <span class="num">${esc(elapsed(r.started, r.ended ?? Date.now()))}</span>` : ''}</div>
+    <div class="hint">${stateHtml(runLabel({ ...r, needsYou: (r.requests ?? []).filter(x => x.status === 'open').length }))} · <span class="num">${shortDate(r.created)}</span> · ${esc(projectName(r.project))}${(brief?.tools ?? []).length ? ` · ${esc(runToolsLabel(brief).join(' · '))}` : ''} · ${esc(originLabel(r.origin))}${r.started ? ` · <span class="num">${esc(elapsed(r.started, r.ended ?? Date.now()))}</span>` : ''}${brief?.reviewedBy ? ` · ${esc(t('Reviewed by: {who}', { who: reviewerText(brief) }))}` : ''}</div>
     ${r.result ? `<p>${esc(r.result)}</p>` : ''}${r.note ? `<p class="hint">${esc(r.note)}</p>` : ''}
     ${r.outcome ? `<div class="label">${esc(t('Final summary'))}</div>${outcomeHtml(r.outcome)}` : ''}
     ${r.instruction ? `<details class="report-full"><summary>${esc(t('Full instruction'))}</summary><p class="hint">${esc(r.instruction)}</p></details>` : ''}
@@ -3765,9 +3834,22 @@ function drawProjectFacts(info) {
 function drawProjectTeam(id) {
   const team = state.teams?.find(x => x.project === id);
   const html = team
-    ? `<div class="team"><div class="team-top"><h3>${esc(t('Crew'))}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>${teamBody(team, true)}</div>`
+    ? `<div class="team"><div class="team-top"><h3>${esc(t('Crew'))}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>${teamBody(team, true)}${leadInbox(team)}</div>${projectReviews(id)}`
     : '';
   if (!pickingEffort('#project-team')) draw('#project-team', html, html);
+}
+
+/** Who reviewed each of the project's latest runs: the team lead (delegated review) or the manager, and why. */
+function projectReviews(id) {
+  const info = projectPage.data?.id === id ? projectPage.data : null;
+  const runs = (info?.history ?? []).slice(0, 10);
+  if (!runs.length) return '';
+  const rows = runs.map(r => `<tr>
+      <td class="num">${shortDate(r.created)}</td>
+      <td><span class="primary">${esc(r.title)}</span></td>
+      <td>${r.reviewedBy?.agent ? face(member(r.reviewedBy.agent, r.project), 'still', 20) : ''} ${esc(reviewerText(r))}</td>
+    </tr>`);
+  return `<h2 class="section-title">${esc(t('Who reviewed each run'))}</h2><table class="table"><thead><tr><th>${esc(t('Date'))}</th><th>${esc(t('Run'))}</th><th>${esc(t('Reviewed by'))}</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
 }
 
 /** The project's runs going on (a click opens the agent's panel) and its runs in the queue. */

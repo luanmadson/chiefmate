@@ -24,6 +24,7 @@ export const NEWS_EVENTS = [
   'update_installed', 'update_blocked', 'memory_alert', 'usage_alert', 'session_ended', 'plan_proposed',
   'idle', 'autopilot_report', 'watchdog', 'away', 'back', 'owner_decided', 'push_allowed', 'repo_allowed', 'owner_request',
   'lockdown', 'security_warning', 'power', 'owner_working', 'defect', 'focus', 'run_parked', 'quarantine', 'session_spare',
+  'lead_forward',
 ];
 
 // The owner's own switches (away mode, the power modes of src/power.mjs, the focus of src/steer.mjs), a push the owner

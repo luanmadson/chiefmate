@@ -44,10 +44,12 @@ export function senderLabel(s) {
 
 /**
  * Records a defect an agent reported. sender: { kind, id, step, name, agent, project, tool } (see agentSender in
- * src/manager.mjs). Returns { defect, repeated }: a repeat of an open defect only counts; a new one (or one closed and
- * reported again) is news for the manager.
+ * src/manager.mjs). Returns { defect, repeated, held }: a repeat of an open defect only counts (one held by a team lead
+ * and reported from outside its crew becomes the manager's); a new one (or one closed and reported again) is news for
+ * the manager, unless holdFor names the project whose team lead sees it first (a member of its crew reported it,
+ * src/leads.mjs): then it waits with the lead (defect.held) and the caller hands it over.
  */
-export function reportDefect(text, sender = null, { config } = {}) {
+export function reportDefect(text, sender = null, { config, holdFor = null } = {}) {
   const said = clip(String(text ?? '').trim(), MAX_TEXT);
   if (!said) throw new Error('Write the defect: what happened and what was expected.');
   const list = readDefects();
@@ -57,7 +59,11 @@ export function reportDefect(text, sender = null, { config } = {}) {
   const same = matches.find(d => d.status === 'open') ?? matches.sort((a, b) => b.last.localeCompare(a.last))[0];
   if (same?.status === 'open') {
     Object.assign(same, { count: (same.count ?? 1) + 1, last: at, reporters: [...(same.reporters ?? []), reporter].slice(-MAX_REPORTERS) });
+    // Waiting with a team lead and reported from outside its crew too: not one crew's misunderstanding, so the manager's.
+    const heldBy = same.held && same.held.project !== holdFor ? same.held.project : null;
+    if (heldBy) delete same.held;
     saveDefects(list);
+    if (heldBy) reportEvent('defect', `Defect #${same.id}, waiting with the team lead of project ${heldBy}, reported again by ${senderLabel(sender)} (${same.count} reports): ${clip(same.text, 600)}`, { config });
     return { defect: same, repeated: true };
   }
   let defect;
@@ -68,9 +74,27 @@ export function reportDefect(text, sender = null, { config } = {}) {
     defect = { id: list.reduce((max, d) => Math.max(max, d.id), 0) + 1, text: said, status: 'open', first: at, last: at, count: 1, reporters: [reporter] };
     list.push(defect);
   }
+  if (holdFor) defect.held = { project: holdFor, at };
+  else delete defect.held;
   saveDefects(list);
+  if (holdFor) return { defect, repeated: false, held: true };
   reportEvent('defect', `${defect.reopened === at ? `Defect #${defect.id}, closed before, reported again` : `New defect #${defect.id}`} by ${senderLabel(sender)}: ${clip(said, 600)}`, { config });
-  return { defect, repeated: false };
+  return { defect, repeated: false, held: false };
+}
+
+/**
+ * A defect a team lead passed on to the manager (or the manager took from the lead's inbox): it leaves the lead and is
+ * the manager's like any other. note: the lead's line on it. news: whether the manager hears of it (a lead's pass).
+ */
+export function releaseDefect(id, { note = '', lead = null, news = true, config } = {}) {
+  const list = readDefects();
+  const defect = list.find(d => d.id === Number(id));
+  if (!defect || defect.status !== 'open') return null;
+  delete defect.held;
+  if (note) defect.leadNote = clip(String(note).trim(), 500);
+  saveDefects(list);
+  if (news) reportEvent('defect', `Defect #${defect.id}, passed on by the team lead${lead ? ` ${lead}` : ''}${note ? ` ("${clip(note, 300)}")` : ''}, reported by ${senderLabel(defect.reporters?.at(-1))}: ${clip(defect.text, 600)}`, { config });
+  return defect;
 }
 
 /** Closes a defect once its fix is in. note: what fixed it. */
@@ -86,9 +110,9 @@ export function closeDefect(id, note = '', by = 'manager') {
 
 export const openDefects = () => readDefects().filter(d => d.status === 'open');
 
-/** The open defects, for the manager's situation; empty when there are none. */
+/** The open defects, for the manager's situation (those still with a team lead are in its line); empty when there are none. */
 export function defectsLine() {
-  const open = openDefects().sort((a, b) => b.last.localeCompare(a.last));
+  const open = openDefects().filter(d => !d.held).sort((a, b) => b.last.localeCompare(a.last));
   if (!open.length) return '';
   const one = d => `#${d.id}${d.count > 1 ? ` (reported ${d.count} times)` : ''}, last ${formatDateTime(d.last)} by ${senderLabel(d.reporters?.at(-1))}: ${clip(d.text, 240)}`;
   return `Open defects of Chiefmate, reported by the agents (node src/cli.mjs defect list; close each with node src/cli.mjs defect close <id> --note "<what fixed it>" once its fix is in): ${open.slice(0, 8).map(one).join('; ')}${open.length > 8 ? `; and ${open.length - 8} more` : ''}.`;
