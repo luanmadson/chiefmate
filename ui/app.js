@@ -1977,7 +1977,8 @@ function drawChat() {
   let html = g.messages.length ? '' : `<div class="msg system">${esc(t('No messages yet. Ask the manager how things are going, or ask for a job.'))}</div>`;
   for (const m of g.messages) {
     if (m.who === 'system') {
-      html += `<div class="msg system">${esc(m.text)}</div>`;
+      // An answer cut off by the usage limit stands out: when it comes back.
+      html += `<div class="msg system${m.cut ? ' cut' : ''}">${esc(m.text)}</div>`;
       continue;
     }
     // An agent's message (chat say from a session or a step): never shown as yours.
@@ -1993,7 +1994,7 @@ function drawChat() {
       m.edited ? t('edited') : '',
       m.model ? shortModel(m.model) : '',
     ].filter(Boolean).join(' · ');
-    const tag = m.interrupted ? `<span class="tag">${esc(t('interrupted'))}</span>` : '';
+    const tag = m.interrupted ? `<span class="tag">${esc(t('interrupted'))}</span>` : m.cut ? `<span class="tag">${esc(t('cut off'))}</span>` : '';
     // A notice: the manager's own news to you, after something happened (it was not an answer to a message of yours).
     const news = !you && m.news ? `<span class="tag news">${esc(t('notice'))}</span><span class="msg-events">${esc(m.news.map(newsEvent).join(' · '))}</span>` : '';
     html += `<div class="msg ${you ? 'you' : 'manager'}${news ? ' news' : ''}${m.error ? ' error' : ''}"><div class="msg-head">${you ? '' : face(manager, m.error ? 'failed' : 'still', 20)}<span class="msg-author">${esc(you ? t('You') : t(manager.name))}</span><span class="msg-meta">${esc(meta)}</span>${news}${tag}</div><div class="msg-body">${md(m.text)}</div></div>`;
@@ -2016,7 +2017,7 @@ function drawChat() {
   if (g.responding) draw('#manager-last', JSON.stringify([g.lastAction?.at, g.lastAction?.text]), managerLastAction(g));
   drawChatQueue();
   $('#send').disabled = !online;
-  $('#send').textContent = g.responding || g.pending?.length ? t('Add to the queue') : t('Send');
+  $('#send').textContent = g.responding || g.pending?.length || g.cut ? t('Add to the queue') : t('Send');
   $('#interrupt').hidden = !online || !g.responding;
   $('#interrupt').disabled = !!g.interrupting;
 }
@@ -2038,7 +2039,13 @@ function drawChatQueue() {
     toast(t('The message you were editing is no longer in the queue: it was delivered or removed.'));
   }
   $('#chat-queue').hidden = !list.length;
-  const head = `<div class="chat-queue-head"><span class="label">${esc(t('In the queue'))}</span><span class="hint">${esc(g.responding ? t('They go together, in order, when the manager finishes this answer.') : t('Being delivered…'))}</span></div>`;
+  // After an answer cut off by the usage limit, the queue (the news included) waits for the renewal.
+  const cutUntil = g.cut?.until;
+  const today = cutUntil && new Date(cutUntil).toDateString() === new Date().toDateString();
+  const waiting = cutUntil && (today
+    ? t('The usage limit ran out: they go at {time}, after the answer that was cut off.', { time: clockTime(cutUntil) })
+    : t('The usage limit ran out: they go on {time}, after the answer that was cut off.', { time: `${new Date(cutUntil).toLocaleDateString(locale(), { weekday: 'short' }).replace(/\.$/, '')} ${clockTime(cutUntil)}` }));
+  const head = `<div class="chat-queue-head"><span class="label">${esc(t('In the queue'))}</span><span class="hint">${esc(waiting || (g.responding ? t('They go together, in order, when the manager finishes this answer.') : t('Being delivered…')))}</span></div>`;
   const items = list.map(m => (m.from === 'chiefmate'
     // Chiefmate's news for the manager: not a message of yours, so it can't be edited (only removed).
     ? `<div class="queued-msg news" data-pending="${esc(m.id)}">
@@ -2058,7 +2065,7 @@ function drawChatQueue() {
         <span class="queued-actions"><button type="button" class="button secondary small" data-pending-edit="${esc(m.id)}">${esc(t('Edit'))}</button><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
       <div class="msg-body">${md(m.text)}</div>
     </div>`));
-  draw('#chat-queue', JSON.stringify([list, g.responding, language()]), list.length ? head + items.join('') : '');
+  draw('#chat-queue', JSON.stringify([list, g.responding, cutUntil, language()]), list.length ? head + items.join('') : '');
 }
 
 function drawSuggestions() {

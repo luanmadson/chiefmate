@@ -3,10 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { staleLine } from './attention.mjs';
-import { loginLine, runClaude } from './claude.mjs';
+import { limitWarning, loginLine, runClaude } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectEfforts, projectLead } from './config.mjs';
 import { effortChangeLine, effortHistory } from './effort.mjs';
-import { formatDateTime, formatDuration, formatNumber, formatPercent, t } from './i18n.mjs';
+import { formatDateTime, formatDuration, formatNumber, formatPercent, locale, t } from './i18n.mjs';
 import { LEAD, leadSituation } from './leads.mjs';
 import { processes } from './machine.mjs';
 import { autopilotLine, weekLine } from './autopilot.mjs';
@@ -262,7 +262,7 @@ export function sendToManager(text, { sender = null } = {}) {
   if (!message) throw new Error(t('Write a message.'));
   const list = readPending();
   if (list.length >= MAX_PENDING) throw new Error(t('The queue already has {count} messages. Wait for the manager, or remove some.', { count: list.length }));
-  const queued = chat.responding || list.length > 0 || held() || isLocked();
+  const queued = chat.responding || list.length > 0 || held() || isLocked() || !!limitWait();
   const item = { id: randomUUID().slice(0, 8), text: message, at: now(), queued, ...(sender ? { from: 'agent', sender } : {}) };
   list.push(item);
   savePending(list);
@@ -281,7 +281,7 @@ export function deliverNews(events) {
   let item = list.find(m => m.from === 'chiefmate');
   if (item) item.events = [...item.events, ...events].slice(-30);
   else {
-    item = { id: randomUUID().slice(0, 8), from: 'chiefmate', events: [...events], at: now(), queued: chat.responding || list.length > 0 || held() || isLocked() };
+    item = { id: randomUUID().slice(0, 8), from: 'chiefmate', events: [...events], at: now(), queued: chat.responding || list.length > 0 || held() || isLocked() || !!limitWait() };
     list.push(item);
   }
   item.text = item.events.map(e => `${e.kind}: ${e.text}`).join('\n');
@@ -313,21 +313,122 @@ export function removePending(id) {
   return rest;
 }
 
-/** Whether the manager is answering, or has messages waiting (the self-update waits for both). */
-export const managerBusy = () => chat.responding || readPending().length > 0;
+/**
+ * Whether the manager is answering, or has messages waiting (the self-update waits for both). Not while they wait for
+ * the plan's usage to renew: they are kept on disk and go after a restart too.
+ */
+export const managerBusy = () => chat.responding || (readPending().length > 0 && !limitWait());
 
 /**
  * When the manager is free, hands it the whole queue as one message. Returns whether an answer started. While an update
  * of Chiefmate is being installed, the queue waits: it goes after the update (or the restart). In an emergency
- * lockdown, it waits for the owner's release.
+ * lockdown, it waits for the owner's release. After an answer cut off by the plan's usage limit, everything waits for
+ * the renewal, then goes with what that answer was about (see limitCut).
  */
 export function deliverPending() {
   if (chat.responding || held() || isLocked()) return false;
-  const items = readPending();
+  const state = readState();
+  const cut = state.manager?.cut ?? null;
+  if (cut && !cutDue(cut)) {
+    wakeAt(cut);
+    return false;
+  }
+  const items = [...(cut?.items ?? []), ...readPending()];
+  if (cut) {
+    delete state.manager.cut;
+    saveState(state);
+  }
   if (!items.length) return false;
   savePending([]);
-  answer(items).catch(error => addMessage('manager', t("I couldn't answer: {error}", { error: error.message }), { error: error.message }));
+  answer(items, cut).catch(error => addMessage('manager', t("I couldn't answer: {error}", { error: error.message }), { error: error.message }));
   return true;
+}
+
+// ---------- The plan's usage running out in the middle of an answer ----------
+
+// The conversation goes on this long after the renewal the usage reader gives; until then, it looks again this often
+// for a reading that shows the usage back sooner (a free reset, another session's call that went through).
+const RESUME_SLACK_MS = 30_000;
+const LIMIT_CHECK_MS = 60_000;
+
+/**
+ * The window the usage reader (data/usage.json, from Claude Code's rate_limit_event) says ran out: refused or at 100%,
+ * with its reset still ahead. Returns { until, window } (the later reset when both ran out), or null.
+ */
+export function outOfUsage(usage = {}, at = Date.now()) {
+  const windows = ['five_hour', 'seven_day'];
+  const ahead = windows.filter(k => Date.parse(usage[k]?.resets ?? '') > at);
+  let out = ahead.filter(k => usage[k].status === 'rejected' || usage[k].used >= 1);
+  // A refusal with no window's own state to go by: the 5-hour window, as the runs take it.
+  if (!out.length && usage.status === 'rejected' && !windows.some(k => usage[k]?.status)) out = ahead.slice(0, 1);
+  if (!out.length) return null;
+  const window = out.reduce((a, b) => (Date.parse(usage[b].resets) > Date.parse(usage[a].resets) ? b : a));
+  return { until: usage[window].resets, window };
+}
+
+/**
+ * Whether an answer stopped because the plan's usage ran out: Claude Code's warning (the result's "limit", from
+ * runClaude: never the manager's own answer that quotes it), or an answer that ended with no final text after actions
+ * (or after a call the account refused) while the usage reader shows a window out. Never an answer stopped on purpose
+ * (interrupted, over its time limit). Returns { until, window }: when the usage renews, by the usage reader; with the
+ * warning but no reading to go by, the warning's own time, else the next reset of the fullest window, else in an hour
+ * (a new cut then brings it up to date). actions: how many the answer took.
+ */
+export function limitCut(r, { actions = 0, usage = readUsage(), at = Date.now() } = {}) {
+  if (!r || r.canceled) return null;
+  const text = String(r.text ?? '').trim();
+  const warned = !!r.limit?.text;
+  const silent = !text && (actions > 0 || !!r.limit?.rejected);
+  if (!warned && !silent) return null;
+  const out = outOfUsage(usage, at);
+  if (out) return out;
+  if (!warned) return null; // no final text, but no window ran out: some other failure
+  const stamp = Number(String(r.limit?.text ?? text).match(/limit reached\|(\d{9,})/i)?.[1]) * 1000; // "Claude AI usage limit reached|<seconds>"
+  if (stamp > at) return { until: new Date(stamp).toISOString(), window: null };
+  const next = ['five_hour', 'seven_day'].filter(k => Date.parse(usage[k]?.resets ?? '') > at).sort((a, b) => (usage[b].used ?? 0) - (usage[a].used ?? 0))[0];
+  return next ? { until: usage[next].resets, window: next } : { until: new Date(at + 3600_000).toISOString(), window: null };
+}
+
+/**
+ * Whether the conversation cut off by the limit goes on: past the renewal, or a reading since the cut shows the usage
+ * back. That reading counts once: an answer cut off again as it went on (again) waits for the renewal, so a reading
+ * that only seems back (another model's calls going through, say) can't start one attempt after another.
+ */
+export function cutDue(cut, usage = readUsage(), at = Date.now()) {
+  if (!cut) return false;
+  if (!(Date.parse(cut.until) + RESUME_SLACK_MS > at)) return true;
+  return !cut.again && Date.parse(usage.updated ?? '') > Date.parse(cut.at) && usage.status !== 'rejected' && !outOfUsage(usage, at);
+}
+
+/** The conversation cut off by the limit, while it waits for the renewal: { at, until, window, items }, else null. */
+export function limitWait(state = readState(), usage = readUsage(), at = Date.now()) {
+  const cut = state.manager?.cut;
+  return cut && !cutDue(cut, usage, at) ? { at: cut.at, until: cut.until, window: cut.window ?? null, items: cut.items?.length ?? 0 } : null;
+}
+
+// Looks again at the renewal, or sooner (LIMIT_CHECK_MS). Never keeps Chiefmate running by itself.
+let wakeTimer = null;
+function wakeAt(cut) {
+  clearTimeout(wakeTimer);
+  const wait = Math.min(Date.parse(cut.until) + RESUME_SLACK_MS - Date.now(), LIMIT_CHECK_MS);
+  wakeTimer = setTimeout(() => deliverPending(), Math.max(1000, wait || 0));
+  wakeTimer.unref?.();
+}
+
+/** The conversation's notice of an answer cut off by the limit, with when it comes back ("11:20" today, else the date too). */
+export function cutNotice(items, until, at = Date.now()) {
+  const today = new Date(until).toDateString() === new Date(at).toDateString();
+  const time = today ? new Intl.DateTimeFormat(locale(), { timeStyle: 'short' }).format(new Date(until)) : formatDateTime(until);
+  if (items.some(m => !isNews(m) && !isAgent(m))) {
+    return today ? t('Answer cut off by the usage limit; it comes back at {time}.', { time }) : t('Answer cut off by the usage limit; it comes back on {time}.', { time });
+  }
+  return today ? t("The manager's notice was cut off by the usage limit; it comes back at {time}.", { time }) : t("The manager's notice was cut off by the usage limit; it comes back on {time}.", { time });
+}
+
+/** What tells the manager, as the conversation goes on after the renewal, that its previous answer was cut off. */
+export function cutMessage(owner, cut) {
+  const window = { five_hour: ', the 5-hour window', seven_day: ", the plan's week" }[cut.window] ?? '';
+  return `[System message from Chiefmate, not from ${owner}] Your previous answer was cut off at ${formatDateTime(cut.at)}: the plan's usage ran out${window} and Claude Code stopped before you finished. Now that it renewed (${formatDateTime(cut.until)}), Chiefmate resumes the conversation on its own; ${owner} did not write again. Finish that answer now, from where it stopped. What you did before the cut may be half done, or done without your seeing its result: check it before you carry on, and don't do it twice. Start with one line saying your answer had been cut off by the usage limit. What it answered is below again, with whatever arrived while the usage was out.`;
 }
 
 /**
@@ -397,12 +498,16 @@ export function agentMessage(owner, items) {
 
 const isAgent = m => m.from === 'agent';
 
-/** The text the manager receives: your message, or the queue in order with the time of each one, the agents' messages and Chiefmate's news. */
-export function composeMessage(owner, items, interrupted = null) {
+/**
+ * The text the manager receives: your message, or the queue in order with the time of each one, the agents' messages and
+ * Chiefmate's news. cut: the answer cut off by the plan's usage limit that this one finishes (see cutMessage).
+ */
+export function composeMessage(owner, items, interrupted = null, cut = null) {
   const parts = [];
   const mine = items.filter(m => !isNews(m) && !isAgent(m));
   const agents = items.filter(isAgent);
   const events = items.filter(isNews).flatMap(m => m.events ?? []);
+  if (cut) parts.push(cutMessage(owner, cut));
   if (interrupted) {
     parts.push(`${owner} interrupted your previous answer at ${formatDateTime(interrupted)}. What you were doing then may be half done: check it before you carry on.`);
   }
@@ -416,12 +521,13 @@ export function composeMessage(owner, items, interrupted = null) {
   return parts.join('\n\n');
 }
 
-async function answer(items) {
+/** resuming: the answer cut off by the usage limit this one finishes; its messages are in the conversation already. */
+async function answer(items, resuming = null) {
   // Set before anything else, so a message sent meanwhile goes to the queue.
   Object.assign(chat, { responding: true, interrupting: false, partial: '', actions: [], cancel: null, since: now() });
   let state = null;
   try {
-    for (const m of items.filter(x => !isNews(x))) addMessage(isAgent(m) ? 'agent' : 'you', m.text, { ...(isAgent(m) ? { sender: m.sender } : {}), at: m.at, ...(m.queued ? { queued: true, delivered: now() } : {}), ...(m.edited ? { edited: m.edited } : {}) });
+    for (const m of items.filter(x => !isNews(x) && !x.cut)) addMessage(isAgent(m) ? 'agent' : 'you', m.text, { ...(isAgent(m) ? { sender: m.sender } : {}), at: m.at, ...(m.queued ? { queued: true, delivered: now() } : {}), ...(m.edited ? { edited: m.edited } : {}) });
     const config = loadConfig();
     const manager = loadAgents(config).manager;
     if (!manager) throw new Error(t('agents/manager.md is missing.'));
@@ -432,7 +538,7 @@ async function answer(items) {
     const model = manager.model ?? config.default_model;
     const libraries = await chatLibraries(config);
     await processes(60_000).catch(() => {}); // the projects running on this computer, for the situation
-    const prompt = `<situation>\n${situation(libraries)}\n</situation>\n\n${composeMessage(config.owner, items, state.manager.interrupted)}`;
+    const prompt = `<situation>\n${situation(libraries)}\n</situation>\n\n${composeMessage(config.owner, items, state.manager.interrupted, resuming)}`;
     // What the guard refuses in this answer, read when it ends; and whether the owner allowed a push (the guard decides which).
     // A log left by an answer cut short goes to the history first, with its push requests.
     try {
@@ -462,7 +568,8 @@ async function answer(items) {
         session,
         log: conversationLog(),
         onEvent: event => {
-          if (event.type === 'say') chat.partial = event.text;
+          // Claude Code's warning that the usage ran out is not the manager's words.
+          if (event.type === 'say' && !event.limit && !limitWarning(event.text)) chat.partial = event.text;
           if (event.type === 'action') chat.actions = [...chat.actions, { at: now(), text: event.text }].slice(-40);
           if (event.type === 'context') chat.context = { ...chat.context, used: event.used, window: event.window };
         },
@@ -473,17 +580,20 @@ async function answer(items) {
 
     let r;
     let resumed = false;
+    let cut = null;
     if (state.manager.session) {
       r = await attempt({ id: state.manager.session, resume: true });
-      resumed = r.ok || !!r.text;
-      // The old conversation is gone: start another one. Not when the answer was stopped (interrupted, or over the
-      // time limit): the session is still there, and the next message carries on in it.
+      cut = limitCut(r, { actions: chat.actions.length });
+      resumed = r.ok || !!r.text || !!cut;
+      // The old conversation is gone: start another one. Not when the answer was stopped (interrupted, over the time
+      // limit, or cut off by the usage limit): the session is still there, and the next message carries on in it.
       if (!resumed && !r.canceled) r = null;
     }
     if (!r) {
       const id = randomUUID();
       r = await attempt({ id, resume: false });
       if (!r.session) r.session = id;
+      cut = limitCut(r, { actions: chat.actions.length });
     }
     // An answer to Chiefmate's news alone is a notice: the app shows it apart, with the events it is about.
     // An answer to agents' messages alone is one too.
@@ -492,6 +602,13 @@ async function answer(items) {
       if (chat.partial) addMessage('manager', chat.partial, { model, interrupted: true, ...news });
       addMessage('system', t('You interrupted the answer. The conversation goes on in the same session, and the manager is told in your next message.'));
       state.manager.interrupted = now();
+    } else if (cut) {
+      // Cut off by the plan's usage limit: what it wrote so far stays, marked, and what it answered (the owner's
+      // messages, the agents' and the news) is kept to go again, by itself, once the usage renews (deliverPending).
+      if (chat.partial) addMessage('manager', chat.partial, { model, cut: true, ...news });
+      addMessage('system', cutNotice(items, cut.until), { cut: { until: cut.until } });
+      state.manager.cut = { at: now(), until: cut.until, window: cut.window, items: items.map(m => ({ ...m, cut: true })), ...(resuming ? { again: true } : {}) };
+      delete state.manager.interrupted; // this answer told it
     } else {
       addMessage('manager', r.text || t("I couldn't answer: {error}", { error: r.error }), { model, ...news, ...(r.ok ? {} : { error: r.error }) });
       delete state.manager.interrupted; // this message told it
@@ -562,7 +679,8 @@ async function renewIfFull() {
   const state = readState();
   const c = state.manager?.context;
   const session = state.manager?.session;
-  if (!session || !c?.used || !c.window || c.used / c.window < RENEW_AT || chat.responding || held()) return;
+  // Not while an answer cut off by the usage limit waits: it goes on first, in this conversation.
+  if (!session || !c?.used || !c.window || c.used / c.window < RENEW_AT || chat.responding || held() || state.manager?.cut) return;
   const config = loadConfig();
   const manager = loadAgents(config).manager;
   if (!manager) return;

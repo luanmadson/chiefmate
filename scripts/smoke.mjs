@@ -1261,6 +1261,103 @@ try {
   failures.push(`conversation checks: ${error.message}`);
 }
 
+// The manager's answer cut off by the plan's usage limit, in this process, with a stand-in for Claude Code (nothing real
+// starts): the account refused after an action, with Claude Code's warning; what the owner asked stays, with the notice
+// of when it comes back; news and a message sent meanwhile wait, without holding an update; at the renewal the
+// conversation goes on by itself, in the same session, told it was cut off, and the answer comes.
+try {
+  const manager = await import(pathToFileURL(path.join(root, 'src', 'manager.mjs')).href);
+  const store = await import(pathToFileURL(path.join(root, 'src', 'store.mjs')).href);
+  const cutDir = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-cut-'));
+  const calls = path.join(cutDir, 'calls.jsonl');
+  const fake = path.join(cutDir, 'fake-claude.mjs');
+  const resets = Math.floor(Date.now() / 1000) + 3600;
+  writeFileSync(fake, [
+    "import { appendFileSync } from 'node:fs';",
+    'const args = process.argv.slice(2);',
+    "const id = args.includes('--resume') ? args[args.indexOf('--resume') + 1] : args[args.indexOf('--session-id') + 1];",
+    "let prompt = ''; process.stdin.on('data', d => (prompt += d)); process.stdin.on('end', () => {",
+    `  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ args, prompt }) + '\\n');`,
+    "  const say = e => process.stdout.write(JSON.stringify(e) + '\\n');",
+    "  say({ type: 'system', subtype: 'init', session_id: id, model: 'm' });",
+    "  if (prompt.includes('What did Claude Code say?')) {",
+    "    const quote = \"It said: You've hit your session limit - resets 11:20am\";",
+    "    say({ type: 'assistant', message: { model: 'm', content: [{ type: 'text', text: quote }] } });",
+    "    return say({ type: 'result', subtype: 'success', is_error: false, result: quote, session_id: id, num_turns: 1 });",
+    '  }',
+    "  if (prompt.includes('Your previous answer was cut off')) {",
+    "    say({ type: 'assistant', message: { content: [{ type: 'text', text: 'Cut off by the limit before: the queue is empty.' }] } });",
+    "    return say({ type: 'result', subtype: 'success', is_error: false, result: 'Cut off by the limit before: the queue is empty.', session_id: id, num_turns: 1 });",
+    '  }',
+    "  say({ type: 'assistant', message: { content: [{ type: 'text', text: 'Checking the queue first.' }, { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'node src/cli.mjs status' } }] } });",
+    "  say({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } });",
+    `  say({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', unifiedWindows: { five_hour: { utilization: 1, resetsAt: ${resets}, status: 'rejected' }, seven_day: { utilization: 0.4, resetsAt: ${resets + 86400}, status: 'allowed' } } } });`,
+    "  const warning = \"You've hit your session limit - resets 11:20am\";",
+    "  say({ type: 'assistant', error: 'rate_limit', message: { model: '<synthetic>', content: [{ type: 'text', text: warning }] } });",
+    "  say({ type: 'result', subtype: 'success', is_error: true, result: warning, session_id: id, num_turns: 2 });",
+    '});',
+  ].join('\n'));
+  // The records this changes, put back afterwards.
+  const usageFile = path.join(data, 'usage.json');
+  const conversationFile = path.join(data, 'manager', 'conversation.json');
+  const kept = { claude: process.env.CHIEFMATE_CLAUDE, manager: store.readState().manager, pending: store.readPending(), files: [usageFile, conversationFile].map(f => (existsSync(f) ? readFileSync(f, 'utf8') : null)) };
+  process.env.CHIEFMATE_CLAUDE = fake;
+  store.saveState({ ...store.readState(), manager: {} });
+  store.savePending([]);
+  const called = () => readFileSync(calls, 'utf8').trim().split('\n').map(l => JSON.parse(l));
+  const settled = async () => {
+    for (let i = 0; i < 300 && manager.chat.responding; i++) await delay(100);
+  };
+  try {
+    const asked = manager.sendToManager('How is the queue?');
+    await settled();
+    const cut = store.readState().manager.cut;
+    const said = store.readConversation();
+    const partial = said.find(m => m.who === 'manager' && m.cut);
+    expect(!asked.queued && cut?.items.map(m => m.text).join() === 'How is the queue?' && cut.window === 'five_hour' && cut.until === new Date(resets * 1000).toISOString()
+      && partial?.text === 'Checking the queue first.' && said.at(-1).who === 'system' && said.at(-1).cut?.until === cut.until && !said.some(m => /hit your session limit/.test(m.text)),
+    `an answer cut off by the usage limit was not kept, with what it wrote so far and the notice of when it comes back: ${JSON.stringify({ cut, said: said.slice(-3) })}`);
+    expect(store.readUsage().five_hour?.status === 'rejected' && manager.limitWait()?.until === cut.until, 'the usage reader did not get the refusal, or the wait is not there for the app');
+
+    // While the usage is out, the news and a new message wait in the queue; an update is not held for it.
+    const news = manager.deliverNews([{ kind: 'run_finished', text: 'Run smoke-cut finished', at: new Date().toISOString() }]);
+    const later = manager.sendToManager('And the board?');
+    expect(news.queued && later.queued && !manager.chat.responding && !manager.deliverPending() && !manager.managerBusy() && called().length === 1,
+      `the queue went to the manager while the usage was out, or held an update: ${called().length} call(s)`);
+
+    // The renewal (moved into the past): the conversation goes on by itself, in the same session.
+    const state = store.readState();
+    state.manager.cut.until = new Date(Date.now() - 60_000).toISOString();
+    store.saveState(state);
+    expect(manager.deliverPending(), 'the conversation did not go on after the renewal');
+    await settled();
+    const [first, resumed] = called();
+    const after = store.readConversation();
+    expect(called().length === 2 && resumed.args[resumed.args.indexOf('--resume') + 1] === first.args[first.args.indexOf('--session-id') + 1]
+      && resumed.prompt.includes('Your previous answer was cut off') && resumed.prompt.includes('How is the queue?') && resumed.prompt.includes('And the board?')
+      && resumed.prompt.includes('run_finished: Run smoke-cut finished'),
+    `the conversation went on in another session, without saying the answer was cut off, or without what it answered: ${resumed?.prompt.slice(-1200)}`);
+    expect(after.filter(m => m.text === 'How is the queue?').length === 1 && after.filter(m => m.text === 'And the board?').length === 1
+      && after.at(-1).who === 'manager' && after.at(-1).text.startsWith('Cut off by the limit before') && !store.readState().manager.cut && !store.readPending().length && !manager.limitWait(),
+    `after the renewal, a message showed twice, the answer did not come or the wait stayed: ${JSON.stringify(after.slice(-4))}`);
+
+    // The manager's own answer that quotes the warning, with the usage reader still showing the window out: an answer.
+    manager.sendToManager('What did Claude Code say?');
+    await settled();
+    const quoted = store.readConversation().at(-1);
+    expect(!store.readState().manager.cut && quoted.who === 'manager' && quoted.text.startsWith('It said:') && !quoted.cut,
+      `the manager's own answer quoting Claude Code's warning was taken for a cut: ${JSON.stringify(quoted)}`);
+  } finally {
+    process.env.CHIEFMATE_CLAUDE = kept.claude;
+    store.saveState({ ...store.readState(), manager: kept.manager ?? {} });
+    store.savePending(kept.pending);
+    [usageFile, conversationFile].forEach((f, i) => (kept.files[i] === null ? rmSync(f, { force: true }) : writeFileSync(f, kept.files[i])));
+    rmSync(cutDir, { recursive: true, force: true });
+  }
+} catch (error) {
+  failures.push(`usage limit cut checks: ${error.message}`);
+}
+
 // The planning board follows the runs linked to it (in this process, with the same records; no run starts).
 try {
   const { planItem, planningLine } = await import(pathToFileURL(path.join(root, 'src', 'planning.mjs')).href);

@@ -2,7 +2,8 @@
 // its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation;
 // the band of what a live session asks; the emergency lockdown, its detection, its emergency watch and the call to the
 // owner outside the app; the warning before Claude Code's sign-in expires; each agent's effort; the redacted backup of
-// the settings; the usage resets' countdowns; the session's spending modes, the queue's fair turn and the session's spare.
+// the settings; the usage resets' countdowns; the session's spending modes, the queue's fair turn and the session's spare;
+// the manager's answer cut off by the plan's usage limit.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -13,7 +14,9 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE, projectColor, shouldClose, themeManifest, windowName } from '../src/browsers.mjs';
-import { describeDoing, LOGIN_RENEW, loginDue, loginLine, loginRead, loginWarning, parseLoginStatus, readFeed } from '../src/claude.mjs';
+import { describeDoing, limitWarning, LOGIN_RENEW, loginDue, loginLine, loginRead, loginWarning, parseLoginStatus, readFeed } from '../src/claude.mjs';
+import { formatDateTime, locale } from '../src/i18n.mjs';
+import { composeMessage, cutDue, cutNotice, limitCut, limitWait, outOfUsage } from '../src/manager.mjs';
 import { loginText } from '../src/plan.mjs';
 import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
@@ -2805,4 +2808,89 @@ test("the session's spare near its renewal: spent alone while the owner is away,
   const end = checkSpending({ config, usage: renewed, at: later, runs, capacity: 3, file: away, report, note, away: true });
   assert.equal(end.ended?.until, resets);
   assert.deepEqual([sessionNow(config, readSpending(away), later).mode, effectiveLimits(config, readSpending(away), later).pause_at_5h_window], ['save', SAFETY]);
+});
+
+// ---------- The manager's answer cut off by the plan's usage limit ----------
+
+const cutAt = Date.parse('2026-11-27T14:15:00Z');
+const cutIso = minutes => new Date(cutAt + minutes * 60_000).toISOString();
+const usageOut = { updated: cutIso(-1), status: 'rejected', five_hour: { used: 1, resets: cutIso(5), status: 'rejected' }, seven_day: { used: 0.4, resets: cutIso(3000), status: 'allowed' } };
+const usageLeft = { updated: cutIso(-1), status: 'allowed', five_hour: { used: 0.5, resets: cutIso(5), status: 'allowed' }, seven_day: { used: 0.4, resets: cutIso(3000), status: 'allowed' } };
+
+test("the manager's answer cut off: Claude Code's warning, or no final text after actions with the usage out", () => {
+  // Claude Code's own words, never an answer that only talks about a limit.
+  for (const text of ["You've hit your session limit · resets 11:20am (America/Sao_Paulo)", "You've hit your weekly limit · resets Mon 8am", 'Claude AI usage limit reached|1764243600', '5-hour limit reached ∙ resets 3pm', "You're out of extra usage · resets 3pm"]) {
+    assert.ok(limitWarning(text), `not taken for the warning: ${text}`);
+  }
+  for (const text of ['', 'A fila está vazia.', 'The run paused: the 5-hour window reached its limit at 85%.', `${'x'.repeat(300)} usage limit reached`, 'API Error: Request rejected (429) · this may be a temporary capacity issue']) {
+    assert.ok(!limitWarning(text), `taken for the warning: ${text}`);
+  }
+
+  // The usage reader says when it renews: the window out, the later reset when both are.
+  const warning = { ok: false, text: "You've hit your session limit · resets 11:20am", error: 'Ended with an error (success).', limit: { text: "You've hit your session limit · resets 11:20am", rejected: true } };
+  assert.deepEqual(limitCut(warning, { usage: usageOut, at: cutAt }), { until: cutIso(5), window: 'five_hour' });
+  const weekOut = { ...usageOut, seven_day: { used: 1, resets: cutIso(3000), status: 'rejected' } };
+  assert.deepEqual(limitCut(warning, { usage: weekOut, at: cutAt }), { until: cutIso(3000), window: 'seven_day' });
+  const unmarked = { status: 'rejected', five_hour: { used: 0.7, resets: cutIso(5) }, seven_day: { used: 0.4, resets: cutIso(3000) } };
+  assert.deepEqual(outOfUsage(unmarked, cutAt), { until: cutIso(5), window: 'five_hour' }, 'a refusal with no window marked was not the 5-hour window');
+  assert.equal(outOfUsage({ ...usageOut, five_hour: { ...usageOut.five_hour, resets: cutIso(-1) } }, cutAt), null, 'a window already renewed was still out');
+  assert.equal(outOfUsage({ ...usageLeft, status: 'rejected' }, cutAt), null, "a refusal was put on a window whose own state says it isn't out");
+
+  // No final text after actions (or after a refused call): the limit only when the usage reader shows a window out.
+  const silent = { ok: true, text: '', turns: 3 };
+  assert.deepEqual(limitCut(silent, { actions: 2, usage: usageOut, at: cutAt }), { until: cutIso(5), window: 'five_hour' });
+  assert.deepEqual(limitCut({ ok: false, text: '', limit: { text: null, rejected: true } }, { usage: usageOut, at: cutAt }), { until: cutIso(5), window: 'five_hour' });
+  assert.equal(limitCut(silent, { actions: 2, usage: usageLeft, at: cutAt }), null, 'an answer with no final text was taken for the limit with usage left');
+  assert.equal(limitCut(silent, { actions: 0, usage: usageOut, at: cutAt }), null, 'an answer with no action and no warning was taken for the limit');
+
+  // An answer that ended as usual, or stopped on purpose, never; nor a refusal that is not the plan's limit.
+  assert.equal(limitCut({ ok: true, text: 'Tudo certo: a fila está vazia.', limit: { text: null, rejected: true } }, { actions: 3, usage: usageOut, at: cutAt }), null);
+  assert.equal(limitCut({ ...warning, canceled: true }, { usage: usageOut, at: cutAt }), null, 'an interrupted answer was taken for the limit');
+  assert.equal(limitCut({ ok: false, text: 'API Error: Request rejected (429) · this may be a temporary capacity issue' }, { usage: usageLeft, at: cutAt }), null);
+
+  // The warning with no reading to go by: its own time, else the fullest window's reset, else in an hour.
+  const warned = text => ({ ok: false, text, limit: { text, rejected: false } });
+  assert.equal(limitCut(warned(`Claude AI usage limit reached|${Math.floor((cutAt + 600_000) / 1000)}`), { usage: {}, at: cutAt }).until, cutIso(10));
+  assert.deepEqual(limitCut(warned("You've hit your session limit"), { usage: usageLeft, at: cutAt }), { until: cutIso(5), window: 'five_hour' });
+  assert.deepEqual(limitCut(warned("You've hit your session limit"), { usage: {}, at: cutAt }), { until: cutIso(60), window: null });
+  assert.ok(limitWarning('You’ve hit your session limit · resets 3pm'), 'the warning with a typographic apostrophe was missed');
+
+  // The manager's own answer that quotes the warning (runClaude gives it no "limit") is an answer, never a cut.
+  for (const ok of [true, false]) {
+    assert.equal(limitCut({ ok, text: "O aviso foi: You've hit your session limit · resets 3pm", limit: null }, { actions: 2, usage: usageOut, at: cutAt }), null);
+  }
+});
+
+test("the manager's answer cut off: it waits for the renewal, says when it comes back and is told it was cut off", () => {
+  const cut = { at: cutIso(0), until: cutIso(5), window: 'five_hour', items: [{ id: 'a', text: 'How is the queue?', at: cutIso(-2), queued: false, cut: true }] };
+  // At the renewal (with a moment's slack), or sooner when a reading since the cut shows the usage back.
+  assert.equal(cutDue(cut, usageOut, cutAt), false);
+  assert.equal(cutDue(cut, usageOut, cutAt + 5 * 60_000), false, 'it went on before the slack after the renewal');
+  assert.equal(cutDue(cut, usageOut, cutAt + 6 * 60_000), true);
+  assert.equal(cutDue({ ...cut, until: 'never' }, usageOut, cutAt), true, 'a cut with no time to go by waited for good');
+  assert.equal(cutDue(cut, { ...usageLeft, updated: cutIso(1) }, cutAt + 2 * 60_000), true, 'a reading that shows the usage back did not end the wait');
+  assert.equal(cutDue(cut, { ...usageLeft, updated: cutIso(-1) }, cutAt + 2 * 60_000), false, 'a reading from before the cut ended the wait');
+  assert.equal(cutDue(cut, { ...usageOut, updated: cutIso(1) }, cutAt + 2 * 60_000), false);
+  // Cut off again as it went on: only the renewal ends the wait, so readings that seem back can't loop it.
+  assert.equal(cutDue({ ...cut, again: true }, { ...usageLeft, updated: cutIso(1) }, cutAt + 2 * 60_000), false, 'an answer cut off again went on before the renewal');
+  assert.equal(cutDue({ ...cut, again: true }, usageOut, cutAt + 6 * 60_000), true);
+
+  // For the app, while it lasts.
+  assert.deepEqual(limitWait({ manager: { cut } }, usageOut, cutAt), { at: cutIso(0), until: cutIso(5), window: 'five_hour', items: 1 });
+  assert.equal(limitWait({ manager: { cut } }, usageOut, cutAt + 6 * 60_000), null);
+  assert.equal(limitWait({ manager: {} }, usageOut, cutAt), null);
+
+  // The conversation's notice: the time alone today, the date too on another day; an answer to the owner or a notice.
+  const time = new Intl.DateTimeFormat(locale(), { timeStyle: 'short' }).format(new Date(cutIso(5)));
+  const mine = cutNotice(cut.items, cutIso(5), cutAt);
+  const notice = cutNotice([{ id: 'n', from: 'chiefmate', events: [] }], cutIso(5), cutAt);
+  assert.ok(mine.includes(time) && notice.includes(time) && mine !== notice, `${mine} / ${notice}`);
+  assert.ok(cutNotice(cut.items, cutIso(3000), cutAt).includes(formatDateTime(cutIso(3000))), 'a renewal on another day came without its date');
+
+  // Going on: told it was cut off, with what it answered and what came meanwhile (the news too), not as the owner's words.
+  const items = [...cut.items, { id: 'b', text: 'And the board?', at: cutIso(2), queued: true }, { id: 'n', from: 'chiefmate', events: [{ kind: 'run_finished', text: 'Run x finished', at: cutIso(1) }], cut: true }];
+  const told = composeMessage('Owner', items, null, cut);
+  assert.ok(told.startsWith('[System message from Chiefmate, not from Owner] Your previous answer was cut off') && told.includes('the 5-hour window') && told.includes('Owner did not write again'));
+  assert.ok(told.includes('How is the queue?') && told.includes('And the board?') && told.includes('run_finished: Run x finished') && told.includes("Answer Owner's message(s)"));
+  assert.ok(!composeMessage('Owner', [{ text: 'Hi', at: cutIso(0) }]).includes('cut off'), 'a message with nothing cut off said it was');
 });
