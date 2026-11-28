@@ -4,7 +4,7 @@
 // ("tool" in its settings) or the one chosen for a task (--tool). The manager, the team leads, the final review and the
 // projects marked "sensitive" always run on Claude Code.
 import { execFile, spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, createWriteStream, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, createWriteStream, existsSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -172,6 +172,145 @@ export function qualitySummary(records = readQuality()) {
     const kinds = [...new Set(mine.map(r => r.mission ? `mission ${r.mission}` : r.kind))];
     return { tool, ...sum(mine), kinds: kinds.map(kind => ({ kind, ...sum(mine.filter(r => (r.mission ? `mission ${r.mission}` : r.kind) === kind)) })), last: mine.at(-1)?.at ?? null };
   });
+}
+
+// ---------- Each tool's usage: its plan's limits, as the tool last read them, and the steps it ran ----------
+
+const codexHome = () => process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+
+/** The end of a text file, at most "bytes" of it, from its first whole line. */
+function fileTail(file, bytes) {
+  const size = statSync(file).size;
+  const start = Math.max(0, size - bytes);
+  const buffer = Buffer.alloc(size - start);
+  const fd = openSync(file, 'r');
+  try {
+    readSync(fd, buffer, 0, buffer.length, start);
+  } finally {
+    closeSync(fd);
+  }
+  const text = buffer.toString('utf8');
+  return start ? text.slice(text.indexOf('\n') + 1) : text;
+}
+
+/** The last line of a JSON Lines text that contains "needle", parsed, or null. */
+function lastLine(text, needle) {
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].includes(needle)) continue;
+    try {
+      return JSON.parse(lines[i]);
+    } catch {}
+  }
+  return null;
+}
+
+// A file is read again only once it changed (the app asks for the state every few seconds).
+const readings = new Map();
+function readCached(file, read) {
+  let s;
+  try {
+    s = statSync(file);
+  } catch {
+    return null;
+  }
+  const key = `${s.mtimeMs}:${s.size}`;
+  const hit = readings.get(file);
+  if (hit?.key === key) return hit.value;
+  let value = hit?.value ?? null;
+  try {
+    value = read(file, value);
+  } catch {}
+  readings.set(file, { key, value });
+  return value;
+}
+
+const iso = ms => (Number.isFinite(ms) ? new Date(ms).toISOString() : null);
+
+/** Codex's newest sessions (sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl), at most "count". */
+function codexSessions(home, count) {
+  const found = [];
+  const numbered = dir => {
+    try {
+      return readdirSync(dir).filter(x => /^\d+$/.test(x)).sort().reverse().map(x => path.join(dir, x));
+    } catch {
+      return [];
+    }
+  };
+  for (const year of numbered(path.join(home, 'sessions'))) for (const month of numbered(year)) for (const day of numbered(month)) {
+    let files = [];
+    try {
+      files = readdirSync(day).filter(f => /^rollout-.*\.jsonl$/.test(f)).sort().reverse();
+    } catch {}
+    for (const f of files) {
+      found.push(path.join(day, f));
+      if (found.length >= count) return found;
+    }
+  }
+  return found;
+}
+
+/**
+ * Codex's plan (ChatGPT's), as Codex last reported it in a session on this computer, the owner's own or a step's:
+ * { plan, updated, windows: [{ minutes, used (0 to 1), resets }] } (its 5-hour window and its week), or null.
+ */
+export function codexPlan(home = codexHome()) {
+  let best = null;
+  for (const file of codexSessions(home, 8)) {
+    const reading = readCached(file, f => {
+      const line = lastLine(fileTail(f, 512 * 1024), '"rate_limits":{');
+      const limits = line?.payload?.rate_limits;
+      if (!limits) return null;
+      const at = Date.parse(line.timestamp);
+      const window = w => (typeof w?.used_percent === 'number' ? {
+        minutes: w.window_minutes ?? null, used: w.used_percent / 100,
+        // older versions of Codex give the seconds left instead of the moment
+        resets: w.resets_at ? iso(w.resets_at * 1000) : w.resets_in_seconds != null ? iso(at + w.resets_in_seconds * 1000) : null,
+      } : null);
+      return { plan: limits.plan_type ?? null, updated: iso(at), windows: [window(limits.primary), window(limits.secondary)].filter(Boolean) };
+    });
+    if (reading && (!best || (reading.updated ?? '') > (best.updated ?? ''))) best = reading;
+  }
+  return best;
+}
+
+/**
+ * Grok's plan (SuperGrok's credits), as Grok last fetched it and wrote in its log (logs/unified.jsonl, when it starts
+ * in a terminal): { plan, updated, windows: [{ minutes, used (0 to 1), resets }] }, or null. Its log only grows at the
+ * end, so the reading found once is kept until a newer one.
+ */
+export function grokPlan(home = grokHome()) {
+  return readCached(path.join(home, 'logs', 'unified.jsonl'), (f, before) => {
+    const line = lastLine(fileTail(f, 2 * 1024 * 1024), '"creditUsagePercent"');
+    const config = line?.ctx?.config;
+    if (typeof config?.creditUsagePercent !== 'number') return before;
+    const start = Date.parse(config.currentPeriod?.start);
+    const end = Date.parse(config.currentPeriod?.end);
+    return {
+      plan: line.ctx.subscriptionTier ?? null, updated: iso(Date.parse(line.ts)),
+      windows: [{ minutes: Number.isFinite(start) && Number.isFinite(end) ? Math.round((end - start) / 60_000) : null, used: config.creditUsagePercent / 100, resets: iso(end) }],
+    };
+  });
+}
+
+/** How many steps each tool ran (a step without one: Claude Code), started since "since" (ms): { claude, codex, grok }. */
+export function stepsByTool(runs, since) {
+  const counts = Object.fromEntries(TOOLS.map(x => [x, 0]));
+  for (const run of runs) {
+    for (const s of [...(run.steps ?? []), ...(run.review ? [run.review] : [])]) {
+      if (s.started && Date.parse(s.started) >= since) counts[TOOLS.includes(s.tool) ? s.tool : 'claude']++;
+    }
+  }
+  return counts;
+}
+
+/** For the app's Usage section: the plans of Codex and Grok, and the steps of each tool today and in the last 7 days. */
+export function toolsUsage(runs, at = new Date()) {
+  const midnight = new Date(at);
+  midnight.setHours(0, 0, 0, 0);
+  const today = stepsByTool(runs, midnight.getTime());
+  const week = stepsByTool(runs, at.getTime() - 7 * 24 * 3600_000);
+  return { codex: codexPlan(), grok: grokPlan(), steps: TOOLS.map(tool => ({ tool, name: TOOL_NAMES[tool], today: today[tool], week: week[tool] })) };
 }
 
 // ---------- Finding and starting the programs ----------

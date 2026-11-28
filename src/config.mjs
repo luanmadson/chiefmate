@@ -1,7 +1,7 @@
 // The settings (config/chiefmate.json, created from config/example.json on the first run) and the crew (agents/*.md).
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { DATA, languageName, readJson, ROOT, writeJson } from './util.mjs';
+import { DATA, languageName, now, readJson, ROOT, writeJson } from './util.mjs';
 
 export const CONFIG_FILE = path.join(ROOT, 'config', 'chiefmate.json');
 const EXAMPLE_FILE = path.join(ROOT, 'config', 'example.json');
@@ -21,45 +21,106 @@ export function saveConfig(config) {
 
 /** Where the full copy of the settings stays: Chiefmate's own data folder, on this computer only and never in git. */
 export const FULL_BACKUP_DIR = path.join(DATA, 'config-backup');
+/** The copies of the settings failing now (backupConfig), for the app's notice, the manager and the watch in src/plan.mjs. */
+export const BACKUP_PROBLEMS = path.join(DATA, 'backup-problems.json');
 
 /**
  * With "backup_dir" or "full_backup_dir" in the settings, keeps up-to-date copies of the settings, on every save and
  * whenever Chiefmate starts. In "backup_dir" (a folder of your own, such as one in a private repository), a redacted
  * one (redactConfig), since that folder is usually pushed somewhere. The full copy goes to FULL_BACKUP_DIR, on this
  * computer only, and to "full_backup_dir" when set (a private folder off this computer, such as a synced cloud one).
+ * A copy refused or failing is kept in "problems" (backupProblems) by its place and cause, never with the settings'
+ * values, from the first time ("since") while that cause lasts; it leaves once the copy works or is no longer asked for.
  */
-export function backupConfig(config = loadConfig(), { fullDir = FULL_BACKUP_DIR } = {}) {
-  if (!config.backup_dir && !config.full_backup_dir) return;
-  if (config.backup_dir) writeIfChanged(config.backup_dir, redactConfig(config));
-  writeIfChanged(fullDir, config);
-  if (!config.full_backup_dir) return;
-  const refused = refusedFullDir(config.full_backup_dir, config.backup_dir);
-  if (refused) console.error(`Settings backup: full_backup_dir ${refused}, so the full copy is not written there.`);
-  else writeIfChanged(config.full_backup_dir, config);
+export function backupConfig(config = loadConfig(), { fullDir = FULL_BACKUP_DIR, problems = BACKUP_PROBLEMS } = {}) {
+  const failed = [];
+  const copy = (target, dir, value) => {
+    const problem = writeIfChanged(dir, value);
+    if (problem) failed.push({ target, ...problem, log: `${target === 'local' ? 'the full copy on this computer' : target}: ${problem.log}` });
+  };
+  if (config.backup_dir || config.full_backup_dir) {
+    if (config.backup_dir) copy('backup_dir', config.backup_dir, redactConfig(config));
+    copy('local', fullDir, config);
+    const refused = config.full_backup_dir && refusedFullDir(config.full_backup_dir, config.backup_dir);
+    if (refused) failed.push({ target: 'full_backup_dir', ...refused, log: `full_backup_dir ${refused.log}, so the full copy is not written there.` });
+    else if (config.full_backup_dir) copy('full_backup_dir', config.full_backup_dir, config);
+  }
+  recordProblems(failed, problems);
 }
 
 /** Why "full_backup_dir" may not take the full copy, or null: not a path, backup_dir's own folder, or inside git. */
 function refusedFullDir(dir, redactedDir) {
-  if (typeof dir !== 'string') return 'is not a folder path';
+  if (typeof dir !== 'string') return { cause: 'invalid', log: 'is not a folder path' };
   // path.relative ignores the case on Windows, where "C:\Backup" and "c:\backup" are the same folder
-  if (typeof redactedDir === 'string' && redactedDir && path.relative(redactedDir, dir) === '') return 'is the same folder as backup_dir';
+  if (typeof redactedDir === 'string' && redactedDir && path.relative(redactedDir, dir) === '') return { cause: 'same_folder', log: 'is the same folder as backup_dir' };
   // a git working tree: the folder or a parent has ".git" (a folder, or a file in a worktree or submodule)
   for (let at = path.resolve(dir); ; at = path.dirname(at)) {
-    if (existsSync(path.join(at, '.git'))) return `is inside a git repository (${at})`;
+    if (existsSync(path.join(at, '.git'))) return { cause: 'in_git', log: `is inside a git repository (${at})` };
     if (path.dirname(at) === at) return null;
   }
 }
 
+/** null once the copy is in "dir", else { cause, code, log }: the cause from the error's code, the log with its message. */
 function writeIfChanged(dir, value) {
+  if (typeof dir !== 'string') return { cause: 'invalid', code: null, log: 'not a folder path.' };
   try {
     const target = path.join(dir, 'chiefmate.json');
     const text = `${JSON.stringify(value, null, 2)}\n`;
-    if (existsSync(target) && readFileSync(target, 'utf8') === text) return;
+    if (existsSync(target) && readFileSync(target, 'utf8') === text) return null;
     mkdirSync(dir, { recursive: true });
     writeFileSync(target, text);
+    return null;
   } catch (error) {
-    console.error('Settings backup:', error.message);
+    return { cause: backupCause(error), code: error.code ?? null, log: error.message };
   }
+}
+
+// A missing drive and a name Windows doesn't allow both give ENOENT; a file where the folder should be, EEXIST or ENOTDIR.
+const CAUSES = {
+  invalid: ['ENOENT', 'ENOTDIR', 'EEXIST', 'EISDIR', 'EINVAL', 'ENAMETOOLONG'],
+  no_access: ['EACCES', 'EPERM', 'EROFS'],
+  disk_full: ['ENOSPC', 'EDQUOT'],
+};
+
+/** A failed write's cause, in a word the notices explain: "invalid", "no_access", "disk_full", else "failed" (with its code). */
+export const backupCause = error => Object.keys(CAUSES).find(cause => CAUSES[cause].includes(error?.code)) ?? 'failed';
+
+// The problems this process already wrote in its log: once per cause, not again at each retry while it lasts.
+const logged = new Set();
+const problemKey = p => `${p.target}:${p.cause}`;
+
+/** Keeps the problems found now, each with its first time ("since") and whether the owner was told, in "file". */
+function recordProblems(failed, file) {
+  try {
+    const before = backupProblems(file);
+    const at = now();
+    const list = failed.map(f => {
+      const old = before.find(p => problemKey(p) === problemKey(f));
+      return { target: f.target, cause: f.cause, code: f.code ?? null, since: old?.since ?? at, told: old?.told ?? null };
+    });
+    for (const f of failed.filter(f => !logged.has(problemKey(f)))) {
+      logged.add(problemKey(f));
+      console.error(`Settings backup: ${f.log}`);
+    }
+    for (const key of logged) if (!failed.some(f => problemKey(f) === key)) logged.delete(key);
+    if (JSON.stringify(list) !== JSON.stringify(before) && (list.length || existsSync(file))) writeJson(file, list);
+  } catch (error) {
+    console.error('Settings backup:', error.message); // a backup never gets in the way of a save or of the start
+  }
+}
+
+/** The copies of the settings failing now: [{ target: "backup_dir" | "local" | "full_backup_dir", cause, code, since, told }]. */
+export function backupProblems(file = BACKUP_PROBLEMS) {
+  const list = readJson(file, []);
+  return Array.isArray(list) ? list : [];
+}
+
+/** Marks these problems as told to the owner (src/plan.mjs): each cause is told once while it lasts. */
+export function markBackupTold(told, file = BACKUP_PROBLEMS) {
+  const at = now();
+  const list = backupProblems(file);
+  const marked = list.map(p => (told.some(x => problemKey(x) === problemKey(p) && x.since === p.since) ? { ...p, told: p.told ?? at } : p));
+  if (JSON.stringify(marked) !== JSON.stringify(list)) writeJson(file, marked);
 }
 
 // Free text written by the owner (notes, instructions, descriptions): it is where personal data ends up, so the
