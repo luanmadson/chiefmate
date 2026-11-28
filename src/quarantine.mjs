@@ -1,8 +1,10 @@
 // A file of a project's working copy that vanishes or can't be read right after it was written: most likely the
 // antivirus put it in quarantine. The step that finds it says so, with the path; the project's queue waits instead of
 // failing its next runs, checks the file again every few minutes and goes on by itself once it can be read again.
-// The owner's notice (src/attention.mjs) and the manager's news carry the steps to restore the file.
-import { closeSync, openSync, readSync } from 'node:fs';
+// A file the step removed itself or kept in .tmp doesn't count, nor one Microsoft Defender, when it can be asked, has
+// no record of. The owner's notice (src/attention.mjs) and the manager's news carry the steps to restore the file.
+import { execFile } from 'node:child_process';
+import { closeSync, openSync, readSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { t } from './i18n.mjs';
 import { reportEvent } from './news.mjs';
@@ -64,17 +66,71 @@ export function blockedPaths(text, dir) {
 
 const settle = () => new Promise(resolve => setTimeout(resolve, SETTLE_MS));
 
+// Microsoft Defender's record of the files it detected, only while it guards this computer by itself (normal mode,
+// real-time protection on, no other antivirus on in Windows Security). Prints JSON.
+const ASK_DEFENDER = [
+  '[Console]::OutputEncoding = [Text.Encoding]::UTF8',
+  "$ErrorActionPreference = 'SilentlyContinue'",
+  '$s = Get-MpComputerStatus',
+  "$alone = [bool]($s -and $s.AMRunningMode -eq 'Normal' -and $s.RealTimeProtectionEnabled -and -not (Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | Where-Object { ($_.productState -band 0x1000) -and $_.displayName -notmatch '^(Windows|Microsoft) Defender' }))",
+  '$found = @(if ($alone) { Get-MpThreatDetection | ForEach-Object { $_.Resources } })',
+  'ConvertTo-Json -Compress -InputObject @{ alone = $alone; found = $found }',
+].join('; ');
+
+/** Defender's answer as printed: { found: [its detections' resources] } while it guards alone, else null. */
+export function defenderAnswer(text) {
+  try {
+    const answer = JSON.parse(String(text ?? '').trim());
+    return answer?.alone === true ? { found: [].concat(answer.found ?? []).map(String) } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Microsoft Defender's record ({ found }) when it can be asked, else null: another antivirus (Bitdefender, for one) has
+ * no way to be asked, and then the step's own actions decide alone. Nothing is asked outside Windows or in the smoke test.
+ */
+export function askDefender() {
+  if (process.platform !== 'win32' || process.env.CHIEFMATE_SMOKE) return Promise.resolve(null);
+  return new Promise(resolve => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ASK_DEFENDER], { timeout: 30_000, windowsHide: true, encoding: 'utf8' }, (error, stdout) =>
+      resolve(error ? null : defenderAnswer(stdout)));
+  });
+}
+
+// The file's path in its folder's real place too (a working copy reached through a junction): Defender names that one.
+const realPlace = file => {
+  try {
+    return path.join(realpathSync.native(path.dirname(file)), path.basename(file));
+  } catch {
+    return path.resolve(file);
+  }
+};
+
+// A detection's resource names a file: "file:_C:\a\b.js", "containerfile:_C:\a\c.zip" or "file:_C:\a\c.zip->b.js".
+const names = (resource, file) => {
+  const named = resource.replace(/^\w+:_/, '').replace(/^\\\\\?\\/, '').split('->')[0].toLowerCase();
+  return [path.resolve(file), realPlace(file)].some(p => p.toLowerCase() === named);
+};
+
 /**
  * The first file that is gone or can't be read, looked at twice (a scan can hold a file for a moment): { file, state },
- * or null. files: absolute paths.
+ * or null. files: absolute paths. A file Microsoft Defender has no record of, when it can be asked (ask), is no
+ * quarantine: cleared(file) is told instead.
  */
-export async function lostFile(files, { wait = settle } = {}) {
+export async function lostFile(files, { wait = settle, ask = askDefender, cleared = () => {} } = {}) {
   const suspects = files.filter(f => fileState(f) !== 'ok');
   if (!suspects.length) return null;
   await wait();
+  let defender = null;
   for (const file of suspects) {
     const state = fileState(file);
-    if (state !== 'ok') return { file, state };
+    if (state === 'ok') continue;
+    defender ??= Promise.resolve().then(ask).catch(() => null);
+    const record = await defender;
+    if (!record || record.found.some(r => names(r, file))) return { file, state };
+    cleared(file);
   }
   return null;
 }
@@ -82,17 +138,24 @@ export async function lostFile(files, { wait = settle } = {}) {
 /** A git or tool error that names a file of the working copy now gone or unreadable: { file, state }, or null. */
 export const quarantinedBy = (error, dir, options) => (dir ? lostFile(blockedPaths(error?.message ?? error, dir), options) : Promise.resolve(null));
 
-// A later command that can remove or move files on purpose (git's included): what was written before it doesn't count.
-const REMOVING = /\b(?:git\s+(?:checkout|reset|clean|stash|restore|rm|mv|switch|rebase|merge|cherry-pick|revert|apply)|rm|rmdir|del|erase|rd|mv|move|ren|rename|remove-item|move-item|rename-item|unlink)\b/i;
+// A later command that can remove or move files on purpose (git's and scripts' included): what was written before it
+// doesn't count.
+const REMOVING = /\b(?:git\s+(?:checkout|reset|clean|stash|restore|rm|mv|switch|rebase|merge|cherry-pick|revert|apply)|rm|rmdir|del|erase|rd|mv|move|ren|rename|remove-item|move-item|rename-item|unlink|rimraf|rmtree|rmSync|rmdirSync|unlinkSync)\b/i;
+
+// The crew's scratch folder (.tmp, kept out of the commit by the crew's rules): a file there that is gone is no loss.
+const scratch = (dir, file) => path.relative(path.resolve(dir), file).split(/[\\/]/).some(part => part.toLowerCase() === '.tmp');
 
 /**
- * The files a step wrote (through its file tools) that are gone or unreadable at its end. A file a later shell command
- * names, or written before a command that can remove or move files, doesn't count (done on purpose).
- * writes: [{ file, seq }]; commands: [{ text, seq }].
+ * The files a step wrote (through its file tools) that are gone or unreadable at its end. A file a later action names
+ * (a shell command in full, a deletion), written before a command that can remove or move files, or in a .tmp folder,
+ * doesn't count (done on purpose). writes: [{ file, seq }]; commands: [{ text, seq }].
  */
 export function writtenSuspects(writes, commands, dir) {
   const last = new Map();
-  for (const w of writes) if (w.file && inside(dir, w.file)) last.set(path.resolve(dir, w.file), w.seq);
+  for (const w of writes) {
+    const file = w.file ? path.resolve(dir, w.file) : null;
+    if (file && inside(dir, file) && !scratch(dir, file)) last.set(file, w.seq);
+  }
   return [...last].filter(([file, seq]) => {
     const name = path.basename(file).toLowerCase();
     return !commands.some(c => c.seq > seq && (String(c.text ?? '').toLowerCase().includes(name) || REMOVING.test(String(c.text ?? ''))));

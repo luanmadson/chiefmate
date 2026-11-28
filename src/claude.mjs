@@ -130,6 +130,9 @@ export function loginLine(owner = 'the owner', info = loginInfo, at = Date.now()
 /** The file a file tool writes (Write, Edit, MultiEdit, NotebookEdit), or null. */
 export const writtenFile = (name, input = {}) => (/^(Write|Edit|MultiEdit|NotebookEdit)$/.test(name) ? input?.file_path ?? input?.notebook_path ?? null : null);
 
+/** The whole command a shell tool runs (Bash, PowerShell), or null: the logbook's line keeps only its start. */
+export const shellCommand = (name, input = {}) => (/^(Bash|PowerShell)$/.test(name) && input?.command ? String(input.command) : null);
+
 /** One line saying what the agent did, for the logbook. */
 export function describeAction(name, input = {}, dir) {
   const file = p => (p ? path.relative(dir, p) || p : '');
@@ -143,6 +146,8 @@ export function describeAction(name, input = {}, dir) {
       return t('Edited {file}', { file: file(input.file_path) });
     case 'Write':
       return t('Wrote {file}', { file: file(input.file_path) });
+    case 'Delete':
+      return t('Deleted {file}', { file: file(input.file_path) });
     case 'Glob':
       return t('Looked for files: {pattern}', { pattern: clip(input.pattern, 80) });
     case 'Grep':
@@ -190,6 +195,7 @@ export function describeDoing(name, input = {}, dir) {
     case 'Edit':
     case 'MultiEdit':
     case 'NotebookEdit':
+    case 'Delete':
       return t('changing {file}', { file: file || path.basename(input.notebook_path ?? '') });
     case 'Write':
       return t('writing {file}', { file });
@@ -335,7 +341,10 @@ export function runClaude(options) {
         if (block.type === 'text' && block.text.trim()) onEvent({ type: 'say', text: block.text });
         if (block.type === 'tool_use') {
           inFlight.add(block.id);
-          onEvent({ type: 'action', tool: block.name, text: describeAction(block.name, block.input, dir), doing: describeDoing(block.name, block.input, dir), file: writtenFile(block.name, block.input) });
+          onEvent({
+            type: 'action', tool: block.name, text: describeAction(block.name, block.input, dir), doing: describeDoing(block.name, block.input, dir), file: writtenFile(block.name, block.input),
+            command: shellCommand(block.name, block.input),
+          });
         }
       }
       // A subagent's turns fill its own context, not this one.
