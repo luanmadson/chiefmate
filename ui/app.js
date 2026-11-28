@@ -2030,8 +2030,8 @@ function managerLastAction(g) {
   return `<span class="label">${esc(t('Last action'))}</span><time>${p ? clockTime(p.at) : ''}</time><span class="text" title="${esc(text)}">${esc(text)}</span>`;
 }
 
-/** Whether Interrupt delivers the queue at once: the manager is answering and no update holds the queue until its restart. */
-const interruptSendsNow = () => !!state?.manager?.responding && !state.update?.installing;
+/** Whether Interrupt delivers the queue at once: the manager answers and no update or stop holds it (held() in src/manager.mjs). */
+const interruptSendsNow = () => !!state?.manager?.responding && !state.update?.installing && state.power?.mode !== 'stopping';
 
 // The messages waiting for the manager. While you edit one, the list is not redrawn under you.
 let editingPending = null;

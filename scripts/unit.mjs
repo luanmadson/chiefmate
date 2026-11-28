@@ -337,10 +337,11 @@ test("app: Interrupt stops the manager's answer at once, with no confirmation; U
   await ui.listeners.bridge(click('now'));
   assert.deepEqual(ui.asked, ['Update now'], 'Update now went without its confirmation');
   assert.deepEqual(ui.sent().at(-1), ['/api/update-now', { interruptManager: false }]);
-  // The queue says Interrupt sends it at once only while that is true: not while an update holds it until the restart.
+  // The queue says Interrupt sends it at once only while that is true: not while an update or a stop holds it.
   const sendsNow = s => runInNewContext(`${between('/** Whether Interrupt delivers', '// The messages waiting for the manager')} interruptSendsNow();`, { state: s });
-  assert.equal(sendsNow({ manager: { responding: true }, update: {} }), true);
+  assert.equal(sendsNow({ manager: { responding: true }, update: {}, power: { mode: 'on' } }), true);
   assert.equal(sendsNow({ manager: { responding: true }, update: { installing: { stage: 'manager' } } }), false);
+  assert.equal(sendsNow({ manager: { responding: true }, update: {}, power: { mode: 'stopping', stage: 'pausing' } }), false);
   assert.equal(sendsNow({ manager: { responding: false }, update: {} }), false);
 });
 
