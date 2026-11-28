@@ -6,10 +6,11 @@
 // Nothing is lost: the archive keeps the last ARCHIVE_MAX. In data/state.json: the seen marks ("attention_seen"), the
 // notices shown last time ("attention_shown") and the archive ("attention_archive").
 import { formatDateTime, formatPercent, locale, t } from './i18n.mjs';
+import { listAccounts, manyAccounts } from './accounts.mjs';
 import { RAM_LOW, availableResets, current, loginNotices, loginText } from './plan.mjs';
 import { restoreSteps } from './quarantine.mjs';
-import { readState, saveState, settleRunOutside } from './store.mjs';
-import { LOGIN_MINUTES, readerSettings, readerStatus, signInNeeded } from './usagepage.mjs';
+import { readState, readUsage, saveState, settleRunOutside } from './store.mjs';
+import { LOGIN_MINUTES, readerAccounts, readerSettings, readerStatus, signInNeeded } from './usagepage.mjs';
 import { ROOT } from './util.mjs';
 import { baseBranch, localBranchState, run as exec } from './workspace.mjs';
 
@@ -150,7 +151,8 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
     const level = ['3d', 'signed_out'].includes(w.step) ? 'important' : 'urgent';
     add({ id: `login:${tag}${w.expires ?? ''}:${w.step}`, level, kind: 'login', ...loginText(w, account), view: 'usage', seenable: level === 'important', ...(account ? { account: account.id } : {}) });
   }
-  // The plan's free resets: urgent when one expires within a day, important within 3 days or when it's time to use one.
+  // The plan's free resets: urgent when one expires within a day, important within 3 days or when it's time to use one
+  // (each against the week of its own Claude account, src/accounts.mjs).
   const resets = availableResets(config);
   for (const g of resets) {
     const left = g.expires ? Date.parse(g.expires) - Date.now() : Infinity;
@@ -161,21 +163,33 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
       text: t('A free reset of your plan expires {when}, still unused.', { when: formatDateTime(g.expires) }) + (g.note ? ` (${g.note})` : ''), view: 'usage',
     });
   }
-  const week = usage.seven_day;
-  if (resets.length && current(week) && week.used >= 0.9) {
-    add({ id: `reset-suggest:${week.resets ?? ''}`, level: 'important', kind: 'reset', title: t('Free reset available'), text: t('The week is almost used up: a good time to use a free reset.'), view: 'usage' });
+  const many = manyAccounts(config);
+  for (const account of many ? listAccounts(config) : [null]) {
+    const week = (account ? readUsage(account) : usage).seven_day;
+    const own = account ? resets.filter(g => g.account === account.id) : resets;
+    if (!own.length || !current(week) || week.used < 0.9) continue;
+    add({
+      id: `reset-suggest:${account ? `${account.id}:` : ''}${week.resets ?? ''}`, level: 'important', kind: 'reset', title: account ? t('Free reset available ({account})', { account: account.name }) : t('Free reset available'),
+      text: t('The week is almost used up: a good time to use a free reset.'), view: 'usage',
+    });
   }
   // Important: the reading of the account's usage page needs you to sign in (one card, with the button that opens the
   // window), or fails otherwise (the usage shown may be stale). One id per cause: seen, it stays seen while the cause
   // lasts, and comes back once a day ("remind").
-  const reader = readerStatus();
-  if (readerSettings(config).enabled && signInNeeded(reader)) {
-    add({
-      id: 'reader:login', level: 'important', kind: 'reader-login', title: t('Sign in to claude.ai'), view: 'usage', at: reader.failing_since ?? null, remind: DAY,
-      text: t('The usage reading needs you to sign in to claude.ai, in a window of its own. Open it when you can: it closes by itself after {minutes} minutes.', { minutes: LOGIN_MINUTES }),
-    });
-  } else if (readerSettings(config).enabled && reader.error) {
-    add({ id: `reader:${reader.cause ?? 'other'}`, level: 'important', kind: 'reader', title: t('Usage reading failed'), text: t('Reading claude.ai: {problem}', { problem: reader.error }), view: 'usage', at: reader.failing_since ?? reader.attempted ?? null, remind: DAY });
+  // With several Claude accounts (src/accounts.mjs), each one's reading, on a profile of its own, named.
+  for (const account of many ? readerAccounts(config) : [null]) {
+    const reader = readerStatus(account ?? undefined);
+    const tag = account ? `:${account.id}` : '';
+    const named = account ? ` (${account.name})` : '';
+    if (readerSettings(config).enabled && signInNeeded(reader, undefined, account)) {
+      add({
+        id: `reader:login${tag}`, level: 'important', kind: 'reader-login', title: `${t('Sign in to claude.ai')}${named}`, view: 'usage', at: reader.failing_since ?? null, remind: DAY,
+        text: t('The usage reading needs you to sign in to claude.ai, in a window of its own. Open it when you can: it closes by itself after {minutes} minutes.', { minutes: LOGIN_MINUTES }),
+        ...(account ? { account: account.id } : {}),
+      });
+    } else if (readerSettings(config).enabled && reader.error) {
+      add({ id: `reader:${reader.cause ?? 'other'}${tag}`, level: 'important', kind: 'reader', title: `${t('Usage reading failed')}${named}`, text: t('Reading claude.ai: {problem}', { problem: reader.error }), view: 'usage', at: reader.failing_since ?? reader.attempted ?? null, remind: DAY });
+    }
   }
   // Important: the board's items waiting for the owner: a pull request to approve, an item waiting for their action,
   // or a crew proposal the manager triaged ("decision": the Planning view decides it in its Decide block).

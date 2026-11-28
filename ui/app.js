@@ -1740,7 +1740,7 @@ function attnNotice(i, brief = false) {
     : i.kind === 'spare' ? `<button type="button" class="button small" data-session-boost="on"${i.account ? ` data-account="${esc(i.account)}"` : ''}>${esc(t('Spend all until {time}', { time: clockTime(i.until) }))}</button><button type="button" class="button secondary small" data-spending-dismiss${i.account ? ` data-account="${esc(i.account)}"` : ''}>${esc(t('Not now'))}</button>`
     // an account no one signed in to yet (src/claude.mjs): its sign-in window
     : i.kind === 'login' && i.account ? `<button type="button" class="button small" data-account-login="${esc(i.account)}">${esc(t('Sign in'))}</button>`
-    : `${i.kind === 'reader-login' ? `<button type="button" class="button small" data-reader="login">${esc(t('Open the sign-in window'))}</button>` : ''}${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
+    : `${i.kind === 'reader-login' ? `<button type="button" class="button small" data-reader="login"${i.account ? ` data-account="${esc(i.account)}"` : ''}>${esc(t('Open the sign-in window'))}</button>` : ''}${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
   return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
       <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
       <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}${brief ? '' : requestWhy(r)}${brief || !r?.run ? '' : requestReply(r.run, r, ' small')}${where || links.length ? `<span class="hint">${[esc(where), ...links].filter(Boolean).join(' · ')}</span>` : ''}${brief ? '' : permissionFacts(r?.explain, r?.id)}</div>
@@ -3533,7 +3533,12 @@ function accountsPanel() {
       ? `<button type="button" class="button small" data-account-login="${esc(a.id)}">${esc(login.signedOut ? t('Sign in') : t('Renew the sign-in'))}</button>`
       : '';
     const loginLine = login.signedOut ? t('Not signed in yet') : login.expires ? t('Signed in until {when}', { when: shortDate(login.expires) }) : login.checked ? t('Sign-in not read') : '';
-    const resets = (state.plan?.resets ?? []).filter(g => g.available && (g.account ?? list.find(x => x.default)?.id) === a.id);
+    const resets = (state.plan?.resets ?? []).filter(g => g.available && g.account === a.id);
+    // the reading of its usage page on claude.ai, on a browser profile of its own (src/usagepage.mjs), when it is on
+    const reader = state.plan?.reader?.enabled ? (state.plan.readers ?? []).find(r => r.account === a.id) : null;
+    const readLine = !reader ? '' : reader.signIn
+      ? `<div class="hint">${esc(t('claude.ai: the reading needs you to sign in with this account.'))} <button type="button" class="button secondary small" data-reader="login" data-account="${esc(a.id)}">${esc(t('Open the sign-in window'))}</button></div>`
+      : reader.status?.read_at ? `<div class="hint">${esc(t('claude.ai read {when}: session {session}, week {week}.', { when: shortDate(reader.status.read_at), session: percent(reader.status.five_hour), week: percent(reader.status.seven_day) }))}</div>` : '';
     const tabs = SESSION_MODES().map(([key, label, about]) =>
       `<button type="button" class="tab${key === s.configured?.mode ? ' active' : ''}" aria-pressed="${key === s.configured?.mode}" data-session-mode="${key}" data-account="${esc(a.id)}" title="${esc(about)}">${esc(label)}</button>`).join('');
     return `<div class="account-card">
@@ -3544,6 +3549,7 @@ function accountsPanel() {
       <div class="hint">${esc(t('{mode}: {count} run(s) at a time, pausing at {pause}. Running now: {running}.', { mode, count: s.parallel ?? '—', pause: percent(s.limit), running: a.running ?? 0 }))}</div>
       <div class="hint">${esc(t('Projects: {list}', { list: (a.projects ?? []).map(id => names.get(id) ?? id).join(', ') || t('none') }))}</div>
       ${resets.length ? `<div class="hint">${esc(t('Free resets: {count}, the first until {when}', { count: resets.length, when: resets[0].expires ? shortDate(resets[0].expires) : '—' }))}</div>` : ''}
+      ${readLine}
     </div>`;
   };
   return `<div class="panel accounts-panel">
@@ -6660,7 +6666,9 @@ document.addEventListener('click', async event => {
       toast(t('Not now: no more offers until the session renews.'));
     } else if (target.dataset.reader) {
       const action = target.dataset.reader;
-      await api('/api/usage-reader', action === 'now' ? { read: true } : action === 'login' ? { login: true } : { enabled: action === 'on' });
+      // with several Claude accounts, the button names the account whose profile it reads or signs in
+      const which = target.dataset.account ? { account: target.dataset.account } : {};
+      await api('/api/usage-reader', action === 'now' ? { read: true, ...which } : action === 'login' ? { login: true, ...which } : { enabled: action === 'on' });
       toast(action === 'now' ? t('Reading claude.ai…') : action === 'login' ? t('A window opened on this computer for you to sign in to claude.ai.') : action === 'on' ? t('Reading of claude.ai turned on.') : t('Reading of claude.ai turned off.'));
     }
     refresh();

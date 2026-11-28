@@ -1,6 +1,6 @@
 // The plan's free resets, the week's pace, and the alerts about your account and this computer.
 // Alerts only warn (a band in the app and a Windows notification, once each): they never pause anything.
-import { accountLabel, manyAccounts } from './accounts.mjs';
+import { accountLabel, findAccount, listAccounts, manyAccounts } from './accounts.mjs';
 import { loginCommand, loginFrom, loginWarning, loginWarnings } from './claude.mjs';
 import { loadConfig, saveConfig } from './config.mjs';
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
@@ -36,20 +36,27 @@ export function parseExpiry(text) {
 }
 
 /**
- * "plan_resets" in the settings: [{ kind: "full", expires: ISO, used: false, note }]. Claude Code doesn't report them,
- * so you record them (or the optional claude.ai reading does). Each comes back with its number, from 1.
+ * "plan_resets" in the settings: [{ kind: "full", expires: ISO, used: false, note, account }]. Claude Code doesn't
+ * report them, so you record them (or the optional claude.ai reading does). Each comes back with its number, from 1,
+ * and its Claude account (src/accounts.mjs): one recorded without it is of Claude Code's own configuration, the
+ * account there was before accounts.
  */
-export const planResets = (config = loadConfig()) =>
-  (config.plan_resets ?? []).map((g, i) => ({ ...g, index: i + 1, available: !g.used && (!g.expires || Date.parse(g.expires) > Date.now()) }));
+export const planResets = (config = loadConfig()) => {
+  const legacy = (listAccounts(config).find(a => !a.configDir) ?? listAccounts(config).find(a => a.default)).id;
+  return (config.plan_resets ?? []).map((g, i) => ({ ...g, account: g.account ?? legacy, index: i + 1, available: !g.used && (!g.expires || Date.parse(g.expires) > Date.now()) }));
+};
 
-export const availableResets = config =>
-  planResets(config).filter(g => g.available).sort((a, b) => (a.expires ?? '9').localeCompare(b.expires ?? '9'));
+/** The free resets still available, the first to expire first; with an account, only its own. */
+export const availableResets = (config, account = null) =>
+  planResets(config).filter(g => g.available && (!account || g.account === account.id)).sort((a, b) => (a.expires ?? '9').localeCompare(b.expires ?? '9'));
 
-/** action: "add" (expires, note), "used" or "remove" (index, from 1). */
-export function changeResets({ action, index, expires, note }) {
+/** action: "add" (expires, note, account: the id of its Claude account, the default one when not given), "used" or "remove" (index, from 1). */
+export function changeResets({ action, index, expires, note, account }) {
   const config = loadConfig();
   const list = config.plan_resets ?? [];
-  if (action === 'add') list.push({ kind: 'full', expires: parseExpiry(expires), used: false, note: String(note ?? '').trim(), source: 'manual' });
+  const owner = findAccount(config, account);
+  if (action === 'add' && owner.missing) throw new Error(t('Unknown Claude account: {id}', { id: owner.id }));
+  if (action === 'add') list.push({ kind: 'full', expires: parseExpiry(expires), used: false, note: String(note ?? '').trim(), source: 'manual', account: owner.id });
   else {
     const i = Number(index) - 1;
     if (!list[i]) throw new Error(t('There is no free reset number {index}.', { index }));
@@ -125,16 +132,26 @@ export function loginNotices(config) {
 export function alerts(config, usage, c) {
   const list = [];
   if (c.memory.free / c.memory.total < RAM_LOW) list.push({ level: 'critical', text: ramText(c), view: 'projects' });
-  for (const [key, name] of WINDOWS) {
-    const w = usage[key];
-    if (current(w) && w.used >= USAGE_STEPS.at(-1)) list.push({ level: w.used >= USAGE_STEPS[0] ? 'critical' : 'warn', text: usageText(name(), w), view: 'usage' });
+  // each Claude account's own windows and free resets (src/accounts.mjs), named when there are several
+  for (const { account, usage: u, label } of accountUsages(config, usage)) {
+    for (const [key, name] of WINDOWS) {
+      const w = u[key];
+      if (current(w) && w.used >= USAGE_STEPS.at(-1)) list.push({ level: w.used >= USAGE_STEPS[0] ? 'critical' : 'warn', text: usageText(label(name()), w), view: 'usage' });
+    }
+    const own = availableResets(config, account);
+    if (own.length && current(u.seven_day) && u.seven_day.used >= 0.9) list.push({ level: 'warn', text: suggestText(u.seven_day, own[0]), view: 'usage' });
   }
   const available = availableResets(config);
-  if (available.length && current(usage.seven_day) && usage.seven_day.used >= 0.9) list.push({ level: 'warn', text: suggestText(usage.seven_day, available[0]), view: 'usage' });
   for (const g of available) if (g.expires && Date.parse(g.expires) - Date.now() <= 3 * DAY) list.push({ level: 'warn', text: expiryText(g), view: 'usage' });
   const reader = readerStatus();
   if (readerSettings(config).enabled && reader.error) list.push({ level: 'warn', text: t('Reading claude.ai: {problem}', { problem: reader.error }), view: 'usage' });
   return list;
+}
+
+/** The usage to watch: each Claude account's, named, with several (src/accounts.mjs); else the one account's, as before. */
+function accountUsages(config, usage = readUsage()) {
+  if (!manyAccounts(config)) return [{ account: null, usage, label: name => name, tag: '' }];
+  return listAccounts(config).map(account => ({ account, usage: readUsage(account), label: name => `${name} (${account.name})`, tag: `${account.id}:` }));
 }
 
 /** Every 15 seconds: sends each alert to Windows once (per window and threshold, per reset, per episode of low memory). */
@@ -152,20 +169,22 @@ async function watch() {
   if (share < RAM_LOW && !a.ram_low) lowMemory = a.ram_low = true;
   else if (share >= RAM_BACK && a.ram_low) a.ram_low = false;
 
-  for (const [key, name] of WINDOWS) {
-    const w = usage[key];
-    if (!current(w)) continue;
-    const step = USAGE_STEPS.find(s => w.used >= s);
-    if (!step) continue;
-    const keys = USAGE_STEPS.filter(s => s <= step).map(s => `usage:${key}:${w.resets}:${s}`);
-    if (keys.map(fresh)[0]) send.push({ title: t('Account usage at {percent}', { percent: formatPercent(w.used) }), text: usageText(name(), w), target: 'chiefmate:usage', event: 'usage_alert', urgent: step >= 0.9 });
+  for (const { account, usage: u, label, tag } of accountUsages(config, usage)) {
+    for (const [key, name] of WINDOWS) {
+      const w = u[key];
+      if (!current(w)) continue;
+      const step = USAGE_STEPS.find(s => w.used >= s);
+      if (!step) continue;
+      const keys = USAGE_STEPS.filter(s => s <= step).map(s => `usage:${tag}${key}:${w.resets}:${s}`);
+      if (keys.map(fresh)[0]) send.push({ title: `${t('Account usage at {percent}', { percent: formatPercent(w.used) })}${account ? ` (${account.name})` : ''}`, text: usageText(label(name()), w), target: 'chiefmate:usage', event: 'usage_alert', urgent: step >= 0.9 });
+    }
+    const own = availableResets(config, account);
+    const week = u.seven_day;
+    if (own.length && current(week) && week.used >= 0.9 && fresh(`reset-suggest:${tag}${week.resets}`)) {
+      send.push({ title: `${t('Free reset available')}${account ? ` (${account.name})` : ''}`, text: suggestText(week, own[0]), target: 'chiefmate:usage', event: 'usage_alert' });
+    }
   }
-
   const available = availableResets(config);
-  const week = usage.seven_day;
-  if (available.length && current(week) && week.used >= 0.9 && fresh(`reset-suggest:${week.resets}`)) {
-    send.push({ title: t('Free reset available'), text: suggestText(week, available[0]), target: 'chiefmate:usage', event: 'usage_alert' });
-  }
   for (const g of available.filter(x => x.expires)) {
     const left = Date.parse(g.expires) - Date.now();
     const id = `reset-expiry:${g.expires}:${g.note ?? ''}`;
@@ -217,8 +236,10 @@ export function computerLine(config) {
 
 export function planLine(config, usage) {
   const available = availableResets(config);
+  const many = manyAccounts(config);
+  const whose = g => (many ? `, of the account ${accountLabel(findAccount(config, g.account))}` : '');
   const resets = available.length
-    ? `${available.length} available (${available.map(g => `#${g.index} ${g.expires ? `until ${formatDateTime(g.expires)}` : 'expiry unknown'}${g.note ? `, ${g.note}` : ''}`).join('; ')})`
+    ? `${available.length} available (${available.map(g => `#${g.index} ${g.expires ? `until ${formatDateTime(g.expires)}` : 'expiry unknown'}${whose(g)}${g.note ? `, ${g.note}` : ''}`).join('; ')})`
     : 'none available';
   const p = weekPace(usage);
   const pace = p

@@ -3010,3 +3010,18 @@ test("Claude accounts: each account's sign-in is warned on its own, a new one as
   assert.deepEqual(loginWarnings(config, at, { team: { signedOut: true, expires: null } }), []);
   assert.equal(loginRead({}, Object.assign(new Error('x'), { code: 1 }), JSON.stringify({ loggedIn: false, loginExpiresAt: null }), 'now').signedOut, true);
 });
+
+test('Claude accounts: each free reset is of its own account; one recorded before accounts is of the first configuration', async () => {
+  const { availableResets, planResets } = await import('../src/plan.mjs');
+  const { listAccounts } = await import('../src/accounts.mjs');
+  const later = new Date(Date.now() + 5 * 86400_000).toISOString();
+  const config = {
+    accounts: [{ id: 'team', name: 'Team' }, { id: 'max', name: 'Max', config_dir: path.join(temp, 'claude-max') }], default_account: 'max',
+    plan_resets: [{ kind: 'full', expires: later, used: false }, { kind: 'full', expires: later, used: false, account: 'max' }],
+  };
+  assert.deepEqual(planResets(config).map(g => g.account), ['team', 'max'], 'a reset from before accounts moved to the default account');
+  const [team, max] = listAccounts(config);
+  assert.deepEqual(availableResets(config, max).map(g => g.index), [2]);
+  assert.deepEqual(availableResets(config, team).map(g => g.index), [1]);
+  assert.equal(availableResets(config).length, 2);
+});
