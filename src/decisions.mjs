@@ -17,6 +17,7 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
+import { settleRank } from './agents.mjs';
 import { attentionArchive, mainPushNotice, markSeen } from './attention.mjs';
 import { ownerAnswered } from './charge.mjs';
 import { loadConfig } from './config.mjs';
@@ -50,7 +51,7 @@ export const mergedByOwner = (config, project) => config?.projects?.[project]?.m
  * recommend (one of the options), project, level (the approval level, 1 to 3) }. It waits as a card until answered or
  * discarded.
  */
-export function addQuestion({ question, context, options, recommend, project, level, request = null, reboot = null } = {}, config = loadConfig()) {
+export function addQuestion({ question, context, options, recommend, project, level, request = null, reboot = null, rank = null } = {}, config = loadConfig()) {
   const text = clip(question, 300);
   if (!text) throw new Error('The question is missing.');
   const list = (Array.isArray(options) ? options : String(options ?? '').split('|')).map(o => clip(o, 60)).filter(Boolean);
@@ -70,6 +71,8 @@ export function addQuestion({ question, context, options, recommend, project, le
     ...(request != null ? { request: Number(request) } : {}),
     // A restart of the computer the manager asked for (askReboot): its first option starts it.
     ...(reboot ? { reboot } : {}),
+    // The manager's proposal of an agent's rank (rankProposal in src/agents.mjs): its first option applies it.
+    ...(rank ? { rank } : {}),
   };
   saveQuestions([...questions, q]);
   return q;
@@ -456,10 +459,13 @@ function decisionCard(notice, item, config) {
 }
 
 function questionCard(notice, q, config) {
+  // A proposal of an agent's rank (src/agents.mjs) says so, and what its first option changes.
+  const rank = q.rank ? t("The manager's proposal: {name}'s rank (Crew section)", { name: q.rank.name ?? q.rank.agent }) : '';
   return {
     id: notice.id, kind: 'question', level: notice.level, seen: !!notice.seen, at: q.at, project: q.project,
-    label: q.project ? t('Question from the manager about {project}', { project: projectName(config, q.project) }) : t('Question from the manager'),
-    title: q.question, what: q.context, change: '', risk: '', recommend: q.recommend ?? '', recommendShort: q.recommend ?? '', detail: '',
+    label: rank || (q.project ? t('Question from the manager about {project}', { project: projectName(config, q.project) }) : t('Question from the manager')),
+    title: q.question, what: q.context, change: q.rank ? t('"{option}" changes the rank in the settings at once; any other answer keeps it.', { option: q.options[0] }) : '', risk: '',
+    recommend: q.recommend ?? '', recommendShort: q.recommend ?? '', detail: '',
     question: q.id, options: q.options, approve: false, approval: q.level ?? null,
   };
 }
@@ -662,7 +668,17 @@ export async function decide({ card, action, option, note, reason } = {}, cards 
     const request = !followed ? '' : followed.error
       ? ` Request #${q.request} could not follow it (${followed.error}).`
       : ` Chiefmate applied it to request #${q.request}: ${followed.status}${followed.run ? `, run ${followed.run} queued` : ''}; don't answer that request again.`;
-    tell(questionNews(q) + request);
+    // So does a proposal of an agent's rank: the first option applies it.
+    let ranked = '';
+    if (q.rank) {
+      try {
+        const r = settleRank(q);
+        ranked = r.applied ? ` Chiefmate applied it: ${r.name} [${r.agent}] is now ${r.to}.` : ` ${r.name} [${r.agent}] stays ${r.from}.`;
+      } catch (error) {
+        ranked = ` The rank could not change (${error.message}).`;
+      }
+    }
+    tell(questionNews(q) + request + ranked);
     return { card: c.id, done: q.status === 'answered' ? 'answered' : 'discarded', answer: q.answer, note: q.note ?? null, run: followed?.run ?? null };
   }
   throw new Error(t('This decision does not take that action.'));

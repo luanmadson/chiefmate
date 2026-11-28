@@ -4,7 +4,7 @@
 // ("tool" in its settings) or the one chosen for a task (--tool). The manager, the team leads, the final review and the
 // projects marked "sensitive" always run on Claude Code.
 import { execFile, spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, createWriteStream, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, createWriteStream, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -100,36 +100,72 @@ export function runTools(run) {
   return [...found];
 }
 
-// ---------- How each tool does: data/manager/tools-quality.jsonl ----------
+// ---------- How each step did, by tool and by agent: data/manager/tools-quality.jsonl ----------
 
 export const QUALITY_FILE = () => path.join(DATA, 'manager', 'tools-quality.jsonl');
 
 /** The one line the final review wrote on what it had to fix ("Corrections: ..."), or null. */
 export function correctionLine(report) {
   const m = String(report ?? '').match(/^[\s>*_-]*Corrections?\**:\**\s*(.+)$/im);
-  return m ? clip(m[1].replace(/[*_`]+/g, '').trim(), 200) : null;
+  return m ? clip(m[1].replace(/[*_`]+/g, '').trim(), 300) : null;
+}
+
+const NONE = /^(none|nothing|no|nenhum|nenhuma|nada|n[aã]o)\b/i;
+
+/**
+ * What the "Corrections:" line says of each member it names ("writer: two claims without a source; curator: none"):
+ * Map of member id to what was fixed ('' for none). Empty when it names no member: then it is about the whole work.
+ * members: the run's crew, { id: name }.
+ */
+export function namedCorrections(said, members = {}) {
+  const found = new Map();
+  const ids = Object.fromEntries(Object.entries(members).flatMap(([id, name]) => [[id.toLowerCase(), id], ...(name ? [[String(name).toLowerCase(), id]] : [])]));
+  for (const part of String(said ?? '').split(/;\s*/)) {
+    const m = part.match(/^\s*([^:]{1,40}?)\s*:\s*(.*)$/);
+    const id = m && ids[m[1].replace(/[`"']/g, '').trim().toLowerCase()];
+    if (id) found.set(id, NONE.test(m[2].trim()) || !m[2].trim() ? '' : clip(m[2].trim(), 200));
+  }
+  return found;
 }
 
 /**
- * The records of a run that ended, one per step that ran on Codex or Grok: the tool, the kind of task, how long it
- * took, whether the checks passed (null: none ran) and whether the final review had to correct something (null: no
- * review), with one line on what. reviewCommits: the subjects of the commits the final review made.
+ * The records of a run that ended, one per crew step due (stepDue: never the manager's nor the team lead's; in a
+ * failed run, only the step that failed): the tool, the kind of task, how long it took, whether the checks passed
+ * (null: none ran) and whether the final review had to correct the step's work (null: no review), with one line on what. The review's "Corrections:"
+ * line decides, for each member it names; else its commits or a line about the whole work count for every step.
+ * reviewCommits: the subjects of the commits the final review made. who: the agent behind a member id (src/agents.mjs,
+ * agentKey); names: { member id: name }, to read the line; only: which of the steps that ran (the ones not recorded
+ * yet). Each record has v: 2 (every crew step of its run is recorded).
  */
-export function qualityRecords(run, reviewCommits = []) {
-  const ran = (run.steps ?? []).filter(s => s.tool && s.tool !== 'claude' && ['done', 'failed'].includes(s.status));
+export function stepRecords(run, reviewCommits = [], { who = () => null, names = {}, only = () => true } = {}) {
+  const ran = (run.steps ?? []).filter(s => stepDue(run, s) && only(s));
   if (!ran.length) return [];
+  const at = now();
   const checks = run.checks?.length ? run.checks.every(c => c.ok) : null;
   const review = run.review && ['done', 'failed'].includes(run.review.status) ? run.review : null;
   const said = review ? correctionLine(review.report) : null;
-  const saidNone = !said || /^(none|nothing|no|nenhum|nenhuma|nada|n[aã]o)\b/i.test(said);
-  const corrected = review ? reviewCommits.length > 0 || !saidNone : null;
-  const note = !review ? '' : said && !saidNone ? said : reviewCommits.length ? clip(reviewCommits.join('; '), 200) : '';
+  const saidNone = !said || NONE.test(said);
+  // Every member of the run may be named, the ones recorded before too: a line that names any member is read by member.
+  const crew = (run.steps ?? []).filter(s => s.agent !== 'manager' && s.agent !== 'lead');
+  const named = said && !saidNone ? namedCorrections(said, Object.fromEntries(crew.map(s => [s.agent, names[s.agent] ?? null]))) : new Map();
+  const whole = { corrected: review ? reviewCommits.length > 0 || !saidNone : null, note: !review ? '' : said && !saidNone ? said : reviewCommits.length ? clip(reviewCommits.join('; '), 200) : '' };
+  const verdict = s => (!review || !named.size ? whole : named.has(s.agent) ? { corrected: !!named.get(s.agent), note: named.get(s.agent) } : { corrected: false, note: '' });
   return ran.map(s => ({
-    at: now(), run: run.id, project: run.project, tool: s.tool, agent: s.agent, kind: run.kind, mission: run.mission ?? null,
-    task: clip(run.title, 100), chosen: (s.toolAsked ?? run.tool) ? 'task' : 'member', status: s.status, durationMs: s.durationMs ?? null,
-    checks, run_status: run.status, corrected, note,
+    v: 2, at, ended: s.ended ?? null, run: run.id, project: run.project, tool: s.tool ?? 'claude', agent: s.agent, who: who(s.agent) ?? null,
+    kind: run.kind, mission: run.mission ?? null, task: clip(run.title, 100), chosen: (s.toolAsked ?? run.tool) ? 'task' : 'member', status: s.status,
+    durationMs: s.durationMs ?? null, checks, run_status: run.status, ...verdict(s),
   }));
 }
+
+/**
+ * Whether a step of a run that ended is recorded now: a crew step (never the manager's nor the team lead's) that
+ * failed, or that was done in a run done. In a failed run the steps done wait for its end after a retry or resume,
+ * with its checks and review: a failure after them (another member's step, the review, the delivery) is not theirs.
+ */
+export const stepDue = (run, s) => s.agent !== 'manager' && s.agent !== 'lead' && (s.status === 'failed' || (s.status === 'done' && run.status === 'done'));
+
+/** The records of a run's steps that ran on Codex or Grok (how each tool does: node src/cli.mjs tools). */
+export const qualityRecords = (run, reviewCommits = [], options = {}) => stepRecords(run, reviewCommits, options).filter(r => r.tool !== 'claude');
 
 /** Appends the records (src/runs.mjs calls it once per run, when it ends). */
 export function recordQuality(records) {
@@ -139,18 +175,41 @@ export function recordQuality(records) {
   appendFileSync(file, records.map(r => `${JSON.stringify(r)}\n`).join(''));
 }
 
+// Read again only when the file changes: the app's state reads it every few seconds (the agents' records). Not to be changed.
+let qualityRead = { key: null, list: [] };
+
 export function readQuality() {
   try {
-    return readFileSync(QUALITY_FILE(), 'utf8').split('\n').filter(Boolean).map(line => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        return null;
-      }
-    }).filter(Boolean);
+    const file = QUALITY_FILE();
+    const { size, mtimeMs } = statSync(file);
+    const key = `${file}|${size}|${mtimeMs}`;
+    if (qualityRead.key !== key) {
+      const list = readFileSync(file, 'utf8').split('\n').filter(Boolean).map(line => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      }).filter(Boolean);
+      qualityRead = { key, list };
+    }
+    return qualityRead.list;
   } catch {
     return [];
   }
+}
+
+/** Whether a record's step was approved with no correction: done, no check failed, the run done and the review fixed nothing. */
+export const cleanRecord = r => r.status === 'done' && r.checks !== false && r.run_status === 'done' && r.corrected !== true;
+
+/** Records summed up: how many, approved with no correction, corrected by the review, failed, and a step's mean time. */
+export function sumRecords(list) {
+  const timed = list.filter(r => Number(r.durationMs) > 0);
+  return {
+    count: list.length, clean: list.filter(cleanRecord).length, corrected: list.filter(r => r.corrected === true).length,
+    failed: list.filter(r => r.status === 'failed' || r.run_status === 'failed').length,
+    meanMs: timed.length ? Math.round(timed.reduce((n, r) => n + r.durationMs, 0) / timed.length) : null,
+  };
 }
 
 /**
@@ -158,15 +217,7 @@ export function readQuality() {
  * step done, no check failed, the run done and the review fixed nothing), and the mean time of a step.
  */
 export function qualitySummary(records = readQuality()) {
-  const clean = r => r.status === 'done' && r.checks !== false && r.run_status === 'done' && r.corrected !== true;
-  const sum = list => {
-    const timed = list.filter(r => Number(r.durationMs) > 0);
-    return {
-      count: list.length, clean: list.filter(clean).length, corrected: list.filter(r => r.corrected === true).length,
-      failed: list.filter(r => r.status === 'failed' || r.run_status === 'failed').length,
-      meanMs: timed.length ? Math.round(timed.reduce((n, r) => n + r.durationMs, 0) / timed.length) : null,
-    };
-  };
+  const sum = sumRecords;
   return TOOLS.filter(x => x !== 'claude').map(tool => {
     const mine = records.filter(r => r.tool === tool);
     const kinds = [...new Set(mine.map(r => r.mission ? `mission ${r.mission}` : r.kind))];

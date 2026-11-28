@@ -104,6 +104,22 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 Counts from the next step and is recorded (effort history)
   node src/cli.mjs effort history [--project <id>]
                                                 the recorded effort changes: who, when, from and to
+  node src/cli.mjs agents [--project <id>] [--json]
+                                                the agents (docs/crew.md): projects, specialty, rank, status and
+                                                record (tasks, % approved with no correction, failures, mean time)
+  node src/cli.mjs agents show <key> | memory <key> --project <id> | history [<key>]
+                                                one agent: its record, latest tasks, memory and changes; a member of a
+                                                project's own crew is "<member>@<project>"
+  node src/cli.mjs agents add <id> --base <agent> --projects <id>[,<id>] [--name ".."] [--specialty ".."]
+                                  [--instructions ".."] [--model ..] [--effort ..] [--tool ..] [--rank ..]
+                                                hires an agent (the owner's)
+  node src/cli.mjs agents set <key> [--name ..] [--specialty ..] [--instructions ..] [--projects ..] [--base ..]
+                                  [--model ..] [--effort ..] [--tool ..] [--max-minutes N] [--rank ..]
+                                                adjusts one ("" or default clears a field); --rank is the owner's
+  node src/cli.mjs agents deactivate|activate <key>
+                                                no new work for it, or back to work (the owner's)
+  node src/cli.mjs agents propose <key> --rank junior|mid|senior|lead --why "<reason>"
+                                                the manager's proposal of a promotion or demotion: a card for the owner
   node src/cli.mjs plan [list] [--project <id>] [--status <s>] [--priority <p>] [--all]
                                                 the planning board: open items by priority (--all: done and archived too)
   node src/cli.mjs plan add <project> "<title>" [--priority high|medium|low] [--status <s>] [--description "<text>"]
@@ -818,7 +834,11 @@ async function effortCommand() {
     console.log(e.changed ? `${effortChangeLine(e)}. Counts from the next step.` : `No change: ${who} is already at ${e.to ?? 'default'}.`);
     return;
   }
-  const team = project ? projectCrew(config, project) : loadAgents(config);
+  const { explicitAgent } = await import('./config.mjs');
+  const roles = loadAgents(config);
+  // Without --project: the agents' files and the agents of the settings (agents.<id>), each with its own level.
+  const team = project ? projectCrew(config, project, roles, { inactive: true })
+    : { ...roles, ...Object.fromEntries(Object.keys(config.agents ?? {}).map(id => [id, explicitAgent(config, id, roles)]).filter(([, a]) => a)) };
   const members = Object.values(team).filter(a => !who || a.id === who);
   if (!members.length) throw new Error(`Unknown agent: ${who}`);
   const from = { project: `this project (projects.${project}.effort)`, member: "this project's crew setting", installation: 'this installation (crew)', agent: 'the agent file', none: "Claude Code's default for the model" };
@@ -826,6 +846,99 @@ async function effortCommand() {
     const chat = a.id === 'manager' ? `; conversation ${a.chat_effort ?? a.effort ?? 'default'}` : '';
     console.log(`${a.id.padEnd(12)} ${String(a.name ?? '').padEnd(16)} ${String(a.model ?? config.default_model ?? '').padEnd(18)} effort ${String(a.effort ?? 'default').padEnd(7)} from ${from[effortSource(config, project, a)]}${chat}`);
   }
+}
+
+/**
+ * "agents": the agents as entities (src/agents.mjs, docs/crew.md). Anyone reads them; the manager adjusts one and
+ * proposes a rank; hiring, deactivating and the rank are the owner's; a step only reads.
+ */
+async function agentsCommand() {
+  const agents = await import('./agents.mjs');
+  const { openQuestions } = await import('./decisions.mjs');
+  const own = new Set([...VALUED, '--base', '--name', '--specialty', '--instructions', '--model', '--effort', '--rank', '--why', '--max-minutes', '--projects']);
+  const [first, key] = rest.filter((x, i) => !x.startsWith('--') && !own.has(rest[i - 1]));
+  const action = first ?? 'list';
+  const config = loadConfig();
+  const project = option('--project') ?? null;
+  const percent = s => (s.count ? `${Math.round((s.clean / s.count) * 100)}%` : '-');
+  const minutes = ms => (ms ? `${Math.round(ms / 60000)} min` : '-');
+  const recordLine = s => (s.count
+    ? `${s.count} task(s), ${percent(s)} approved with no correction, ${s.corrected} corrected by the review, ${s.failed} failed, mean ${minutes(s.meanMs)}, last ${formatDateTime(s.last)}`
+    : 'no task recorded yet');
+  const view = () => agents.agentsView({ config, questions: openQuestions() });
+  const find = list => {
+    const a = list.find(x => x.key === key) ?? list.find(x => x.key === agents.findAgent(config, key, project)?.key);
+    if (!a) throw new Error(`Unknown agent: ${key ?? ''}. See node src/cli.mjs agents.`);
+    return a;
+  };
+  const describe = a => [
+    `${a.key.padEnd(20)} ${a.name} · ${a.kind === 'role' ? 'base agent' : `based on ${a.base}`} · ${a.rank} · ${a.status} · ${a.projects.join(', ') || 'no project'} · ${a.tool === 'claude' ? '' : `${a.tool} `}${a.model ?? 'default model'}, effort ${a.effort ?? 'default'}`,
+    ...(a.specialty ? [`  ${a.specialty}`] : []),
+    `  record: ${recordLine(a.record.all)}${a.record.defects ? `; ${a.record.defects} defect(s) of Chiefmate reported` : ''}`,
+    ...(a.proposal ? [`  waiting for the owner: rank ${a.proposal.from} → ${a.proposal.to} (question #${a.proposal.question})`] : []),
+    ...(a.advice && !a.proposal ? [`  the record meets the criteria to ${a.advice.move} it to ${a.advice.to} (${a.advice.clean} of the latest ${a.advice.count} with no correction, ${a.advice.failed} failed)`] : []),
+  ];
+  if (action === 'list' || action === 'show') {
+    const v = view();
+    if (action === 'list') {
+      const list = v.list.filter(a => !project || a.projects.includes(project));
+      if (has('--json')) return console.log(JSON.stringify(list, null, 2));
+      console.log(list.flatMap(describe).join('\n') || 'No agent.');
+      return;
+    }
+    const a = find(v.list);
+    if (has('--json')) return console.log(JSON.stringify(a, null, 2));
+    console.log(describe(a).join('\n'));
+    console.log(`  kind: ${a.kind} (settings in ${a.source})${a.hired_at ? `, hired ${a.hired_at}` : ''}${a.maxMinutes ? `, ${a.maxMinutes} min per step` : ''}`);
+    for (const [p, s] of Object.entries(a.record.byProject)) console.log(`  in ${p}: ${recordLine(s)}`);
+    for (const x of a.record.latest) console.log(`  - ${formatDateTime(x.at)} ${x.project}: ${x.task} (${x.status}${x.corrected ? `, corrected${x.note ? `: ${x.note}` : ''}` : ''}) [${x.run}]`);
+    for (const [p, m] of Object.entries(a.memory)) console.log(`  memory in ${p}: ${m ? `${m.lines} line(s), ${m.chars} of ${v.memoryMax} characters, updated ${formatDateTime(m.updated)}` : 'none yet'}`);
+    for (const e of agents.agentHistory({ agent: a.key }).slice(-5)) console.log(`  ${formatDateTime(e.at)} ${e.by}: ${e.action} ${Object.entries(e.changes ?? {}).map(([f, c]) => `${f} ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`).join(', ')}`);
+    return;
+  }
+  if (action === 'memory') {
+    const a = agents.findAgent(config, key);
+    if (!a || !project) throw new Error('Use: node src/cli.mjs agents memory <key> --project <id>');
+    const m = agents.agentMemoryText(config, a.key, project);
+    console.log(m.text || `${a.name} has no memory in ${project} yet.`);
+    return;
+  }
+  if (action === 'history') {
+    const list = agents.agentHistory(key ? { agent: agents.findAgent(config, key, project)?.key ?? key } : {}).slice(-30);
+    console.log(list.map(e => `${formatDateTime(e.at)} ${e.by}: ${e.agent} ${e.action} ${Object.entries(e.changes ?? {}).map(([f, c]) => `${f} ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`).join(', ')}`).join('\n') || 'No change recorded.');
+    return;
+  }
+  if (!['add', 'set', 'deactivate', 'activate', 'propose'].includes(action)) throw missing(`agents ${action}`, 'Use: agents [list] | show <key> | memory <key> --project <id> | history [<key>] | add <id> | set <key> | deactivate|activate <key> | propose <key>');
+  if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error('A step only reads the agents: propose a change for the planning board.');
+  if (!key) throw new Error(`Use: node src/cli.mjs agents ${action} <key>`);
+  // Only the owner's terminal is the owner: a live session or the rescuer adjusts at most, as the manager does.
+  const by = process.env.CHIEFMATE_MANAGER ? 'manager' : process.env.CHIEFMATE_SESSION || process.env.CHIEFMATE_RESCUER ? 'session' : 'owner';
+  if (action === 'propose') {
+    if (by === 'session') throw new Error("A rank is the manager's to propose: tell the manager.");
+    const body = { action, key, project, rank: option('--rank'), why: option('--why'), by };
+    const r = await apiOr('/api/agents', body, async () => {
+      const { addQuestion } = await import('./decisions.mjs');
+      const a = agents.findAgent(config, key, project);
+      if (!a) throw new Error(`Unknown agent: ${key}`);
+      const stats = agents.agentPerformance(agents.agentRecords({ config }).filter(x => x.who === a.key)).recent;
+      const q = addQuestion(agents.rankProposal(a, String(body.rank ?? '').trim(), body.why, { stats, by, open: openQuestions() }), config);
+      return { question: q.id, agent: a.key, name: a.name, from: q.rank.from, to: q.rank.to };
+    });
+    console.log(`Proposal #${r.question} for the owner: ${r.name} [${r.agent}] from ${r.from} to ${r.to}. It waits as a card in Decisions; the answer comes back as owner_decided news.`);
+    return;
+  }
+  const fields = Object.fromEntries([
+    ['name', '--name'], ['base', '--base'], ['specialty', '--specialty'], ['instructions', '--instructions'], ['model', '--model'], ['effort', '--effort'],
+    ['tool', '--tool'], ['rank', '--rank'], ['max_minutes', '--max-minutes'], ['projects', '--projects'],
+  ].map(([f, flag]) => [f, option(flag)]).filter(([, v]) => v !== undefined));
+  // When hiring, --project lists its projects too; elsewhere it names the project of a member of a project's own crew.
+  if (action === 'add' && project && fields.projects === undefined) fields.projects = project;
+  const body = { action, key, project: action === 'add' ? null : project, fields, by };
+  const r = await apiOr('/api/agents', body, () => agents.changeAgent(body, { config }));
+  const changed = Object.entries(r.changes ?? {});
+  console.log(changed.length
+    ? `${action === 'add' ? 'Hired' : 'Changed'} ${r.agent}: ${changed.map(([f, c]) => `${f} ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`).join('; ')}.${'effort' in r.changes ? ' The effort counts from the next step.' : ''}`
+    : `No change: ${r.agent} already is so.`);
 }
 
 /**
@@ -1619,6 +1732,9 @@ async function main() {
       return;
     case 'effort':
       await effortCommand();
+      return;
+    case 'agents':
+      await agentsCommand();
       return;
     case 'update-check': {
       const u = await api('/api/update-check', {});

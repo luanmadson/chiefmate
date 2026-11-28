@@ -74,7 +74,7 @@ The last one found wins:
 
 1. the agent's file, `agents/<id>.md` (`effort`, and `chat_effort` for the manager's conversation);
 2. this installation's settings, `crew.<id>.effort` (and `crew.manager.chat_effort`);
-3. a member of a project's own crew or its team lead, `projects.<id>.crew.<member>.effort` and `projects.<id>.lead.effort`;
+3. a member of a project's own crew or its team lead, `projects.<id>.crew.<member>.effort` and `projects.<id>.lead.effort`, or an agent of your own, `agents.<id>.effort` (see [crew.md](crew.md));
 4. the project's own levels, `projects.<id>.effort`: `{ "<member id>": "<level>" }`, written by the app and `effort --project`.
 
 The changes are recorded in `data/effort-history.jsonl`.

@@ -7,7 +7,7 @@
 // time, in the owner's order), "later" (future) or "discard" (discarded, with a reason; it can come back).
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { loadConfig, projectCrew } from './config.mjs';
+import { loadConfig, memberId, projectCrew } from './config.mjs';
 import { reportEvent } from './news.mjs';
 import { onRunSaved, readRun, stepsOf } from './store.mjs';
 import { parseTool } from './tools.mjs';
@@ -269,7 +269,8 @@ function taskMembers(project, config = loadConfig()) {
 
 /** The member who will do the item: one of the project's crew (any name for a project not in the settings). */
 function checkAgent(project, agent) {
-  const id = clip(agent, 60);
+  // An agent's key ("<member>@<project>", src/agents.mjs) names the member of that project.
+  const id = memberId(clip(agent, 60), project);
   if (!id) return null;
   const members = taskMembers(project);
   if (members && !members.includes(id)) throw new Error(`${id} is not in the crew of ${project}. Use: ${members.join(', ')}.`);
