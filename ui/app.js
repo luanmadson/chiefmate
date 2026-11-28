@@ -72,15 +72,151 @@ function toast(text) {
   toast.timer = setTimeout(() => box.classList.remove('visible'), 4000);
 }
 
-function confirmDialog(title, text, yes) {
+/** A confirmation; "final" says, apart and in red, what can't be undone afterwards (a merge, a push). */
+function confirmDialog(title, text, yes, final = '') {
   const dialog = $('#confirm');
   $('#confirm-title').textContent = title;
   $('#confirm-text').textContent = text;
+  $('#confirm-final').textContent = final;
+  $('#confirm-final').hidden = !final;
   $('#confirm-yes').textContent = yes;
   dialog.returnValue = '';
   dialog.showModal();
   return new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue === 'yes'), { once: true }));
 }
+
+// ---------- Strong confirmation: hold the button for HOLD_MS, or type the word (lockdown, stop, shut down) ----------
+
+const HOLD_MS = 2000;
+const plainWord = s => String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+let holdTimer = null;
+
+function strongConfirm(title, text, yes, word) {
+  const dialog = $('#strong-confirm');
+  $('#strong-title').textContent = title;
+  $('#strong-text').textContent = text;
+  $('#strong-hold-label').textContent = t('Hold for 2 seconds: {action}', { action: yes });
+  $('#strong-type-label').textContent = t('Or type {word} and confirm', { word });
+  $('#strong-word').value = '';
+  $('#strong-yes').textContent = yes;
+  $('#strong-yes').disabled = true;
+  dialog.dataset.word = plainWord(word);
+  dialog.returnValue = '';
+  dialog.showModal();
+  return new Promise(resolve => dialog.addEventListener('close', () => {
+    stopHold();
+    resolve(dialog.returnValue === 'yes');
+  }, { once: true }));
+}
+
+function startHold() {
+  if (holdTimer) return;
+  $('#strong-hold').classList.add('holding');
+  holdTimer = setTimeout(() => {
+    holdTimer = null;
+    $('#strong-confirm').close('yes');
+  }, HOLD_MS);
+}
+
+function stopHold() {
+  clearTimeout(holdTimer);
+  holdTimer = null;
+  $('#strong-hold').classList.remove('holding');
+}
+
+{
+  const hold = $('#strong-hold');
+  const holdKey = e => e.key === ' ' || e.key === 'Enter';
+  hold.addEventListener('pointerdown', event => {
+    event.preventDefault();
+    hold.setPointerCapture?.(event.pointerId);
+    startHold();
+  });
+  for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) hold.addEventListener(name, stopHold);
+  // A long press on a phone opens no menu; a key held down counts once, from its first press.
+  hold.addEventListener('contextmenu', event => event.preventDefault());
+  hold.addEventListener('keydown', event => {
+    if (!holdKey(event)) return;
+    event.preventDefault();
+    if (!event.repeat) startHold();
+  });
+  hold.addEventListener('keyup', event => holdKey(event) && stopHold());
+  hold.addEventListener('blur', stopHold);
+  const word = $('#strong-word');
+  word.addEventListener('input', () => {
+    $('#strong-yes').disabled = plainWord(word.value) !== $('#strong-confirm').dataset.word;
+  });
+  word.addEventListener('keydown', event => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    if (!$('#strong-yes').disabled) $('#strong-confirm').close('yes');
+  });
+}
+
+// ---------- Undo: "Done: <what> — Undo" for UNDO_MS after a decision (undoDecision in src/decisions.mjs) ----------
+
+const UNDO_MS = 10_000;
+
+/** A decision's state in words, for the undo band and the history. */
+const decisionWord = code => ({
+  pending: t('pending'), open: t('open'), later: t('left for later'), approved: t('approved'), discarded: t('discarded'), dismissed: t('discarded'),
+  answered: t('answered'), done: t('done'), allowed: t('allowed'), refused: t('refused'), merged: t('merged'), future: t('later'),
+  triaged: t('waiting for you'), proposed: t('proposed'), todo: t('to do'), queued: t('queued'), in_progress: t('in progress'),
+}[code] ?? code);
+
+/**
+ * Shows the undo band for a decision on record ("id"): "Done: <action> · <title>" and Undo, in place of the toast.
+ * It waits while the pointer or the focus is on it; Ctrl+Z (outside a text field) clicks its Undo.
+ */
+function showUndo(id, action, title = '') {
+  if (!id) return;
+  const bar = $('#undo-bar');
+  const what = title ? `${action} · ${title}` : action;
+  $('#toast').classList.remove('visible');
+  bar.innerHTML = `<span class="undo-text">${esc(t('Done: {what}', { what }))}</span><button type="button" class="button small" data-undo="${esc(id)}">${esc(t('Undo'))}</button>`;
+  bar.hidden = false;
+  undoLater(UNDO_MS);
+}
+
+function undoLater(ms) {
+  clearTimeout(showUndo.timer);
+  showUndo.timer = setTimeout(() => ($('#undo-bar').hidden = true), ms);
+}
+
+{
+  const bar = $('#undo-bar');
+  const hold = () => clearTimeout(showUndo.timer);
+  const resume = () => !bar.hidden && !bar.matches(':hover, :focus-within') && undoLater(4000);
+  bar.addEventListener('pointerenter', hold);
+  bar.addEventListener('focusin', hold);
+  bar.addEventListener('pointerleave', resume);
+  bar.addEventListener('focusout', () => setTimeout(resume));
+  document.addEventListener('keydown', event => {
+    if (bar.hidden || event.key.toLowerCase() !== 'z' || !(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey) return;
+    if (event.target.closest('input, textarea, select, [contenteditable]')) return;
+    event.preventDefault();
+    bar.querySelector('[data-undo]')?.click();
+  });
+}
+
+document.addEventListener('click', async event => {
+  const button = event.target.closest('[data-undo]');
+  if (!button) return;
+  button.disabled = true;
+  button.blur(); // a list with the focus inside isn't drawn again (the board's Decide block)
+  let back = null;
+  try {
+    back = await api('/api/undo', { id: button.dataset.undo });
+    toast({ request: t('Undone: the call is open again, at the top of the page.'), plan: t('Undone: the item is back on the board as it was.') }[back.kind] ?? t('Undone: it is back for your decision.'));
+  } catch (error) {
+    toast(error.message);
+  }
+  // Undone or no longer possible, the band goes; the history says which.
+  $('#undo-bar').hidden = true;
+  await refresh();
+  // From the history, the card back for a new answer is at the top of Decisions.
+  if (back && button.closest('#decisions')) $('#view-decisions')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+});
 
 // ---------- Text and formats ----------
 
@@ -592,19 +728,80 @@ $('#focus-bar').addEventListener('click', event => {
   if (event.target.closest('a[href]')) setFocusMode(false); // a section that needs you: it opens, with everything back
 });
 
-/** The focus mode's line: the manager's state, the sections that need you (each with its mark) and the way out. */
+// Phones: the Conversation's fixed blocks fold with one tap, each choice kept on this device (html.fold-<name>, at the
+// end of ui/style.css). "top": the header (the title bar, the notices and the section's header; in focus mode, its
+// line) becomes one thin line with the manager's state and the marks of what needs you. "queue": the messages waiting
+// for the manager become one line, "N in the queue", until opened. The field to write never folds.
+const FOLDS_KEY = 'chiefmate.folds';
+const FOLD_DEFAULTS = { top: false, queue: true };
+const folds = { ...FOLD_DEFAULTS };
+try {
+  const saved = JSON.parse(localStorage.getItem(FOLDS_KEY) ?? '{}');
+  for (const name of Object.keys(FOLD_DEFAULTS)) if (typeof saved?.[name] === 'boolean') folds[name] = saved[name];
+} catch {
+  // no storage, or a value spoiled by hand: the defaults
+}
+function applyFolds() {
+  for (const name of Object.keys(FOLD_DEFAULTS)) document.documentElement.classList.toggle(`fold-${name}`, folds[name]);
+  for (const toggle of document.querySelectorAll('[data-fold]')) toggle.setAttribute('aria-expanded', String(!folds[toggle.dataset.fold]));
+}
+function setFold(name, on) {
+  folds[name] = on;
+  try {
+    localStorage.setItem(FOLDS_KEY, JSON.stringify(folds));
+  } catch {
+    // no storage (a private window): the choice lasts until the page is reloaded
+  }
+  applyFolds();
+  if (state) drawAlerts();
+}
+applyFolds();
+document.addEventListener('click', event => {
+  const toggle = event.target.closest('[data-fold]');
+  if (!toggle) return;
+  const name = toggle.dataset.fold;
+  setFold(name, !folds[name]);
+  // The control may go with its block: the focus moves to the one that brings it back.
+  if (document.activeElement === toggle && !toggle.offsetParent) [...document.querySelectorAll(`[data-fold="${name}"]`)].find(x => x.offsetParent)?.focus();
+});
+/** The header is folded where the fold applies: on a phone, in the Conversation. */
+const topFolded = () => folds.top && phoneQuery.matches && currentView() === 'manager';
+const FOLD_UP = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3.5 10.5 8 6l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
+const FOLD_DOWN = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3.5 6 8 10.5 12.5 6" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
+
+/** The sections that need you, with their marks: the Conversation's own notices too, since focus mode hides its band. */
+const focusSections = () => navSections().filter(x => x.mark);
+
+/**
+ * The focus mode's line: the manager's state, the sections that need you (each with its mark) and the way out. The
+ * folded header's line is drawn with it, from the same state.
+ */
 function drawFocusBar() {
+  drawChatTop();
   if (!focusMode()) return draw('#focus-bar', '', '');
-  const chips = navSections().filter(x => x.view !== 'manager' && x.mark)
-    .map(x => `<a class="focus-chip" href="#${x.view}">${x.mark}<span>${esc(x.name)}</span></a>`).join('');
+  const chips = focusSections().map(x => `<a class="focus-chip" href="#${x.view}">${x.mark}<span>${esc(x.name)}</span></a>`).join('');
   const html = `<span class="focus-bar-state">${stateHtml(presence().slice(0, 2))}</span>
     <span class="focus-chips">${chips || `<span class="hint">${esc(t('Nothing needs you now.'))}</span>`}</span>
-    <button type="button" class="button secondary small" data-focus-leave title="Esc">${esc(t('Leave focus'))}</button>`;
-  draw('#focus-bar', html, html);
+    <button type="button" class="button secondary small" data-focus-leave title="Esc"><span class="long">${esc(t('Leave focus'))}</span><span class="short">${esc(t('Leave'))}</span></button>
+    <button type="button" class="button secondary small fold-button" data-fold="top" aria-label="${esc(t('Minimize the header'))}" title="${esc(t('Minimize the header'))}">${FOLD_UP}</button>`;
+  // Its aria-expanded is set apart, so a fold alone doesn't redraw the line (and take the focus off its button)
+  if (draw('#focus-bar', html, html)) applyFolds();
+}
+
+/**
+ * The folded header's thin line: the manager's state and the marks of what the header holds that needs you (in focus
+ * mode, the sections of its line; otherwise the notices of the band, which the nav's marks don't cover). Never hidden.
+ */
+function drawChatTop() {
+  const marks = focusMode() ? focusSections().map(x => x.mark).join('') : attnMark(bandItems('manager'), t('Conversation'), true);
+  const html = `<span class="chat-top-state">${stateHtml(presence().slice(0, 2))}</span><span class="chat-top-marks">${marks}</span>
+    <span class="chat-top-toggle">${FOLD_DOWN}</span><span class="visually-hidden">${esc(t('Show the header'))}</span>`;
+  draw('#chat-top', html, html);
 }
 
 function showView() {
   const view = currentView();
+  if (view === 'usage' && started) drawProjectCosts();
   const run = pageRun();
   if (run && selectedRun !== run) {
     selectedRun = run;
@@ -675,7 +872,10 @@ function placeChat(home = $('#view-manager')) {
 window.addEventListener('hashchange', showView);
 phoneQuery.addEventListener('change', () => {
   drawPlaceholders();
-  if (state) drawAlerts();
+  if (state) {
+    drawAlerts();
+    drawChatQueue(); // its head folds only on a phone
+  }
 });
 
 /** A project's name that opens its page; any other name (an old board's project, a library) stays plain text. */
@@ -789,22 +989,27 @@ $('#away-pace').addEventListener('change', async event => {
 // The lockdown seen through the remote access, which then refuses the state: { active, since, reason }, or null.
 let lockedAfar = null;
 
-/** The red button in the title bar: engages the lockdown, after a confirmation. Hidden while it is on. */
+/**
+ * The red button, in the power dialog, apart from the everyday buttons: engages the lockdown after a strong
+ * confirmation (hold for 2 seconds or type the word). Hidden while it is on.
+ */
 function drawLockdownButton() {
   const button = $('#lockdown');
   button.hidden = !online || !!state?.lockdown?.active;
   if (button.hidden) return;
-  const label = t('Lockdown');
+  const label = t('Engage the emergency lockdown…');
   button.title = t('Emergency lockdown: stops every run, the queue, the agents and their browsers at once, and refuses pushes, merges and the remote access until you release it on this computer.');
   button.setAttribute('aria-label', `${label}. ${button.title}`);
   draw('#lockdown', label, esc(label));
 }
 
 $('#lockdown').addEventListener('click', async () => {
-  const yes = await confirmDialog(
+  if ($('#power-dialog').open) $('#power-dialog').close();
+  const yes = await strongConfirm(
     t('Emergency lockdown'),
     t("Stop everything now? The runs, the queue, the manager, the live sessions and the crew's browsers stop at once; pushes, merges, new repositories, external actions and the remote access are refused. Only you can release it, on this computer."),
     t('Lock down now'),
+    t('EMERGENCY'),
   );
   if (!yes) return;
   try {
@@ -1094,6 +1299,8 @@ async function confirmPower(action) {
     if (preview.unsaved.length) lines.push(t('Changes not committed: {folders}.', { folders: preview.unsaved.map(u => t('{folder} ({count} file(s))', { folder: u.folder, count: u.files })).join('; ') }));
     if (notSent) lines.push(t('There is text not sent in the app: it will be lost.'));
   }
+  // Stopping Chiefmate and shutting down take a strong confirmation, as the lockdown: no accidental click.
+  if (['stop', 'shutdown'].includes(action)) return strongConfirm(mode.title, lines.join('\n\n'), mode.yes, t('SHUT DOWN'));
   return confirmDialog(mode.title, lines.join('\n\n'), mode.yes);
 }
 
@@ -1704,18 +1911,12 @@ function swReady() {
 let attnOpen = false; // the band shows every notice, not only the most urgent
 /** The band at the top: the most urgent notice and how many others, opening into all of them. Nothing is paused. */
 function drawAlerts() {
-  // The notices with a decision card are left to the Decisions tab, those a page lists (Operations, Planning, a
-  // project) to that page, and the crew's calls to the call bar above it. The conversation shows only its own notices
-  // (the others mark their tabs), and none in focus mode. A permission asked shows there without its facts, as a way
-  // to them. On a phone, the band keeps its room for what needs the owner: the info notices stay in each section's list.
-  const phone = phoneQuery.matches;
-  const carded = cardedIds();
-  const view = currentView();
-  const listed = { operations: ['operations', 'log'], planning: ['planning'] }[view] ?? [];
-  const skip = i => (view === 'manager' ? i.view !== 'manager' : listed.includes(i.view) || (view === 'project' && ofProject(pageProject())(i)));
-  // The lockdown has its own red band, on every page and in focus mode too; so does the call bar.
+  // A permission asked shows there without its facts, as a way to them. The lockdown has its own red band, and the
+  // crew's calls their bar, on every page, in focus mode and under the folded header too; the other notices are then
+  // in their line's marks.
   const band = `${lockdownBand()}${callsBar()}`;
-  const list = focusMode() ? [] : attnItems().filter(i => !carded.has(i.id) && !inCallBar(i) && !(phone && i.level === 'info') && !skip(i) && i.kind !== 'lockdown');
+  if (focusMode() || topFolded()) return draw('#alerts', band, band);
+  const list = bandItems();
   const fresh = unseen(list);
   if (!fresh.length && !attnOpen) return draw('#alerts', band, band);
   const others = fresh.length - 1;
@@ -1729,6 +1930,20 @@ function drawAlerts() {
       ${toggle || (attnOpen && all) ? `<div class="attn-more">${attnOpen ? attnArchivedLink() : ''}${toggle}${attnOpen ? all : ''}</div>` : ''}
     </div>`;
   draw('#alerts', html, html);
+}
+
+/**
+ * The notices of the band on a page (this one by default). Those with a decision card are left to the Decisions tab,
+ * those a page lists (Operations, Planning, a project) to that page, and the crew's calls to the call bar above it. The
+ * conversation shows only its own notices (the others mark their tabs). On a phone, the band keeps its room for what
+ * needs the owner: the info notices stay in each section's list.
+ */
+function bandItems(view = currentView()) {
+  const phone = phoneQuery.matches;
+  const carded = cardedIds();
+  const listed = { operations: ['operations', 'log'], planning: ['planning'] }[view] ?? [];
+  const skip = i => (view === 'manager' ? i.view !== 'manager' : listed.includes(i.view) || (view === 'project' && ofProject(pageProject())(i)));
+  return attnItems().filter(i => !carded.has(i.id) && !inCallBar(i) && !(phone && i.level === 'info') && !skip(i) && i.kind !== 'lockdown');
 }
 
 /** The notices that have a decision card: they count in the Decisions tab, not in their own section's. */
@@ -1889,14 +2104,59 @@ function drawDecisions() {
   const fold = (key, title, list) => (list.length ? `<details class="decisions-later" data-detail="${key}"><summary>${esc(title)}</summary>${list.map(decisionCardHtml).join('')}</details>` : '');
   const rest = fold('later', t('Left for later ({count})', { count: later.length }), later)
     + fold('manager', t('The manager will settle it ({count})', { count: managers.length }), managers);
-  const html = cards.length
+  const log = decisionLogNow();
+  const html = (cards.length
     ? `${fresh.length ? '' : `<div class="panel empty">${esc(t('Nothing needs your decision now.'))}</div>`}${fresh.map(decisionCardHtml).join('')}${rest}`
-    : `<div class="panel empty">${esc(t('Nothing waits for your decision. New pull requests, proposals and questions from the manager show up here.'))}</div>`;
+    : `<div class="panel empty">${esc(t('Nothing waits for your decision. New pull requests, proposals and questions from the manager show up here.'))}</div>`)
+    + decisionHistoryHtml(log);
   // What you opened stays open when the cards are drawn again.
   const opened = [...box.querySelectorAll('details[open]')].map(d => d.dataset.detail);
-  if (draw('#decisions', JSON.stringify([cards, language()]), html)) {
+  if (draw('#decisions', JSON.stringify([cards, log, language()]), html)) {
     for (const d of box.querySelectorAll('details')) if (opened.includes(d.dataset.detail)) d.open = true;
   }
+}
+
+// Your recent decisions (src/decisions.mjs, recentDecisions), under the cards: each on record (when, what, from what to
+// what, who and where), with Undo or Change answer while it has had no effect, else why not.
+
+const decisionLogNow = () => (online ? state?.decisionLog ?? [] : []);
+const decisionBy = e => ({ owner: t('you'), manager: t('the manager'), autopilot: t('the autopilot') })[e.by] ?? e.by;
+const decisionVia = e => ({ app: t('in the app'), remote: t('through the remote access'), cli: t('from the command line') })[e.via] ?? e.via;
+const undoBlockWord = block => ({
+  final: t("can't be undone"), undone: t('undone'), read: t('already read'), started: t('its task started'), used: t('permission used'),
+  expired: t('expired'), ended: t('the run ended'), changed: t('changed since'), gone: t('no longer exists'),
+})[block] ?? '';
+
+function historyRowHtml(e) {
+  // An answer (to a question, a request) is answered again; the rest is undone.
+  const answer = ['question', 'request'].includes(e.kind) && e.to === 'answered';
+  const action = e.canUndo
+    ? `<button type="button" class="button secondary small" data-undo="${esc(e.id)}">${esc(answer ? t('Change answer') : t('Undo'))}</button>`
+    : `<span class="history-block">${esc(undoBlockWord(e.block))}</span>`;
+  const change = `${decisionWord(e.from)} → ${decisionWord(e.to)}`;
+  const today = new Date(e.at).toDateString() === new Date().toDateString();
+  const facts = [
+    e.title ? esc(e.label) : '',
+    esc(e.undoes ? t('undo: {change}', { change }) : change),
+    e.answer ? `"${esc(e.answer)}"` : '',
+    esc(`${decisionBy(e)}, ${decisionVia(e)}`),
+  ].filter(Boolean).join(' · ');
+  return `<li class="history-row"${e.undone ? ' data-undone' : ''}>
+      <span class="history-when num" title="${esc(shortDate(e.at))}">${esc(today ? clockTime(e.at) : shortDate(e.at))}</span>
+      <div class="history-text"><span class="primary">${esc(firstLine(e.title) || e.label)}</span><span class="hint">${facts}</span></div>
+      <div class="history-action">${action}</div>
+    </li>`;
+}
+
+function decisionHistoryHtml(log) {
+  if (!log.length) return '';
+  const open = log.filter(e => e.canUndo).length;
+  const title = open
+    ? t('Your recent decisions ({count}) · {open} can still change', { count: log.length, open })
+    : t('Your recent decisions ({count})', { count: log.length });
+  return `<details class="decision-history" data-detail="history"><summary>${esc(title)}</summary>
+      <p class="hint">${esc(t('The last day, newest first. What has had no effect yet (a task not started, an answer the agent has not read) can be undone or answered again; a merge cannot.'))}</p>
+      <ol>${log.map(historyRowHtml).join('')}</ol></details>`;
 }
 
 /** "Talk about this": the conversation with the manager, your message started with the item quoted. */
@@ -1916,15 +2176,20 @@ $('#decisions').addEventListener('click', async event => {
   if (!c) return;
   const action = button.dataset.decide;
   if (action === 'talk') return talkAbout(c);
-  // Merging and closing a pull request are confirmed: the click is your authorization (src/merge.mjs).
+  // Merging and closing a pull request are confirmed, saying they can't be undone: the click is your authorization (src/merge.mjs).
   const how = c.url ? t('Chiefmate merges the pull request on GitHub.') : t('Chiefmate merges the branch into the branch checked out in your clone; nothing is sent to GitHub.');
-  if (c.kind === 'merge' && action === 'approve' && !(await confirmDialog(t('Approve and merge'), `${c.label}: ${c.title}. ${how}`, t('Approve')))) return;
+  if (c.kind === 'merge' && action === 'approve' && !(await confirmDialog(t('Approve and merge'), `${c.label}: ${c.title}. ${how}`, t('Approve'), t("A merge can't be undone from Chiefmate.")))) return;
   const closes = c.url ? t('The pull request is closed on GitHub; it can be reopened there.') : t('The branch stays in your clone, not merged.');
-  if (c.kind === 'merge' && action === 'discard' && !(await confirmDialog(t('Discard this work'), `${c.label}: ${c.title}. ${closes}`, t('Discard')))) return;
-  // Allowing a push is confirmed too: it lets the manager send that branch to GitHub once (the main branch, with its risk).
-  if (c.kind === 'push' && action === 'approve' && !(await confirmDialog(t('Allow this push'), `${c.title}. ${c.what} ${c.change}${c.main ? ` ${c.risk}` : ''}`, t('Allow push')))) return;
+  if (c.kind === 'merge' && action === 'discard' && !(await confirmDialog(t('Discard this work'), `${c.label}: ${c.title}. ${closes}`, t('Discard'), t("This can't be undone from Chiefmate.")))) return;
+  // Allowing a push is confirmed too: it lets the manager (or the session that asked) send that branch to GitHub once
+  // (the main branch, with its risk). The permission can be taken back until it is used; what is sent stays sent.
+  const used = t('You can take the permission back until it is used; what is sent to GitHub then stays there.');
+  if (c.kind === 'push' && action === 'approve' && !(await confirmDialog(t('Allow this push'), `${c.title}. ${c.what} ${c.change}${c.main ? ` ${c.risk}` : ''}`, t('Allow push'), used))) return;
   // And creating a repository: the manager may then create it, private, and send the folder once.
-  if (c.kind === 'repo' && action === 'approve' && !(await confirmDialog(t('Allow this repository'), `${c.what} ${c.change}`, t('Allow creation')))) return;
+  if (c.kind === 'repo' && action === 'approve' && !(await confirmDialog(t('Allow this repository'), `${c.what} ${c.change}`, t('Allow creation'), used))) return;
+  // Restarting the computer takes a strong confirmation, as shutting it down: no accidental click.
+  if (c.restartYes && action === 'answer' && button.dataset.option === c.restartYes
+    && !(await strongConfirm(t('Restart the computer'), [c.title, c.what].filter(Boolean).join('\n\n'), c.restartYes, t('RESTART')))) return;
   // What the owner wrote goes with the answer; "Send" needs something written.
   const note = action === 'answer' ? replyText(`card:${c.id}`) : '';
   if (button.hasAttribute('data-reply-send') && !note) return toast(t('Write your answer first.'));
@@ -1933,13 +2198,19 @@ $('#decisions').addEventListener('click', async event => {
   try {
     const r = await api('/api/decide', { card: c.id, action, option: button.dataset.option, note });
     if (r.done === 'answered') replyDrafts.delete(`card:${c.id}`);
-    toast({
-      merged: [t('Merged.'), r.merge?.copiesNote].filter(Boolean).join(' '), later: c.thirdParty ? t('Hidden: it is in the archive.') : t('Left for later: the card stays at the end, faded.'), discarded: t('Discarded.'),
-      already_merged: t('Branch already merged'), branch_deleted: t('Local branch deleted'),
-      approved: t('Approved: it becomes a task for its agent, in its turn.'),
-      allowed: c.session ? t('Allowed: the session is told and may send it once now.') : t('Allowed: the manager may send it once now.'),
-      refused: c.session ? t('Refused: the session is told.') : t('Refused: the manager is told.'), answered: t('Answer sent to the manager: {answer}', { answer: [r.answer, r.note].filter(Boolean).join(' — ') }),
-    }[r.done] ?? '');
+    // What can be undone gets the band ("Done: … Undo"); the rest (a merge, a discard, a restart) only the toast.
+    const answer = [r.answer, r.note].filter(Boolean).join(' — ');
+    const word = r.done === 'answered' ? t('answered "{answer}"', { answer }) : r.done === 'later' && c.thirdParty ? t('hidden') : decisionWord(r.done);
+    if (r.logged) showUndo(r.logged, word, c.title);
+    else {
+      toast({
+        merged: [t('Merged.'), r.merge?.copiesNote].filter(Boolean).join(' '), discarded: t('Discarded.'),
+        already_merged: t('Branch already merged'), branch_deleted: t('Local branch deleted'),
+        approved: t('Approved: it becomes a task for its agent, in its turn.'),
+        allowed: c.session ? t('Allowed: the session is told and may send it once now.') : t('Allowed: the manager may send it once now.'),
+        refused: c.session ? t('Refused: the session is told.') : t('Refused: the manager is told.'), answered: t('Answer sent to the manager: {answer}', { answer }),
+      }[r.done] ?? word);
+    }
   } catch (error) {
     toast(error.message);
     for (const b of card.querySelectorAll('button')) b.disabled = false;
@@ -2005,20 +2276,20 @@ function drawChat() {
     html += `<div class="msg manager typing"><div class="msg-head">${face(manager, 'thinking', 20)}<span class="msg-author">${esc(t(manager.name))}</span><span class="msg-meta">${esc(doing)}${g.since ? ` · ${ticking(g.since)}` : ''}</span></div><div class="msg-body">${g.partial && !renewing ? md(g.partial) : `<span class="hint">${esc(waiting)}</span>`}</div><div class="live-last" id="manager-last"></div></div>`;
   }
   const signature = JSON.stringify([g.messages.length, g.messages.at(-1)?.at, g.responding, renewing, g.interrupting, g.since, g.partial]);
-  if (draw('#chat', signature, html)) {
-    delete signatures['#manager-last'];
-    if (atBottom || !chatScrolled) {
-      box.scrollTop = box.scrollHeight;
-      chatScrolled = true;
-    }
-  }
+  const drawn = draw('#chat', signature, html);
+  if (drawn) delete signatures['#manager-last'];
   // What the manager is doing now, redrawn alone, like the last action of the crew at work.
   if (g.responding) draw('#manager-last', JSON.stringify([g.lastAction?.at, g.lastAction?.text]), managerLastAction(g));
-  drawChatQueue();
   $('#send').disabled = !online;
   $('#send').textContent = g.responding || g.pending?.length ? t('Add to the queue') : t('Send');
   $('#interrupt').hidden = !online || !g.responding;
   $('#interrupt').disabled = !!g.interrupting;
+  // The last action, the queue and Interrupt beside the field change the height: the end comes into view after them.
+  const queued = drawChatQueue();
+  if ((drawn || queued) && (atBottom || !chatScrolled)) {
+    box.scrollTop = box.scrollHeight;
+    chatScrolled = true;
+  }
 }
 
 function managerLastAction(g) {
@@ -2027,7 +2298,7 @@ function managerLastAction(g) {
   return `<span class="label">${esc(t('Last action'))}</span><time>${p ? clockTime(p.at) : ''}</time><span class="text" title="${esc(text)}">${esc(text)}</span>`;
 }
 
-// The messages waiting for the manager. While you edit one, the list is not redrawn under you.
+// The messages waiting for the manager. While you edit one, the list is not redrawn under you. True when it was drawn.
 let editingPending = null;
 function drawChatQueue() {
   const g = state.manager;
@@ -2038,7 +2309,12 @@ function drawChatQueue() {
     toast(t('The message you were editing is no longer in the queue: it was delivered or removed.'));
   }
   $('#chat-queue').hidden = !list.length;
-  const head = `<div class="chat-queue-head"><span class="label">${esc(t('In the queue'))}</span><span class="hint">${esc(g.responding ? t('They go together, in order, when the manager finishes this answer.') : t('Being delivered…'))}</span></div>`;
+  // On a phone the head is the fold's line: "N in the queue", opening into the messages (html.fold-queue).
+  const phone = phoneQuery.matches;
+  const hint = `<span class="hint">${esc(g.responding ? t('They go together, in order, when the manager finishes this answer.') : t('Being delivered…'))}</span>`;
+  const head = phone
+    ? `<button type="button" class="chat-queue-head" data-fold="queue" aria-expanded="${!folds.queue}"><span class="label">${esc(t('{count} in the queue', { count: list.length }))}</span>${hint}<span class="attn-toggle"><span class="when-closed">${esc(t('See all'))}</span><span class="when-open">${esc(t('Hide'))}</span></span></button>`
+    : `<div class="chat-queue-head"><span class="label">${esc(t('In the queue'))}</span>${hint}</div>`;
   const items = list.map(m => (m.from === 'chiefmate'
     // Chiefmate's news for the manager: not a message of yours, so it can't be edited (only removed).
     ? `<div class="queued-msg news" data-pending="${esc(m.id)}">
@@ -2058,7 +2334,7 @@ function drawChatQueue() {
         <span class="queued-actions"><button type="button" class="button secondary small" data-pending-edit="${esc(m.id)}">${esc(t('Edit'))}</button><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
       <div class="msg-body">${md(m.text)}</div>
     </div>`));
-  draw('#chat-queue', JSON.stringify([list, g.responding, language()]), list.length ? head + items.join('') : '');
+  return draw('#chat-queue', JSON.stringify([list, g.responding, language(), phone]), list.length ? head + items.join('') : '');
 }
 
 function drawSuggestions() {
@@ -5094,10 +5370,16 @@ function drawPlanning(force = false) {
   const turn = approved.length
     ? `<div class="plan-turn hint">${esc(t('Approved, waiting their turn:'))} ${approved.map(i => `<span class="num">#${i.id}</span> ${esc(i.title)}${i.agent ? ` (${esc(agentName(i.agent, i.project))})` : ''}`).join(' · ')}</div>`
     : '';
+  // Your last decisions here that can still be undone (in the last hour; all of them are in Decisions' history).
+  const hour = Date.now() - 3600_000;
+  const recent = decisionLogNow().filter(e => e.kind === 'plan' && e.canUndo && e.by === 'owner' && Date.parse(e.at) > hour).slice(0, 3);
+  const undo = recent.length
+    ? `<div class="plan-turn plan-undo hint">${esc(t('Decided just now:'))} ${recent.map(e => `<span><span class="num">#${esc(e.ref)}</span> ${esc(e.title)} (${esc(decisionWord(e.to))}) <button type="button" class="button secondary small" data-undo="${esc(e.id)}">${esc(t('Undo'))}</button></span>`).join(' ')}</div>`
+    : '';
   // The other notices of the board (pull requests, items waiting for your action) as attention notices; the
   // proposals to decide are in the Decide block.
   const notices = attnList(attnItems().filter(i => i.view === 'planning' && i.kind !== 'decision'), t('Waiting for you'));
-  const highlight = decisions + turn + notices;
+  const highlight = decisions + turn + undo + notices;
   if (!$('#planning-waiting').contains(document.activeElement) && !dragging) draw('#planning-waiting', highlight, highlight);
 
   // Quick filters: the proposals, what waits for you and what was discarded, each with its count.
@@ -5169,7 +5451,8 @@ $('#planning-waiting').addEventListener('click', async event => {
   discarding = null;
   const done = { approve: t('Approved: it becomes a task for its agent, in its turn.'), later: t('Left for later. It is under "Future".'), discard: t('Discarded. It is under "Discarded", where you can restore it.') }[decision];
   if (document.activeElement) document.activeElement.blur();
-  await changeItem({ action: decision, id, reason }, done);
+  // The band "Done: … Undo" for a decision that can be undone; an approved task starts once it is gone.
+  await changeItem({ action: decision, id, reason }, ({ item }) => (item?.logged ? showUndo(item.logged, decisionWord({ approve: 'approved', later: 'later', discard: 'discarded' }[decision]), `#${item.id} ${item.title}`) : toast(done)));
 });
 $('#planning-waiting').addEventListener('keydown', event => {
   if (event.key === 'Enter' && event.target.matches('[data-discard-reason]')) event.target.closest('[data-item]').querySelector('[data-confirm]').click();
@@ -5198,10 +5481,12 @@ $('#planning-waiting').addEventListener('dragend', async () => {
   else drawPlanning(true);
 });
 
+/** Sends a change of the board; "done" is the toast's text, or a function given the answer. */
 async function changeItem(body, done) {
   try {
-    await api('/api/planning', body);
-    if (done) toast(done);
+    const answer = await api('/api/planning', body);
+    if (typeof done === 'function') done(answer);
+    else if (done) toast(done);
   } catch (error) {
     toast(error.message);
   }
@@ -5635,6 +5920,138 @@ async function fetchState() {
   return data;
 }
 
+const costsForm = $('#costs-form');
+let costsLoading = false;
+let costsReload = false;
+let costsReadAt = -Infinity;
+let costsSignature;
+const costNumber = value => new Intl.NumberFormat(locale(), { maximumFractionDigits: 2 }).format(value);
+const costMoney = (currency, value) => new Intl.NumberFormat(locale(), {
+  style: 'currency', currency, currencyDisplay: 'code', minimumFractionDigits: 2, maximumFractionDigits: 2,
+}).format(value / 100);
+const costMoneyTotals = expenses => Object.entries(expenses).map(([code, value]) => costMoney(code, value)).join(' · ') || '—';
+const costEstimate = (usage, kind, source) => usage[kind]?.[source] != null
+  ? t('{value} pp', { value: costNumber(usage[kind][source]) }) : '—';
+const costDate = date => new Intl.DateTimeFormat(locale(), { dateStyle: 'medium', timeZone: 'UTC' }).format(new Date(date));
+
+function costWeek(row) {
+  return esc(t('{runs} runs · {agents} h of agent work · {sessions} live sessions · {turns} h in app turns · {windows} h with terminal windows open', {
+    runs: row.runs, agents: costNumber(row.agentHours), sessions: row.sessions, turns: costNumber(row.liveHours), windows: costNumber(row.windowHours),
+  }));
+}
+
+function costUsage(usage) {
+  return esc(t('5-hour / plan week · agents {agent5h} / {agentWeek} · live {live5h} / {liveWeek}', {
+    agent5h: costEstimate(usage, 'five_hour', 'agents'), agentWeek: costEstimate(usage, 'seven_day', 'agents'),
+    live5h: costEstimate(usage, 'five_hour', 'live'), liveWeek: costEstimate(usage, 'seven_day', 'live'),
+  }));
+}
+
+// The weeks' agent and app turn hours on the common scale, oldest first; the current week in full brass.
+function costChart(weeks, max) {
+  const bars = weeks.map((w, i) => {
+    const hours = w.agentHours + w.liveHours;
+    return `<span class="${i ? '' : 'current'}" style="height:${Math.round(Math.min(1, hours / max) * 100)}%" title="${esc(`${costDate(w.from)}: ${costNumber(hours)} h`)}"></span>`;
+  });
+  return `<div class="cost-chart" role="img" aria-label="${esc(t('Agent and app turn hours'))}">${bars.reverse().join('')}</div>`;
+}
+
+function costProject(row, max) {
+  const [current] = row.weeks;
+  const frequencies = { once: t('Once'), weekly: t('Weekly'), monthly: t('Monthly'), yearly: t('Yearly') };
+  return `<article class="cost-project">
+    <h3>${esc(row.name)}</h3>
+    ${costChart(row.weeks, max)}
+    <p>${costWeek(current)}</p>
+    <p>${esc(t('Estimated usage in current windows'))} · ${costUsage(row.currentUsage)}</p>
+    <p>${esc(t('Scheduled this week: {total}', { total: costMoneyTotals(current.expenses) }))}</p>
+    <details data-cost-project="${esc(row.project)}">
+      <summary>${esc(t('Weekly details and expenses'))}</summary>
+      <ul class="cost-weeks">
+        ${row.weeks.map(w => `<li>
+          <strong>${esc(costDate(w.from))}</strong>
+          <span>${costWeek(w)}</span>
+          <span>${costUsage(w.usage)}</span>
+          <span>${esc(t('Scheduled expenses: {total}', { total: costMoneyTotals(w.expenses) }))}</span>
+        </li>`).join('')}
+      </ul>
+      ${row.expenses.length ? `<ul class="cost-expenses">${row.expenses.map(e => `<li>
+        <span>${esc(e.name)} · ${esc(costMoney(e.currency, e.minor))} · ${esc(frequencies[e.frequency])}
+          · ${esc(t('First due: {date}', { date: costDate(e.due) }))}
+          ${e.nextDue ? `· ${esc(t('Next due: {date}', { date: costDate(e.nextDue) }))}` : ''}</span>
+        <button class="button secondary small" type="button" data-cost-remove="${esc(e.id)}">${esc(t('Remove'))}</button>
+      </li>`).join('')}</ul>` : ''}
+    </details>
+  </article>`;
+}
+
+async function drawProjectCosts(force = false) {
+  if (costsLoading) {
+    costsReload ||= force;
+    return;
+  }
+  if (!force && Date.now() - costsReadAt < 60_000) return;
+  costsLoading = true;
+  const status = $('#costs-status');
+  if (!costsSignature) status.textContent = t('Loading project costs…');
+  try {
+    const { projects } = await api('/api/costs', {});
+    const signature = JSON.stringify(projects);
+    if (signature !== costsSignature || force) {
+      const open = new Set([...document.querySelectorAll('[data-cost-project][open]')].map(el => el.dataset.costProject));
+      const max = projects.reduce((highest, p) => p.weeks.reduce((n, w) => Math.max(n, w.agentHours + w.liveHours), highest), 1);
+      $('#costs-summary').innerHTML = projects.map(p => costProject(p, max)).join('');
+      for (const el of document.querySelectorAll('[data-cost-project]')) el.open = open.has(el.dataset.costProject);
+      const select = costsForm.elements.project;
+      const selected = select.value;
+      select.innerHTML = projects.filter(p => p.configured).map(p => `<option value="${esc(p.project)}">${esc(p.name)}</option>`).join('');
+      if ([...select.options].some(o => o.value === selected)) select.value = selected;
+      $('#costs-entry').hidden = !select.options.length;
+      costsSignature = signature;
+    }
+    status.textContent = projects.length
+      ? t('Bars: agent and app turn hours per week, oldest to newest; the current week is filled. Usage is an estimate in percentage points, from recorded Claude tokens.')
+      : t('No project costs yet.');
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    costsLoading = false;
+    costsReadAt = Date.now();
+    if (costsReload) {
+      costsReload = false;
+      drawProjectCosts(true);
+    }
+  }
+}
+
+async function saveProjectExpense(body) {
+  try {
+    await api('/api/costs/expense', body);
+    if (body.action === 'add') costsForm.reset();
+    await drawProjectCosts(true);
+  } catch (error) {
+    $('#costs-status').textContent = error.message;
+  }
+}
+
+costsForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  const submit = event.submitter;
+  if (submit) submit.disabled = true;
+  try {
+    await saveProjectExpense({ action: 'add', ...Object.fromEntries(new FormData(costsForm)) });
+  } finally {
+    if (submit) submit.disabled = false;
+  }
+});
+
+$('#costs-summary').addEventListener('click', async event => {
+  const remove = event.target.closest('[data-cost-remove]');
+  if (remove && window.confirm(t('Remove this expense and its scheduled occurrences?'))) {
+    await saveProjectExpense({ action: 'remove', id: remove.dataset.costRemove });
+  }
+});
+
 async function refresh() {
   let next;
   try {
@@ -5675,6 +6092,7 @@ async function refresh() {
     location.reload();
     return;
   }
+  if (currentView() === 'usage') drawProjectCosts();
   state = next;
   online = true;
   if (fresh && state.now) skew = new Date(state.now).getTime() - Date.now();
@@ -6066,7 +6484,7 @@ document.addEventListener('click', async event => {
       const m = await api('/api/merge', { run: target.dataset.merge, preview: true });
       const where = m.kind === 'pr' ? t('The pull request {address} is merged on GitHub.', { address: m.url }) : t('The branch {branch} is merged into {base} in {path}. Nothing is sent to GitHub.', { branch: m.branch, base: m.base, path: m.dir });
       const checks = m.failedChecks ? ` ${t('{count} check(s) failed.', { count: m.failedChecks })}` : '';
-      if (!(await confirmDialog(t('Merge'), `${where}${checks}`, t('Merge')))) return;
+      if (!(await confirmDialog(t('Merge'), `${where}${checks}`, t('Merge'), t("A merge can't be undone from Chiefmate.")))) return;
       target.disabled = true;
       const done = await api('/api/merge', { run: target.dataset.merge });
       const message = done.discarded ? t('Local branch deleted') : done.merged.by === 'outside' ? t('Branch already merged') : t('Merged.');
@@ -6105,10 +6523,12 @@ document.addEventListener('click', async event => {
       const key = `req:${target.dataset.request}`;
       const note = replyText(key);
       if (target.hasAttribute('data-reply-send') && !note) return toast(t('Write your answer first.'));
-      await api('/api/needs-you/done', { run: target.dataset.needsDone, id: target.dataset.request, answer, note: note || null });
+      const r = await api('/api/needs-you/done', { run: target.dataset.needsDone, id: target.dataset.request, answer, note: note || null });
       replyDrafts.delete(key);
       const sent = [answer, note].filter(Boolean).join(' — ');
-      toast(sent ? t('Answer sent: {answer}. The crew goes on.', { answer: sent }) : t('Marked as done. The crew goes on.'));
+      // The agent gets the answer once the band "Done: … Undo" is gone (src/needs.mjs, pollRequest).
+      if (r?.logged) showUndo(r.logged, sent ? t('answered "{answer}"', { answer: sent }) : t('marked as done'), firstLine(r.what ?? ''));
+      else toast(sent ? t('Answer sent: {answer}. The crew goes on.', { answer: sent }) : t('Marked as done. The crew goes on.'));
       if (selectedRun === target.dataset.needsDone) await refreshDetail(true);
     } else if (target.dataset.needsSession) {
       const permission = (state.needs ?? []).some(n => n.id === target.dataset.request && n.kind === 'permission');
@@ -6133,8 +6553,10 @@ document.addEventListener('click', async event => {
       if (call && !call.options?.length) $('#alerts .call-answer textarea')?.focus();
       return;
     } else if (target.dataset.callLater) {
-      await api('/api/needs-you/later', { run: target.dataset.callLater, id: target.dataset.request });
-      toast(t('Left for later: it stays in Operations, and the agent goes on with what it can.'));
+      const r = await api('/api/needs-you/later', { run: target.dataset.callLater, id: target.dataset.request });
+      // "Not now" can be taken back from the band: the call is back in the bar (src/needs.mjs, reopenRequest).
+      if (r?.logged) showUndo(r.logged, decisionWord('later'), firstLine(r.what ?? ''));
+      else toast(t('Left for later: it stays in Operations, and the agent goes on with what it can.'));
     } else if (target.hasAttribute('data-calls-more')) {
       callsOpen = !callsOpen;
       drawAlerts();

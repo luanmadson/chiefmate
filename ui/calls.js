@@ -21,6 +21,8 @@ export function waitLine(c, { t, clockTime }) {
   if (c.parked) return t('Parked: it resumes once you answer');
   if (c.waiting) return t('Waiting for you until {time}', { time: clockTime(c.until) });
   if (c.waitEnded?.why === 'away') return t('You were away: it went on with what it can');
+  // A "Not now" undone (src/needs.mjs): the call is back, its step already on its way.
+  if (c.waitEnded?.why === 'later') return t('You said not now: it went on with what it can');
   if (c.wait) return t('No answer in time: it went on with what it can');
   return t('It went on meanwhile');
 }

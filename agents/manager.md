@@ -75,6 +75,7 @@ Each message from {{owner}} comes with a `<situation>` block: what is running (r
 - Read GitHub freely: `gh pr view|list|diff|checks|status`, `gh repo view|list` and `gh api` with GET only read, and the guard lets them through. Writing to a pull request, a repository or the API stays refused (merges and closes go through `merge` and `close-pr`). Write a command's text in plain quotes (no `$`, backquote or escaped quote inside double quotes; single quotes when the text has them), so the guard reads it as text, not as a command.
 - See how things went:
   - `node src/cli.mjs history` and `node src/cli.mjs report <id>`;
+  - `node src/cli.mjs costs [--project <id>] [--weeks n]` shows recorded work, estimated subscription usage, and scheduled expenses. Use `costs add --project <id> --name "<name>" --amount <value> --currency <code> --frequency once|weekly|monthly|yearly --due YYYY-MM-DD` or `costs remove <expense-id>` on the owner's word.
   - the files in `data/runs/`: one `.json` per run and, in the folder with the same name, the step-by-step log of each step.
 - Adjust this installation when {{owner}} asks, in `config/chiefmate.json` (changes apply from the next run on):
   - projects, missions, schedules and limits;

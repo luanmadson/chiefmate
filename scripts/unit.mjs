@@ -16,6 +16,7 @@ import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE
 import { describeDoing, LOGIN_RENEW, loginDue, loginLine, loginRead, loginWarning, parseLoginStatus, readFeed } from '../src/claude.mjs';
 import { loginText } from '../src/plan.mjs';
 import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
+import { changeExpense, costActivity, listExpenses, nextExpenseDate, projectCosts } from '../src/costs.mjs';
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, opening, openOnComputer, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
 import { createdPaths, guardHooks, mainPushTarget, mainPushTargets, plainPush, publishing, riskyCommand } from '../src/guard.mjs';
@@ -58,6 +59,64 @@ import { forAgent, isOwner, openAppWindow, OWNER_HEADER, ownerHeaders, ownerKey,
 const windows = process.platform === 'win32';
 const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-unit-'));
 after(() => rmSync(temp, { recursive: true, force: true }));
+
+test('project costs split a run at Monday and estimate account usage before filtering projects', () => {
+  const monday = new Date(2026, 10, 23).getTime();
+  const hour = 3_600_000;
+  const iso = offset => new Date(monday + offset * hour).toISOString();
+  const projects = { alpha: {}, beta: {} };
+  const runs = [
+    { project: 'alpha', steps: [{ tool: 'claude', started: iso(-1), ended: iso(1), durationMs: 2 * hour, tokens: { cacheRead: 100 } }] },
+    { project: 'beta', steps: [{ started: iso(1), costActivity: [
+      costActivity({ durationMs: hour, tokens: { input: 100 } }, 'claude', iso(1), iso(2)),
+      costActivity({ durationMs: hour, tokens: { input: 900 } }, 'codex', iso(2), iso(3)),
+    ] }] },
+    { project: 'alpha', created: iso(1), steps: [{}] },
+  ];
+  const sessions = [
+    { project: 'alpha', mode: 'app', started: iso(1), costActivity: [costActivity({ durationMs: hour, tokens: { output: 100 } }, 'claude', iso(1), iso(2))] },
+    { project: 'alpha', mode: 'window', started: iso(-2), ended: iso(2), status: 'ended' },
+  ];
+  const samples = { five_hour: [{ used: 0.6, resets: iso(4) }], seven_day: [{ used: 0.9, resets: iso(8) }] };
+  const options = { projects, project: 'alpha', at: monday + 3 * hour, weeks: 2, runs, sessions, expenses: [], samples };
+  const [alpha] = projectCosts(options).projects;
+  assert.deepEqual(alpha.currentUsage, { five_hour: { agents: 20, live: 20 }, seven_day: { agents: 30, live: 30 } });
+  const [current, previous] = alpha.weeks;
+  assert.deepEqual([current.from, current.runs, current.agentHours, current.sessions, current.liveHours, current.windowHours], ['2026-11-23', 1, 1, 2, 1, 2]);
+  assert.deepEqual([previous.from, previous.runs, previous.agentHours, previous.sessions, previous.windowHours], ['2026-11-16', 1, 1, 1, 2]);
+  assert.deepEqual(current.usage.five_hour, { agents: 10, live: 20 });
+  assert.deepEqual(previous.usage.five_hour, { agents: 10 });
+  const beta = projectCosts({ ...options, project: 'beta', at: monday + 9 * hour }).projects[0];
+  assert.equal(beta.weeks[0].agentHours, 2);
+  assert.deepEqual(beta.currentUsage, {});
+  assert.throws(() => projectCosts({ ...options, weeks: 0 }));
+  assert.throws(() => projectCosts({ ...options, project: 'missing' }));
+});
+
+test('project costs keep recurring expenses by currency and reject invalid entries', () => {
+  const dir = path.join(temp, 'expense-fixture');
+  const projects = { alpha: {} };
+  const options = { dir, projects, by: 'manager' };
+  assert.deepEqual(listExpenses(dir), []);
+  const body = { action: 'add', project: 'alpha', name: 'Hosting', amount: '12.34', currency: 'usd', frequency: 'monthly', due: '2026-01-31' };
+  const monthly = changeExpense(body, options);
+  const once = changeExpense({ ...body, currency: 'EUR', frequency: 'once', due: '2026-02-27' }, options);
+  assert.equal(monthly.by, 'manager');
+  assert.equal(nextExpenseDate(monthly, '2026-02-23'), '2026-02-28');
+  assert.equal(nextExpenseDate(monthly, '2026-03-01'), '2026-03-31');
+  assert.equal(nextExpenseDate({ frequency: 'yearly', due: '2024-02-29' }, '2026-02-25'), '2026-02-28');
+  assert.equal(nextExpenseDate({ frequency: 'weekly', due: '2026-02-20' }, '2026-02-24'), '2026-02-27');
+  assert.equal(nextExpenseDate(once, '2026-02-28'), null);
+  assert.throws(() => changeExpense({ ...body, due: '2026-02-30' }, options));
+  assert.throws(() => changeExpense({ ...body, amount: '-1' }, options));
+  assert.throws(() => changeExpense({ action: 'remove', id: '../other' }, options));
+  const report = projectCosts({ projects, weeks: 1, at: +new Date(2026, 1, 26), runs: [], samples: {}, expenses: listExpenses(dir) });
+  assert.deepEqual(report.projects[0].weeks[0].expenses, { USD: 1234, EUR: 1234 });
+  changeExpense({ action: 'remove', id: once.id }, options);
+  assert.deepEqual(listExpenses(dir), [monthly]);
+  assert.equal(ownerOnly('/api/costs'), true);
+  assert.equal(ownerOnly('/api/costs/expense', { action: 'add', by: 'manager' }), true);
+});
 
 // A project's working copy, its clone, a library, a folder outside every root and Chiefmate's own data folder.
 const workspaces = path.join(temp, 'workspaces');
@@ -978,8 +1037,9 @@ test('Grok: deny rules for every publication, its own session, no Claude or Curs
   const glob = rule => new RegExp(`^${rule.slice(5, -1).replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
   const caught = command => GROK_DENY.some(rule => glob(rule).test(command));
   for (const c of ['git push', 'git -C x push origin main', 'bash -c "git push"', 'git remote set-url origin x', 'gh pr create', 'gh repo delete x', 'gh api -X POST repos/a/b/pulls',
-    'curl -X POST https://api.github.com/repos/a/b/pulls', 'gh gist create f --public', 'gh release create v1', 'gh workflow run ci', 'gh secret set T']) assert.ok(caught(c), `not refused: ${c}`);
-  for (const c of ['git status', 'git commit -m "Fix"', 'npm test', 'node src/cli.mjs plan list', 'git log --oneline']) assert.ok(!caught(c), `refused: ${c}`);
+    'curl -X POST https://api.github.com/repos/a/b/pulls', 'gh gist create f --public', 'gh release create v1', 'gh workflow run ci', 'gh secret set T',
+    'tailscale serve --bg 3000', 'tailscale funnel 443', 'C:/Program Files/Tailscale/tailscale.exe serve 3000']) assert.ok(caught(c), `not refused: ${c}`);
+  for (const c of ['git status', 'git commit -m "Fix"', 'npm test', 'node src/cli.mjs plan list', 'git log --oneline', 'tailscale status', 'tailscale ip -4']) assert.ok(!caught(c), `refused: ${c}`);
 });
 
 test("Codex's PATH leaves out Windows' app aliases, which its sandbox can't start", { skip: !windows }, () => {
@@ -1634,6 +1694,32 @@ test("gh's gists, releases, workflows and secrets publish, each under its own ru
   // Allowed on its card, the rule goes to the hook like the others.
   const hook = guardHooks({ log: 'g', allowed: ['Bash(gh release:*)', 'Bash(rm:*)'] }).PreToolUse[0].hooks[0].command;
   assert.ok(hook.includes('--allow "Bash(gh release:*)"') && !hook.includes('rm:'), hook);
+});
+
+test('Tailscale Serve and Funnel publish a port of this computer, each under its own rule; only status looks', () => {
+  const found = command => publishing(command).map(f => [f.rule, f.part]);
+  const serve = 'Bash(tailscale serve:*)';
+  const funnel = 'Bash(tailscale funnel:*)';
+  for (const [command, rule, part] of [
+    ['tailscale serve --bg 4748', serve, 'tailscale serve --bg 4748'], ['tailscale serve 3000', serve, 'tailscale serve 3000'],
+    ['tailscale serve --tcp=2222 22', serve, 'tailscale serve --tcp=2222 22'], ['tailscale funnel --bg 443', funnel, 'tailscale funnel --bg 443'],
+    // Turning it off changes it too (the owner's remote access may go through it), and so does the group alone.
+    ['tailscale serve reset', serve, 'tailscale serve reset'], ['tailscale funnel 443 off', funnel, 'tailscale funnel 443 off'], ['tailscale serve', serve, 'tailscale serve'],
+    // Written any other way: whatever the case, its path, its own options, inside a shell, after cd, behind a wrapper.
+    ['Tailscale SERVE 3000', serve, 'tailscale serve 3000'], [String.raw`& "C:\Program Files\Tailscale\tailscale.exe" funnel 3000`, funnel, 'tailscale funnel 3000'],
+    ['tailscale --socket /run/ts.sock serve 3000', serve, 'tailscale serve 3000'], ['tailscale --socket=/run/ts.sock funnel 80', funnel, 'tailscale funnel 80'],
+    ['bash -c "tailscale serve --bg 5173"', serve, 'tailscale serve --bg 5173'], ['cd x && sudo tailscale funnel 8080', funnel, 'tailscale funnel 8080'],
+    ['pwsh -Command "tailscale serve 5173"', serve, 'tailscale serve 5173'],
+    // "status" counts only right after the group: an option's value named so may be a path shared.
+    ['tailscale serve --set-path status 3000', serve, 'tailscale serve --set-path status 3000'], ['tailscale --socket status serve 3000', serve, 'tailscale serve 3000'],
+  ]) assert.deepEqual(found(command), [[rule, part]], command);
+  for (const command of ['tailscale serve status', 'tailscale serve status --json', 'tailscale funnel STATUS', 'tailscale status', 'tailscale status serve',
+    'tailscale --socket=/run/ts.sock status --json', 'tailscale ip -4', 'tailscale up', 'echo tailscale serve 3000', 'git commit -m "tailscale funnel 443"']) {
+    assert.deepEqual(found(command), [], command);
+  }
+  // Allowed on its card, each rule goes to the hook like the others.
+  const hook = guardHooks({ log: 'g', allowed: [serve, funnel] }).PreToolUse[0].hooks[0].command;
+  assert.ok(hook.includes(`--allow "${serve}"`) && hook.includes(`--allow "${funnel}"`), hook);
 });
 
 test("A heredoc's text written into a file by a command that does nothing else is data; any other is looked at as before", () => {

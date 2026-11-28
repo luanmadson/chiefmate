@@ -9,7 +9,7 @@ import { contextWindow, runClaude } from './claude.mjs';
 import { loadConfig, projectCrew } from './config.mjs';
 import { currentEffort, effortChangeLine, runEffortChanges } from './effort.mjs';
 import { guardHooks } from './guard.mjs';
-import { askOwner, finishRequest, needsSettings } from './needs.mjs';
+import { askOwner, finishRequest, markRead, needsSettings, settlingNow } from './needs.mjs';
 import {
   fullReport, generateBrief, generateOutcome, mergeOutcomes, outcomeLine, outcomeMarkdown, outcomeTemplate, parseOutcome, shortSummary, shortTitle,
   TITLE_MAX,
@@ -24,6 +24,7 @@ import { holdForQuarantine, lostFile, quarantinedBy, writtenSuspects } from './q
 import { builderSettings, projectInstructions, writtenInstructions } from './prompts.mjs';
 import { addSpeech, askedBy, speechRule } from './speech.mjs';
 import { effectiveLimits } from './spending.mjs';
+import { costActivity, legacyStepCosts } from './costs.mjs';
 import { listRuns, readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
 import { chooseTool, GROK_DENY, LOGIN_COMMAND, parseTool, qualityRecords, recordQuality, runTool, signedIn, TOOL_NAMES, toolEffort, toolModel } from './tools.mjs';
@@ -354,6 +355,7 @@ export function retryRun(id, { step, agent, tool } = {}, { by = 'manager', confi
   }
   const reviewsAfter = steps.slice(n).filter(s => s.agent === LEAD && s.role === 'review');
   for (const s of new Set([target, ...steps.slice(n).filter(s => s.status !== 'done'), ...reviewsAfter, ...(run.review ? [run.review] : [])])) {
+    s.costActivity ??= legacyStepCosts(s);
     s.status = 'pending';
     delete s.paused;
   }
@@ -726,7 +728,7 @@ function toolLines(tool) {
     return [
       '',
       '## Working on Grok',
-      "- You run on the Grok CLI. Commands that would publish (git push, git remote, gh pr, gh repo, gh api, gh gist, gh release, gh workflow, gh secret, requests to GitHub's API) are refused by rule, even inside a longer command line: keep those words out of your commands.",
+      "- You run on the Grok CLI. Commands that would publish (git push, git remote, gh pr, gh repo, gh api, gh gist, gh release, gh workflow, gh secret, requests to GitHub's API, tailscale serve, tailscale funnel) are refused by rule, even inside a longer command line: keep those words out of your commands.",
       "- The rules match words anywhere in a command, so a commit message or a search may be refused too (\"push\", \"remote\", or \"gh\" followed by \"pr\", as in \"high priority\"). Then reword it, or leave your changes uncommitted: Chiefmate commits them when your step ends.",
     ];
   }
@@ -858,13 +860,19 @@ async function signInFirst(l, run, index, tool) {
   while (Date.now() < until && !l.cancelRequest && !l.pauseRequest) {
     l.heldUntil = Date.now() + 20_000;
     await new Promise(resolve => setTimeout(resolve, 10_000));
-    const done = run.requests?.find(r => r.id === request.id)?.status === 'done';
+    // The owner's "I did it" counts once its undo window is over (src/needs.mjs); from then on, it can't be undone.
+    const asked = run.requests?.find(r => r.id === request.id);
+    const done = asked?.status === 'done' && !settlingNow(asked);
     if (await signedIn(tool)) {
-      if (!done) finishRequest(run.id, request.id, 'check');
+      if (asked?.status === 'done') markRead(run, asked);
+      else finishRequest(run.id, request.id, 'check');
       l.heldUntil = 0;
       return true;
     }
-    if (done) break;
+    if (done) {
+      markRead(run, asked);
+      break;
+    }
   }
   l.heldUntil = 0;
   return false;
@@ -907,6 +915,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   if (l.pauseRequest) return { paused: true };
   // A step paused for an update of Chiefmate resumes its own Claude Code session, with its clock and its counts.
   const paused = step.paused ?? null;
+  step.costActivity ??= legacyStepCosts(step);
   delete step.paused;
   // Told once: a later resume finds, and tells, an operation of its own.
   delete step.gitRecovery;
@@ -1003,6 +1012,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
   let pausedNow = false;
   l.talking = true;
   for (;;) {
+    const costStarted = now();
     const proc = tool === 'claude' ? runClaude({ ...common, prompt: turn, session, spentMs }) : runTool(tool, { ...common, prompt: turn, session, spentMs });
     if (!session.resume) {
       try {
@@ -1018,6 +1028,15 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     r = await proc.promise;
     l.process = null;
     l.pid = null;
+    const activity = costActivity(r, tool, costStarted, now(), r.durationMs || (r.spentMs ?? spentMs) - spentMs);
+    if (activity.durationMs || activity.tokens) {
+      step.costActivity.push(activity);
+      try {
+        saveRun(run);
+      } catch (error) {
+        console.error('Recording step costs:', error.message);
+      }
+    }
     spentMs = r.spentMs ?? spentMs;
     for (const k of Object.keys(total.tokens)) total.tokens[k] += r.tokens?.[k] ?? 0;
     total.turns += r.turns ?? 0;

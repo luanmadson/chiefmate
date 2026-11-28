@@ -20,7 +20,6 @@
         <div class="titlebar-right">
           <select id="project-jump" class="project-jump" aria-label="Go to a project's page" data-t-label="Go to a project's page"></select>
           <span id="power" class="power" hidden></span>
-          <button type="button" id="lockdown" class="lockdown-button" hidden></button>
           <button type="button" id="away" class="away" aria-pressed="false" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 4.6V8l2.3 1.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="away-label" data-t="Away mode">Away mode</span><span id="away-since" aria-hidden="true" hidden></span></button>
           <div id="presence" class="presence"></div>
           <span id="clock" class="clock"></span>
@@ -66,8 +65,11 @@
           <div class="view-header-actions">
             <button type="button" class="button secondary" id="focus-mode" aria-pressed="false"><span class="long" data-t="Focus on the conversation">Focus on the conversation</span><span class="short" data-t="Focus">Focus</span></button>
             <button type="button" class="button secondary" id="new-conversation"><span class="long" data-t="New conversation">New conversation</span><span class="short" data-t="New">New</span></button>
+            <button type="button" class="button secondary fold-button" data-fold="top" aria-expanded="true" aria-label="Minimize the header" title="Minimize the header" data-t-label="Minimize the header" data-t-title="Minimize the header"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3.5 10.5 8 6l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg></button>
           </div>
         </div>
+        <!-- Phones: the header folded into one thin line (the manager's state, the marks of what needs you); a tap unfolds it -->
+        <button type="button" id="chat-top" class="chat-top" data-fold="top" aria-expanded="false"></button>
         <!-- Focus mode: only the conversation, with one thin line for what needs you and the way out -->
         <div id="focus-bar" class="focus-bar" aria-live="polite"></div>
         <div class="chat-column">
@@ -334,6 +336,30 @@
         </div>
         <div id="usage"></div>
         <div id="spending" class="panel form"></div>
+        <section id="project-costs" class="panel form" aria-labelledby="project-costs-title">
+          <h2 id="project-costs-title" data-t="Project costs">Project costs</h2>
+          <p id="costs-status" class="hint" role="status"></p>
+          <div id="costs-summary"></div>
+          <details id="costs-entry" hidden>
+            <summary data-t="Add an expense">Add an expense</summary>
+            <form id="costs-form">
+              <div class="fields">
+                <label><span data-t="Project">Project</span><select name="project" required></select></label>
+                <label><span data-t="Name">Name</span><input name="name" required maxlength="120"></label>
+                <label><span data-t="Amount">Amount</span><input name="amount" type="number" required min="0.01" max="10000000000" step="0.01"></label>
+                <label><span data-t="Currency code">Currency code</span><input name="currency" required pattern="[A-Za-z]{3}" maxlength="3"></label>
+                <label><span data-t="Frequency">Frequency</span><select name="frequency">
+                  <option value="once" data-t="Once">Once</option>
+                  <option value="weekly" data-t="Weekly">Weekly</option>
+                  <option value="monthly" data-t="Monthly">Monthly</option>
+                  <option value="yearly" data-t="Yearly">Yearly</option>
+                </select></label>
+                <label><span data-t="Due date">Due date</span><input name="due" type="date" required></label>
+              </div>
+              <div class="actions"><button type="submit" class="button" data-t="Add expense">Add expense</button></div>
+            </form>
+          </details>
+        </section>
         <form id="limits-form" class="panel form">
           <div class="label" data-t="The week's limit">The week's limit</div>
           <div class="fields">
@@ -391,6 +417,7 @@
     <form method="dialog">
       <div class="label" id="confirm-title"></div>
       <p id="confirm-text"></p>
+      <p id="confirm-final" class="confirm-final" hidden></p>
       <div class="actions">
         <button value="no" class="button secondary" data-t="Cancel">Cancel</button>
         <button value="yes" class="button" id="confirm-yes"></button>
@@ -460,6 +487,19 @@
       </div>
     </form>
   </dialog>
+  <!-- A strong confirmation (strongConfirm in app.js): hold the button for 2 seconds, or type the word. -->
+  <dialog id="strong-confirm" class="confirm strong-confirm">
+    <form method="dialog">
+      <div class="label" id="strong-title"></div>
+      <p id="strong-text"></p>
+      <button type="button" class="hold-button" id="strong-hold"><span class="hold-fill" aria-hidden="true"></span><span class="hold-label" id="strong-hold-label"></span></button>
+      <label class="strong-type"><span id="strong-type-label"></span><input id="strong-word" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false"></label>
+      <div class="actions">
+        <button value="no" class="button secondary" data-t="Cancel" autofocus>Cancel</button>
+        <button value="yes" class="button danger" id="strong-yes" disabled></button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="escalation-dialog" class="confirm escalation-dialog">
     <form method="dialog">
       <div class="label" data-t="Calling you outside the app">Calling you outside the app</div>
@@ -474,6 +514,12 @@
       <div class="label" data-t="Power">Power</div>
       <p class="hint" id="power-now"></p>
       <div class="power-modes" id="power-modes"></div>
+      <!-- The emergency lockdown, kept here, apart from the everyday buttons; it asks for a strong confirmation. -->
+      <div class="power-emergency">
+        <div class="label" data-t="Emergency">Emergency</div>
+        <p class="hint" data-t="Stops every run, the queue, the agents and their browsers at once, and refuses pushes, merges and the remote access until you release it on this computer.">Stops every run, the queue, the agents and their browsers at once, and refuses pushes, merges and the remote access until you release it on this computer.</p>
+        <button type="button" id="lockdown" class="lockdown-button" hidden></button>
+      </div>
       <div class="actions">
         <button value="no" class="button secondary" data-t="Close">Close</button>
       </div>
@@ -538,6 +584,7 @@
       </div>
     </form>
   </dialog>
+  <div id="undo-bar" class="undo-bar" role="status" aria-live="polite" hidden></div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/app.js" type="module"></script>
 </body>

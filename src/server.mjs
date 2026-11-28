@@ -15,7 +15,7 @@ import { EFFORTS, loadAgents, loadConfig, projectCrew, projectEfforts, projectLe
 import { effortHistory, effortSource, runEffortChanges, setEffort } from './effort.mjs';
 import { agentTool, runTools, toolModel } from './tools.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
-import { addQuestion, askReboot, decide, decisionCards, openPushes, openQuestions, openRepoRequests } from './decisions.mjs';
+import { addQuestion, askReboot, decide, decisionCards, openPushes, openQuestions, openRepoRequests, recentDecisions, recordMerge, undoDecision } from './decisions.mjs';
 import { listFolder, openOnComputer, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
@@ -40,6 +40,7 @@ import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, cancelQueued, doNow, editQueued, endDoNow, focus, holdRun, maxParallel, moveInQueue, nudgeQueue, queueControl, queueInTurn, queueMarks, resume } from './queue.mjs';
 import { changeSession, spendingStatus } from './spending.mjs';
+import { changeExpense, projectCosts } from './costs.mjs';
 import { activeRun, createRun, describeLater, doingNow, liveRuns, liveSpeech, needsBrief, outcomeLater, pauseLive, retryRun, setRunLevel, stepSays } from './runs.mjs';
 import { speechView } from './speech.mjs';
 import { closeGap, recordGap } from './gaps.mjs';
@@ -453,6 +454,8 @@ function buildState() {
     attention: { items: attention, ...attentionSummary(attention), archived: attentionArchive().length },
     // The owner's decisions as cards (src/decisions.mjs): pull requests and branches to merge, proposals, the manager's questions.
     decisions: decisionCards({ config, attention, items, questions, pushes, repos }),
+    // The owner's decisions of the last day, each with whether it can still be undone (src/decisions.mjs).
+    decisionLog: recentDecisions(),
     // The owner's planning board (data/plan.json): every item, archived ones included, in the board's order.
     planning: { items, priorities: PRIORITIES, statuses: STATUSES },
     // The project radar (data/radar.json): ideas for new projects, highest potential first.
@@ -825,10 +828,10 @@ export function startServer() {
           return reply(res, 200, pollRequest(body.run, body.id));
         case '/api/needs-you/done':
           if (body.session) return reply(res, 200, finishSessionRequest(String(body.session), String(body.id ?? '')));
-          return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner', body.answer ?? null, body.note ?? null));
+          return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner', body.answer ?? null, body.note ?? null, { via: remote ? 'remote' : 'app' }));
         case '/api/needs-you/later':
           // "Not now" on a call (the owner's): it stays open, out of the call bar, and its step stops waiting.
-          return reply(res, 200, deferRequest(body.run, String(body.id ?? '')));
+          return reply(res, 200, deferRequest(body.run, String(body.id ?? ''), { via: remote ? 'remote' : 'app' }));
         case '/api/needs-you/settings':
           // The longest a step waits for the owner (the owner's, from the Crew section's Calls panel).
           return reply(res, 200, setMaxWait(body.max_wait_minutes));
@@ -858,7 +861,7 @@ export function startServer() {
           return reply(res, 200, { holds: quarantineList() });
         case '/api/decide': {
           // The owner's click on a decision card: approve (a merge goes through src/merge.mjs), later, discard or answer.
-          const decided = await decide({ card: body.card, action: body.action, option: body.option, note: body.note, reason: body.reason }, buildState().decisions);
+          const decided = await decide({ card: body.card, action: body.action, option: body.option, note: body.note, reason: body.reason, via: remote ? 'remote' : 'app' }, buildState().decisions);
           // A request of an agent in charge, authorized on its card, has its run queued: the queue looks at once.
           if (decided.run) nudgeQueue();
           return reply(res, 200, decided);
@@ -1008,10 +1011,15 @@ export function startServer() {
         }
         case '/api/resume':
           return reply(res, 200, { status: resume(body.id, !!body.ignoreLimits) });
-        case '/api/merge':
+        case '/api/merge': {
           // Merges a finished run's work with the owner's authorization (src/merge.mjs): "preview" only shows it.
           if (body.preview) return reply(res, 200, await previewMerge(body.run));
-          return reply(res, 200, await mergeRun(body.run, { by: body.by === 'manager' ? 'manager' : 'owner', savePending: body.savePending === true }));
+          const by = body.by === 'manager' ? 'manager' : 'owner';
+          const merged = await mergeRun(body.run, { by, savePending: body.savePending === true });
+          // On record with the owner's decisions (src/decisions.mjs): the run's page or the manager's merge command.
+          recordMerge(body.run, { by, via: remote ? 'remote' : by === 'manager' ? 'cli' : 'app' });
+          return reply(res, 200, merged);
+        }
         case '/api/close-pr':
           // Closes a run's pull request replaced by a newer run's (src/merge.mjs): "preview" only shows it.
           if (body.preview) return reply(res, 200, previewClose(body.run, body.replacedBy));
@@ -1143,6 +1151,12 @@ export function startServer() {
           // The session's mode, runs at once and pause, "Spend all until" the renewal and "Not now" (src/spending.mjs).
           changeSession(body, { by: remote ? `remote:${String(req.headers['tailscale-user-login'] ?? '').trim().toLowerCase()}` : 'app' });
           return reply(res, 200, spendingStatus());
+        case '/api/costs': {
+          const { projects } = loadConfig();
+          return reply(res, 200, projectCosts({ projects, weeks: body.weeks, project: body.project, sessions: listSessions() }));
+        }
+        case '/api/costs/expense':
+          return reply(res, 200, changeExpense(body, { projects: loadConfig().projects, by: 'owner' }));
         case '/api/autopilot':
           // Save the autopilot's settings and record who changed them (src/autopilot.mjs).
           changeAutopilot(body, { by: remote ? `remote:${String(req.headers['tailscale-user-login'] ?? '').trim().toLowerCase()}` : 'app' });
@@ -1161,7 +1175,10 @@ export function startServer() {
           return reply(res, 400, { error: 'unknown action' });
         }
         case '/api/planning':
-          return reply(res, 200, { item: await changePlan(body) });
+          return reply(res, 200, { item: await changePlan({ ...body, via: remote ? 'remote' : body.via === 'cli' ? 'cli' : 'app' }) });
+        case '/api/undo':
+          // The owner takes a decision back while it has had no effect (src/decisions.mjs): the card comes back.
+          return reply(res, 200, undoDecision(body.id, { by: 'owner', via: remote ? 'remote' : 'app' }));
         case '/api/radar':
           return reply(res, 200, { idea: changeRadar(body) });
         case '/api/reset-grants':

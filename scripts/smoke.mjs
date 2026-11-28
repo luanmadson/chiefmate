@@ -149,6 +149,13 @@ try {
       && !/id="chat"[^]*?<\/section>/.exec(html)?.[0].includes('id="decisions"'), 'the app lacks the Decisions tab or the focus mode, or the decisions are still in the conversation');
     expect(/html\.chat-focus \.app-header, html\.chat-focus \.nav, html\.chat-focus \.alerts, html\.chat-focus \.statusbar/.test(styles)
       && /prefers-reduced-motion: reduce\) \{ \.nav a\[data-level="urgent"\][^}]*animation: none/.test(styles), 'the focus mode leaves a bar or band on screen, or an urgent tab pulses with reduced motion');
+    // Phones: the Conversation's header folds into one thin line that keeps the marks of what needs the owner, and the
+    // messages in the queue into one line "N in the queue", each choice kept on the device; the field to write never folds.
+    expect(html.includes('id="chat-top"') && /class="[^"]*fold-button[^"]*" data-fold="top"/.test(html)
+      && /html\.fold-top:has\(#view-manager\.active\) \.app-header/.test(phone) && /html\.fold-queue #chat-queue \.queued-msg \{ display: none; \}/.test(phone)
+      && !/html\.fold-[a-z]+[^{,]*(\.compose|#manager-form|#message)/.test(styles)
+      && /FOLDS_KEY = 'chiefmate\.folds'/.test(appJs) && /data-fold="queue"/.test(appJs) && /attnMark\(bandItems\('manager'\)/.test(appJs) && /focusSections\(\)\.map\(x => x\.mark\)/.test(appJs),
+      "the phone's Conversation lacks its folds (the header's thin line with the marks, the queue's line, kept on the device), or the field folds");
     expect(['project-status', 'project-actions', 'project-more', 'project-needs', 'project-overview', 'project-crew', 'project-tasks', 'project-planning', 'project-context', 'project-builder', 'builder-body', 'builder-view', 'builder-edit']
       .every(id => html.includes(`id="${id}"`)), "the app's page lacks a part of the project's page or of the prompt builder");
     const unsigned = await fetch(`${base}/api/limits`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
@@ -171,6 +178,11 @@ try {
       }
     };
     const post = (route, body) => keyless(route, body, ownerHeader);
+    const protectedCosts = await keyless('/api/costs', { weeks: 1 });
+    expect(protectedCosts.status === 403 && (await protectedCosts.json()).owner, 'project costs answered without the owner key');
+    const costs = await (await post('/api/costs', { project: 'none', weeks: 1 })).json();
+    expect(costs.projects?.length === 1 && costs.projects[0].weeks?.length === 1 && costs.projects[0].weeks[0].runs === 1,
+      'project costs did not report the smoke run for the requested week');
     // Without the key (any other program of this computer), what is the owner's is refused and changes nothing; what an
     // agent may do goes on; a pairing code must be one the server gave; and the app's window opens nothing here.
     for (const [route, body, more] of [['/api/lockdown', { action: 'release', confirm: true }], ['/api/manager', { message: 'As the owner' }],
@@ -659,8 +671,16 @@ try {
     expect(askedOut.includes('Question #') && questionCard?.options?.join('|') === 'Yes|No|Wait' && questionCard.recommend === 'Wait' && questionCard.what === 'Two lines of why.' && questionCard.approval === 2,
       `the manager's question is not a card with its options: ${askedOut} ${JSON.stringify(questionCard)}`);
     expect((await post('/api/decide', { card: questionCard?.id, action: 'answer', option: 'Maybe' })).status !== 200, 'an answer that is not one of the options was accepted');
-    expect((await post('/api/decide', { card: questionCard?.id, action: 'answer', option: 'no' })).ok && !(await cardsNow()).some(c => c.id === questionCard?.id),
-      'answering a question from its card failed, or the card stayed');
+    const cardAnswer = await post('/api/decide', { card: questionCard?.id, action: 'answer', option: 'no' });
+    const cardAnswerBody = cardAnswer.ok ? await cardAnswer.json() : {};
+    expect(cardAnswer.ok && !(await cardsNow()).some(c => c.id === questionCard?.id), 'answering a question from its card failed, or the card stayed');
+    // On record in the state, with its Undo (src/decisions.mjs): undone, the card is back; not twice; answered again.
+    const decisionLog = (await (await fetch(`${base}/api/state`)).json()).decisionLog ?? [];
+    const onRecord = decisionLog.find(e => e.id === cardAnswerBody.logged);
+    expect(onRecord?.canUndo && onRecord.to === 'answered' && onRecord.answer === 'No' && onRecord.via === 'app' && !onRecord.undo, `the answer is not in the state's record with its Undo: ${JSON.stringify(onRecord)}`);
+    expect((await post('/api/undo', { id: cardAnswerBody.logged })).ok && (await cardsNow()).some(c => c.id === questionCard?.id), 'an answer undone through the API did not bring its card back');
+    expect((await post('/api/undo', { id: cardAnswerBody.logged })).status !== 200 && (await post('/api/undo', { id: 'nope' })).status !== 200, 'a decision was undone twice, or an unknown one was');
+    expect((await post('/api/decide', { card: questionCard?.id, action: 'answer', option: 'yes' })).ok, 'a question undone could not be answered again');
     // The manager's approval level for a run (cli.mjs level, through the running Chiefmate): kept in the run's record.
     const runLevel = () => JSON.parse(readFileSync(path.join(data, 'runs', 'smoke-feed.json'), 'utf8')).level;
     const leveled = cli(['level', 'smoke-feed', '1']);
@@ -1425,7 +1445,8 @@ try {
   expect(section.includes('Owner') && section.includes('Use the other file') && section.includes('The second one'), `the step's report does not get the direct talk: ${section}`);
   expect(talkSituation([run], 'Owner').includes('Owner guided step 1 (generalist): "Use the other file"'), "the manager's situation does not get the direct talk");
   // A question from the step: one button per option, the recommended one among them; it always waits, and the
-  // option clicked is the answer the waiting command hands over.
+  // option clicked is the answer the waiting command hands over, once its undo window is over (made so here).
+  const pastUndo = id => (run.requests.find(r => r.id === id).undo_until = new Date(Date.now() - 1000).toISOString());
   const asked = await askOwner({ run: run.id, step: 1, what: 'Resend or SES?', options: 'Resend|SES', recommend: 'resend', why: 'Simpler to set up.' });
   expect(asked.wait && asked.options.join() === 'Resend,SES' && asked.recommend === 'Resend' && asked.why === 'Simpler to set up.', `a question was not recorded with its options and recommendation: ${JSON.stringify(asked)}`);
   let outside = false;
@@ -1435,15 +1456,18 @@ try {
     outside = true;
   }
   finishRequest(run.id, asked.id, 'owner', 'ses');
+  pastUndo(asked.id);
   const chosen = pollRequest(run.id, asked.id);
   expect(outside && chosen.status === 'done' && chosen.answer === 'SES', `the option clicked did not answer the question, or an answer outside the options was taken: ${JSON.stringify(chosen)}`);
   // What the owner writes goes with the option, or answers alone; the waiting command hands it over, and it stays in
   // the run's conversation.
   const explained = await askOwner({ run: run.id, step: 1, what: 'Which region?', options: 'US|EU' });
   finishRequest(run.id, explained.id, 'owner', 'eu', '  Closer to the users.  ');
+  pastUndo(explained.id);
   const withNote = pollRequest(run.id, explained.id);
   const own = await askOwner({ run: run.id, step: 1, what: 'Which plan?', options: 'Free|Pro' });
   finishRequest(run.id, own.id, 'owner', '', 'Neither: wait for the trial.');
+  pastUndo(own.id);
   const ownWords = pollRequest(run.id, own.id);
   const said = run.talk.filter(m => m.who === 'owner' && m.via === 'request').map(m => m.text);
   expect(withNote.answer === 'EU' && withNote.note === 'Closer to the users.' && ownWords.answer === null && ownWords.note === 'Neither: wait for the trial.'
@@ -2096,10 +2120,10 @@ try {
     const guarded = JSON.parse(claudeArgs({ model: 'm', hooks: crewGuard(guardLog) }).find((a, i, all) => all[i - 1] === '--settings'));
     const hook = guarded.hooks?.PreToolUse?.[0]?.hooks?.[0]?.command ?? '';
     const refuses = command => /"permissionDecision":"deny"/.test(execFileSync(hook, { shell: true, encoding: 'utf8', input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', tool_input: { command } }) }));
-    const publish = ['git -C . push origin main', 'gh api repos/a/b/pulls -f title=T -f head=h', 'cd x && git push', 'bash -c "gh pr create --fill"', 'git -c a=b remote add up u', 'gh gist create notes.md --public', 'gh release create v1'];
+    const publish = ['git -C . push origin main', 'gh api repos/a/b/pulls -f title=T -f head=h', 'cd x && git push', 'bash -c "gh pr create --fill"', 'git -c a=b remote add up u', 'gh gist create notes.md --public', 'gh release create v1', 'tailscale funnel --bg 3000'];
     // A heredoc's text that only goes into a file is data, not a command.
     const written = "cat > t.mjs <<'EOF'\ngh pr create\ngit push origin main\nEOF";
-    const wrong = [...publish.filter(c => !refuses(c)), ...['git status', 'gh api repos/a/b/pulls', 'git commit -m "no git push here"', 'gh release list', written].filter(refuses)];
+    const wrong = [...publish.filter(c => !refuses(c)), ...['git status', 'gh api repos/a/b/pulls', 'git commit -m "no git push here"', 'gh release list', 'tailscale serve status', written].filter(refuses)];
     const noted = readFileSync(guardLog, 'utf8').trim().split('\n').length;
     expect(hook.includes('guard.mjs') && !hook.includes('--allow') && !wrong.length && noted === publish.length,
       `the guard of the crew and the manager misjudged what publishes: ${JSON.stringify({ hook, wrong, noted })}`);
@@ -2812,6 +2836,124 @@ try {
   failures.push(`decision cards: ${error.message}`);
 }
 
+// Undoing the owner's decisions, in this process with made-up records (nothing told to the manager): every decision on
+// record (who, when, from where, from what to what); an answer, "not now" and a board decision undone while they have
+// had no effect, the card back for another answer; an answer to a request reaches the agent only after the undo window
+// and, once read, can't be taken back; the owner's approval starts its task only after the window, the command line's
+// at once, undone while queued, never once begun; a merge can't be undone, nor an undo.
+try {
+  process.env.CHIEFMATE_SMOKE = '1';
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const { addQuestion, decide, openQuestions, recentDecisions, recordMerge, undoDecision } = await import(src('decisions.mjs'));
+  const { readDecisionLog, readRun, readState, saveRun, UNDO_GRACE_MS } = await import(src('store.mjs'));
+  const planning = await import(src('planning.mjs'));
+  const { finishRequest, pollRequest } = await import(src('needs.mjs'));
+  const { loadConfig, projectCrew } = await import(src('config.mjs'));
+  const refused = fn => {
+    try {
+      fn();
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  const logged = id => readDecisionLog().find(e => e.id === id);
+  const listed = id => recentDecisions(100).find(e => e.id === id);
+
+  // An answer: on record, undone (the question open again, the undo on record too), then answered with another option.
+  const q = addQuestion({ question: 'Undo this answer?', options: 'Yes|No' }, { projects: {} });
+  const qCard = { id: `question:${q.id}`, kind: 'question', question: q.id, label: 'Question', title: q.question };
+  const first = await decide({ card: qCard.id, action: 'answer', option: 'yes', via: 'remote' }, [qCard]);
+  const entry = logged(first.logged);
+  expect(entry?.kind === 'question' && entry.from === 'pending' && entry.to === 'answered' && entry.answer === 'Yes' && entry.by === 'owner' && entry.via === 'remote' && Date.parse(entry.at) > 0,
+    `an answer is not on record with who, when, from where and from what to what: ${JSON.stringify(entry)}`);
+  expect(listed(first.logged)?.canUndo === true && !('undo' in listed(first.logged)), 'an answer not read yet cannot be undone, or the app gets what undoing it needs');
+  expect(undoDecision(first.logged).to === 'pending' && openQuestions().some(x => x.id === q.id && x.answer === null), 'an answer undone did not bring the question back');
+  const swapped = readDecisionLog().find(e => e.undoes === first.logged);
+  expect(swapped?.from === 'answered' && swapped.to === 'pending' && logged(first.logged).undone?.by === 'owner' && listed(first.logged)?.block === 'undone',
+    `an undo is not on record, from and to swapped: ${JSON.stringify(swapped)}`);
+  expect(refused(() => undoDecision(first.logged)) && refused(() => undoDecision(swapped.id)) && refused(() => undoDecision('nope')), 'a decision was undone twice, an undo was undone, or an unknown one was');
+  expect((await decide({ card: qCard.id, action: 'answer', option: 'No' }, [qCard])).answer === 'No', 'a question whose answer was undone could not be answered again');
+
+  // "Not now" undone: the card is no longer left for later.
+  const fadedCard = { id: 'pr:zz-undo-later', kind: 'merge', label: 'PR #1 of Undo', title: 'Faded work' };
+  const faded = await decide({ card: fadedCard.id, action: 'later' }, [fadedCard]);
+  const wasSeen = !!readState().attention_seen?.[fadedCard.id];
+  undoDecision(faded.logged);
+  expect(wasSeen && !readState().attention_seen?.[fadedCard.id], '"not now" undone did not bring the card back');
+
+  // A board decision undone, the item back as it was; once the item changed, it can't be.
+  const item = planning.proposeItem({ project: 'zz-undo', title: 'Undo on the board', summary: 'One line.', by: 'smoke' });
+  const put = await planning.decideItem(item.id, 'later', { by: 'owner', via: 'app' });
+  undoDecision(put.logged);
+  expect(planning.planItem(item.id).status === 'proposed' && logged(put.logged)?.from === 'proposed' && logged(put.logged)?.to === 'future', `a board decision undone did not put the item back: ${planning.planItem(item.id).status}`);
+  const thrown = await planning.decideItem(item.id, 'discard', { by: 'owner', reason: 'Not needed' });
+  planning.updateItem(item.id, { status: 'todo' });
+  expect(refused(() => undoDecision(thrown.logged)) && listed(thrown.logged)?.block === 'changed', 'a board decision was undone after the item changed');
+
+  // An answer to a request: the agent gets it only after the undo window; taken back before, the request is open again.
+  const at = new Date().toISOString();
+  saveRun({
+    id: 'zz-undo-run', kind: 'task', project: 'zz-undo', title: 'Undo run', status: 'running', created: at, steps: [{ agent: 'designer', status: 'running' }],
+    requests: [{ id: 'r1', step: 1, agent: 'designer', what: 'Pick one', options: ['A', 'B'], status: 'open', at, wait: true }],
+  });
+  const answer = finishRequest('zz-undo-run', 'r1', 'owner', 'a', 'Because.', 'app');
+  const early = pollRequest('zz-undo-run', 'r1');
+  expect(answer.logged && early.status === 'open' && early.answer === null && !readRun('zz-undo-run').requests[0].read, `the agent got an answer within the undo window: ${JSON.stringify(early)}`);
+  undoDecision(answer.logged);
+  const reopened = readRun('zz-undo-run');
+  expect(reopened.requests[0].status === 'open' && !reopened.requests[0].answer && !(reopened.talk ?? []).some(m => m.request === 'r1'), 'an answer taken back did not open the request again');
+  // Answered again and past the window (made so here), the agent reads it: from then on it can't be taken back.
+  const second = finishRequest('zz-undo-run', 'r1', 'owner', 'B');
+  const run = readRun('zz-undo-run');
+  expect(Date.parse(run.requests[0].undo_until) - Date.now() > UNDO_GRACE_MS - 5000, `an answer clicked has no undo window: ${run.requests[0].undo_until}`);
+  run.requests[0].undo_until = new Date(Date.now() - 1000).toISOString();
+  saveRun(run);
+  const read = pollRequest('zz-undo-run', 'r1');
+  expect(read.status === 'done' && read.answer === 'B' && refused(() => undoDecision(second.logged)) && listed(second.logged)?.block === 'read', `an answer the agent read could still be taken back: ${JSON.stringify(read)}`);
+
+  // A merge is on record, and can't be undone.
+  saveRun({ id: 'zz-undo-merged', kind: 'task', project: 'zz-undo', title: 'Merged work', status: 'done', created: at, ended: at, pullRequest: 'https://github.com/o/r/pull/7', merged: { at, by: 'owner', how: 'pr' } });
+  const merged = recordMerge('zz-undo-merged', { via: 'app' });
+  expect(merged?.final && merged.to === 'merged' && merged.label.includes('#7') && listed(merged.id)?.block === 'final' && refused(() => undoDecision(merged.id)), `a merge is not on record, or could be undone: ${JSON.stringify(merged)}`);
+
+  // An approval: only with a project in this installation's settings (read only).
+  const config = loadConfig();
+  const projectId = Object.keys(config.projects ?? {})[0];
+  const agent = projectId && Object.keys(projectCrew(config, projectId)).find(id => id !== 'manager' && id !== 'lead');
+  if (agent) {
+    // The project free: what the checks above left queued ends.
+    for (const i of planning.planItems().filter(i => i.project === projectId && ['queued', 'in_progress'].includes(i.status) && i.run)) saveRun({ ...readRun(i.run), status: 'done' });
+    const task = planning.proposeItem({ project: projectId, title: 'Smoke undo approval', agent, by: 'manager' });
+    planning.triageItem(task.id, { recommend: 'now' });
+    // The owner's "Do" in the app: its task waits out the undo window; undone in it, it never starts.
+    const owner = await planning.changePlan({ action: 'approve', id: task.id, via: 'app' });
+    await planning.startApproved();
+    const waiting = planning.planItem(task.id);
+    expect(waiting.status === 'approved' && !waiting.run && Date.parse(waiting.starts_at) > Date.now() && owner.logged, `an approved task started within its undo window: ${JSON.stringify(waiting)}`);
+    undoDecision(owner.logged);
+    expect(planning.planItem(task.id).status === 'triaged' && !planning.planItem(task.id).starts_at, 'an approval undone did not put the item back for the owner');
+    // From the command line, at once: undone while its run is queued, the run is canceled.
+    const cli = await planning.changePlan({ action: 'approve', id: task.id, via: 'cli' });
+    const queued = planning.planItem(task.id);
+    undoDecision(cli.logged);
+    expect(queued.status === 'queued' && queued.run && planning.planItem(task.id).status === 'triaged' && readRun(queued.run).status === 'canceled',
+      `an approval undone while its run was queued did not cancel it: ${JSON.stringify([queued, planning.planItem(task.id)])}`);
+    // Once its task has begun, it can't be undone.
+    const again = await planning.changePlan({ action: 'approve', id: task.id, via: 'cli' });
+    const begun = planning.planItem(task.id);
+    saveRun({ ...readRun(begun.run), status: 'running', started: new Date().toISOString() });
+    expect(refused(() => undoDecision(again.logged)) && listed(again.logged)?.block === 'started', 'an approval was undone after its task began');
+    saveRun({ ...readRun(begun.run), status: 'done' });
+    // Their titles, asked of the quick model one at a time in the background, end here, before the checks below
+    // swap Claude Code for a stand-in.
+    const { describeLater } = await import(src('runs.mjs'));
+    for (const id of [queued.run, begun.run]) await describeLater(id);
+  }
+} catch (error) {
+  failures.push(`undoing decisions: ${error.message}`);
+}
+
 // The manager's push, allowed once by the owner, in this process with a made-up repository (no network): the guard
 // refuses it and it becomes a card; allowed, the same push goes once (then refused again); never the main branch, a
 // forced push, another branch or folder, nor after the grant expires. "cli.mjs push" sends only a granted push.
@@ -3113,7 +3255,7 @@ try {
     "  if (prompt.includes('through the API')) {",
     "    const hook = JSON.parse(args[args.indexOf('--settings') + 1]).hooks.PreToolUse[0].hooks[0].command;",
     "    const run = command => execSync(hook, { input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't3', tool_input: { command } }), encoding: 'utf8' });",
-    `    appendFileSync(${JSON.stringify(path.join(liveDir, 'guard.txt'))},JSON.stringify([run('cd x && gh api repos/a/b/pulls -f title=T -f head=h'), run('git -C sub push origin main'), run('git status')]));`,
+    `    appendFileSync(${JSON.stringify(path.join(liveDir, 'guard.txt'))},JSON.stringify([run('cd x && gh api repos/a/b/pulls -f title=T -f head=h'), run('git -C sub push origin main'), run('git status'), run('tailscale funnel --bg 3000'), run('tailscale serve reset')]));`,
     "  }",
     "  const wait = prompt.includes('waiting for the environment test') ? 750 : prompt.includes('take long') ? 20000 : 300;",
     "  setTimeout(() => say({ type: 'result', subtype: 'success', result: 'done', session_id: id, num_turns: 1, permission_denials: denials }), wait);",
@@ -3191,6 +3333,8 @@ try {
       // What only reads publishes nothing; what writes, however placed, does.
       'gh pr view 12': '', 'gh pr list --repo a/b --state open': '', 'gh -R a/b pr checks 3': '', 'gh pr diff 3': '', 'gh pr status': '', 'gh repo view a/b --json name': '', 'gh repo list': '',
       'gh pr --repo a/b merge 3': 'gh pr', 'gh repo create x --public': 'gh repo', 'gh pr': 'gh pr', 'gh repo delete a/b': 'gh repo',
+      // A port of this computer shared through Tailscale (Serve on the tailnet, Funnel on the internet); only status looks.
+      'tailscale serve --bg 4748': 'tailscale serve', 'cd x && tailscale.exe Funnel 443': 'tailscale funnel', 'tailscale serve status --json': '', 'tailscale status': '',
       // An instruction for Chiefmate's command line, a commit message or an issue's body that only names a command is
       // text, when the whole command is in plain words; what the command itself does still counts.
       'node src/cli.mjs task p generalist "Fix it.\ngh pr create, then git push (gh repo view)"': '', 'git commit -m "Guard\n\ngit push origin main stays refused"': '',
@@ -3218,12 +3362,21 @@ try {
     sessions.sayToSession(s.id, 'Open it through the API');
     await idle(s.id);
     const hooked = JSON.parse(called().at(-1).args[called().at(-1).args.indexOf('--settings') + 1]).hooks?.PreToolUse?.[0]?.hooks?.[0]?.command ?? '';
-    const [api, sideways, plainGit] = JSON.parse(readFileSync(path.join(liveDir, 'guard.txt'), 'utf8'));
-    expect(hooked.includes('guard.mjs') && hooked.includes('--allow "Bash(git push:*)"') && JSON.parse(api).hookSpecificOutput?.permissionDecision === 'deny' && sideways === '' && plainGit === '',
-      `the guard did not refuse a pull request opened through the API, or refused what was allowed or harmless: ${JSON.stringify([hooked, api, sideways, plainGit])}`);
-    const viaApi = sessions.readSession(s.id).requests.find(r => r.kind === 'permission' && r.status === 'open' && r.rule === 'Bash(gh api:*)');
+    const [api, sideways, plainGit, funnel, reset] = JSON.parse(readFileSync(path.join(liveDir, 'guard.txt'), 'utf8'));
+    expect(hooked.includes('guard.mjs') && hooked.includes('--allow "Bash(git push:*)"') && [api, funnel, reset].every(d => JSON.parse(d).hookSpecificOutput?.permissionDecision === 'deny') && sideways === '' && plainGit === '',
+      `the guard did not refuse a pull request opened through the API or a Tailscale Serve or Funnel, or refused what was allowed or harmless: ${JSON.stringify([hooked, api, sideways, plainGit, funnel, reset])}`);
+    const asked = rule => sessions.readSession(s.id).requests.find(r => r.kind === 'permission' && r.status === 'open' && r.rule === rule);
+    const viaApi = asked('Bash(gh api:*)');
     expect(viaApi?.explain?.summary === "Open a pull request on a/b through GitHub's API" && viaApi.explain.command.startsWith('cd x && gh api'), `what the guard refused did not become a request explained in plain words: ${JSON.stringify(viaApi)}`);
+    // A Tailscale Funnel gets the same card as a publication: the port opened to the internet, at high risk.
+    const toInternet = asked('Bash(tailscale funnel:*)');
+    expect(toInternet?.explain?.summary === 'Open a port of this computer to the internet (Tailscale Funnel)' && toInternet.explain.risk === 'high', `a Tailscale Funnel the guard refused did not become a request explained in plain words: ${JSON.stringify(toInternet)}`);
+    // Turning Serve off says so, and that allowing it lets the agent share ports for the rest of the session.
+    const turnOff = asked('Bash(tailscale serve:*)');
+    expect(turnOff?.explain?.summary === 'Turn off what this computer shares through Tailscale (tailscale serve reset)' && turnOff.explain.why.includes('share ports'), `a Tailscale Serve turned off did not become a request explained in plain words: ${JSON.stringify(turnOff)}`);
     sessions.answerPermission(s.id, viaApi.id, false);
+    sessions.answerPermission(s.id, toInternet.id, false);
+    sessions.answerPermission(s.id, turnOff.id, false);
 
     sessions.sayToSession(s.id, 'Please take long');
     for (let i = 0; i < 50 && !sessions.turnOf(s.id)?.last; i++) await new Promise(r => setTimeout(r, 100));
@@ -4257,6 +4410,9 @@ try {
     const done = confirmByOwnerWords(run.id, call.id, 'liberei o arquivo no antivírus', { conversation, answering: true });
     const after = readRun(run.id);
     expect(done.status === 'done' && done.by === 'manager' && done.ownerSaid === 'liberei o arquivo no antivírus', `the call was not marked done on the owner's words: ${JSON.stringify(done)}`);
+    // On record as the manager's, on the owner's words, never undone.
+    const marked = (await load('store')).readDecisionLog().findLast(e => e.ref === `${run.id}:${call.id}`);
+    expect(marked?.by === 'manager' && marked.via === 'cli' && marked.final && marked.answer === 'liberei o arquivo no antivírus' && !done.logged, `the manager's call done is not on record: ${JSON.stringify(marked)}`);
     expect(after.talk?.some(m => m.via === 'manager' && m.request === call.id && /liberei o arquivo/.test(m.text)), "the owner's words are not in the run's conversation");
     expect(after.status === 'queued' && after.resumeFirst && queued()[0]?.id === run.id, 'the answered run did not go back to the front of the queue');
     expect(await Promise.resolve().then(() => finishRequest(run.id, call.id)).then(r => r.by === 'manager', () => false), 'a second answer changed the call');
@@ -4294,18 +4450,27 @@ try {
       'away mode parked a run whose step went on');
     const again = pollRequest(ends.run.id, holding.id, { away: false });
     expect(again.ended === null && !ends.run.requests[0].waitEnded, 'a step waiting again once the owner is back was not held');
-    deferRequest(ends.run.id, holding.id);
+    const leftLater = deferRequest(ends.run.id, holding.id);
     const notNow = pollRequest(ends.run.id, holding.id, { away: false });
     expect(notNow.later && notNow.status === 'open' && ends.run.requests[0].waitEnded?.why === 'later' && (ends.run.speech ?? []).some(x => x.by === 'auto' && /not now/i.test(x.text)),
       `"Not now" did not end the wait with a line in the bubble: ${JSON.stringify(notNow)}`);
     expect(await Promise.resolve().then(() => parkRun(ends.run.id)).then(() => false, e => /not waiting/.test(e.message)) && !ends.l.pauseRequest,
       'a call left for later still parked its run');
-    // Answered after its step stopped waiting: the step still at work hears it at its next safe point (src/talk.mjs).
+    // "Not now" is on record and undone while the call is open: the call is back in the bar, its step on its way.
+    const { undoDecision } = await load('decisions');
+    const { readDecisionLog } = await load('store');
+    const laterEntry = readDecisionLog().find(e => e.id === leftLater.logged);
+    undoDecision(leftLater.logged);
+    expect(laterEntry?.kind === 'request' && laterEntry.to === 'later' && laterEntry.by === 'owner' && !ends.run.requests[0].deferred && ends.run.requests[0].waitEnded?.why === 'later'
+      && openCalls().some(c => c.id === holding.id && !c.deferred && !c.waiting), `"Not now" undone did not bring the call back: ${JSON.stringify(laterEntry)}`);
+    // Answered after its step stopped waiting: the step still at work hears it at its next safe point (src/talk.mjs),
+    // at once, so that answer can't be undone.
     Object.assign(ends.l, { talking: true, step: 1 });
-    finishRequest(ends.run.id, holding.id, 'owner', null, 'Use the test key.');
+    const lateAnswer = finishRequest(ends.run.id, holding.id, 'owner', null, 'Use the test key.');
     const lateTalk = ends.run.talk?.find(m => m.who === 'owner' && m.request === holding.id);
-    expect(lateTalk?.status === 'pending' && lateTalk.text.includes('Sign in to the bank') && lateTalk.text.includes('Use the test key.') && ends.l.interrupted === 1,
-      `an answer given after the step went on did not reach it: ${JSON.stringify(lateTalk)}`);
+    expect(lateTalk?.status === 'pending' && lateTalk.text.includes('Sign in to the bank') && lateTalk.text.includes('Use the test key.') && ends.l.interrupted === 1
+      && !lateAnswer.logged && !lateAnswer.undo_until && readDecisionLog().some(e => e.ref === `${ends.run.id}:${holding.id}` && e.to === 'answered' && e.final),
+      `an answer given after the step went on did not reach it at once, on record: ${JSON.stringify(lateTalk)}`);
     ends.l.talking = false;
     const late = await askOwner({ run: ends.run.id, step: 1, what: 'Confirm the domain', wait: true });
     ends.run.requests.find(r => r.id === late.id).at = new Date(Date.now() - 31 * 60_000).toISOString();
@@ -4314,8 +4479,11 @@ try {
     // A request to act answered in the owner's own words (the call bar's "Answer here"): done, with the words.
     const words = await askOwner({ run: ends.run.id, step: 1, what: 'Send me the invoice', wait: true });
     finishRequest(ends.run.id, words.id, 'owner', null, '  It is in the shared folder.  ');
+    // The waiting command gets it once its undo window is over (made so here).
+    const settling = pollRequest(ends.run.id, words.id, { away: false });
+    ends.run.requests.find(r => r.id === words.id).undo_until = new Date(Date.now() - 1000).toISOString();
     const inWords = pollRequest(ends.run.id, words.id, { away: false });
-    expect(inWords.status === 'done' && inWords.note === 'It is in the shared folder.' && inWords.question === false
+    expect(settling.status === 'open' && settling.ended === null && inWords.status === 'done' && inWords.note === 'It is in the shared folder.' && inWords.question === false
       && ends.run.talk?.some(m => m.via === 'request' && m.request === words.id && m.text === 'It is in the shared folder.'), `an answer in words to a request to act was lost: ${JSON.stringify(inWords)}`);
     // In away mode a step doesn't wait at all, and its bubble doesn't call.
     const { setAway } = await load('news');
@@ -4341,10 +4509,11 @@ try {
     parkRun(parkedLater.run.id, { by: 'manager' });
     live.delete(parkedLater.run.id);
     saveRun(Object.assign(parkedLater.run, { status: 'paused' }));
-    deferRequest(parkedLater.run.id, parkedCall.id);
+    const parkedDefer = deferRequest(parkedLater.run.id, parkedCall.id);
     const resumed = readRun(parkedLater.run.id);
-    expect(resumed.status === 'queued' && resumed.resumeFirst && resumed.requests[0].status === 'open' && !!resumed.requests[0].deferred,
-      `"Not now" left a parked run parked: ${JSON.stringify({ status: resumed.status, resumeFirst: resumed.resumeFirst })}`);
+    // Back in the queue already: that "Not now" can't be undone.
+    expect(resumed.status === 'queued' && resumed.resumeFirst && resumed.requests[0].status === 'open' && !!resumed.requests[0].deferred && !parkedDefer.logged,
+      `"Not now" left a parked run parked, or can be undone: ${JSON.stringify({ status: resumed.status, resumeFirst: resumed.resumeFirst, logged: parkedDefer.logged })}`);
     // "Not now" while its run is still parking: not held at its safe point, so it goes back to the queue there.
     const parking = going('smoke-parking-later', 'parking-later-sample');
     const parkingCall = await askOwner({ run: parking.run.id, step: 1, what: 'Allow the script', wait: true });

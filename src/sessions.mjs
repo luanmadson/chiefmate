@@ -18,6 +18,7 @@ import { browserServers } from './browsers.mjs';
 import { addRequest, chargeFolder, chargeProfile, chargeProject, chargeTurn, takeRequest, turnChanges } from './charge.mjs';
 import { describeAction, environment, runClaude } from './claude.mjs';
 import { loadConfig } from './config.mjs';
+import { costActivity } from './costs.mjs';
 import { API, guardHooks, mainPushTarget, mainPushTargets, PUSH, publishing, pushesFile, readPushes } from './guard.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { computer, formatBytes, processes, refreshProcesses } from './machine.mjs';
@@ -801,6 +802,11 @@ function finishTurn(id, turn, r) {
   live.delete(id);
   const session = readSession(id);
   if (!session) return;
+  if (turn.pid || r.durationMs || r.tokens) {
+    const activity = turn.costActivity ??= costActivity(r, session.tool, turn.since, now(), r.durationMs || r.spentMs || Date.now() - Date.parse(turn.since));
+    const recorded = session.costActivity ??= [];
+    if (!recorded.some(entry => entry.started === activity.started && entry.ended === activity.ended)) recorded.push(activity);
+  }
   // A turn that got to start counts: the next one resumes its session (Codex's thread, or Claude Code's own id).
   const started = session.tool === 'codex' ? r.session : turn.started || r.session ? session.toolSession : null;
   Object.assign(session, { working: null, lastTurn: { at: now(), ok: !!r.ok }, ...(started ? { toolSession: started, turns: (session.turns ?? 0) + 1, ...(turn.seen ? { seen: turn.seen } : {}) } : {}) });
@@ -906,7 +912,7 @@ function gitOut(dir, ...args) {
 /** "owner/name" for a GitHub address, the address itself otherwise. */
 const repoLabel = url => /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(url ?? '')?.[1] ?? url ?? '';
 
-/** The command refused (git push, gh pr, gh repo, git remote or any other), explained. */
+/** The command refused (git push, gh pr, gh repo, git remote, tailscale serve or funnel, or any other), explained. */
 function explainCommand(command, dir) {
   const [program, group, ...args] = words(command);
   const origin = () => repoLabel(gitOut(dir, 'remote', 'get-url', 'origin')) || (dir ? path.basename(dir) : '?');
@@ -1004,6 +1010,21 @@ function explainCommand(command, dir) {
       },
     };
     return of[group] || { summary: t('Act on GitHub ({what})', { what: `gh ${group} ${action}`.trim() }), where: group === 'gist' ? account : repo, ...unknownEffect() };
+  }
+  if (program === 'tailscale' && ['serve', 'funnel'].includes(group)) {
+    // Serve shares a port of this computer on the tailnet, Funnel on the internet; reset and off stop sharing.
+    const where = t('This computer');
+    if (plain[0]?.toLowerCase() === 'reset' || plain.some(a => a.toLowerCase() === 'off')) {
+      // Allowed, the rule lets the whole group go for the session: sharing a port too, on the internet with Funnel.
+      const grant = group === 'funnel'
+        ? { risk: 'high', why: t('Allowing it also lets the agent open ports to the internet with Funnel for the rest of this session.') }
+        : { risk: 'medium', why: t('Allowing it also lets the agent share ports on your tailnet with Serve for the rest of this session.') };
+      return { summary: t('Turn off what this computer shares through Tailscale ({what})', { what: `tailscale ${group} ${args.join(' ')}`.trim() }), where, change: t("Your other devices stop reaching it, Chiefmate's remote access included if it goes this way."), undo: t('Yes: it can be shared again.'), ...grant };
+    }
+    // Not "tailscale serve reset" as the way back: it turns off everything shared, the remote access included.
+    return group === 'funnel'
+      ? { summary: t('Open a port of this computer to the internet (Tailscale Funnel)'), where, change: t('Anyone on the internet with the address reaches what answers on that port, with no sign-in.'), undo: t('Partly: it can be turned off, but it may have been reached already.'), risk: 'high', why: t('It is open to the whole internet.') }
+      : { summary: t('Share a port of this computer on your tailnet (Tailscale Serve)'), where, change: t('Your other devices, and whoever you shared the tailnet with, reach what answers on that port.'), undo: t('Yes: it can be turned off.'), risk: 'medium', why: t('What answers on that port stops being for this computer only.') };
   }
   if (program === 'git' && group === 'remote') {
     const [action, name = 'origin', url] = plain;
@@ -1112,6 +1133,7 @@ function runCodex({ session, prompt, log, onEvent }) {
   let thread = null;
   let failure = null;
   let finished = false;
+  let tokens;
   let canceled = null;
   let stderr = '';
   const timer = setTimeout(() => cancel(t('went over the time limit ({minutes} min)', { minutes: TURN_MINUTES })), TURN_MINUTES * 60_000);
@@ -1133,7 +1155,11 @@ function runCodex({ session, prompt, log, onEvent }) {
       return;
     }
     if (event.type === 'thread.started') thread = event.thread_id;
-    else if (event.type === 'turn.completed') finished = true;
+    else if (event.type === 'turn.completed') {
+      finished = true;
+      const usage = event.usage;
+      if (usage) tokens = { input: usage.input_tokens, output: usage.output_tokens };
+    }
     else if (event.type === 'turn.failed') failure = event.error?.message ?? 'turn failed';
     else if (event.type === 'error') failure = event.message ?? 'error';
     else {
@@ -1151,7 +1177,7 @@ function runCodex({ session, prompt, log, onEvent }) {
       out.end();
       const ok = finished && !failure && !canceled;
       const error = canceled ?? failure ?? (ok ? null : t('{tool} ended without finishing its turn (exit code {code}). {output}', { tool: 'Codex', code, output: clip(stderr.trim(), 600) }));
-      resolve({ ok, canceled: !!canceled, error, session: thread ?? session.toolSession ?? null });
+      resolve({ ok, canceled: !!canceled, error, session: thread ?? session.toolSession ?? null, tokens });
     });
   });
   return { promise, cancel, pid: child.pid };
