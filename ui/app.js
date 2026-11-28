@@ -1716,7 +1716,7 @@ function fixProgress(h) {
     stopped: t('Fix stopped; waiting for the manager'),
   }[h.progress] ?? t('Waiting for the manager');
   const link = h.fix ? `: <a href="#log" data-select="${esc(h.fix.run)}">${esc(h.fix.title)}</a>` : '';
-  return `<span class="decision-progress" data-state="${esc(h.progress)}">${esc(label)}${link}</span>`;
+  return `<span class="decision-progress" data-state="${esc(h.progress)}"><span>${esc(label)}${link}</span></span>`;
 }
 
 function decisionCardHtml(c) {
