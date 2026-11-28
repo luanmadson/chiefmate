@@ -13,7 +13,7 @@ import { openWork, releaseWork, workNotesView } from './worknow.mjs';
 import { checkClaude, checkLogin, claudeInfo, readFeed } from './claude.mjs';
 import { EFFORTS, loadAgents, loadConfig, projectCrew, projectEfforts, projectLead, saveConfig } from './config.mjs';
 import { effortHistory, effortSource, runEffortChanges, setEffort } from './effort.mjs';
-import { agentTool, runTools, toolModel } from './tools.mjs';
+import { agentTool, runTools, toolModel, toolsUsage } from './tools.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
 import { addQuestion, askReboot, decide, decisionCards, openPushes, openQuestions, openRepoRequests } from './decisions.mjs';
 import { listFolder, openOnComputer, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
@@ -24,7 +24,7 @@ import { addNote, engage, isLocked, lockdownView, recordSignal, release } from '
 import { watchView } from './sentinel.mjs';
 import { closeBrowser, focusBrowser, openBrowsers } from './browsers.mjs';
 import { computer, latestProcesses, processes, stoppable, stopProject } from './machine.mjs';
-import { agentSender, chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
+import { agentSender, chat, editPending, interruptManager, limitWait, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
 import { closeDefect, reportDefect } from './defects.mjs';
 import { closeReplaced, mergeRun, previewClose, previewMerge } from './merge.mjs';
 import { awayInfo, reportEvent, setAway } from './news.mjs';
@@ -434,7 +434,8 @@ function buildState() {
     queue: queue.map(r => ({ ...summary(r), ...queueMarks(r, doNowInForce) })),
     queueControl: control,
     history: runs.filter(r => !['queued', 'waiting'].includes(r.status) && !goingIds.has(r.id)).slice(0, 30).map(summary),
-    usage: { limits: config.limits ?? {}, account: usage },
+    // Codex's and Grok's plans, and the steps each tool ran (src/tools.mjs).
+    usage: { limits: config.limits ?? {}, account: usage, tools: toolsUsage(runs) },
     computer: machine,
     // The crew's browsers open (src/browsers.mjs): project, task, since when and whether the task still goes on.
     browsers: openBrowsers(config, latestProcesses()),
@@ -460,6 +461,8 @@ function buildState() {
     manager: {
       messages: conversation.slice(-80), responding: chat.responding, interrupting: chat.interrupting, since: chat.since, partial: chat.partial,
       actions: chat.actions.slice(-12), lastAction: chat.actions.at(-1) ?? null, pending: readPending(), context: managerContext(),
+      // An answer cut off by the plan's usage limit, while it waits for the renewal: { at, until, window, items }, else null.
+      cut: limitWait(),
     },
     // The emergency lockdown (src/lockdown.mjs): whether it is on, why, its evidence and the security warnings of the day.
     lockdown: security,
