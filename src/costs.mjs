@@ -2,8 +2,9 @@
 import { randomUUID } from 'node:crypto';
 import { readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
+import { listAccounts } from './accounts.mjs';
 import { t } from './i18n.mjs';
-import { listRuns, readUsage, stepsOf, USAGE_WINDOWS } from './store.mjs';
+import { listRuns, readUsage, stepsOf, usageWindows } from './store.mjs';
 import { DATA, now, readJson, writeJson } from './util.mjs';
 
 const HOUR = 3_600_000;
@@ -38,9 +39,13 @@ export function legacyStepCosts(step) {
 }
 
 function samplesSince(since) {
-  const usage = readUsage();
+  // One Claude account's windows and its current usage, never mixed (src/accounts.mjs): Claude Code's own
+  // configuration's, as before accounts, else the default one's. Each account's own share per project is still to come.
+  const accounts = listAccounts();
+  const account = accounts.find(a => !a.configDir) ?? accounts.find(a => a.default);
+  const usage = readUsage(account);
   return Object.fromEntries(Object.keys(WINDOWS).map(kind => {
-    const dir = path.join(USAGE_WINDOWS, kind);
+    const dir = path.join(usageWindows(account), kind);
     const samples = files(dir).filter(name => /^\d+\.json$/.test(name) && Number.parseInt(name, 10) > since)
       .map(name => readJson(path.join(dir, name), null)).filter(Boolean);
     const byReset = new Map(samples.map(sample => [sample.resets, sample]));

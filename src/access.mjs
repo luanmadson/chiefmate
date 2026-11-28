@@ -4,6 +4,7 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { listAccounts } from './accounts.mjs';
 import { DATA, WORKSPACES } from './util.mjs';
 
 /**
@@ -107,8 +108,12 @@ export function stepMcp(config, project, agent) {
   };
 }
 
-/** The user's own Claude Code folder: its CLAUDE.md and rules never reach the crew. */
-export const userClaudeExcludes = () => [`${path.join(os.homedir(), '.claude').replaceAll('\\', '/')}/**`];
+/**
+ * The user's own Claude Code folders: ~/.claude and each Claude account's own configuration folder (src/accounts.mjs,
+ * where Claude Code looks for the user's CLAUDE.md under CLAUDE_CONFIG_DIR). Their CLAUDE.md and rules never reach the crew.
+ */
+export const userClaudeExcludes = () =>
+  [path.join(os.homedir(), '.claude'), ...listAccounts().map(a => a.configDir).filter(Boolean)].map(dir => `${dir.replaceAll('\\', '/')}/**`);
 
 // The repository's own instruction files, as Claude Code finds them.
 const INSTRUCTION_FILES = ['CLAUDE.md', 'CLAUDE.local.md', 'AGENTS.md', '.claude/CLAUDE.md', '.claude/settings.json', '.claude/settings.local.json', '.mcp.json'];

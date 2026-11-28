@@ -38,9 +38,12 @@ export function withinAccounts(picked, going, config = loadConfig(), at = Date.n
     room.set(id, (room.get(id) ?? 0) - 1);
   }
   return picked.filter(run => {
-    const id = projectAccount(config, run.project).id;
-    if ((room.get(id) ?? 0) <= 0) return false;
-    room.set(id, room.get(id) - 1);
+    const account = projectAccount(config, run.project);
+    // an account missing from the settings has no room: its run starts anyway (within the total), and its first step
+    // stops at once with the message that says what to fix (accountEnv), instead of waiting in the queue unseen
+    if (account.missing) return true;
+    if ((room.get(account.id) ?? 0) <= 0) return false;
+    room.set(account.id, room.get(account.id) - 1);
     return true;
   });
 }

@@ -8,7 +8,6 @@ ensureDir(RUNS);
 // Each Claude account's usage is its own (src/accounts.mjs): Claude Code's own configuration keeps these files in the
 // data folder, as before accounts; another account, in data/accounts/<id>.
 const usageFile = account => path.join(accountData(account), 'usage.json');
-export const USAGE_WINDOWS = path.join(DATA, 'usage-windows');
 export const usageWindows = account => path.join(accountData(account), 'usage-windows');
 const STATE_FILE = path.join(DATA, 'state.json');
 const CONVERSATION_FILE = path.join(DATA, 'manager', 'conversation.json');

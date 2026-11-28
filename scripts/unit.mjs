@@ -2972,6 +2972,13 @@ test('Claude accounts: a limit holds only its own account, and each account has 
   const picked = ['a', 'b', 'c', 'd', 'e'].map(project => ({ id: project, project }));
   assert.deepEqual(withinAccounts(picked, ['a'], config).map(r => r.project), ['c', 'd', 'e']);
   assert.deepEqual(withinAccounts(picked, [], config).map(r => r.project), ['a', 'c', 'd', 'e']);
+  // a project on an account missing from the settings is not left waiting unseen: it starts, and its step stops with the message
+  const typo = { ...config, projects: { ...config.projects, f: { account: 'maxx' } } };
+  assert.deepEqual(withinAccounts([...picked, { id: 'f', project: 'f' }], ['a'], typo).map(r => r.project), ['c', 'd', 'e', 'f']);
+  // the autopilot stops each project at its own account's session: Max spends all, Team keeps its own stop
+  const { autopilotSettings } = await import('../src/autopilot.mjs');
+  const pilot = { ...config, autopilot: { enabled: true, stop_at_5h_window: 0.85 } };
+  assert.deepEqual([autopilotSettings(pilot, team).window_stop, autopilotSettings(pilot, max).window_stop], [0.85, 0.97]);
 
   // a run held by the week of Team goes back to the queue once its project is on Max, with Max under its limits
   const resets = new Date(Date.now() + 3600_000).toISOString();
@@ -3019,7 +3026,7 @@ test('Claude accounts: each free reset is of its own account; one recorded befor
     accounts: [{ id: 'team', name: 'Team' }, { id: 'max', name: 'Max', config_dir: path.join(temp, 'claude-max') }], default_account: 'max',
     plan_resets: [{ kind: 'full', expires: later, used: false }, { kind: 'full', expires: later, used: false, account: 'max' }],
   };
-  assert.deepEqual(planResets(config).map(g => g.account), ['team', 'max'], 'a reset from before accounts moved to the default account');
+  assert.deepEqual(planResets(config).map(g => g.account), ['team', 'max'], "a reset from before accounts stays on Claude Code's own configuration");
   const [team, max] = listAccounts(config);
   assert.deepEqual(availableResets(config, max).map(g => g.index), [2]);
   assert.deepEqual(availableResets(config, team).map(g => g.index), [1]);

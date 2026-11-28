@@ -1739,7 +1739,7 @@ function attnNotice(i, brief = false) {
     // the session renewing with usage to spare (src/spending.mjs): spend all until then, or not now
     : i.kind === 'spare' ? `<button type="button" class="button small" data-session-boost="on"${i.account ? ` data-account="${esc(i.account)}"` : ''}>${esc(t('Spend all until {time}', { time: clockTime(i.until) }))}</button><button type="button" class="button secondary small" data-spending-dismiss${i.account ? ` data-account="${esc(i.account)}"` : ''}>${esc(t('Not now'))}</button>`
     // an account no one signed in to yet (src/claude.mjs): its sign-in window
-    : i.kind === 'login' && i.account && offered('account-login') ? `<button type="button" class="button small" data-account-login="${esc(i.account)}">${esc(t('Sign in'))}</button>`
+    : i.kind === 'login' && i.account && offered('account-login') ? `<button type="button" class="button small" data-account-login="${esc(i.account)}">${esc(t('Sign in'))}</button>${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`
     : `${i.kind === 'reader-login' ? `<button type="button" class="button small" data-reader="login"${i.account ? ` data-account="${esc(i.account)}"` : ''}>${esc(t('Open the sign-in window'))}</button>` : ''}${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
   return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
       <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
@@ -3636,8 +3636,10 @@ function drawSpending() {
   const counts = [...new Set([1, 2, 3, 4, c.parallel])].sort((x, y) => x - y);
   const pauses = [...new Set([...SESSION_PAUSES, ...(c.pause == null ? [] : [c.pause])])].sort((x, y) => x - y);
   const pauseValue = p => (p == null ? 'off' : String(p));
+  // with several Claude accounts, these controls are the default account's: named, so it is never ambiguous
+  const whose = (state.accounts ?? []).length > 1 && sp.account?.name ? ` · ${sp.account.name}` : '';
   const session = `<div>
-      <div class="label">${esc(t('Session (5 hours)'))}</div>
+      <div class="label">${esc(t('Session (5 hours)'))}${esc(whose)}</div>
       <div class="tabs autopilot-modes" role="group" aria-label="${esc(t('Session mode'))}">${tabs(SESSION_MODES(), c.mode, 'data-session-mode')}${custom}</div>
       <div class="fields">
         <label><span>${esc(t('Runs at a time'))}</span><select data-session-parallel>${counts.map(n => `<option value="${n}"${n === c.parallel ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
