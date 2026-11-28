@@ -2993,7 +2993,10 @@ async function openAgentDialog(key = null) {
   $('#agent-fields').querySelector('input')?.focus();
 }
 
-/** Saves what changed in the dialog: only the fields the owner changed ("" clears one, back to its base's). */
+/**
+ * Saves what changed in the dialog: only the fields the owner changed ("" clears one, back to its base's). true once
+ * saved (or nothing changed); false with the reason in a toast, the dialog still open to correct it.
+ */
 async function saveAgentDialog() {
   const form = $('#agent-dialog form');
   const data = new FormData(form);
@@ -3020,20 +3023,30 @@ async function saveAgentDialog() {
       toast(t('{name} was adjusted: it counts from its next step.', { name: t(current.name) }));
     }
     await refresh();
+    return true;
   } catch (error) {
     toast(error.message);
+    return false;
   }
 }
 
-$('#agent-dialog').addEventListener('close', () => {
-  if ($('#agent-dialog').returnValue === 'save') saveAgentDialog();
+// Save closes the dialog only once Chiefmate took the change; Cancel closes it at once.
+$('#agent-dialog form').addEventListener('submit', async event => {
+  if (event.submitter?.value !== 'save') return;
+  event.preventDefault();
+  $('#agent-save').disabled = true;
+  try {
+    if (await saveAgentDialog()) $('#agent-dialog').close('save');
+  } finally {
+    $('#agent-save').disabled = false;
+  }
 });
 
 // Enter in a field of the dialog saves it (its first button is Cancel), once the fields are valid.
 document.addEventListener('keydown', event => {
   if (event.key !== 'Enter' || !event.target.matches?.('#agent-fields input')) return;
   event.preventDefault();
-  if ($('#agent-dialog form').reportValidity()) $('#agent-dialog').close('save');
+  $('#agent-dialog form').requestSubmit($('#agent-save'));
 });
 
 // An agent's memory is read only when the owner opens it (the details' toggle does not bubble: caught on the way down).

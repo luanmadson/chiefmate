@@ -660,7 +660,7 @@ const KEYLESS = {
   // What a restart of the computer would stop, and the manager's restart (src/power.mjs); never the owner's own.
   '/api/power': b => b.action === 'preview' || (b.action === 'reboot' && b.by === 'manager'),
   // The agents (src/agents.mjs): the manager adjusts them and proposes a rank; hiring, the status and the rank are the owner's.
-  '/api/agents': b => b.by === 'manager' && (b.action === 'propose' || (b.action === 'set' && !['rank', 'status'].some(k => k in (b.fields ?? {})))),
+  '/api/agents': b => b.by === 'manager' && (b.action === 'propose' || (b.action === 'set' && !['rank', 'status'].some(k => Object.hasOwn(Object(b.fields ?? {}), k)))),
   '/api/merge': b => !!b.preview || b.by === 'manager',
   '/api/close-pr': b => !!b.preview || b.by === 'manager',
   '/api/lockdown': b => b.action === 'engage' && ['manager', 'step'].includes(b.by),

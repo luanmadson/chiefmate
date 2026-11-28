@@ -911,8 +911,10 @@ async function agentsCommand() {
   if (!['add', 'set', 'deactivate', 'activate', 'propose'].includes(action)) throw missing(`agents ${action}`, 'Use: agents [list] | show <key> | memory <key> --project <id> | history [<key>] | add <id> | set <key> | deactivate|activate <key> | propose <key>');
   if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error('A step only reads the agents: propose a change for the planning board.');
   if (!key) throw new Error(`Use: node src/cli.mjs agents ${action} <key>`);
-  const by = process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner';
+  // Only the owner's terminal is the owner: a live session or the rescuer adjusts at most, as the manager does.
+  const by = process.env.CHIEFMATE_MANAGER ? 'manager' : process.env.CHIEFMATE_SESSION || process.env.CHIEFMATE_RESCUER ? 'session' : 'owner';
   if (action === 'propose') {
+    if (by === 'session') throw new Error("A rank is the manager's to propose: tell the manager.");
     const body = { action, key, project, rank: option('--rank'), why: option('--why'), by };
     const r = await apiOr('/api/agents', body, async () => {
       const { addQuestion } = await import('./decisions.mjs');
