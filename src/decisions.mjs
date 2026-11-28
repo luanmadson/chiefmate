@@ -377,7 +377,8 @@ const plainVerdict = text => String(text ?? '').replace(/[*_`>#]/g, '').replace(
 const verdicts = new Map(); // run id -> the final review's verdict, read once (the file doesn't change after the run)
 
 /**
- * The recommendation in the manager's verdict, which also says what it fixed and the risks: { short, text }. "short"
+ * The recommendation in the final review's verdict (the manager's, or the team lead's in a delegated review), which
+ * also says what it fixed or checked and the risks: { short, text }. "short"
  * is the verdict alone ("Approve with caveats"), "text" the recommendation's own words. Looked for after a
  * "Recommendation:" label (in English or Portuguese), else in the verdict's last paragraph.
  */
