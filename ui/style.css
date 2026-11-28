@@ -492,6 +492,17 @@ textarea { resize: vertical; min-height: 64px; }
 .team-member .name { color: var(--strong); }
 /* The project's team lead, above its crew: a brass rule on the left and a stronger line below. */
 .team-lead { grid-template-columns: 34px minmax(0, 1fr) auto; padding: 8px 0 8px 10px; border-left: 2px solid var(--accent); border-bottom: 1px solid var(--line-strong); }
+/* Who answers to whom: the crew, its team lead, the manager and you, in one line with brass arrows. */
+.team-chain { padding: 0 0 8px; }
+.team-chain .label { display: block; margin-bottom: 3px; }
+.team-chain .chain { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; color: var(--strong); }
+.team-chain .arrow { color: var(--accent); }
+.team-chain .hint { margin-top: 3px; }
+/* What the crew wrote to its team lead, and what the lead did with it. */
+.lead-inbox { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line-strong); }
+.lead-inbox ul { list-style: none; margin: 4px 0 0; padding: 0; }
+.lead-inbox li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.lead-inbox .inbox-text { margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* Speech bubbles (src/speech.mjs): what an agent says, in plain words, with a tail toward its name; its state in a
    word and in the color of the left rule (working blue, waiting amber, stuck red, done green). A click opens the run's
    history. Done with its part: quiet, the text in grey. */
