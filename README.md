@@ -492,7 +492,7 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `full_backup_dir` | A private folder outside git, such as one synced to your own cloud storage, where Chiefmate also writes the full copy of these settings, the same as `data/config-backup/chiefmate.json`, so it survives losing this computer. It works with or without `backup_dir`. Everything goes there unredacted (notes, instructions, secrets), so pick a folder only you can reach: Chiefmate refuses one inside a git repository or the same as `backup_dir`, and says why in its log |
 | `viewer` | The file viewer: `extra_roots`, a list of more folders (absolute paths) it may open besides the projects' folders and the libraries. Empty by default |
 | `ui` | The app's own settings: `voice_input`, the microphone for dictation in the message fields (see "Dictation"). On by default; `false` hides it |
-| `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. Optional: `crew` (its own crew), `lead` (its team lead, see "The crew"), `mcp` (external tools it releases), `prompt_block`, `prompt_modules` and `prompt_exclude` (the prompt builder), `dev_start` (the command that starts its development environment from its page, such as `npm run dev`) and `dev_url` (the address of the system it starts, for **Open the system**), `merge_by_owner: false` when someone else reviews and merges its work (its cards then have no Approve). `main_push: "card"`, for a project without pull requests, lets its main branch go to GitHub through your card in Decisions, sent by the manager or a "Work now" session once you allow it (see "Waiting for your decision"); only you turn it on, in the project's Context tab or here. `color` (`#rrggbb`) is its color on the crew's browser and in the app's list of browsers; without it, a fixed palette in the order of the projects. `effort` (`{ "<member id>": "<level>" }`) sets the effort of any member for this project only, the manager's reviews of its runs included (written by the app and `effort --project`). `"sensitive": true` keeps all of its work on Claude Code, whatever a member's or a task's tool (see "A tool for one task"). See also "Local delivery" below |
+| `projects` | For each project: `repository`, `main_branch`, `setup` (such as `npm ci`), `checks` (such as `npm test`), the `playbook` the crew follows, a sentence `about` it, optional `notes` for every agent and `agent_notes` for specific ones, and an optional `language` for its pull requests and commits. Optional: `crew` (its own crew), `lead` (its team lead, see "The crew"), `mcp` (external tools it releases), `prompt_block`, `prompt_modules` and `prompt_exclude` (the prompt builder), `dev_start` (the command that starts its development environment from its page, such as `npm run dev`) and `dev_url` (the address of the system it starts, for **Open the system**), `merge_by_owner: false` when someone else reviews and merges its work (its cards then have no Approve). `main_push: "card"`, for a project without pull requests, lets its main branch go to GitHub through your card in Decisions, sent by the manager or a "Work now" session once you allow it (see "Waiting for your decision"); only you turn it on, in the project's Context tab or here. `color` (`#rrggbb`) is its color on the crew's browser and in the app's list of browsers; without it, a fixed palette in the order of the projects. `effort` (`{ "<member id>": "<level>" }`) sets the effort of any member for this project only, the manager's reviews of its runs included (written by the app and `effort --project`). `"sensitive": true` keeps all of its work on Claude Code, whatever a member's or a task's tool (see "A tool for one task"). `"account"` is the Claude account its runs use and `"sessions_account"` the one of its live sessions (see "Two or more Claude accounts"). See also "Local delivery" below |
 | `missions` | For each mission: the `project`, the `steps` (an agent and its part, in order), the final `review`, the `schedule` (`days` such as `["mon"]` and a `time` such as `"09:00"`) and the `eve_reminder` time |
 | `crew` | Settings for one agent in this installation only, such as `{ "writer": { "model": "claude-opus-5-5", "effort": "xhigh", "max_minutes": 90, "extra_instructions": "..." } }` (`chat_effort` for the manager's conversation; see [docs/effort.md](docs/effort.md)); `"tool": "codex"` or `"grok"` runs its steps on that tool (see "The crew") |
 | `tools` | The tools the crew may run on besides Claude Code: `{ "grok": { "available_until": "2026-12-17" }, "codex": { "enabled": true } }`. After `available_until` (or with `"enabled": false`), its members go back to Claude Code by themselves. Empty by default: both available |
@@ -500,7 +500,7 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `max_parallel` | How many runs of different projects may go on at once (3 by default): the session's runs at a time, set in Usage (1 to 4). Within a project, one at a time |
 | `sessions` | The live sessions' profiles: `name`, `tool` (`claude` or `codex`), `project`, `library_folder` or `cwd`, `prompt_blocks` and optionally `model` and `mcp` (see "Live sessions") |
 | `limits` | When runs pause: `pause_at_5h_window` (the session's pause, set in Usage; `null`, off: only the 85% safety margin) and `pause_at_plan_week`, as shares of your account's usage (0.85 is 85%) |
-| `plan_resets` | The plan's free resets, which Claude Code doesn't report: `[{ "kind": "full", "expires": "<ISO date>", "used": false, "note": "..." }]`. Easier from the Usage section or `node src/cli.mjs reset-grant` |
+| `plan_resets` | The plan's free resets, which Claude Code doesn't report: `[{ "kind": "full", "expires": "<ISO date>", "used": false, "note": "...", "account": "<id>" }]` (`account`: its Claude account; without it, Claude Code's own configuration). Easier from the Usage section or `node src/cli.mjs reset-grant` |
 | `mcp_servers` | External tools (MCP servers) the crew may use, in Claude Code's format: `{ "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] } }`. Nothing is released until a project or an agent lists it in `mcp` |
 | `browser_cdp` | The address of your own browser with remote debugging on, such as `http://127.0.0.1:9333`: sign-ins asked by the crew open there, and the prompt builder is copied through it. Any local program can control a browser with remote debugging on: prefer a separate profile |
 | `needs_you` | `{ "max_wait_minutes": 30, "park_after_minutes": 15, "on_call": false }`: the longest a step waits for you before it goes on without you (in away mode it doesn't wait; also set in the Crew section's **Calls from the crew** panel); in away mode, how long a call that still holds its step waits before its run is parked (0: never); the on-call outside the app, off until a channel exists (see "The call bar") |
@@ -509,6 +509,10 @@ Run it again whenever you change a mission's schedule. To remove everything it c
 | `auto_update_mode` | How the self-update installs an approved update (see "Chiefmate improves itself"): `"pause"` (the default) pauses the work going on at a safe point, installs and resumes it by itself; `"wait"` installs only once no run is going on and the manager is free |
 | `autopilot` | The optional autopilot (see "Planning"): `{ "enabled": false, "week_pace": 1, "stop_at_5h_window": 0.85, "quiet_hours": "", "daily_report": "08:00" }`. `week_pace` is the spending mode: `0.9` (save), `1` (normal), `"all"` (spend all: no week's pace) or any other share, above 1 too (kept as given). `quiet_hours` such as `"23:00-07:00"`; `daily_report: false` turns the report off. Read on every check, with no restart |
 | `manager_updates` | The manager's news in the conversation (see "News from the manager"): `true` (the default, every event), `false` (none) or a list of the events that wake it, such as `["run_failed", "pr_ready", "needs_you"]` |
+| `accounts` | The Claude accounts Chiefmate works with (see "Two or more Claude accounts"): `[{ "id": "work", "name": "Work seat" }, { "id": "personal", "name": "Personal plan", "config_dir": "<folder>" }]`. Each has its own Claude Code configuration folder (`CLAUDE_CONFIG_DIR`; none for the one Claude Code already uses) and may have its own `max_parallel`, `pause_at_5h_window` and `pause_at_plan_week`. Without it, one account: Claude Code's own configuration |
+| `default_account` | The account of a project without `account` (the first in `accounts` when not set) |
+| `manager_account` | The account of the manager's conversation and of Chiefmate's own short calls (the default one when not set) |
+| `sessions_account` | The account of the live sessions, **Work now** and the agent in charge (a project's own `sessions_account` first; without either, the project's account) |
 | `usage_reader` | The optional reading of your usage page on claude.ai (see below): `{ "enabled": false, "every_hours": 4 }`, and `browser` with the path to Edge or Chrome if it isn't found |
 | `watchdog` | The watchdog (see "The watchdog"): `{ "rescuer": true, "model": null, "max_minutes": 15, "every_minutes": 60 }`. `rescuer: false` keeps Claude out of it (you are only told); `model` is the rescuer's (`default_model` when null); `every_minutes`, the shortest time between two rescues |
 | `remote_access` | The optional use from your laptop and phone through Tailscale Serve (see "Remote access" below): `{ "enabled": false, "host": "<pc>.<tailnet>.ts.net", "logins": ["<your Tailscale login>"], "port": 4748 }`. Off by default; read when Chiefmate starts |
@@ -595,7 +599,38 @@ Chiefmate measures what really counts on a subscription plan: your account's usa
 - **Each step has a time limit** (in the agent's header), in case an agent gets stuck.
 - **Alerts at 70% and 90%** of the 5-hour window and of the plan's week, once per threshold and window. They don't pause anything.
 - **The autopilot** (optional; see "Planning"): its switch, its pace for the week (the week's mode, above), its limits (a slider for the 5-hour window, the quiet hours and the daily report's time), a **Now** line with what it does or exactly why it is stopped, a suggestion to spend all when a free reset is available, what it did today and who changed its settings, and when.
+- **Several Claude accounts**: each project on its own, with its own usage, limits and sign-in (see "Two or more Claude accounts" below).
 - **The plan's free resets.** Claude Code doesn't report them, so you record them in the Usage section or with `reset-grant`. Chiefmate shows the ones available and the week's pace (the share used against the share of the week gone by, and whether there is slack). It warns you when the week passes 90% with one available, and 3 days and 1 day before one expires unused.
+
+### Two or more Claude accounts
+
+Chiefmate can work with several Claude accounts at once, such as a work seat and a personal subscription. Each account has its own Claude Code configuration folder (Claude Code's `CLAUDE_CONFIG_DIR`), so its sign-in, its conversations and its usage are its own.
+
+- **Each project stays on one account**: `projects.<id>.account`, or the default account without it. Its steps, the final review, the team lead and the reviews run there. The manager's conversation has its own account (`manager_account`), and so do the live sessions, **Work now** and the agent in charge: `sessions_account` (for all of them) or `projects.<id>.sessions_account` (one project), else the project's own account. So the crew can work on one account while your own sessions and the manager keep to another, as your margin. A session keeps the account it opened on until it ends.
+- **No automatic switching.** When an account runs out, only its projects wait: a project on another account goes on. Chiefmate never moves work to another account by itself. Which account a project uses is your deliberate choice, in the settings, within each plan's terms. Once you move a project to another account, a run that was waiting for the old account's limit goes back to the queue as soon as the new account has room. An account named in the settings but missing from the list never runs, and no other account runs in its place: the step stops with a message saying what to fix.
+- **Each account has its own session settings**: `max_parallel`, `pause_at_5h_window` and `pause_at_plan_week` in its entry, else the general ones. One account can spend all, with more runs at once, while another keeps a margin for you. The mode buttons of each account in Usage change its own entry. The queue starts a run only while its project's account has room, so the runs at once are the sum of each account's.
+- **Signing in to a new account**: **Sign in** on its card in Usage (on this computer) opens a window with Claude Code's own sign-in (`claude auth login`), on the account's folder. You sign in once in your browser, and Chiefmate never sees the password or the credentials. `node src/cli.mjs account-login <id>` does the same in your terminal. Each account's sign-in is checked once a day, and the sign-in warning names the account and its own command. An account nobody has signed in to yet gets its own notice.
+- **Usage**: the **Your Claude accounts** panel in Usage shows each account side by side, with these details:
+  - the 5-hour window and the week in colored bars, with when each renews;
+  - roughly how much of the session will be left unused;
+  - its mode, its runs going on and its projects;
+  - its free resets and its sign-in.
+
+  The manager's situation has one line per account. The usage alerts, the session's spare (the offer and "Spend all until"), the autopilot and the free resets each look at the right account. A free reset carries its account (`account` in `plan_resets`; one recorded before accounts belongs to Claude Code's own configuration), and `reset-grant add ... --account <id>` records one for another account.
+- **Reading claude.ai** (optional): each account is read on a browser profile of its own, signed in to it. The account on Claude Code's own configuration keeps `data/browser-profile`, and each other account uses `data/accounts/<id>/browser-profile`, with its own sign-in window (`claude-login --account <id>` or its card in Usage). A reading only touches its own account's free resets.
+
+```json
+"accounts": [
+  { "id": "work", "name": "Work seat" },
+  { "id": "personal", "name": "Personal plan", "config_dir": "C:\\Users\\you\\.claude-personal", "max_parallel": 4, "pause_at_5h_window": 0.97 }
+],
+"default_account": "personal",
+"manager_account": "work",
+"sessions_account": "work",
+"projects": { "work-app": { "account": "work" } }
+```
+
+Leave `config_dir` out for the account Claude Code already uses on this computer (its own `~/.claude`): pointing `CLAUDE_CONFIG_DIR` at that folder would make Claude Code look for its settings in another place. Without `accounts`, Chiefmate works with Claude Code's own configuration, as before.
 
 ### Project costs
 
@@ -724,7 +759,7 @@ Every turn of Claude Code reports how much of the model's context window it fill
 
 ### Reading claude.ai (optional, off by default)
 
-Chiefmate can read your account's usage page on claude.ai, to keep the limits and the free resets up to date without you.
+Chiefmate can read your account's usage page on claude.ai, to keep the limits and the free resets up to date without you. With several Claude accounts, each one is read on a profile of its own, signed in to it (`claude-login --account <id>`; see "Two or more Claude accounts").
 
 1. `node src/cli.mjs claude-login` (or **Open the sign-in window** in the Usage section) opens a browser window (Microsoft Edge or Google Chrome) with a profile of Chiefmate's own, in `data/browser-profile`. Sign in to claude.ai there and close the window. With Chiefmate running, the window never stays open for good: after 10 minutes it closes by itself, since the reading can't use the profile while it is open. A Windows notification tells you 2 minutes before, and while you are using it (in front, with you typing or moving the mouse) it waits; it closes at the next check after you stop.
 2. Turn the reading on in the Usage section, or with `node src/cli.mjs usage-reader on`.
@@ -1004,8 +1039,10 @@ node src/cli.mjs escalation remove telegram|email   forgets that channel
 node src/cli.mjs unlock                       releases it: yours only, in a terminal on this computer, after reading what
                                               triggered it and typing UNLOCK
 node src/cli.mjs stop-project <id> [--yes]    lists a project's processes; with --yes, stops them
-node src/cli.mjs reset-grant [list]           the plan's free resets (add <YYYY-MM-DD> "<note>", used <n>, remove <n>)
-node src/cli.mjs claude-login                 signs in to claude.ai, for the optional usage reading
+node src/cli.mjs reset-grant [list]           the plan's free resets (add <YYYY-MM-DD> "<note>" [--account <id>], used <n>, remove <n>)
+node src/cli.mjs claude-login [--account <id>]  signs in to claude.ai, for the optional usage reading (one profile per account)
+node src/cli.mjs accounts                     the Claude accounts: configuration folder, usage, session and projects of each
+node src/cli.mjs account-login <id>           signs in to a Claude account (Claude Code's own sign-in, in your browser)
 node src/cli.mjs usage-reader on|off|now      turns the reading on or off, or reads now
 ```
 

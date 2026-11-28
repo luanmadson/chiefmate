@@ -1739,7 +1739,7 @@ function attnNotice(i, brief = false) {
     // the session renewing with usage to spare (src/spending.mjs): spend all until then, or not now
     : i.kind === 'spare' ? `<button type="button" class="button small" data-session-boost="on"${i.account ? ` data-account="${esc(i.account)}"` : ''}>${esc(t('Spend all until {time}', { time: clockTime(i.until) }))}</button><button type="button" class="button secondary small" data-spending-dismiss${i.account ? ` data-account="${esc(i.account)}"` : ''}>${esc(t('Not now'))}</button>`
     // an account no one signed in to yet (src/claude.mjs): its sign-in window
-    : i.kind === 'login' && i.account ? `<button type="button" class="button small" data-account-login="${esc(i.account)}">${esc(t('Sign in'))}</button>`
+    : i.kind === 'login' && i.account && offered('account-login') ? `<button type="button" class="button small" data-account-login="${esc(i.account)}">${esc(t('Sign in'))}</button>`
     : `${i.kind === 'reader-login' ? `<button type="button" class="button small" data-reader="login"${i.account ? ` data-account="${esc(i.account)}"` : ''}>${esc(t('Open the sign-in window'))}</button>` : ''}${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
   return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
       <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
@@ -3529,7 +3529,7 @@ function accountsPanel() {
     const mode = s.boost ? t('Spend all until {time}', { time: clockTime(s.boost.until) }) : s.configured?.mode === 'custom' ? t('Custom') : SESSION_MODES().find(m => m[0] === s.mode)?.[1] ?? s.mode;
     const spare = f ? t('About {left} of the window left unused at the renewal, at this pace.', { left: percent(f.left) }) : '';
     const login = a.login ?? {};
-    const signIn = login.signedOut || login.warning
+    const signIn = (login.signedOut || login.warning) && offered('account-login')
       ? `<button type="button" class="button small" data-account-login="${esc(a.id)}">${esc(login.signedOut ? t('Sign in') : t('Renew the sign-in'))}</button>`
       : '';
     const loginLine = login.signedOut ? t('Not signed in yet') : login.expires ? t('Signed in until {when}', { when: shortDate(login.expires) }) : login.checked ? t('Sign-in not read') : '';

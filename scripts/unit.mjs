@@ -2924,7 +2924,7 @@ test('Claude accounts: the list, the default, each project and session on its ow
   const config = {
     accounts: [{ id: 'team', name: 'Team' }, { id: 'Max', name: 'Max', config_dir: dir }, { id: 'max', name: 'twice' }, { id: 'bad id!' }],
     default_account: 'max', manager_account: 'team', sessions_account: 'team',
-    projects: { site: {}, atlas: { account: 'team' }, lab: { account: 'max', sessions_account: 'max' }, typo: { account: 'maxx' } },
+    projects: { site: {}, office: { account: 'team' }, lab: { account: 'max', sessions_account: 'max' }, typo: { account: 'maxx' } },
   };
   const list = listAccounts(config);
   assert.deepEqual(list.map(a => a.id), ['team', 'max'], 'an id seen before or invalid was kept');
@@ -2933,7 +2933,7 @@ test('Claude accounts: the list, the default, each project and session on its ow
   assert.deepEqual(accountEnv(list[1]), { CLAUDE_CONFIG_DIR: path.resolve(dir) });
   assert.equal(accountData(list[1]), path.join(DATA, 'accounts', 'max'));
   assert.equal(projectAccount(config, 'site').id, 'max', 'a project without "account" is on the default one');
-  assert.equal(projectAccount(config, 'atlas').id, 'team');
+  assert.equal(projectAccount(config, 'office').id, 'team');
   assert.equal(managerAccount(config).id, 'team');
   // an account missing from the settings never runs, and no other account runs in its place
   const typo = projectAccount(config, 'typo');
@@ -2944,7 +2944,7 @@ test('Claude accounts: the list, the default, each project and session on its ow
   assert.equal(openingAccount(config, { project: 'site' }).id, 'team', 'the sessions keep to the general sessions_account');
   assert.equal(openingAccount(config, { project: 'lab' }).id, 'max');
   assert.equal(openingAccount(config, { project: 'site', account: 'max' }).id, 'max');
-  assert.equal(openingAccount(config, { project: 'atlas' }, 'max').id, 'max');
+  assert.equal(openingAccount(config, { project: 'office' }, 'max').id, 'max');
   assert.equal(openingAccount({ ...config, sessions_account: undefined }, { project: 'site' }).id, 'max', "without sessions_account, the project's account");
   // a session keeps the account it opened on; one from before accounts stays on Claude Code's own configuration
   assert.equal(sessionAccount(config, { account: 'max' }).id, 'max');
