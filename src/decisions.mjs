@@ -7,6 +7,8 @@
 // ("owner_decided"; a merge is "merged" news, src/merge.mjs). A project whose work someone else reviews
 // ("merge_by_owner": false) shows its pull requests as waiting for that review, with no Approve. A push the manager
 // tried and the guard refused becomes a card too: the owner allows that one push (src/guard.mjs, takeGrant) or refuses it.
+// In a project whose owner lets its main branch go through a card ("main_push": "card"), so does a push of the main
+// branch, by the manager or by a "Work now" session, with what goes at a glance (commits, files, migrations).
 // So does a private repository the manager asks to create (cli.mjs repo-create; see repoCreate).
 // Every click is on record (recordDecision in src/store.mjs): who, when, from where, from what to what. What has had
 // no effect yet can be undone (undoDecision): the card comes back for another answer. A merge or a discard can't.
@@ -17,17 +19,19 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { attentionArchive, markSeen, unmarkSeen } from './attention.mjs';
+import { attentionArchive, mainPushNotice, markSeen, unmarkSeen } from './attention.mjs';
 import { ownerAnswered } from './charge.mjs';
 import { loadConfig } from './config.mjs';
-import { GRANT_MINUTES, plainPush, pushFacts, readPushes, repoOf, samePath } from './guard.mjs';
+import { GRANT_MINUTES, logPush, mainPushTarget, mainPushTargets, plainPush, pushesFile, pushFacts, readPushes, repoOf, samePath } from './guard.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { discardRun, mergeRun, prNumber, verdict } from './merge.mjs';
 import { refuseWhileLocked } from './lockdown.mjs';
 import { reopenRequest, requestUndoBlock } from './needs.mjs';
+import { logPower, REBOOT_CONFIRM_MINUTES, REBOOT_COUNTDOWN_S, rebootRefusal, stopSystem } from './power.mjs';
 import { newsPending, reportEvent, withdrawNews } from './news.mjs';
 import { notify } from './notify.mjs';
 import { decideItem, itemUndoBlock, undoItemDecision } from './planning.mjs';
+import { sayToSession } from './sessions.mjs';
 import { readDecisionLog, readRun, readState, recordDecision, saveDecisionLog, UNDO_GRACE_MS } from './store.mjs';
 import { localDeliveryClone } from './workspace.mjs';
 import { clip, DATA, ensureDir, now, parseLevel, readJson, ROOT, writeJson } from './util.mjs';
@@ -49,7 +53,7 @@ export const mergedByOwner = (config, project) => config?.projects?.[project]?.m
  * recommend (one of the options), project, level (the approval level, 1 to 3) }. It waits as a card until answered or
  * discarded.
  */
-export function addQuestion({ question, context, options, recommend, project, level, request = null } = {}, config = loadConfig()) {
+export function addQuestion({ question, context, options, recommend, project, level, request = null, reboot = null } = {}, config = loadConfig()) {
   const text = clip(question, 300);
   if (!text) throw new Error('The question is missing.');
   const list = (Array.isArray(options) ? options : String(options ?? '').split('|')).map(o => clip(o, 60)).filter(Boolean);
@@ -67,6 +71,8 @@ export function addQuestion({ question, context, options, recommend, project, le
     options: choices, recommend: recommended ?? null, project: id || null, level: approval, at: now(), status: 'open', answer: null, answered_at: null,
     // A request of a project's agent in charge, taken to the owner (src/charge.mjs): the answer decides it.
     ...(request != null ? { request: Number(request) } : {}),
+    // A restart of the computer the manager asked for (askReboot): its first option starts it.
+    ...(reboot ? { reboot } : {}),
   };
   saveQuestions([...questions, q]);
   return q;
@@ -113,15 +119,63 @@ export function questionNews(q) {
   return `The owner answered ${asked} from the app: "${q.answer}".${q.note ? ` And wrote: "${q.note}".` : ''}${mine}`;
 }
 
+// ---------- A restart of the computer the manager asks for ----------
+
+/**
+ * The manager's restart outside away mode: a question card, answered by the owner. Its first option starts the restart
+ * (within REBOOT_CONFIRM_MINUTES); the other, or a discard, refuses it. One open at a time: asking again gives it, or
+ * replaces it once its confirmation is no longer valid. runs: [{ title, project }]; sessions: [{ name }].
+ */
+export function askReboot({ by = 'manager', reason, runs = [], sessions = [] }, config = loadConfig()) {
+  const open = openQuestions().find(q => q.reboot);
+  if (open && !staleReboot(open)) return open;
+  if (open) {
+    closeQuestion(open.id, null);
+    logPower({ action: 'reboot', outcome: 'expired', by: open.reboot.by, reason: open.reboot.reason, question: open.id });
+  }
+  const yes = t('Restart now');
+  const context = [
+    t('Why: {reason}', { reason }),
+    runs.length ? t('Runs that pause at a safe point and resume first after the restart: {list}', { list: runs.map(r => `${r.title} (${r.project})`).join('; ') }) : t('No run is going on.'),
+    sessions.length ? t('Live sessions open (they carry on after the restart, a window opens again): {list}', { list: sessions.map(s => s.name).join('; ') }) : '',
+    t('Windows restarts after a {seconds}-second countdown, which you can cancel in the app. This confirmation is valid for {minutes} minutes.', { seconds: REBOOT_COUNTDOWN_S, minutes: REBOOT_CONFIRM_MINUTES }),
+  ].filter(Boolean).join('\n');
+  // "Don't restart", not "Not now": the card's own "Not now" only leaves it for later.
+  return addQuestion({ question: t('The manager asks to restart the computer. Restart now?'), context, options: [yes, t("Don't restart")], recommend: yes, level: 3, reboot: { by, reason, yes } }, config);
+}
+
+/** Whether the owner's answer to a restart's question is its first option (askReboot). */
+const rebootYes = (q, answer) => !!q?.reboot && same(answer, q.reboot.yes);
+/** Whether a restart's question is older than its confirmation may be (REBOOT_CONFIRM_MINUTES). */
+const staleReboot = (q, at = Date.now()) => at - Date.parse(q.at) > REBOOT_CONFIRM_MINUTES * 60_000;
+
 // ---------- The manager's pushes ----------
 // The guard refuses the manager every push. One it tried that could be allowed (a plain push of one branch, not the
 // main one, not forced) becomes a request here: the owner allows it on its card, for that repository, branch, folder
 // and source, once, within GRANT_MINUTES, or refuses it. The hook and "cli.mjs push" take the grant (src/guard.mjs).
+// The main branch, only in a project with "main_push": "card": a plain push of it alone, by the manager or by a "Work
+// now" session ("session": its id; the session takes its own grant, src/sessions.mjs), is a request like the others,
+// shown with what it carries.
 
 const PUSHES_MAX = 100;
 const PUSH_OPEN_FOR = 24 * 3600_000; // a request not answered in a day leaves the cards
-export const pushesFile = () => path.join(ensureDir(path.join(DATA, 'manager')), 'pushes.json');
+export { pushesFile };
 const cliPush = p => `node src/cli.mjs push "${p.dir.replaceAll('\\', '/')}" ${p.branch}`;
+/** A push in words, for the manager's news and a session's conversation. */
+const pushWhat = p => (p.main ? `push of the main branch ${p.branch} of ${p.project ?? p.repo} to ${p.repo}` : `push of branch ${p.branch} to ${p.repo}`);
+
+/** Tells the "Work now" session that asked for a push, in its conversation, what the owner did ("text" follows the name). */
+function tellSession(p, text) {
+  const owner = loadConfig().owner || 'The owner';
+  try {
+    sayToSession(p.session, `${owner} ${text}`);
+  } catch (error) {
+    console.error(`Decisions: session ${p.session}:`, error.message); // the answer stands; the session is gone
+  }
+}
+
+/** Whether a request still has its card: the main branch only while its project lets it go through one. */
+const mainCardOn = (config, p) => !p.main || config?.projects?.[p.project]?.main_push === 'card';
 
 /** The requests still waiting for the owner, oldest first. */
 export const openPushes = (list = readPushes(pushesFile())) => list.filter(p => p.status === 'open' && Date.now() - Date.parse(p.at) < PUSH_OPEN_FOR);
@@ -130,13 +184,14 @@ export const openPushes = (list = readPushes(pushesFile())) => list.filter(p => 
  * Turns what the guard refused in the manager's answer (its log, moved to "history" once read) into push requests: one
  * per push that could be allowed, unless the same one already waits. Returns the new requests.
  */
-export function pushRequestsFrom(log, history = null) {
+export function pushRequestsFrom(log, history = null, config = loadConfig()) {
   if (!existsSync(log)) return [];
   const text = readFileSync(log, 'utf8');
   // Every refusal stays on record, not only the pushes.
   if (history && text.trim()) appendFileSync(history, text.endsWith('\n') ? text : `${text}\n`);
   rmSync(log, { force: true });
   const lines = text.split('\n').filter(Boolean);
+  const targets = mainPushTargets(config);
   const made = [];
   for (const line of lines) {
     let entry;
@@ -146,30 +201,42 @@ export function pushRequestsFrom(log, history = null) {
       continue; // a line cut by a crash
     }
     const command = String(entry.tool_input?.command ?? '');
-    const target = plainPush(command, entry.cwd || ROOT);
+    // The main branch of a project that lets it go through a card.
+    const main = mainPushTarget(command, entry.cwd || ROOT, targets);
+    const target = main ?? plainPush(command, entry.cwd || ROOT);
     if (!target.branch) continue;
-    const facts = pushFacts(target);
-    if (!facts.repo || facts.main) continue;
-    const request = addPushRequest({ ...target, ...facts, command });
+    const facts = main?.facts ?? pushFacts(target);
+    if (!facts.repo || (facts.main && !main)) continue;
+    const request = addPushRequest({ ...target, ...facts, command, main: !!main });
     if (request) made.push(request);
   }
   return made;
 }
 
-/** A push request for the owner: { dir, remote, src, branch, repo, commits, count, command }. Null when the same one waits. */
-export function addPushRequest({ dir, remote, src, branch, repo, commits = [], count = 0, command = '' }) {
+/**
+ * A push request for the owner: { dir, remote, src, branch, repo, commits, count, files, fileCount, migrations,
+ * migrationCount, tip, command }, and for the main branch main: true and its project; session (and sessionName): the
+ * "Work now" session that asks (none: the manager). Null when the same one waits.
+ */
+export function addPushRequest({ dir, remote, src, branch, repo, commits = [], count = 0, files = [], fileCount = 0, migrations = [], migrationCount = 0, tip = '', command = '', main = false, project = null, session = null, sessionName = null }) {
   const list = readPushes(pushesFile());
-  const same = p => p.repo === repo && p.branch === branch && p.src === src && samePath(p.dir, dir);
+  const same = p => p.repo === repo && p.branch === branch && p.src === src && samePath(p.dir, dir) && (p.session ?? null) === (session ?? null);
+  // The commit the source is at goes with what the card shows: a grant of the main branch serves only that one (src/guard.mjs, grantFor).
+  const what = { commits: commits.slice(0, 20), count, files: files.slice(0, 20), fileCount, migrations: migrations.slice(0, 20), migrationCount, tip, command: clip(command, 500) };
   const open = openPushes(list).find(same);
   if (open) {
     // Tried again: what it would send now.
-    Object.assign(open, { commits: commits.slice(0, 20), count, command: clip(command, 500) });
+    Object.assign(open, what);
     writeJson(pushesFile(), list);
     return null;
   }
-  const request = { id: randomUUID().slice(0, 8), status: 'open', repo, branch, dir, remote, src, commits: commits.slice(0, 20), count, command: clip(command, 500), at: now() };
+  const request = {
+    id: randomUUID().slice(0, 8), status: 'open', repo, branch, dir, remote, src, ...what,
+    ...(main ? { main: true, project } : {}), ...(session ? { session, sessionName: sessionName ?? session } : {}), at: now(),
+  };
   writeJson(pushesFile(), [...list, request].slice(-PUSHES_MAX));
-  notify(t('The manager asks to push'), t('Branch {branch} to {repo}', { branch, repo }), 'chiefmate:decisions', { urgent: true });
+  const notice = main ? mainPushNotice(request, loadConfig()) : null;
+  notify(notice?.title ?? t('The manager asks to push'), notice?.text ?? t('Branch {branch} to {repo}', { branch, repo }), 'chiefmate:decisions', { urgent: true });
   return request;
 }
 
@@ -202,12 +269,13 @@ export const answerPush = (id, allow) => answerRequest(pushesFile(), openPushes,
 
 /** The manager's line: its push requests waiting for the owner, and the pushes allowed and not used yet. */
 export function pushesLine() {
-  const list = readPushes(pushesFile());
+  const list = readPushes(pushesFile()).filter(p => !p.session);
   const open = openPushes(list);
   const allowed = list.filter(p => p.status === 'allowed' && Date.parse(p.expires) > Date.now());
+  const which = p => (p.main ? `the main branch ${p.branch}` : p.branch);
   const parts = [
-    open.length ? `waiting for the owner's card: ${open.map(p => `${p.branch} to ${p.repo}`).join('; ')}` : '',
-    allowed.length ? `allowed by the owner, once each: ${allowed.map(p => `${p.branch} to ${p.repo} from ${p.dir}, until ${formatDateTime(p.expires)} (${cliPush(p)})`).join('; ')}` : '',
+    open.length ? `waiting for the owner's card: ${open.map(p => `${which(p)} to ${p.repo}`).join('; ')}` : '',
+    allowed.length ? `allowed by the owner, once each: ${allowed.map(p => `${which(p)} to ${p.repo} from ${p.dir}, until ${formatDateTime(p.expires)} (${cliPush(p)})`).join('; ')}` : '',
   ].filter(Boolean);
   return parts.length ? `Your pushes: ${parts.join('. ')}.` : '';
 }
@@ -444,10 +512,37 @@ function questionCard(notice, q, config) {
     label: q.project ? t('Question from the manager about {project}', { project: projectName(config, q.project) }) : t('Question from the manager'),
     title: q.question, what: q.context, change: '', risk: '', recommend: q.recommend ?? '', recommendShort: q.recommend ?? '', detail: '',
     question: q.id, options: q.options, approve: false, approval: q.level ?? null,
+    // A restart's question: its yes takes a strong confirmation in the app, as shutting down does.
+    restartYes: q.reboot?.yes ?? null,
+  };
+}
+
+// A list for a card's details: up to its first items, and how many more.
+const listed = (title, items, total, code = false) => (items?.length
+  ? `${title}:\n- ${items.map(x => (code ? `\`${x}\`` : x)).join('\n- ')}${total > items.length ? `\n- ${t('and {count} more', { count: total - items.length })}` : ''}`
+  : '');
+
+// A push of the main branch: its title says at a glance what goes (commits, files, migrations).
+function mainPushCard(notice, p, config) {
+  const who = p.session ? t('the session "{name}"', { name: p.sessionName ?? p.session }) : t('the manager');
+  return {
+    id: notice.id, kind: 'push', level: notice.level, seen: false, at: p.at, project: p.project ?? null,
+    label: t('Main branch of {project}, asked by {who}', { project: projectName(config, p.project) || p.repo, who }),
+    title: t('Send the main branch ({branch}) to GitHub: {count} commit(s), {files} file(s), {migrations} migration(s)', { branch: p.branch, count: p.count ?? 0, files: p.fileCount ?? 0, migrations: p.migrationCount ?? 0 }),
+    what: t('From {folder} straight into the main branch {branch} of {repo}, with no pull request.', { folder: p.dir, branch: p.branch, repo: p.repo }),
+    change: t('Only this push is allowed: the main branch of this repository, from this folder, with exactly the commits listed, once, within {minutes} minutes; {who} then sends it. A new commit needs a new card. Never a forced push, never a deleted branch.', { minutes: GRANT_MINUTES, who }),
+    risk: [
+      t('Whoever uses the main branch gets these commits at once, and undoing them takes a new commit.'),
+      p.migrationCount ? t('It carries {count} migration(s): the database changes wherever this is applied.', { count: p.migrationCount }) : '',
+    ].filter(Boolean).join(' '),
+    recommend: '', recommendShort: '',
+    detail: [listed(t('Commits'), p.commits, p.count), listed(t('Migrations'), p.migrations, p.migrationCount, true), listed(t('Files'), p.files, p.fileCount, true), `${t('Command')}: \`${p.command}\``].filter(Boolean).join('\n\n'),
+    push: p.id, approve: true, main: true, session: p.session ?? null, approval: 3,
   };
 }
 
 function pushCard(notice, p, config) {
+  if (p.main) return mainPushCard(notice, p, config);
   const project = Object.entries(config.projects ?? {}).find(([, x]) => x.repository && repoOf(x.repository) === p.repo)?.[0] ?? null;
   const more = p.count > (p.commits?.length ?? 0) ? `\n- ${t('and {count} more', { count: p.count - p.commits.length })}` : '';
   const commits = p.commits?.length ? `${t('Commits')}:\n- ${p.commits.join('\n- ')}${more}` : '';
@@ -493,7 +588,7 @@ export function decisionCards({ config = loadConfig(), attention = [], items = [
         if (r) cards.push(repoCard(n, r));
       } else if (n.kind === 'push') {
         const p = pushes.find(x => n.id === `push:${x.id}`);
-        if (p) cards.push(pushCard(n, p, config));
+        if (p && mainCardOn(config, p)) cards.push(pushCard(n, p, config));
       } else if (n.kind === 'question') {
         const q = questions.find(x => n.id === `question:${x.id}`);
         if (q) cards.push(questionCard(n, q, config));
@@ -572,11 +667,18 @@ export async function decide({ card, action, option, note, reason, via = 'app' }
     return { card: c.id, done: action === 'approve' ? 'approved' : 'discarded', logged: item.logged };
   } else if (c.kind === 'push' && ['approve', 'discard'].includes(action)) {
     const p = answerPush(c.push, action === 'approve');
+    const what = pushWhat(p);
+    if (p.status === 'allowed') logPush(pushesFile(), 'allowed', p);
     let news = null;
-    if (p.status === 'allowed') {
-      reportEvent('push_allowed', `The owner allowed, from the app, your push of branch ${p.branch} to ${p.repo} (from ${p.dir}), once, until ${formatDateTime(p.expires)}. Run it now: the same command (${p.command}) or ${cliPush(p)}.`, { urgent: true });
+    // A "Work now" session hears it in its conversation, as a message from the app; the manager, as news.
+    if (p.session) {
+      tellSession(p, p.status === 'allowed'
+        ? `allowed, on its card in the Chiefmate app, your ${what} (from ${p.dir}), once, until ${formatDateTime(p.expires)}. Run the same command again now: ${p.command}`
+        : `refused, on its card in the Chiefmate app, your ${what} (from ${p.dir}). Don't try it again.`);
+    } else if (p.status === 'allowed') {
+      reportEvent('push_allowed', `The owner allowed, from the app, your ${what} (from ${p.dir}), once, until ${formatDateTime(p.expires)}. Run it now: the same command (${p.command}) or ${cliPush(p)}.`, { urgent: true });
     } else {
-      news = tell(`The owner refused, from the app, your push of branch ${p.branch} to ${p.repo} (from ${p.dir}). Don't try it again.`, ref);
+      news = tell(`The owner refused, from the app, your ${what} (from ${p.dir}). Don't try it again.`, ref);
     }
     return { card: c.id, done: p.status, logged: log({ to: p.status, undo: { push: p.id } }, news) };
   } else if (c.kind === 'repo' && ['approve', 'discard'].includes(action)) {
@@ -590,7 +692,36 @@ export async function decide({ card, action, option, note, reason, via = 'app' }
     return { card: c.id, done: r.status, logged: log({ to: r.status, undo: { repo: r.id } }, news) };
   } else if (c.kind === 'question' && ['answer', 'discard'].includes(action)) {
     if (action === 'answer' && !String(option ?? '').trim() && !String(note ?? '').trim()) throw new Error(t('Choose an option or write your answer.'));
+    // A restart confirmed: still fresh, and nothing forbids it now (else the card stays open, with the reason).
+    const asked = readQuestions().find(x => x.id === c.question);
+    if (action === 'answer' && rebootYes(asked, option)) {
+      if (staleReboot(asked)) {
+        closeQuestion(asked.id, null);
+        logPower({ action: 'reboot', outcome: 'expired', by: asked.reboot.by, reason: asked.reboot.reason, question: asked.id });
+        tell(`The owner confirmed your restart of the computer (question #${asked.id}) over ${REBOOT_CONFIRM_MINUTES} minutes after you asked: it was not done. Ask again if it is still needed.`);
+        throw new Error(t('This restart was asked over {minutes} minutes ago: it was not done. The manager may ask again if it is still needed.', { minutes: REBOOT_CONFIRM_MINUTES }));
+      }
+      const refusal = rebootRefusal({ reason: asked.reboot.reason });
+      if (refusal) throw new Error(refusal);
+    }
     const q = action === 'answer' ? closeQuestion(c.question, option ?? null, note) : closeQuestion(c.question, null);
+    if (q.reboot) {
+      if (rebootYes(q, q.answer)) {
+        try {
+          stopSystem('reboot', { by: q.reboot.by, reason: q.reboot.reason, confirmedBy: 'owner' });
+        } catch (error) {
+          logPower({ action: 'reboot', outcome: 'failed', by: q.reboot.by, reason: q.reboot.reason, why: error.message });
+          tell(`The owner confirmed your restart of the computer (question #${q.id}), but it could not start: ${error.message}`);
+          throw error;
+        }
+        // What the owner wrote with the yes reaches the manager too.
+        if (q.note) tell(questionNews(q));
+        // On record; a restart started can't be undone (its countdown is cancelled in the app's power dialog).
+        log({ to: q.status, answer: [q.answer, q.note].filter(Boolean).join(' — ') || null });
+        return { card: c.id, done: 'answered', answer: q.answer, note: q.note ?? null, run: null, reboot: true };
+      }
+      logPower({ action: 'reboot', outcome: 'refused', by: q.reboot.by, reason: q.reboot.reason, why: 'the owner did not confirm it' });
+    }
     // A request of an agent in charge follows the answer by itself: authorized, on hold or refused.
     const followed = q.request ? await ownerAnswered(q).then(x => x.request, error => ({ error: error.message })) : null;
     const request = !followed ? '' : followed.error
@@ -681,12 +812,18 @@ export function undoDecision(id, { by = 'owner', via = 'app' } = {}) {
   else if (entry.kind === 'plan') undoItemDecision(entry);
   else if (entry.kind === 'request') reopenRequest(entry);
   else if (entry.kind === 'question') reopenQuestion(entry.undo.question, entry.to);
-  else if (entry.kind === 'push') reopenRequestIn(pushesFile(), openPushes, entry.undo.push, entry.to);
   else if (entry.kind === 'repo') reopenRequestIn(reposFile(), openRepoRequests, entry.undo.repo, entry.to);
+  const allowed = ['push', 'repo'].includes(entry.kind) && entry.to === 'allowed';
+  // A push: its grant is taken back on record, and a "Work now" session that asked hears of it in its conversation.
+  const push = entry.kind === 'push' ? reopenRequestIn(pushesFile(), openPushes, entry.undo.push, entry.to) : null;
+  if (push && allowed) logPush(pushesFile(), 'taken back', push);
   // Its news, not read yet, goes back; already read (or a permission given), the manager hears of the change.
   const withdrawn = withdrawNews(entry.news);
-  const allowed = ['push', 'repo'].includes(entry.kind) && entry.to === 'allowed';
-  if (!withdrawn && (allowed || entry.news)) {
+  if (push?.session) {
+    tellSession(push, allowed
+      ? `took back, in the Chiefmate app, the permission for your ${pushWhat(push)} (from ${push.dir}): don't run it; it waits for their decision again.`
+      : `undid, in the Chiefmate app, the refusal of your ${pushWhat(push)} (from ${push.dir}): it waits for their decision again.`);
+  } else if (!withdrawn && (allowed || entry.news)) {
     tell(allowed
       ? `The owner took back, from the app, the permission they gave for ${entry.label} "${entry.title}": don't do it; it waits for their decision again.`
       : `The owner undid, from the app, their decision on ${entry.label} "${entry.title}" (${entry.from} → ${entry.to}): it is back to ${entry.from}, waiting for their new decision. Ignore the earlier news about it.`, null, allowed);

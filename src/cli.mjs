@@ -6,6 +6,7 @@ import { loadConfig, saveConfig } from './config.mjs';
 import { fullReport, outcomeMarkdown } from './digest.mjs';
 import { formatDateTime, formatDuration } from './i18n.mjs';
 import { notify } from './notify.mjs';
+import { forAgent, ownerHeaders } from './owner.mjs';
 import { listRuns, readRun, stepsOf } from './store.mjs';
 import { DATA, ensureDir } from './util.mjs';
 
@@ -16,7 +17,7 @@ const option = name => {
 };
 const has = name => rest.includes(name);
 // The words of a command that are not options nor their values ("--title <text>").
-const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--level', '--note', '--recommend', '--project', '--tool', '--from', '--description'];
+const VALUED = ['--origin', '--plan', '--modules', '--title', '--summary', '--level', '--note', '--recommend', '--project', '--run', '--tool', '--from', '--description', '--for', '--until', '--before', '--instruction-append', '--agent', '--step', '--example', '--reason'];
 const words = () => rest.filter((x, i) => !x.startsWith('--') && !VALUED.includes(rest[i - 1]));
 /** The title and summary given with --title and --summary: nothing is generated for them. */
 const brief = () => ({ title: option('--title'), summary: option('--summary'), level: option('--level'), tool: option('--tool') });
@@ -24,13 +25,14 @@ const brief = () => ({ title: option('--title'), summary: option('--summary'), l
 const port = () => Number(process.env.CHIEFMATE_PORT) || loadConfig().port || 4747;
 const work = run => formatDuration(stepsOf(run).reduce((sum, s) => sum + (s.durationMs ?? 0), 0));
 
+// The owner's terminal sends the owner's key (src/owner.mjs); an agent's command, never.
 async function api(route, body) {
   const r = await fetch(
     `http://localhost:${port()}${route}`,
-    body ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1' }, body: JSON.stringify(body) } : {},
+    body ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1', ...ownerHeaders() }, body: JSON.stringify(body) } : {},
   );
   const data = await r.json();
-  if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
+  if (!r.ok) throw new Error(data.owner ? `${data.error}\nIt goes only from the app, or from a command the owner runs in a terminal on this computer.` : data.error ?? `HTTP ${r.status}`);
   return data;
 }
 
@@ -95,6 +97,13 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs tools [--json]               how Codex and Grok did on the crew's steps (data/manager/tools-quality.jsonl):
                                                 by tool and kind of task, how many, % approved with no correction, mean time
   node src/cli.mjs level <run id> <1|2|3|none>  sets (or clears) the approval level of a run
+  node src/cli.mjs effort [<agent>] [low|medium|high|xhigh|max|default] [--project <id>] [--chat]
+                                                each agent's effort (docs/effort.md), or changes one: for the
+                                                installation, or that project only with --project; --chat: the
+                                                manager's conversation; default: back to the level before it.
+                                                Counts from the next step and is recorded (effort history)
+  node src/cli.mjs effort history [--project <id>]
+                                                the recorded effort changes: who, when, from and to
   node src/cli.mjs plan [list] [--project <id>] [--status <s>] [--priority <p>] [--all]
                                                 the planning board: open items by priority (--all: done and archived too)
   node src/cli.mjs plan add <project> "<title>" [--priority high|medium|low] [--status <s>] [--description "<text>"]
@@ -138,7 +147,15 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs chat [n]                     the conversation with the manager: the last n messages (10), what it is
                                                 doing now and the messages waiting in the queue
   node src/cli.mjs chat say "<message>"         writes to the manager; while it answers, the message waits in the queue
-                                                and goes with the others, in order, when the answer ends
+                                                and goes with the others, in order, when the answer ends. From a live
+                                                session or a step, it goes as that agent's message (CHIEFMATE_SESSION,
+                                                --from <session id>, or the step's run), never as the owner's
+  node src/cli.mjs defect report "<text>"       an agent reports a defect of Chiefmate or of the communication between
+                                                agents (also chat say --defect): recorded in data/defects.json, repeats
+                                                joined, and the manager hears of it with its news
+  node src/cli.mjs defect list [--all]          the open defects (--all: the closed too)
+  node src/cli.mjs defect close <id> [--note "..."]
+                                                the manager (or the owner) closes a defect once its fix is in
   node src/cli.mjs chat edit <id> "<message>"   changes a message still in the queue (chat remove <id> takes it out)
   node src/cli.mjs chat interrupt               ends the current answer (the conversation goes on); the queue goes next
   node src/cli.mjs session [<profile>] [--window] [--dry-run]
@@ -158,6 +175,24 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs cancel <id>                  cancels a run
   node src/cli.mjs resume <id> [--ignore-limits]
                                                 resumes a paused, failed or canceled run
+  node src/cli.mjs queue [list]                 the queue in the order it runs, numbered, with the runs on hold
+  node src/cli.mjs queue move <run> --before <run> | --top
+                                                moves a run in the queue (one per project still runs at a time)
+  node src/cli.mjs queue hold <run>             holds a run in the queue without canceling it; queue release <run>
+                                                lets it go again, in the same place
+  node src/cli.mjs edit <run> [--instruction-append "<text>"] [--title "..."] [--summary "..."] [--agent <member>]
+                            [--tool claude|codex|grok|""] [--level 1|2|3|none]
+                                                changes a run still in the queue: more instructions for its steps, its
+                                                title, summary, agent (of its crew steps), tool or approval level
+  node src/cli.mjs guide <run> "<message>"      the manager's guidance to the agent at work on a run: it reaches the
+                                                agent at a safe point, recorded as the manager's (the app shows it)
+  node src/cli.mjs retry <run> [--step n] [--agent <member>] [--tool claude|codex|grok|""]
+                                                redoes one step of a run that failed, was canceled or paused (by
+                                                default the first one not done), with another agent or tool if given;
+                                                the reviews after it run again
+  node src/cli.mjs gap "<what was missing>" [--example "<command>"]
+                                                records a tool the manager needed and Chiefmate lacks; the second time,
+                                                it becomes a proposal on the planning board. gap list; gap close <n>
   node src/cli.mjs ask-owner "<question>" [--context "<explanation>"] [--options "Yes|No|Wait"] [--recommend <option>] [--project <id>]
                             [--level 1|2|3]
                                                 the manager's question for the owner: a card in the app with one button
@@ -167,16 +202,33 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 the requests the agents in charge of the projects sent from their talk
                                                 with the owner (--all: answered ones too)
   node src/cli.mjs request show <id>            one request: what the owner asked, the plan, size, risk, urgency, answers
-  node src/cli.mjs request <id> approve|hold|ask-owner|reject [--note "<why>"] [--recommend approve|hold|reject]
-                     [--title "..."] [--summary "..."]
-                                                the manager's answer: approve queues the work for the project (an "ask"
-                                                for a team lead, else a task with your review), hold leaves it waiting,
-                                                ask-owner makes it a card in Decisions, reject refuses it (--note is
-                                                required except to approve); the answer goes back to the conversation
-  node src/cli.mjs merge <id> [--yes]           merges a finished run's work, only with the owner's authorization: shows
+  node src/cli.mjs request <id> approve|hold|ask-owner|forward|in-progress|reject [--note "<why>"]
+                     [--project <id>] [--run <id>] [--recommend approve|hold|reject] [--title "..."] [--summary "..."]
+                                                approve queues work (use --project to choose where); hold leaves it waiting;
+                                                ask-owner opens a card in Decisions; forward links to a project or run;
+                                                in-progress links to an active run; reject refuses it. --note is required
+                                                except to approve. The answer goes back to the conversation.
+  node src/cli.mjs merge <id> [--yes] [--save-pending]
+                                                merges a finished run's work, only with the owner's authorization: shows
                                                 the pull request (or the branch delivered locally), the checks and the
                                                 review's verdict; with --yes, Chiefmate merges it (a pull request on
-                                                GitHub; a local branch into your clone's base branch, nothing pushed)
+                                                GitHub; a local branch into your clone's base branch, nothing pushed).
+                                                --save-pending: a local merge into a clone with changes not committed
+                                                first saves its changed tracked files (never the untracked ones) in one
+                                                commit with a neutral message, only when nothing conflicts
+  node src/cli.mjs calls                        for the manager: the owner's open calls (needs-you) of the runs, oldest
+                                                first, with the parked runs
+  node src/cli.mjs calls done <run> <request> --owner-said "<the owner's words>"
+                                                for the manager, in its conversation only: marks a call done on what the
+                                                owner told it (their words, as written to the manager), recorded in the
+                                                request, the step's log and the run's conversation
+  node src/cli.mjs calls park <run> [<request>]  parks a run that waits for the owner: its step pauses at a safe point
+                                                with its work committed, its project's next run takes the turn, and it
+                                                resumes first once the owner answers
+  node src/cli.mjs quarantine [release <project>]
+                                                the projects waiting for a file the antivirus probably quarantined (the
+                                                queue waits and checks again every few minutes); release lifts a hold
+                                                without the file
   node src/cli.mjs push <folder> <branch>       for the manager: the push the owner allowed on its card (that branch,
                                                 from that folder, once, within 30 minutes; never the main branch, never
                                                 forced). Without the owner's grant it refuses and sends nothing
@@ -203,8 +255,26 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 from standby. stop: pauses everything at a safe point, closes the crew's
                                                 browsers and processes and ends Chiefmate (the watchdog leaves it off;
                                                 the next start resumes the work). shutdown: the same, then Windows shuts
-                                                down after a 60-second countdown. cancel: stops a stop or shutdown going
-                                                on. Without --yes, only shows what would happen
+                                                down after a 60-second countdown. cancel: stops a stop, shutdown or
+                                                restart going on. Without --yes, only shows what would happen
+  node src/cli.mjs reboot --reason "<why>" [--yes]
+                                                restarts the computer (the manager's, or your terminal's): shows what
+                                                stops; with --yes, pauses everything at a safe point as for an update,
+                                                tells you and restarts Windows after a 2-minute countdown. Back after the
+                                                restart, the paused runs resume first and the live sessions carry on.
+                                                Refused while a live session's turn goes on; outside away mode, the
+                                                manager's waits for your yes on a card
+  node src/cli.mjs reboot history               the restarts asked for: who, why and how each went
+  node src/cli.mjs focus [status]               the owner's focus: which projects may start new work
+  node src/cli.mjs focus <project...> | off | pause-all [--for 2h | --until 08:00] [--pause-running]
+                                                focus: only these projects start new work (the others' runs and
+                                                missions wait; a mission missed meanwhile runs once after); off: no
+                                                restriction; pause-all: nothing new starts. The owner's live sessions
+                                                are never held. --for/--until: back to the state before by itself.
+                                                --pause-running: the runs going on of the projects held pause at a safe
+                                                point (else they finish). For the manager, only at the owner's request
+  node src/cli.mjs project-pause <project> [--for 2h | --until 08:00] [--pause-running]
+  node src/cli.mjs project-resume <project>     pauses one project (no new run starts there), or frees it
   node src/cli.mjs history [n]                  the latest runs
   node src/cli.mjs report <id>                  the report of each step of a run
   node src/cli.mjs context <id> [step]          what each step received: prompt, model, tools, folders, MCP servers
@@ -214,11 +284,15 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 changed since each member's last run. --short leaves the texts out
   node src/cli.mjs needs-you "<what to do>" [--url <address>] [--wait] [--check "<command>"] [--id <request>]
                                                 for a step of a run: asks the owner to act and, with --wait, waits
-                                                until they click "I did it" (or the check command succeeds)
+                                                until they click "I did it" (or the check command succeeds), at most
+                                                needs_you.max_wait_minutes (30 by default), not at all in away mode or
+                                                once the owner clicks "Not now"
   node src/cli.mjs needs-you "<question>" --options "A|B" [--recommend A] [--why "<one sentence>"]
                                                 for a step of a run: asks the owner to choose, one button per option
                                                 (the recommended one marked) and a field to write, and waits for the
                                                 answer: the option, what the owner wrote, or both
+  node src/cli.mjs say "<one short line>"       for a step of a run: what the agent is doing and why, in the first
+                                                person, shown in its speech bubble in the app
   node src/cli.mjs prompts-sync                 brings the prompt builder's document up to date: the library's copy
                                                 (git), or a copy from Google Docs through your browser
   node src/cli.mjs limits [--window-5h 0.85] [--plan-week 0.9]
@@ -231,12 +305,14 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs reset-grant used <n>         marks free reset number n as used (remove <n> deletes it)
   node src/cli.mjs claude-login                 opens a browser window to sign in to claude.ai, for the optional usage reading
   node src/cli.mjs autopilot [on|off] [--mode save|normal|all] [--week-pace 1.2|all] [--window-5h 0.85]
-                           [--quiet 23:00-07:00|off] [--report 08:00|off]
+                           [--quiet 23:00-07:00|off] [--report 08:00|off] [--session save|normal|all]
                                                 the autopilot: when a project's queue empties, the manager puts its next
                                                 item triaged "now" on the queue, within these limits (mode: the week's
                                                 pace, ending it at 90%, 100% or with no pace; --week-pace: any share,
-                                                above 1 too); with no option, its settings, whether it may act now and
-                                                what it did in the last day
+                                                above 1 too); --session: the session's mode (1 run at a time with no
+                                                early pause, the settings' defaults, or 4 at a time pausing at 97%);
+                                                with no option, its settings, whether it may act now, what it did in
+                                                the last day, both spending modes and what the session will leave unused
   node src/cli.mjs usage-reader on|off|now      turns the reading of claude.ai's usage page on or off, or reads it now
   node src/cli.mjs watch [--dry-run] [--json]   the watchdog's check, run every 10 minutes by the Windows task "Watchdog":
                                                 whether Chiefmate answers, a stuck queue, run or update, the live sessions,
@@ -287,9 +363,15 @@ async function needsYou() {
     if (s.status === 'done') {
       // The option chosen and/or what the owner wrote (an explanation, or an answer of their own instead of an option).
       if (s.answer && s.note) console.log(`The owner answered you from the app:\n${s.answer}\n\nAnd wrote:\n${s.note}\n\nTake the answer into account and go on.`);
-      else if (s.note) console.log(`The owner answered you from the app in their own words (none of the options):\n${s.note}\n\nTake the answer into account and go on.`);
+      else if (s.note) console.log(`The owner answered you from the app${s.question ? ' in their own words (none of the options)' : ''}:\n${s.note}\n\nTake the answer into account and go on.`);
       else if (s.answer) console.log(`The owner answered you from the app:\n${s.answer}\n\nTake the answer into account and go on.`);
+      else if (s.ownerSaid) console.log(`Done: the owner told the manager in their conversation: "${s.ownerSaid}". Take it into account and go on.`);
       else console.log(s.by === 'check' ? 'Done: the check succeeded.' : 'Done: the owner says they did it. Go on.');
+      return;
+    }
+    if (s.parked) {
+      // Parked (src/needs.mjs): the session stops at this safe point and resumes with the owner's answer.
+      console.log("Chiefmate parked this run until the owner answers, so the project's next run can use its turn. Stop here and don't write your report now: this session resumes with the owner's answer.");
       return;
     }
     if (s.status === 'closed') {
@@ -297,8 +379,12 @@ async function needsYou() {
       process.exitCode = 2;
       return;
     }
-    if (s.timedOut) {
-      console.log(`No answer within ${s.maxWaitMinutes} min. The request stays open until the run ends. Finish what you can and say in your report what is left for the owner.`);
+    // The wait ended without an answer (src/needs.mjs): the step goes on with what it can, the request stays open.
+    const goOn = "Your request stays open until the run ends. Go on with what you can without it, don't decide for the owner what you asked them, and say in your report what is left for the owner.";
+    if (s.later || s.away || s.timedOut) {
+      if (s.later) console.log(`The owner can't see to it now ("Not now" in the app): stop waiting. ${goOn}`);
+      else if (s.away) console.log(`The owner is away (away mode): Chiefmate doesn't wait for them. ${goOn}`);
+      else console.log(`No answer within ${s.maxWaitMinutes} min. ${goOn}`);
       process.exitCode = 2;
       return;
     }
@@ -319,6 +405,50 @@ async function needsYou() {
   }
 }
 
+/**
+ * Who runs the command, when an agent does: a live session (--from <session id>, or CHIEFMATE_SESSION, which
+ * Chiefmate gives its sessions) or a step of a run (CHIEFMATE_RUN and CHIEFMATE_STEP). Null for the owner's terminal.
+ */
+function agentFrom() {
+  const session = option('--from') || process.env.CHIEFMATE_SESSION;
+  if (session) return { session };
+  if (process.env.CHIEFMATE_RUN) return { run: process.env.CHIEFMATE_RUN, step: process.env.CHIEFMATE_STEP };
+  return null;
+}
+
+/** Records a defect of Chiefmate (src/defects.mjs): through the running Chiefmate, or on disk when it is off. */
+async function reportDefectCommand(text, from = agentFrom()) {
+  if (!String(text ?? '').trim()) throw new Error('Which defect? node src/cli.mjs defect report "<what happened. Expected: what should have happened>"');
+  const r = await apiOr('/api/defect', { text, from: from ?? {} }, async () => {
+    const { agentSender } = await import('./manager.mjs');
+    return (await import('./defects.mjs')).reportDefect(text, agentSender(from ?? {}));
+  });
+  console.log(r.repeated
+    ? `Defect #${r.defect.id} was already open: your report was joined to it (${r.defect.count} reports).`
+    : `Defect #${r.defect.id} recorded; the manager hears of it with its next news.`);
+}
+
+/** "defect": the defects of Chiefmate the agents report on their own; the manager (or the owner) closes them. */
+async function defectCommand() {
+  const [action = 'list', id] = words();
+  const { readDefects, senderLabel } = await import('./defects.mjs');
+  if (action === 'report') return reportDefectCommand(words().slice(1).join(' '));
+  if (action === 'list') {
+    const all = readDefects().filter(d => has('--all') || d.status === 'open');
+    if (!all.length) console.log(has('--all') ? 'No defects.' : 'No open defect.');
+    for (const d of all) console.log(`#${String(d.id).padEnd(3)} ${d.status.padEnd(6)} ${d.count}x, last ${formatDateTime(d.last)} by ${senderLabel(d.reporters?.at(-1))}\n     ${d.text.replace(/\s+/g, ' ')}${d.note ? `\n     Closed: ${d.note}` : ''}`);
+    return;
+  }
+  if (action === 'close') {
+    if ((process.env.CHIEFMATE_RUN || process.env.CHIEFMATE_SESSION) && !process.env.CHIEFMATE_MANAGER) throw new Error('Only the manager (or the owner) closes a defect.');
+    const by = process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner';
+    const r = await apiOr('/api/defect/close', { id, note: option('--note'), by }, async () => ({ defect: (await import('./defects.mjs')).closeDefect(id, option('--note'), by) }));
+    console.log(`Defect #${r.defect.id} closed.`);
+    return;
+  }
+  throw new Error('Use: defect report "<text>" | list [--all] | close <id> [--note "<what fixed it>"]');
+}
+
 /** "chat": the conversation with the manager, through the running Chiefmate. */
 async function chatCommand() {
   const [action, ...args] = rest;
@@ -328,8 +458,13 @@ async function chatCommand() {
   }
   switch (action) {
     case 'say': {
-      const m = await api('/api/manager', { message: args.join(' ') });
+      const message = words().slice(1).join(' ');
+      const from = agentFrom();
+      // A defect of Chiefmate goes to its own record (--defect, or "[Defect]" written by an agent): see "defect".
+      if (has('--defect') || (from && /^\s*\[(defect|defeito)\]/i.test(message))) return reportDefectCommand(message, from);
+      const m = await api('/api/manager', { message, ...(from ? { from } : {}) });
       console.log(m.queued ? `Queued (${m.position} waiting, id ${m.id}): it goes when the manager finishes its answer.` : 'Sent. The manager is answering: node src/cli.mjs chat');
+      if (from) console.log("Marked as an agent's message, not the owner's.");
       return;
     }
     case 'edit':
@@ -347,14 +482,23 @@ async function chatCommand() {
       if (action && !/^\d+$/.test(action)) throw new Error('Use: chat [n] | say "<message>" | edit <id> "<message>" | remove <id> | interrupt');
       const g = (await api('/api/state')).manager;
       const who = { you: 'You', manager: 'Manager', system: 'Chiefmate' };
+      const { senderLabel } = await import('./defects.mjs');
       for (const m of g.messages.slice(-(Number(action) || 10))) {
+        if (m.who === 'agent') {
+          console.log(`[${time(m.at)}] Agent, not you (${senderLabel(m.sender)}):\n${m.text}\n`);
+          continue;
+        }
         const extra = [m.news ? `notice: ${m.news.join(', ')}` : '', m.queued ? `delivered ${time(m.delivered)}` : '', m.interrupted ? 'interrupted' : ''].filter(Boolean).join(', ');
         console.log(`[${time(m.at)}] ${who[m.who] ?? m.who}${extra ? ` (${extra})` : ''}:\n${m.text}\n`);
       }
       if (g.responding) {
         console.log(`Now: ${g.context?.renewing ? 'renewing the conversation' : 'answering'} since ${time(g.since)}.${g.lastAction ? ` Last action, ${time(g.lastAction.at)}: ${g.lastAction.text}` : ''}`);
       } else console.log('Now: waiting for you.');
-      for (const m of g.pending) console.log(m.from === 'chiefmate' ? `In the queue [${m.id}], Chiefmate's news for the manager since ${time(m.at)}: ${m.text}` : `In the queue [${m.id}], sent ${time(m.at)}${m.edited ? ', edited' : ''}: ${m.text}`);
+      for (const m of g.pending) {
+        console.log(m.from === 'chiefmate' ? `In the queue [${m.id}], Chiefmate's news for the manager since ${time(m.at)}: ${m.text}`
+          : m.from === 'agent' ? `In the queue [${m.id}], from ${senderLabel(m.sender)}, sent ${time(m.at)}: ${m.text}`
+            : `In the queue [${m.id}], sent ${time(m.at)}${m.edited ? ', edited' : ''}: ${m.text}`);
+      }
     }
   }
 }
@@ -363,7 +507,8 @@ async function chatCommand() {
 async function requestCommand() {
   const { readRequests } = await import('./charge.mjs');
   const [first = 'list', second] = words();
-  const line = r => `#${String(r.id).padEnd(3)} ${r.status.padEnd(8)} ${r.project}: ${r.plan.replace(/\s+/g, ' ').slice(0, 100)}  (${r.size}, risk ${r.risk}${r.urgency ? ', now' : ''}${r.level ? `, level ${r.level}` : ''}${r.run ? `, run ${r.run}` : ''})`;
+  const destination = r => r.run ? `run ${r.run}` : r.targetProject ? `project ${r.targetProject}` : '';
+  const line = r => `#${String(r.id).padEnd(3)} ${r.status.padEnd(11)} ${r.project}: ${r.plan.replace(/\s+/g, ' ').slice(0, 100)}  (${r.size}, risk ${r.risk}${r.urgency ? ', now' : ''}${r.level ? `, level ${r.level}` : ''}${destination(r) ? `, ${destination(r)}` : ''})`;
   if (first === 'list') {
     const all = readRequests().filter(r => (!option('--project') || r.project === option('--project')) && (has('--all') || ['pending', 'waiting', 'owner'].includes(r.status)));
     if (!all.length) console.log(has('--all') ? 'No requests.' : 'No request waiting for an answer.');
@@ -378,14 +523,18 @@ async function requestCommand() {
     console.log(`  Asked (by the owner, ${formatDateTime(r.at)}): ${r.asked}
   Plan (${r.memberName ?? r.member ?? 'the agent in charge'}): ${r.plan}`);
     for (const h of r.history ?? []) console.log(`  ${formatDateTime(h.at)} ${h.by}: ${h.action}${h.note ? ` (${h.note})` : ''}`);
-    if (!second && first !== 'show') console.log(`Answer with node src/cli.mjs request ${r.id} approve|hold|ask-owner|reject --note "<why>" --level 1|2|3.`);
+    if (!second && first !== 'show') console.log(`Answer with node src/cli.mjs request ${r.id} approve|hold|ask-owner|forward|in-progress|reject --note "<why>" --level 1|2|3.`);
     return;
   }
   // Only the manager (or the owner) answers: a step of a run never does.
   if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error('A step of a run cannot answer the requests of the agents in charge.');
-  const result = await api('/api/request', { id: r.id, action: second, note: option('--note'), recommend: option('--recommend'), ...brief() });
+  for (const flag of ['--project', '--run']) {
+    if (has(flag) && (!option(flag) || option(flag).startsWith('--'))) throw new Error(`${flag} needs an ID.`);
+  }
+  const result = await api('/api/request', { id: r.id, action: second, note: option('--note'), recommend: option('--recommend'), project: option('--project'), run: option('--run'), ...brief() });
   const a = result.request;
-  console.log(`Request #${a.id}: ${a.status}${result.run ? `. Queued: ${result.run.title} [${result.run.id}]` : ''}${result.question ? `. Question #${result.question.id} waits for the owner in Decisions; the answer decides the request by itself.` : ''}`);
+  const target = result.run ? `. Queued in ${result.run.project}: ${result.run.title} [${result.run.id}]` : destination(a) ? ` → ${destination(a)}` : '';
+  console.log(`Request #${a.id}: ${a.status}${target}${result.question ? `. Question #${result.question.id} waits for the owner in Decisions; the answer decides the request by itself.` : ''}`);
   console.log('The answer went back to the conversation with the agent in charge.');
 }
 
@@ -420,6 +569,7 @@ async function planCommand() {
     || (['add', 'set'].includes(action) && option('--status') && decided.includes(planning.parseStatus(option('--status')))))) {
     throw new Error('A step of a run only proposes items: node src/cli.mjs plan propose <project> "<title>" --summary "..." --agent <member>.');
   }
+  // Who decides, on every change: without the owner's key, the server takes a decision only from the manager.
   const by = process.env.CHIEFMATE_MANAGER ? 'manager' : option('--by');
   switch (action) {
     case 'propose': {
@@ -433,7 +583,7 @@ async function planCommand() {
       return;
     }
     case 'triage':
-      show('Triaged', await change({ action: 'triage', id: which(), priority: option('--priority'), agent: option('--agent'), recommend: option('--recommend'), note: option('--note'), risk: option('--risk'), order: option('--order'), level: option('--level'), tool: option('--tool') }));
+      show('Triaged', await change({ action: 'triage', id: which(), by, priority: option('--priority'), agent: option('--agent'), recommend: option('--recommend'), note: option('--note'), risk: option('--risk'), order: option('--order'), level: option('--level'), tool: option('--tool') }));
       return;
     case 'approve':
     case 'later':
@@ -446,12 +596,12 @@ async function planCommand() {
       return;
     }
     case 'restore':
-      show('Restored', await change({ action: 'restore', id: which() }));
+      show('Restored', await change({ action: 'restore', id: which(), by }));
       return;
     case 'order': {
       const ids = args.map(x => Number(x.replace(/^#/, '')));
       if (!ids.length) throw new Error('Which items, in which order? node src/cli.mjs plan order <n> <n> ...');
-      for (const i of await change({ action: 'reorder', ids })) show('Order', i);
+      for (const i of await change({ action: 'reorder', ids, by })) show('Order', i);
       return;
     }
     case 'list': {
@@ -467,22 +617,22 @@ async function planCommand() {
     }
     case 'add': {
       const [project, ...title] = args;
-      show('Added', await change({ action: 'add', ...fields(), project, title: title.join(' ') }));
+      show('Added', await change({ action: 'add', ...fields(), project, title: title.join(' '), by }));
       return;
     }
     case 'set': {
       if (!args[0]) throw new Error('Which item? node src/cli.mjs plan set <n> --status <s>');
-      let item = await change({ action: 'set', id: args[0], ...fields() });
+      let item = await change({ action: 'set', id: args[0], ...fields(), by });
       if (has('--archive') || has('--restore')) item = planning.archiveItem(args[0], has('--archive'));
       show('Changed', item);
       return;
     }
     case 'done':
       if (!args[0]) throw new Error('Which item? node src/cli.mjs plan done <n>');
-      show('Done', await change({ action: 'set', id: args[0], status: 'done' }));
+      show('Done', await change({ action: 'set', id: args[0], status: 'done', by }));
       return;
     default:
-      throw new Error('Use: plan [list] | add <project> "<title>" | set <n> [--status ...] | done <n> | propose <project> "<title>" | triage <n> | approve|later|discard|restore <n> | order <n> <n> ...');
+      throw missing(`plan ${action}`, 'Use: plan [list] | add <project> "<title>" | set <n> [--status ...] | done <n> | propose <project> "<title>" | triage <n> | approve|later|discard|restore <n> | order <n> <n> ...');
   }
 }
 
@@ -545,7 +695,7 @@ async function radarCommand() {
       return;
     }
     case 'set':
-      show('Changed', await change({ action: 'set', id: which(), ...(await fields()), ...(option('--reason') !== undefined ? { reason: option('--reason') } : {}) }));
+      show('Changed', await change({ action: 'set', id: which(), ...(await fields()), ...(option('--reason') !== undefined ? { reason: option('--reason') } : {}), ...(by ? { by } : {}) }));
       return;
     case 'choose':
     case 'later':
@@ -557,7 +707,7 @@ async function radarCommand() {
       return;
     }
     default:
-      throw new Error('Use: radar [list] | show <n> | add "<title>" --summary ... | set <n> ... | choose|later|discard|restore <n>');
+      throw missing(`radar ${action}`, 'Use: radar [list] | show <n> | add "<title>" --summary ... | set <n> ... | choose|later|discard|restore <n>');
   }
 }
 
@@ -624,7 +774,8 @@ async function sessionCommand() {
     console.log(`Command: ${command} ${args.map(a => (/[\s"{}]/.test(a) ? JSON.stringify(a) : a)).join(' ')}`);
     if (prompt.missing.length) console.log(`Not found in the prompt builder: ${prompt.missing.join(', ')}`);
     if (prompt.unresolved?.length) console.log(`Variables left unfilled (no value in the prompt builder): ${prompt.unresolved.map(v => `{${v}}`).join(', ')}`);
-    console.log(prompt.blocksGiven ? `\nFirst message (${prompt.text.length} characters):\n\n${prompt.text}` : '\nNo first message: the profile has no "prompt_blocks".');
+    const text = profile.charge ? prompt.text : sessions.withManager(prompt.text, config, '<session id>');
+    console.log(prompt.blocksGiven ? `\nFirst message (${text.length} characters):\n\n${text}` : `\nNo first message: the profile has no "prompt_blocks". The manager's address goes with your first message:\n\n${sessions.managerAddress(config, '<session id>')}`);
     return;
   }
   const window = has('--window');
@@ -642,13 +793,75 @@ async function sessionCommand() {
 function powerLine(p) {
   if (p.mode === 'standby') return `Standby since ${formatDateTime(p.since)}: nothing new starts. Back on with: node src/cli.mjs power on --yes`;
   if (p.mode !== 'stopping') return 'On.';
-  const what = p.target === 'shutdown' ? 'Shutting the computer down' : 'Stopping Chiefmate';
+  const what = p.target === 'reboot' ? `Restarting the computer (asked by ${p.by === 'manager' ? 'the manager' : 'the owner'}: ${p.reason})`
+    : p.target === 'shutdown' ? 'Shutting the computer down' : 'Stopping Chiefmate';
   const waiting = (p.waitingFor ?? []).map(w => `${w.title ?? w.run}${w.doing ? ` (${w.doing})` : ''}`);
   const stage = p.stage === 'pausing' ? `pausing the work going on at a safe point${waiting.length ? `; waiting for: ${waiting.join('; ')}` : ''}`
     : p.stage === 'manager' ? "ending the manager's answer"
-      : p.stage === 'countdown' ? `the computer shuts down at ${formatDateTime(p.countdownUntil)}`
+      : p.stage === 'countdown' ? `the computer ${p.target === 'reboot' ? 'restarts' : 'shuts down'} at ${formatDateTime(p.countdownUntil)}`
         : 'closing';
   return `${what}: ${stage}.${p.stage !== 'closing' ? ' To cancel: node src/cli.mjs power cancel' : ''}`;
+}
+
+/** "effort": each agent's effort, its changes and their history (src/effort.mjs). A step only reads it. */
+async function effortCommand() {
+  const { effortChangeLine, effortHistory, effortSource, parseEffort, setEffort } = await import('./effort.mjs');
+  const { loadAgents, projectCrew } = await import('./config.mjs');
+  const project = option('--project') ?? null;
+  const [who, level] = words();
+  const config = loadConfig();
+  if (who === 'history') {
+    const list = effortHistory(project ? { project } : {}).slice(-30);
+    console.log(list.length ? list.map(effortChangeLine).join('\n') : 'No effort change recorded.');
+    return;
+  }
+  if (project && !config.projects?.[project]) throw new Error(`Unknown project: ${project}`);
+  if (level !== undefined) {
+    if (!parseEffort(level)) throw new Error('Use: node src/cli.mjs effort <agent> low|medium|high|xhigh|max|default [--project <id>] [--chat]');
+    if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error("A step doesn't change the crew's effort: propose it for the planning board.");
+    const by = process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner';
+    const e = setEffort({ member: who, level, project, chat: has('--chat'), by, config });
+    console.log(e.changed ? `${effortChangeLine(e)}. Counts from the next step.` : `No change: ${who} is already at ${e.to ?? 'default'}.`);
+    return;
+  }
+  const team = project ? projectCrew(config, project) : loadAgents(config);
+  const members = Object.values(team).filter(a => !who || a.id === who);
+  if (!members.length) throw new Error(`Unknown agent: ${who}`);
+  const from = { project: `this project (projects.${project}.effort)`, member: "this project's crew setting", installation: 'this installation (crew)', agent: 'the agent file', none: "Claude Code's default for the model" };
+  for (const a of members) {
+    const chat = a.id === 'manager' ? `; conversation ${a.chat_effort ?? a.effort ?? 'default'}` : '';
+    console.log(`${a.id.padEnd(12)} ${String(a.name ?? '').padEnd(16)} ${String(a.model ?? config.default_model ?? '').padEnd(18)} effort ${String(a.effort ?? 'default').padEnd(7)} from ${from[effortSource(config, project, a)]}${chat}`);
+  }
+}
+
+/**
+ * "focus", "project-pause" and "project-resume": the owner's focus (src/steer.mjs), for the manager at the owner's
+ * request and for a terminal. Refused inside a step.
+ */
+async function steerCommand(which) {
+  if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error("A step doesn't change the owner's focus: ask the owner with needs-you.");
+  const args = words();
+  const body = { by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'cli', running: has('--pause-running') ? 'pause' : 'finish' };
+  if (which === 'focus') {
+    const first = args[0] ?? 'status';
+    if (first === 'status') return console.log((await api('/api/state')).steer?.line ?? 'No restriction');
+    if (first === 'off') body.action = 'free';
+    else if (first === 'pause-all') body.action = 'pause-all';
+    else Object.assign(body, { action: 'focus', projects: args });
+  } else {
+    if (args.length !== 1) throw new Error(`Use: node src/cli.mjs ${which} <project> [--for 2h | --until 08:00]${which === 'project-pause' ? ' [--pause-running]' : ''}`);
+    Object.assign(body, { action: 'project', project: args[0], to: which === 'project-pause' ? 'paused' : 'active' });
+  }
+  const { parseFor } = await import('./steer.mjs');
+  if (option('--for') !== undefined) {
+    const ms = parseFor(option('--for'));
+    if (!ms) throw new Error('--for takes a length such as 2h, 90m or 1h30m.');
+    body.until = new Date(Date.now() + ms).toISOString();
+  } else if (option('--until') !== undefined) body.until = option('--until');
+  const r = await api('/api/steer', body);
+  console.log(r.steer.line);
+  if (r.paused.length) console.log(`Pausing at a safe point: ${r.paused.join(', ')} (they resume when their project is free).`);
+  if (r.steer.back) console.log(`Then back to: ${r.steer.back}.`);
 }
 
 /** "power": the power modes (src/power.mjs). Only the owner's: refused inside a step and the manager's answer. */
@@ -676,6 +889,39 @@ async function powerCommand() {
     return;
   }
   console.log(powerLine(await api('/api/power', { action })));
+}
+
+/**
+ * "reboot": restarts the computer at a safe point (src/power.mjs), for the manager (and the owner's terminal), always
+ * with --reason. Without --yes, only what would stop. With it, outside away mode the manager's waits for the owner's
+ * confirmation on a card. Refused inside a step or a live session.
+ */
+async function rebootCommand() {
+  if (words()[0] === 'history') {
+    const { powerLog } = await import('./power.mjs');
+    const list = powerLog().slice(-20);
+    console.log(list.length ? list.map(e => `${formatDateTime(e.at)}  ${e.action} ${e.outcome}  by ${e.by}${e.reason ? `: ${e.reason}` : ''}${e.why ? ` (${e.why})` : ''}`).join('\n') : 'No restart recorded.');
+    return;
+  }
+  if (process.env.CHIEFMATE_RUN || process.env.CHIEFMATE_SESSION) throw new Error('A step or a live session never restarts the computer: ask the manager, or the owner with needs-you.');
+  const reason = String(option('--reason') ?? '').trim();
+  if (!reason) throw new Error('Use: node src/cli.mjs reboot --reason "<why the computer should restart>" [--yes]  (or: reboot history)');
+  const by = process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner';
+  if (!has('--yes')) {
+    const p = await api('/api/power', { action: 'preview' });
+    console.log(`Restart the computer (${reason}): the runs and the live sessions' turns pause at a safe point, the crew's browsers and processes close, Chiefmate ends and Windows restarts after a 2-minute countdown (cancel with: node src/cli.mjs power cancel, or in the app). Once the owner is signed in again, Chiefmate starts by itself: the paused runs resume first, the live sessions carry on in the same conversation and their windows open again.`);
+    console.log(p.runs.length ? ['Runs that pause at a safe point:', ...p.runs.map(r => `  ${r.title} [${r.run}] (${r.project})`)].join('\n') : 'No run is going on.');
+    if (p.sessions.length) console.log(['Live sessions open:', ...p.sessions.map(x => `  ${x.name} [${x.id}] (${x.mode === 'app' ? (x.phase === 'working' ? 'in the app, a turn going on' : 'in the app') : 'in a window, opens again'})`)].join('\n'));
+    if (p.unsaved.length) console.log(['Changes not committed (they stay on disk):', ...p.unsaved.map(u => `  ${u.folder}: ${u.files} file(s)`)].join('\n'));
+    const turns = p.sessions.filter(x => x.mode === 'app' && x.phase === 'working');
+    if (turns.length) console.log(`Refused now: a live session's turn is going on (${turns.map(x => x.name).join(', ')}). Try again once it ends.`);
+    else if (by === 'manager' && !p.away) console.log("The owner is not in away mode: with --yes, the owner gets a card to confirm, and the restart starts only with their yes (valid for 30 minutes).");
+    console.log('Nothing was done. Add --yes to go ahead.');
+    return;
+  }
+  const r = await api('/api/power', { action: 'reboot', by, reason });
+  if (r.asked) console.log(`Waiting for the owner's confirmation: question #${r.asked} in the app's Decisions. The restart starts only with their yes; you hear of it in the news.`);
+  else console.log(powerLine(r));
 }
 
 /** What an update going on is doing, in one line. */
@@ -706,18 +952,146 @@ function lockdownText(v) {
     const warnings = v.warnings.map(w => `\nWarning ${formatDateTime(w.at)}: ${w.text}`).join('');
     return `Chiefmate is not locked down.${last}${warnings}`;
   }
-  const stopped = Object.entries(v.stopped).map(([k, n]) => `${k} ${n}`).join(', ') || 'nothing';
+  const stopped = Object.entries(v.stopped).filter(([, n]) => !Array.isArray(n)).map(([k, n]) => `${k} ${n}`).join(', ') || 'nothing';
+  const watch = v.sentinel?.status === 'reviewing' ? 'Emergency watch: reviewing it now.'
+    : v.sentinel?.status === 'escalated' ? `Emergency watch: kept it locked for you (${v.sentinel.decision?.reasons?.join(', ') ?? ''}).` : null;
   return [
     `EMERGENCY LOCKDOWN since ${formatDateTime(v.since)} (by ${v.by}, from ${v.from})`,
     `Reason: ${v.reason}`,
     `Stopped: ${stopped}`,
-    ...v.evidence.map(e => `Evidence ${formatDateTime(e.at)} [${e.what}${e.who ? `, ${e.who}` : ''}]: ${e.detail}`),
+    ...(watch ? [watch] : []),
+    ...v.evidence.map(e => `Evidence ${formatDateTime(e.at)} [${e.what}${e.who ? `, ${e.who}` : ''}${e.refused === false ? ', it ran' : ''}]: ${e.command ?? e.detail}${e.cwd ? `  (in ${e.cwd})` : ''}`),
+    ...(v.notes ?? []).map(n => `Your note ${formatDateTime(n.at)}: ${n.text}`),
   ].join('\n');
+}
+
+/** Calling the owner outside the app (src/escalation.mjs), in a few lines: never a secret. */
+function escalationText(v) {
+  const tg = v.telegram ? `Telegram: bot @${v.telegram.bot}, ${v.telegram.chats} chat(s) linked${v.telegram.linking ? ', waiting for /start' : ''}` : 'Telegram: not set up';
+  const pin = v.pin.blocked ? `PIN: blocked since ${formatDateTime(v.pin.blocked)} after wrong PINs (set it again to unblock)` : v.pin.set ? 'PIN: set' : 'PIN: not set (releasing by Telegram needs it)';
+  const email = v.email ? `E-mail fallback: ${v.email.to} through ${v.email.host}:${v.email.port} (${v.email.security})` : 'E-mail fallback: not set up';
+  const last = v.last ? `\nLast call: ${formatDateTime(v.last.at)} by ${v.last.channels.join(', ') || 'nothing (failed)'}${v.last.decisions.length ? `; you chose ${v.last.decisions.map(d => d.action).join(', ')}` : ''}` : '';
+  return `${tg}\n${pin}\n${email}${v.ready ? '' : '\nNo channel is ready: an escalation reaches you only in the app.'}${last}`;
+}
+
+/** A line typed with nothing shown (a token, a PIN, a password). */
+async function askHidden(question) {
+  const { createInterface } = await import('node:readline');
+  return new Promise(resolve => {
+    const prompt = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    prompt.question(question, answer => {
+      prompt.close();
+      process.stdout.write('\n');
+      resolve(answer.trim());
+    });
+    // The question is on screen; what is typed after it is not echoed.
+    prompt._writeToOutput = () => {};
+  });
+}
+
+// ---------- The manager's tools on the queue, the runs and its own gaps ----------
+
+/** An error for a command or action Chiefmate lacks: when the manager runs it, it is recorded as a tool gap (src/gaps.mjs). */
+function missing(what, usage) {
+  const error = new Error(usage);
+  error.gap = what;
+  return error;
+}
+
+/** The commands that steer the queue and the crew: the manager's (or the owner's), never a step's. */
+function notInStep(name) {
+  if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error(`A step of a run cannot use "${name}": only the manager steers the queue and the crew.`);
+}
+
+/** A run of the queue in one line, with its position. */
+function queueLine(r, i) {
+  const agents = [...new Set((r.steps ?? []).filter(s => s.status === 'pending' && !s.review).map(s => s.agent))];
+  const facts = [r.project, agents.join(', '), r.status === 'waiting' ? 'waiting for the limit' : '', r.onHold ? 'ON HOLD' : '', r.notBefore && Date.parse(r.notBefore) > Date.now() ? `not before ${formatDateTime(r.notBefore)}` : ''];
+  return `${String(i + 1).padStart(2)}. ${r.title} [${r.id}] (${facts.filter(Boolean).join('; ')})`;
+}
+
+async function queueCommand() {
+  const [action = 'list', id] = words();
+  const by = process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner';
+  const print = queue => {
+    if (!queue.length) return console.log('The queue is empty.');
+    queue.forEach((r, i) => console.log(queueLine(r, i)));
+  };
+  if (action === 'list') return print((await api('/api/state')).queue);
+  notInStep(`queue ${action}`);
+  if (!id) throw new Error(`Which run? node src/cli.mjs queue ${action} <run>`);
+  switch (action) {
+    case 'move': {
+      if (!option('--before') && !has('--top')) throw new Error('Where to? node src/cli.mjs queue move <run> --before <run> | --top');
+      print((await api('/api/queue', { action: 'move', id, before: option('--before'), top: has('--top'), by })).queue);
+      return;
+    }
+    case 'hold':
+    case 'release': {
+      const r = await api('/api/queue', { action, id, by });
+      console.log(action === 'hold' ? `On hold: ${r.title} [${r.id}]. It keeps its place and starts only after "queue release ${r.id}".` : `Released: ${r.title} [${r.id}]. It starts in its turn.`);
+      return;
+    }
+    default:
+      throw missing(`queue ${action}`, 'Use: queue [list] | move <run> --before <run> | move <run> --top | hold <run> | release <run>');
+  }
+}
+
+async function editCommand() {
+  notInStep('edit');
+  const [id] = words();
+  if (!id) throw new Error('Which run? node src/cli.mjs edit <run> --instruction-append "<text>" | --title ... | --summary ... | --agent ... | --tool ... | --level ...');
+  const changes = { append: option('--instruction-append'), title: option('--title'), summary: option('--summary'), agent: option('--agent'), tool: option('--tool'), level: option('--level') };
+  const r = await api('/api/run/edit', { id, changes, by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' });
+  console.log(`Changed: ${r.title} [${r.id}] (${r.steps.map(s => s.agent).join(', ')}${r.tools?.length ? `; on ${r.tools.join(', ')}` : ''}).`);
+}
+
+async function guideCommand() {
+  notInStep('guide');
+  const [id, message] = words();
+  if (!id || !message) throw new Error('Use: node src/cli.mjs guide <run> "<message>"');
+  const m = await api('/api/run/talk', { run: id, text: message, by: 'manager' });
+  console.log(`Sent to ${m.agent} (step ${m.step}) as the manager's guidance: it reaches the agent at a safe point, and its answer shows in the run.`);
+}
+
+async function retryCommand() {
+  notInStep('retry');
+  const [id] = words();
+  if (!id) throw new Error('Use: node src/cli.mjs retry <run> [--step n] [--agent <member>] [--tool claude|codex|grok]');
+  const r = await api('/api/retry', { id, step: option('--step'), agent: option('--agent'), tool: option('--tool'), by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' });
+  console.log(`Queued again: ${r.title} [${r.id}]. ${r.note ?? ''}`.trim());
+}
+
+async function gapCommand() {
+  const gaps = await import('./gaps.mjs');
+  const [first = 'list', ...more] = words();
+  if (first === 'list') {
+    const list = gaps.readGaps().filter(g => has('--all') || g.status !== 'closed');
+    if (!list.length) console.log(has('--all') ? 'No gaps recorded.' : 'No open gap.');
+    for (const g of list) console.log(`#${String(g.id).padEnd(3)} ${g.status.padEnd(8)} ${g.what} (${g.count}x, last ${formatDateTime(g.last)}${g.plan ? `, board item #${g.plan}` : ''})`);
+    return;
+  }
+  if (first === 'close') {
+    const body = { action: 'close', id: more[0], note: option('--note'), by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' };
+    const g = (await apiOr('/api/gap', body, async () => ({ gap: gaps.closeGap(more[0], option('--note')) }))).gap;
+    console.log(`Closed: #${g.id} ${g.what}`);
+    return;
+  }
+  // "gap <what was missing>": one more case.
+  const what = [first, ...more].join(' ');
+  const g = await recordGapNow(what, option('--example'));
+  console.log(`Recorded: #${g.id} ${g.what} (${g.count}x)${g.plan ? `. Proposed on the planning board as #${g.plan}.` : g.count < gaps.PROPOSE_AT ? '. If it comes up again, it becomes a proposal.' : ''}`);
+}
+
+/** Records a tool gap through the running Chiefmate, else here. */
+async function recordGapNow(what, example) {
+  const body = { action: 'record', what, example, by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' };
+  return (await apiOr('/api/gap', body, async () => ({ gap: await (await import('./gaps.mjs')).recordGap(body) }))).gap;
 }
 
 /** A command refused to a step of a run: noted for the emergency lockdown's detection (src/lockdown.mjs), then refused. */
 async function crewRefused(what, message) {
-  (await import('./lockdown.mjs')).recordSignal('publish_refused', `cli.mjs ${what}`, { who: 'step' });
+  (await import('./lockdown.mjs')).recordSignal('publish_refused', `cli.mjs ${what}`, { who: 'step', run: process.env.CHIEFMATE_RUN, step: process.env.CHIEFMATE_STEP, cwd: process.cwd(), command: `cli.mjs ${what}`, refused: true });
   throw new Error(message);
 }
 
@@ -743,11 +1117,12 @@ async function main() {
         const { startSchedule } = await import('./schedule.mjs');
         const { startUpdates } = await import('./update.mjs');
         const { doingNow, live, pauseAll } = await import('./runs.mjs');
-        const { nudgeQueue } = await import('./queue.mjs');
-        const { pauseSessionTurns, resumeSessions, sessionTurnsGoingOn, startSessions } = await import('./sessions.mjs');
+        const { nudgeQueue, resume } = await import('./queue.mjs');
+        const { pauseSessionTurns, reopenWindows, resumeSessions, sessionTurnsGoingOn, startSessions } = await import('./sessions.mjs');
         const { chat, deliverPending, interruptManager, managerBusy } = await import('./manager.mjs');
         const { startWatch } = await import('./plan.mjs');
         const { startAutopilot } = await import('./autopilot.mjs');
+        const { startSpending } = await import('./spending.mjs');
         const { powerOffCommand, startPower } = await import('./power.mjs');
         const { updating } = await import('./update.mjs');
         // In "pause" mode (and on "update now") the update pauses the runs and the live sessions' turns going on and
@@ -776,7 +1151,20 @@ async function main() {
             const { crewUnder, processList, stopPids } = await import('./watch.mjs');
             await stopPids(crewUnder(process.pid, await processList()).map(p => p.pid));
           },
-          powerOff: () => powerOffCommand(),
+          powerOff: target => powerOffCommand({ target }),
+          // After a restart (or the computer going down without a stop): the live sessions' windows open again.
+          reopenWindows: boot => reopenWindows(boot),
+          // Up with Windows: the app's window, as the shortcut opens it (with a pairing code), once the server answers.
+          openApp: async () => {
+            try {
+              for (let i = 0; i < 20 && !(await answers()); i++) await sleep(500);
+              const { openAppWindow } = await import('./owner.mjs');
+              const { browserPath } = await import('./usagepage.mjs');
+              openAppWindow({ port: p, browser: browserPath(loadConfig()) });
+            } catch (error) {
+              console.error('Power:', error.message);
+            }
+          },
           // A connection slow to close must not keep Chiefmate alive.
           finish: async () => {
             await Promise.race([close(), sleep(10_000)]);
@@ -787,6 +1175,7 @@ async function main() {
         startSchedule();
         startWatch();
         startAutopilot();
+        startSpending();
         startSessions();
         startUpdates({
           ...pausing,
@@ -802,12 +1191,15 @@ async function main() {
         const { processes } = await import('./machine.mjs');
         const { reportEvent } = await import('./news.mjs');
         const { t } = await import('./i18n.mjs');
+        const sentinel = await import('./sentinel.mjs');
+        const { sendToManager } = await import('./manager.mjs');
         lockdown.setLockdownHooks({
           stopAll: async () => {
-            const runs = [...live.keys()].filter(id => {
+            const runIds = [...live.keys()].filter(id => {
               live.get(id)?.preparing?.abort();
               return cancelLive(id, t('stopped by the emergency lockdown'));
-            }).length;
+            });
+            const runs = runIds.length;
             const manager = interruptManager() ? 1 : 0;
             const sessions = stopSessionTurns();
             let browsers = 0;
@@ -820,7 +1212,7 @@ async function main() {
             } catch {
               // listed on Windows only
             }
-            return { runs, manager, sessions, browsers };
+            return { runs, runIds, manager, sessions, browsers };
           },
           resume: () => {
             nudgeQueue();
@@ -831,12 +1223,46 @@ async function main() {
             notify(title, text, 'chiefmate:operations', { urgent: true });
             reportEvent(kind, news ?? text, { urgent: true });
           },
+          // The emergency watch (src/sentinel.mjs) reviews an alarm the detection engaged.
+          review: state => sentinel.reviewIncident(state),
+          // The owner's note on the alarm: to the manager as the owner's own message, with the event.
+          ownerNote: (note, state) => {
+            const head = `[About the emergency lockdown since ${state.since}: ${state.reason}${state.sentinel?.status === 'escalated' ? '; the emergency watch kept it locked' : ''}]`;
+            sendToManager(`${head}\n${note}`);
+          },
         });
+        sentinel.setSentinelHooks({
+          resumeRun: id => resume(id),
+          tell: ({ kind, title, text, news, release }) => {
+            notify(title, text, 'chiefmate:operations', { urgent: !release });
+            reportEvent(kind, news ?? text, { urgent: true });
+          },
+        });
+        sentinel.startSentinel();
         lockdown.startLockdownWatch();
+        // Calling the owner outside the app when the lockdown needs them (src/escalation.mjs): Telegram, then e-mail.
+        const escalation = await import('./escalation.mjs');
+        escalation.setEscalationHooks({
+          tell: ({ kind, title, text, news }) => {
+            notify(title, text, 'chiefmate:operations', { urgent: true });
+            reportEvent(kind, news ?? text, { urgent: true });
+          },
+        });
+        escalation.startEscalation();
+        // A change of the owner's focus (src/steer.mjs), its automatic return included: the projects now free start
+        // their queue and their approved board items.
+        (await import('./steer.mjs')).onSteerChange(() => {
+          nudgeQueue();
+          import('./planning.mjs').then(m => m.startApproved()).catch(error => console.error('Focus:', error));
+        });
         deliverPending(); // messages left in the queue when Chiefmate stopped
         (await import('./news.mjs')).startNews(); // and the news for the manager, such as "update installed"
-        // A task approved within its undo window when Chiefmate stopped (src/planning.mjs) starts now, in its turn.
-        (await import('./planning.mjs')).startApproved().catch(error => console.error('Planning:', error.message));
+        // A task approved within its undo window when Chiefmate stopped (src/planning.mjs) starts in its turn: now, or
+        // once that window is over.
+        const { startApproved } = await import('./planning.mjs');
+        const startLeft = () => startApproved().catch(error => console.error('Planning:', error.message));
+        startLeft();
+        setTimeout(startLeft, (await import('./store.mjs')).UNDO_GRACE_MS + 250).unref?.();
       }
       console.log(`Chiefmate running at http://localhost:${p} (${new Date().toISOString()})`);
       return;
@@ -847,6 +1273,7 @@ async function main() {
       const percent = v => `${Math.round((v ?? 0) * 100)}%`;
       const going = s.running ?? (s.current ? [s.current] : []);
       if (s.power && s.power.mode !== 'on') console.log(`Power: ${powerLine(s.power)}`);
+      if (s.steer) console.log(`Focus: ${s.steer.line}`);
       if (!going.length) console.log('Running: nothing');
       for (const r of going) console.log(`Running: ${r.title} [${r.id}] (${r.project}), step ${r.step ?? '-'}: ${r.agent ?? 'preparing'}`);
       for (const x of s.sessions?.open ?? []) console.log(`Session: ${x.name} [${x.id}] (${x.tool}${x.project ? `, ${x.project}` : ''}), ${x.alive ? 'open' : x.status} since ${formatDateTime(x.started)}`);
@@ -906,6 +1333,9 @@ async function main() {
     case 'chat':
       await chatCommand();
       return;
+    case 'defect':
+      await defectCommand();
+      return;
     case 'ask-owner': {
       // The manager's (or the owner's) question; a step of a run asks with needs-you instead.
       if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) throw new Error('A step of a run asks the owner with needs-you.');
@@ -928,6 +1358,22 @@ async function main() {
     case 'cancel':
       console.log((await api('/api/cancel', { id: rest[0] })).status);
       return;
+    case 'queue':
+      await queueCommand();
+      return;
+    case 'edit':
+      await editCommand();
+      return;
+    case 'guide':
+      await guideCommand();
+      return;
+    case 'retry':
+      await retryCommand();
+      return;
+    case 'gap':
+    case 'gaps':
+      await gapCommand();
+      return;
     case 'resume':
       console.log((await api('/api/resume', { id: rest[0], ignoreLimits: has('--ignore-limits') })).status);
       return;
@@ -941,8 +1387,11 @@ async function main() {
       if (!run) throw new Error('Run not found.');
       console.log(`# ${run.title} (${run.status})\n${run.summary ? `${run.summary}\n` : ''}${run.result ?? ''}${run.pullRequest ? `\nPull request: ${run.pullRequest}` : ''}\n`);
       if (run.outcome) console.log(`${outcomeMarkdown(run.outcome, run.outcome.lang)}\n`);
+      const { effortChangeLine, runEffortChanges } = await import('./effort.mjs');
+      const changes = runEffortChanges(run).map(e => `- ${effortChangeLine(e)}`);
+      if (changes.length) console.log(`Effort changed during the run:\n${changes.join('\n')}\n`);
       for (const step of stepsOf(run)) {
-        console.log(`## ${step.agent} (${step.status}, ${formatDuration(step.durationMs)}, ${step.model ?? ''})\n${fullReport(step) || step.error || '(no report)'}\n`);
+        console.log(`## ${step.agent} (${step.status}, ${formatDuration(step.durationMs)}, ${step.model ?? ''}${step.started && 'effort' in step ? `, effort ${step.effort ?? 'default'}` : ''})\n${fullReport(step) || step.error || '(no report)'}\n`);
       }
       return;
     }
@@ -969,6 +1418,13 @@ async function main() {
     case 'needs-you':
       await needsYou();
       return;
+    case 'say': {
+      // A line for the agent's speech bubble (src/speech.mjs): only a step of a run speaks.
+      if (!process.env.CHIEFMATE_RUN) throw new Error('say is for a step of a Chiefmate run (CHIEFMATE_RUN is not set).');
+      const said = await api('/api/say', { run: process.env.CHIEFMATE_RUN, step: process.env.CHIEFMATE_STEP, text: words().join(' ') });
+      console.log(`Shown in your speech bubble: "${said.text}"`);
+      return;
+    }
     case 'session':
       await sessionCommand();
       return;
@@ -990,13 +1446,13 @@ async function main() {
       if (r.dryRun && !stop) console.log(`Would run, in a window of its own:\n  ${r.command}\nin ${r.cwd}`);
       else if (r.dryRun) console.log(r.pids.length ? `Would stop the window process(es) ${r.pids.join(', ')} and everything under them.` : 'Nothing running.');
       else if (stop) console.log(r.stopped ? 'Development environment stopped.' : 'Nothing running.');
-      else console.log(`Development environment started (${r.window === 'terminal' ? 'Windows Terminal' : 'PowerShell'}): ${r.command}, in ${r.cwd}`);
+      else console.log(`Development environment starting (${r.window === 'terminal' ? 'Windows Terminal' : 'PowerShell'}): ${r.command}, in ${r.cwd}`);
       return;
     }
     case 'dev-run': {
-      // Inside the development environment's window (see src/projects.mjs).
+      // Inside the development environment's window, or in the background with "--background" (see src/projects.mjs).
       const { runDev } = await import('./projects.mjs');
-      await runDev(rest[0]);
+      await runDev(rest[0], rest[1], { background: rest.includes('--background') });
       return;
     }
     case 'prompts-sync': {
@@ -1054,14 +1510,54 @@ async function main() {
         console.log("Nothing was merged. Add --yes only with the owner's explicit yes for this run.");
         return;
       }
-      const m = await api('/api/merge', { run: id, by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' });
+      const m = await api('/api/merge', { run: id, by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner', savePending: has('--save-pending') });
       if (m.discarded || m.merged.by === 'outside') {
         console.log(m.discarded ? `Local branch deleted: ${m.branch}.` : `Branch already merged: ${m.branch}.`);
         return;
       }
       console.log(m.kind === 'pr' ? `Merged: ${m.url}.` : `Merged: ${m.branch} into ${m.base}, in ${m.dir}. Nothing was sent to GitHub.`);
+      if (m.savedNote) console.log(m.savedNote);
       if (m.copies?.done?.length) console.log(`Updated after the merge: ${m.copies.done.join(', ')}.`);
       if (m.copiesNote) console.log(`Not updated: ${m.copiesNote}`);
+      return;
+    }
+    case 'calls': {
+      // The owner's open calls, for the manager (src/needs.mjs). Never from a step: a step asks with needs-you.
+      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER) await crewRefused('calls', 'A step of a run never answers or parks the calls to the owner: ask with needs-you.');
+      const [action = 'list', run, request] = rest.filter((x, i) => !x.startsWith('--') && rest[i - 1] !== '--owner-said');
+      if (action === 'list') {
+        const { calls } = await api('/api/calls', { action: 'list' });
+        if (!calls.length) console.log('No open call to the owner.');
+        const mark = c => (c.parked ? ' [parked]' : c.deferred ? ' [left for later by the owner; the step goes on]' : c.waiting ? '' : ' [the step goes on]');
+        for (const c of calls) console.log(`${c.run} ${c.id}  ${c.at.slice(0, 16).replace('T', ' ')}  ${c.project}: ${c.title}${mark(c)}\n    ${c.options ? `${c.what} (options: ${c.options.join(' | ')})` : c.what}`);
+        return;
+      }
+      if (!run) throw new Error('Which run? node src/cli.mjs calls done|park <run> [<request>]');
+      if (action === 'done') {
+        if (!process.env.CHIEFMATE_MANAGER) throw new Error('Only the manager, in its conversation, marks a call done on the owner\'s word. You can click "I did it" in the app.');
+        if (!request || !option('--owner-said')) throw new Error('node src/cli.mjs calls done <run> <request> --owner-said "<the owner\'s words, as written to you>"');
+        const done = await api('/api/calls', { action: 'done', run, id: request, ownerSaid: option('--owner-said'), by: 'manager' });
+        console.log(`Call ${done.id} of run ${done.run} marked done on the owner's word: "${done.ownerSaid}".`);
+        return;
+      }
+      if (action === 'park') {
+        const parked = await api('/api/calls', { action: 'park', run, id: request ?? null, by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' });
+        console.log(parked.already ? `Run ${parked.run} is already parked.` : `Run ${parked.run} parks at a safe point, waiting for the owner (call ${parked.request}); its project's next run takes the turn, and it resumes first once the owner answers.`);
+        return;
+      }
+      throw new Error('node src/cli.mjs calls [done <run> <request> --owner-said "..." | park <run> [<request>]]');
+    }
+    case 'quarantine': {
+      if (process.env.CHIEFMATE_RUN && !process.env.CHIEFMATE_MANAGER && rest[0] === 'release') throw new Error('A step of a run never lifts a hold: the owner restores the file.');
+      if (rest[0] === 'release') {
+        if (!rest[1]) throw new Error('Which project? node src/cli.mjs quarantine release <project>');
+        const r = await api('/api/quarantine', { action: 'release', project: rest[1], by: process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner' });
+        console.log(`The queue of ${r.project} goes on without waiting for ${r.file}.`);
+        return;
+      }
+      const { holds } = await api('/api/quarantine', {});
+      if (!holds.length) console.log('No project waits for a quarantined file.');
+      for (const h of holds) console.log(`${h.project}: ${h.file} (${h.state}) since ${h.since.slice(0, 16).replace('T', ' ')}${h.run ? `, run ${h.run}` : ''}`);
       return;
     }
     case 'close-pr': {
@@ -1086,14 +1582,17 @@ async function main() {
       (await import('./lockdown.mjs')).refuseWhileLocked('push');
       const [dir, branch] = words();
       if (!dir || !branch) throw new Error('Which folder and branch? node src/cli.mjs push <folder> <branch>');
-      const { pushesFile } = await import('./decisions.mjs');
-      const { grantFor, pushFacts, readPushes, samePath, takeGrant } = await import('./guard.mjs');
-      const asked = readPushes(pushesFile()).find(g => g.status === 'allowed' && Date.parse(g.expires) > Date.now() && g.branch === branch && samePath(g.dir, dir));
+      const { grantFor, mainCardProject, mainPushTargets, pushesFile, pushFacts, readPushes, samePath, takeGrant } = await import('./guard.mjs');
+      const asked = readPushes(pushesFile()).find(g => g.status === 'allowed' && Date.parse(g.expires) > Date.now() && !g.session && g.branch === branch && samePath(g.dir, dir));
       const target = asked && { dir: asked.dir, remote: asked.remote, src: asked.src, branch: asked.branch };
       // The facts again, now: the remote may point elsewhere since the card, or the branch have become the default one.
       const facts = target ? pushFacts(target) : null;
-      if (!target || !grantFor([asked], target, facts) || !takeGrant(pushesFile(), target, facts)) {
-        throw new Error(`The owner has not allowed a push of ${branch} from ${dir} now (or it expired, or was used). Try the push itself (git -C <folder> push <remote> <branch>): the owner gets a card to allow it once.`);
+      // The main branch, only while its project still lets it go through the owner's card ("main_push": "card").
+      if (asked?.main && mainCardProject(mainPushTargets(loadConfig()), target.dir, facts?.repo) == null) {
+        throw new Error(`The main branch of the project in ${dir} no longer goes to GitHub through the owner's card ("main_push": "card" is off): nothing was sent.`);
+      }
+      if (!target || !grantFor([asked], target, facts, 'manager', !!asked.main) || !takeGrant(pushesFile(), target, facts, 'manager', !!asked.main)) {
+        throw new Error(`The owner has not allowed a push of ${branch} from ${dir} now (or it expired, or was used${asked?.main ? ', or the branch has commits its card did not show' : ''}). Try the push itself (git -C <folder> push <remote> <branch>): the owner gets a card to allow it once.`);
       }
       const { spawnSync } = await import('node:child_process');
       const r = spawnSync('git', ['-C', target.dir, 'push', target.remote, `${target.src}:refs/heads/${target.branch}`], { stdio: 'inherit', windowsHide: true });
@@ -1122,6 +1621,18 @@ async function main() {
       await powerCommand();
       return;
     }
+    case 'reboot': {
+      await rebootCommand();
+      return;
+    }
+    case 'focus':
+    case 'project-pause':
+    case 'project-resume':
+      await steerCommand(command);
+      return;
+    case 'effort':
+      await effortCommand();
+      return;
     case 'update-check': {
       const u = await api('/api/update-check', {});
       if (!u.waiting) console.log(`Chiefmate ${(await api('/api/health')).version} is up to date.`);
@@ -1133,7 +1644,8 @@ async function main() {
       const lockdown = await import('./lockdown.mjs');
       if (words()[0] === 'status') return console.log(lockdownText(lockdown.lockdownView()));
       const reason = words().join(' ').trim();
-      const by = process.env.CHIEFMATE_MANAGER ? 'manager' : process.env.CHIEFMATE_RUN ? 'step' : 'owner';
+      // Anyone may engage it: an agent other than the manager (a live session too) goes as a step, without the owner's key.
+      const by = process.env.CHIEFMATE_MANAGER ? 'manager' : forAgent() ? 'step' : 'owner';
       // Without Chiefmate running, only the state is written: it holds from its next start.
       const state = await apiOr('/api/lockdown', { action: 'engage', reason, by, origin: 'cli' }, () => lockdown.engage({ reason, by, from: 'cli' }));
       console.log(lockdownText(state.lockdown ?? lockdown.lockdownView(state)));
@@ -1155,6 +1667,108 @@ async function main() {
       if (typed !== 'UNLOCK') return console.log('Kept locked down.');
       await apiOr('/api/lockdown', { action: 'release', confirm: true, origin: 'cli' }, () => lockdown.release({ by: 'owner', from: 'cli' }));
       console.log('Released. The queue goes on; the runs the lockdown stopped stay canceled until you resume them.');
+      return;
+    }
+    case 'escalation': {
+      // Calling the owner outside the app when the lockdown needs them (src/escalation.mjs): set up by the owner only.
+      if (process.env.CHIEFMATE_RUN || process.env.CHIEFMATE_MANAGER || process.env.CHIEFMATE_RESCUER) throw new Error('Only the owner sets up Telegram, the PIN and the e-mail, in the app or in a terminal on this computer.');
+      const escalation = await import('./escalation.mjs');
+      // Through the running Chiefmate (its loop reads Telegram), or directly when it is off.
+      const act = body => apiOr('/api/escalation', body, () => escalation.changeEscalation(body));
+      const sub = words()[0] ?? 'status';
+      if (sub === 'status') return console.log(escalationText((await act({ action: 'status' })).escalation));
+      if (sub === 'test') {
+        const channel = words()[1] === 'email' ? 'email' : 'telegram';
+        await act({ action: 'test', channel });
+        return console.log(channel === 'email' ? 'Test e-mail sent.' : 'Test sent to the linked Telegram chat(s).');
+      }
+      if (sub === 'remove') {
+        const channel = words()[1];
+        if (!['telegram', 'email'].includes(channel)) throw new Error('Usage: escalation remove telegram|email');
+        return console.log(escalationText((await act({ action: 'remove', channel })).escalation));
+      }
+      if (!['setup', 'pin', 'email'].includes(sub)) throw new Error('Usage: escalation [status|setup|pin|email|test [email]|remove telegram|email]');
+      if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error(`Run "node src/cli.mjs escalation ${sub}" yourself, in a terminal on this computer: it asks for what only you know.`);
+      const { createInterface } = await import('node:readline/promises');
+      const ask = async (question, fallback = '') => {
+        const prompt = createInterface({ input: process.stdin, output: process.stdout });
+        const answer = (await prompt.question(question)).trim();
+        prompt.close();
+        return answer || fallback;
+      };
+      const yes = async question => /^y(es)?$|^s(im)?$/i.test(await ask(question));
+      const pinStep = async () => {
+        for (;;) {
+          const pin = await askHidden('Your PIN (6 to 12 digits, not shown): ');
+          const problem = escalation.pinProblem(pin);
+          if (problem) {
+            console.log(problem);
+            continue;
+          }
+          if ((await askHidden('The same PIN again: ')) !== pin) {
+            console.log('They differ. Again.');
+            continue;
+          }
+          await act({ action: 'pin', pin });
+          return console.log('PIN set: only its salted hash is kept. Releasing by Telegram works again if it was blocked.');
+        }
+      };
+      const emailStep = async () => {
+        const old = (await act({ action: 'status' })).escalation.email ?? {};
+        console.log('\nThe e-mail only warns you, when Telegram fails or is not set up. Use your provider\'s SMTP (an app password where it asks for one).');
+        const host = await ask(`SMTP server${old.host ? ` [${old.host}]` : ''}: `, old.host);
+        const security = await ask(`Security, starttls or tls [${old.security ?? 'starttls'}]: `, old.security ?? 'starttls');
+        const port = await ask(`Port [${old.port ?? (security === 'tls' ? 465 : 587)}]: `, String(old.port ?? (security === 'tls' ? 465 : 587)));
+        const user = await ask(`Login${old.user ? ` [${old.user}]` : ' (empty for none)'}: `, old.user ?? '');
+        const pass = user ? await askHidden(`Password${old.host ? ' (empty keeps the one kept)' : ''}, not shown: `) : '';
+        const from = await ask(`Sender${old.from ? ` [${old.from}]` : ''}: `, old.from);
+        const to = await ask(`Recipient, your address${old.to ? ` [${old.to}]` : ''}: `, old.to);
+        await act({ action: 'email', host, security, port, user, pass, from, to });
+        if (await yes('Send a test e-mail now? [y/N] ')) {
+          await act({ action: 'test', channel: 'email' });
+          console.log('Sent: check your inbox (and the spam folder).');
+        }
+      };
+      if (sub === 'pin') return pinStep();
+      if (sub === 'email') return emailStep();
+      // The whole setup, step by step.
+      let view = (await act({ action: 'status' })).escalation;
+      console.log('Calling you outside the app when the emergency lockdown needs you: your own Telegram bot, your PIN and, if you want, an e-mail.\n');
+      if (!view.telegram || !(await yes(`Keep the bot @${view.telegram.bot}? [y/N] `))) {
+        console.log('1. In Telegram, open @BotFather, send /newbot, choose a name and a username ending in "bot", and copy the token it gives.');
+        for (;;) {
+          try {
+            view = (await act({ action: 'token', token: await askHidden('2. Paste the token here (not shown): ') })).escalation;
+            console.log(`Bot @${view.telegram.bot} checked.`);
+            break;
+          } catch (error) {
+            console.log(error.message);
+          }
+        }
+      }
+      if (!view.telegram.chats || (await yes(`${view.telegram.chats} chat(s) linked. Link another one? [y/N] `))) {
+        const { link } = await act({ action: 'link' });
+        console.log(`3. Open ${link.link} on your phone and press Start (or send "${link.command}" to @${link.bot}). Waiting up to 15 minutes...`);
+        const before = view.telegram.chats;
+        const until = Date.parse(link.until);
+        while (Date.now() < until) {
+          // With Chiefmate off, the terminal reads Telegram itself.
+          if (!(await answers())) await escalation.pollOnce({}, { timeout: 5 }).catch(() => null);
+          else await sleep(2000);
+          view = (await act({ action: 'status' })).escalation;
+          if (view.telegram.chats > before) break;
+        }
+        if (view.telegram.chats <= before) throw new Error('No chat was linked in time. Run "escalation setup" again.');
+        console.log('Linked.');
+      }
+      if (!view.pin.set || (await yes('Change your PIN? [y/N] '))) {
+        console.log('4. Your PIN releases the lockdown from Telegram. Only its salted hash is kept; 3 wrong ones block the release by Telegram.');
+        await pinStep();
+      }
+      if (await yes(`Set up the e-mail fallback${view.email ? ` (now to ${view.email.to})` : ''}? [y/N] `)) await emailStep();
+      await act({ action: 'test', channel: 'telegram' });
+      console.log('\nA test went to your Telegram chat. Done.');
+      console.log(escalationText((await act({ action: 'status' })).escalation));
       return;
     }
     case 'update-now': {
@@ -1214,10 +1828,10 @@ async function main() {
       return;
     }
     case 'claude-login': {
-      const { openLogin, PROFILE_DIR } = await import('./usagepage.mjs');
+      const { LOGIN_MINUTES, openLogin, PROFILE_DIR } = await import('./usagepage.mjs');
       openLogin();
       console.log(`A browser window opened with Chiefmate's own profile (${PROFILE_DIR}).
-Sign in to claude.ai there, then close the window.
+Sign in to claude.ai there, then close the window. With Chiefmate running, it closes by itself after ${LOGIN_MINUTES} minutes.
 The reading is off until you turn it on: node src/cli.mjs usage-reader on`);
       return;
     }
@@ -1230,8 +1844,13 @@ The reading is off until you turn it on: node src/cli.mjs usage-reader on`);
       // validated, saved and kept with who changed it, as in the app (read again on every check: no restart needed)
       const by = process.env.CHIEFMATE_MANAGER ? 'manager' : process.env.CHIEFMATE_RUN ? `step:${process.env.CHIEFMATE_RUN}` : 'cli';
       autopilot.changeAutopilot(changes, { config, by });
+      // the session's mode (src/spending.mjs), beside the week's
+      const spending = await import('./spending.mjs');
+      if (option('--session') !== undefined) spending.changeSession({ mode: option('--session') }, { config, by });
       console.log(JSON.stringify(config.autopilot ?? {}, null, 2));
       console.log(autopilot.autopilotLine(config));
+      console.log(spending.sessionLine(config));
+      console.log(autopilot.weekLine(config));
       return;
     }
     case 'usage-reader': {
@@ -1290,12 +1909,26 @@ The reading is off until you turn it on: node src/cli.mjs usage-reader on`);
     case 'notify':
       notify(rest[0] ?? 'Chiefmate', rest[1] ?? 'Test notification.');
       return;
+    case 'help':
+    case '--help':
+    case '-h':
+      console.log(HELP);
+      return;
     default:
+      // A command Chiefmate lacks, run by the manager: a tool gap.
+      if (command && process.env.CHIEFMATE_MANAGER) throw missing(`command "${command}"`, `Chiefmate has no command "${command}". See node src/cli.mjs help.`);
       console.log(HELP);
   }
 }
 
-main().catch(error => {
+main().catch(async error => {
   console.error(`Error: ${error.message}`);
   process.exitCode = 1;
+  if (!error.gap || !process.env.CHIEFMATE_MANAGER) return;
+  try {
+    const gap = await recordGapNow(error.gap, ['node src/cli.mjs', command, ...rest].filter(Boolean).join(' '));
+    console.error(`Recorded as tool gap #${gap.id} (${gap.count}x)${gap.plan ? `, proposed on the planning board as #${gap.plan}` : ''}. Work around it within the rules, or say what you need.`);
+  } catch (e) {
+    console.error(`The tool gap could not be recorded: ${e.message}`);
+  }
 });

@@ -13,22 +13,23 @@ import { appendFileSync, createWriteStream, existsSync, readdirSync, readFileSyn
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
-import { stepMcp, userClaudeExcludes } from './access.mjs';
+import { denyRules, stepMcp, userClaudeExcludes } from './access.mjs';
 import { browserServers } from './browsers.mjs';
-import { addRequest, chargeFolder, chargeProfile, chargeProject, chargeTurn, takeRequest } from './charge.mjs';
+import { addRequest, chargeFolder, chargeProfile, chargeProject, chargeTurn, takeRequest, turnChanges } from './charge.mjs';
 import { describeAction, environment, runClaude } from './claude.mjs';
 import { loadConfig } from './config.mjs';
-import { API, guardHooks, publishing } from './guard.mjs';
+import { API, guardHooks, mainPushTarget, mainPushTargets, PUSH, publishing, pushesFile, readPushes } from './guard.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { computer, formatBytes, processes, refreshProcesses } from './machine.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { assembleBlocks, builderSettings, parseBlocks } from './prompts.mjs';
 import { codexEnvironment, signedIn, spawnable, toolCommand, where } from './tools.mjs';
-import { isLocked, refuseWhileLocked } from './lockdown.mjs';
+import { isLocked, ownerKeyFile, refuseWhileLocked, secretsFolder } from './lockdown.mjs';
 import { updating } from './update.mjs';
 import { stopping } from './power.mjs';
 import { clip, DATA, ensureDir, languageName, now, readJson, ROOT, slug, stamp, WORKSPACES, writeJson } from './util.mjs';
+import { closeWork, findWorkProfile, IDLE_MINUTES, isCommit, milestone, workContext, workSystem } from './worknow.mjs';
 
 // No new answer or turn starts while an update is installed or Chiefmate stops for the owner (src/power.mjs).
 const held = () => updating() || stopping();
@@ -83,15 +84,18 @@ export function sessionProfiles(config = loadConfig()) {
  * builder ("prompt_block") and the environment ("prompt_builder.environment"), when there is a copy of the builder.
  */
 function autoProfiles(config, configured) {
-  const { file, environment } = builderSettings(config);
-  const builder = !!file && existsSync(file);
   return Object.entries(config.projects ?? {}).flatMap(([id, p]) => TOOLS
     .filter(tool => !configured.some(x => (x.project === id && x.tool === tool) || x.id === `project-${id}-${tool}`))
     .map(tool => ({
       id: `project-${id}-${tool}`, name: `${p?.name ?? id} (${tool === 'codex' ? 'Codex' : 'Claude Code'})`, tool, project: id, library_folder: null,
-      prompt_blocks: builder && p?.prompt_block ? [p.prompt_block, environment].filter(Boolean) : [],
-      model: tool === 'claude' ? config.default_model ?? null : null, cwd: null, mcp: [], auto: true,
+      prompt_blocks: projectBlocks(config, p), model: tool === 'claude' ? config.default_model ?? null : null, cwd: null, mcp: [], auto: true,
     })));
+}
+
+/** A project's usual blocks of the prompt builder (its block and the environment), when there is a copy of the builder. */
+function projectBlocks(config, project) {
+  const { file, environment } = builderSettings(config);
+  return file && existsSync(file) && project?.prompt_block ? [project.prompt_block, environment].filter(Boolean) : [];
 }
 
 /**
@@ -179,13 +183,41 @@ export function sessionPrompt(config, profile, folder) {
   return { text: lines.join('\n'), blocks: built?.blocks ?? [], details: built?.details ?? [], missing: built?.missing ?? [], unresolved: built?.unresolved ?? [], blocksGiven: !!built || !!project };
 }
 
+/** Chiefmate's command line, with the installation's full path: it works from any folder. */
+export function cliCommand() {
+  const cli = path.join(ROOT, 'src', 'cli.mjs').replaceAll('\\', '/');
+  return `node ${/\s/.test(cli) ? `"${cli}"` : cli}`;
+}
+
+/** What the agent's commands get: the session they come from, so a message to the manager is marked as its own. */
+export const sessionEnv = id => ({ CHIEFMATE_SESSION: id });
+
+/**
+ * The manager's fixed address, for the first message of every live session: the command (with the session's id) and
+ * when to use it, and the rule to report any defect of Chiefmate on its own. Nothing of it is written in the project's
+ * folder: the command talks to Chiefmate on this computer, and its records stay in Chiefmate's data folder.
+ */
+export function managerAddress(config, id) {
+  const owner = config.owner || 'the owner';
+  const cli = cliCommand();
+  return [
+    `Chiefmate's manager (the agent that coordinates the crew and answers to ${owner}) is reached only with \`${cli} chat say --from ${id} "<message>"\` (it works from this folder): to report a problem, ask something of the crew or tell it what ${owner} asked. It never appears in Claude Code's session list (the "chiefmate-…" sessions there are short-lived turns, not the manager): don't look for it there. Your message reaches it marked as this session's, not ${owner}'s, and it is never taken as an order from ${owner}.`,
+    `When you notice an error or failure of Chiefmate or of the communication between agents (a notice that never came, outdated information, a Chiefmate command that failed, a missing instruction), report it on your own at once, without waiting for ${owner} to ask: \`${cli} defect report --from ${id} "<what happened>. Expected: <what should have happened>."\` One report per defect, then go on with your work.`,
+  ].join('\n');
+}
+
+/** The first message, with the manager's address at its end. */
+export const withManager = (text, config, id) => `${String(text ?? '').trimEnd()}\n\n${managerAddress(config, id)}`;
+
 /**
  * The tool's arguments, the first message last. Claude Code starts without the user's own configuration, as the
  * crew's steps do (no user settings, hooks, plugins, skills, ~/.claude/CLAUDE.md or MCP servers of their own), with
  * the external tools released to the session (see sessionMcp).
  * Codex has no option to skip its own configuration (~/.codex): it gets the folder (-C) and the model.
+ * A Claude Code window with its own conversation id (session.toolSession) starts it (--session-id), or, with resume,
+ * carries it on (--resume) after the computer restarted.
  */
-export function sessionArgs(session, config, prompt, servers = sessionMcp(config, session).servers) {
+export function sessionArgs(session, config, prompt, servers = sessionMcp(config, session).servers, { resume = false } = {}) {
   const first = prompt ? [prompt] : [];
   if (session.tool === 'codex') return [...(session.model ? ['-m', session.model] : []), '-C', session.cwd, ...first];
   const settings = { claudeMdExcludes: userClaudeExcludes() };
@@ -193,7 +225,8 @@ export function sessionArgs(session, config, prompt, servers = sessionMcp(config
   // --mcp-config takes a list: the options after it end it, so the message is not read as one more file.
   return [
     '--setting-sources', 'project,local', '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: servers }),
-    ...(session.model ? ['--model', session.model] : []), '--settings', JSON.stringify(settings), ...first,
+    ...(session.model ? ['--model', session.model] : []), '--settings', JSON.stringify(settings),
+    ...(session.toolSession ? [resume ? '--resume' : '--session-id', session.toolSession] : []), ...first,
   ];
 }
 
@@ -201,6 +234,8 @@ export function sessionArgs(session, config, prompt, servers = sessionMcp(config
 function findProfile(config, profileId) {
   const project = chargeProject(profileId);
   if (project && config.projects?.[project]) return chargeProfile(config, project);
+  const work = findWorkProfile(config, profileId);
+  if (work) return { ...work, prompt_blocks: projectBlocks(config, config.projects[work.project]) };
   return sessionProfiles(config).find(p => p.id === profileId);
 }
 
@@ -222,12 +257,26 @@ export function planSession(config, profileId, { prompt: written = null } = {}) 
   const profile = findProfile(config, profileId);
   if (!profile) throw new Error(t('Unknown session profile: {id}', { id: profileId }));
   if (!TOOLS.includes(profile.tool)) throw new Error(t('Session "{name}": "tool" must be "claude" or "codex".', { name: profile.name }));
+  if (profile.work) throw new Error(t('"Work now" opens only from the button on the project\'s page.'));
   const folder = sessionFolder(config, profile);
   const text = String(written ?? '').trim();
   // The conversation with the agent in charge starts with the owner's first message: its role comes every turn.
   if (profile.charge) return { profile, folder, prompt: { text: `# ${profile.name}`, blocks: [], missing: [], unresolved: [], blocksGiven: false } };
   const prompt = text ? { text, blocks: [], missing: [], unresolved: [], blocksGiven: true, written: true } : sessionPrompt(config, profile, folder);
   return { profile, folder, prompt };
+}
+
+/**
+ * What a "Work now" session would open (src/worknow.mjs): its profile, the folder chosen (the owner's clone or a
+ * separate copy) and the first message, the project's blocks followed by its context. where: { dir, copy, crew }.
+ */
+export function planWork(config, profileId, where) {
+  const profile = findProfile(config, profileId);
+  if (!profile?.work) throw new Error(t('Unknown session profile: {id}', { id: profileId }));
+  const folder = { dir: where.dir, copy: false };
+  const base = sessionPrompt(config, profile, folder);
+  const context = workContext(config, profile.project, profile, where, { cloneOf: projectClone, sessions: listSessions() });
+  return { profile, folder, prompt: { ...base, text: `${base.text}\n\n${context}`, blocksGiven: true } };
 }
 
 /** Whether Codex is signed in ("codex login status" succeeds). */
@@ -237,19 +286,19 @@ const codexSignedIn = () => signedIn('codex');
  * Opens a window of its own running "node src/cli.mjs <args>" in a folder: Windows Terminal when there is one, else
  * PowerShell. Returns which. The arguments are ids (letters, digits, "_", "." and "-"): they need no quoting.
  */
-export function openConsole(name, cwd, args) {
+export function openConsole(name, cwd, args, onError = error => console.error(error.message)) {
   const cli = path.join(ROOT, 'src', 'cli.mjs');
   const title = `Chiefmate: ${name}`.replace(/[^\p{L}\p{N} .:_()-]/gu, '').slice(0, 60);
   const options = { cwd, detached: true, stdio: 'ignore' };
   const terminal = process.platform === 'win32' ? where('wt')[0] : null;
   if (terminal) {
-    spawn(terminal, ['-w', 'new', 'new-tab', '--title', title, '-d', cwd, process.execPath, cli, ...args], options).unref();
+    spawn(terminal, ['-w', 'new', 'new-tab', '--title', title, '-d', cwd, process.execPath, cli, ...args], options).once('error', onError).unref();
     return 'terminal';
   }
   const quote = s => `'${String(s).replaceAll("'", "''")}'`;
   const command = `$Host.UI.RawUI.WindowTitle = ${quote(title)}; & ${quote(process.execPath)} ${quote(cli)} ${args.join(' ')}`;
   // "start" gives PowerShell a console window of its own. The line is written as cmd.exe reads it (no double quotes inside).
-  spawn('cmd.exe', [`/d /c start "" powershell.exe -NoLogo -NoProfile -Command "${command}"`], { ...options, windowsHide: true, windowsVerbatimArguments: true }).unref();
+  spawn('cmd.exe', [`/d /c start "" powershell.exe -NoLogo -NoProfile -Command "${command}"`], { ...options, windowsHide: true, windowsVerbatimArguments: true }).once('error', onError).unref();
   return 'powershell';
 }
 
@@ -277,9 +326,11 @@ function launch(session) {
  * that one ("existing"). When Codex is not signed in, asks the owner to sign in (as a step's "needs-you" does) and
  * starts the session once that is done.
  */
-export async function openSession(profileId, { origin = 'app', prompt: written = null, window = false, config = loadConfig() } = {}) {
+export async function openSession(profileId, { origin = 'app', prompt: written = null, window = false, work = null, config = loadConfig() } = {}) {
   refuseWhileLocked(t('live session'));
-  const { profile, folder, prompt } = planSession(config, profileId, { prompt: written });
+  // "Work now" opens only from the owner's click on the project's page (openWork in src/worknow.mjs), in the app.
+  if (findProfile(config, profileId)?.work && (!work || window || written)) throw new Error(t('"Work now" opens only from the button on the project\'s page.'));
+  const { profile, folder, prompt } = work ? planWork(config, profileId, work) : planSession(config, profileId, { prompt: written });
   if (profile.charge && (window || written)) throw new Error(t('The conversation with the agent in charge happens only here in the app.'));
   const mode = window ? 'window' : 'app';
   const open = mode === 'app' ? listSessions().find(s => s.profile === profile.id && s.mode === 'app' && OPEN.includes(s.status)) : null;
@@ -291,13 +342,19 @@ export async function openSession(profileId, { origin = 'app', prompt: written =
   const base = `${stamp()}-${slug(profile.id)}`;
   let id = base;
   for (let n = 2; existsSync(recordFile(id)); n++) id = `${base}-${n}`;
-  writeFileSync(promptFile(id), `${prompt.text}\n`);
+  // The agent in charge has no command line: it reaches the manager with its requests (src/charge.mjs).
+  writeFileSync(promptFile(id), `${profile.charge ? prompt.text : withManager(prompt.text, config, id)}\n`);
   const session = {
     id, profile: profile.id, name: profile.name, tool: profile.tool, project: profile.project, library_folder: profile.library_folder,
-    cwd: folder.dir, readOnlyCopy: folder.copy, model: profile.model ?? (profile.tool === 'claude' ? config.default_model ?? null : null), command, blocks: prompt.written ? ['(written in the prompt builder)'] : prompt.blocks, missing: prompt.missing, firstMessage: prompt.blocksGiven,
+    cwd: folder.dir, readOnlyCopy: folder.copy, model: profile.model ?? (profile.tool === 'claude' ? config.default_model ?? null : null), command, blocks: prompt.written ? ['(written in the prompt builder)'] : prompt.blocks, missing: prompt.missing,
+    // In a window, the first message always goes: it carries the manager's address (in the app, it goes with the owner's first message).
+    firstMessage: prompt.blocksGiven || (mode === 'window' && !profile.charge),
     origin, created: now(), status: 'starting', requests: [], mode, ...(profile.charge ? { charge: true, member: profile.member } : {}),
+    ...(profile.work ? { member: profile.member, memberName: profile.memberName, memberRole: profile.memberRole, work: { copy: !!work.copy, held: [], crew: (work.crew ?? []).map(c => c.run) } } : {}),
     // The tool's own session: Claude Code's is chosen here (--session-id), Codex gives its thread id on the first turn.
     ...(mode === 'app' ? { toolSession: profile.tool === 'claude' ? randomUUID() : null, turns: 0, queue: [], allowed: [] } : {}),
+    // In a window, Claude Code's own id too: after a restart of the computer, the window opens again in that conversation.
+    ...(mode === 'window' && profile.tool === 'claude' ? { toolSession: randomUUID() } : {}),
   };
   if (profile.tool === 'codex' && !(await codexSignedIn())) {
     const what = t('Sign in to Codex for the session "{name}": run "codex login" in a terminal (it opens your browser). The session opens by itself once you are signed in.', { name: profile.name });
@@ -318,15 +375,17 @@ export async function runSession(id) {
   const config = loadConfig();
   const tool = session.command?.command ? session.command : toolCommand(session.tool);
   let prompt = null;
-  if (session.firstMessage) {
+  // Opened again after the computer restarted: Claude Code carries on its conversation when it was saved.
+  const resume = !!session.reopened && savedConversation(session);
+  if (session.firstMessage && !resume) {
     const text = readFileSync(promptFile(id), 'utf8').trim();
     prompt = text.length <= MAX_PROMPT_ARG ? text : `Read the file ${promptFile(id)} whole and follow it: it opens this session.`;
   }
   saveSession({ ...session, status: 'open', pid: process.pid, opened: now() });
   console.log(`Chiefmate: ${session.name} (${session.tool}) in ${session.cwd}\n`);
   process.on('SIGINT', () => {}); // Ctrl+C belongs to the agent
-  const child = spawn(tool.command, [...tool.prefix, ...sessionArgs(session, config, prompt, browserServers(config, sessionMcp(config, session).servers, sessionBrowser(session)))], {
-    cwd: session.cwd, stdio: 'inherit', env: session.tool === 'claude' ? environment() : codexEnvironment(),
+  const child = spawn(tool.command, [...tool.prefix, ...sessionArgs(session, config, prompt, browserServers(config, sessionMcp(config, session).servers, sessionBrowser(session)), { resume })], {
+    cwd: session.cwd, stdio: 'inherit', env: session.tool === 'claude' ? environment(sessionEnv(id)) : codexEnvironment(sessionEnv(id)),
   });
   const code = await new Promise(resolve => {
     child.on('error', error => {
@@ -345,6 +404,41 @@ export async function runSession(id) {
   process.exit(0);
 }
 
+/**
+ * Whether Claude Code saved the conversation of a session in a window (its file under ~/.claude/projects, whatever
+ * folder name Claude Code gave it), so it can be carried on. Always ~/.claude: the window's Claude Code runs without
+ * CLAUDE_CONFIG_DIR (environment() in src/claude.mjs drops it).
+ */
+export function savedConversation(session, home = path.join(os.homedir(), '.claude')) {
+  if (session.tool !== 'claude' || !/^[\w-]+$/.test(session.toolSession ?? '')) return false;
+  const projects = path.join(home, 'projects');
+  try {
+    return readdirSync(projects).some(dir => existsSync(path.join(projects, dir, `${session.toolSession}.jsonl`)));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * After the computer restarted (a restart from Chiefmate, or a power cut or crash): the sessions in a window still open
+ * then lost their window. Each opens again in its folder: Claude Code in the same conversation when it was saved, else
+ * (and Codex, which can't be pointed at its own) a new one with the first message. Not in an emergency lockdown, and
+ * only on Windows. boot: when the computer started (ms). dryRun: only the ids. Returns the ids.
+ */
+export function reopenWindows(boot, { dryRun = false } = {}) {
+  if (isLocked() || (process.platform !== 'win32' && !dryRun)) return [];
+  const lost = listSessions().filter(s => s.mode === 'window' && ['starting', 'open'].includes(s.status) && Date.parse(s.opened ?? s.started ?? s.created) < boot);
+  if (dryRun) return lost.map(s => s.id);
+  for (const s of lost) {
+    try {
+      saveSession({ ...s, status: 'starting', started: now(), reopened: now(), pid: null, window: openWindow(s) });
+    } catch (error) {
+      console.error('Sessions:', error.message);
+    }
+  }
+  return lost.map(s => s.id);
+}
+
 /** Ends a session: stops its turn going on (in the app) or its window's process, and everything they started. */
 export async function endSession(id) {
   const session = readSession(id);
@@ -357,7 +451,10 @@ export async function endSession(id) {
     }
     for (const r of session.requests ?? []) if (r.status === 'open') Object.assign(r, { status: 'canceled', done: now() });
     if (OPEN.includes(session.status)) note(id, t('You ended the session. Its history stays here; Resume carries on in the same conversation.'));
-    return saveSession({ ...session, status: 'ended', ended: now(), endedBy: 'owner', queue: [], working: null, paused: null });
+    const ended = saveSession({ ...session, status: 'ended', ended: now(), endedBy: 'owner', queue: [], working: null, paused: null });
+    // "Work now": the summary for the next conversation, the manager told and the crew's paused runs back in the queue.
+    if (session.work && OPEN.includes(session.status)) closeWork(id).catch(error => console.error('Work now:', error.message));
+    return ended;
   }
   if (OPEN.includes(session.status) && process.platform === 'win32') {
     const { list } = await processes(0);
@@ -395,9 +492,16 @@ function remember(id, entry) {
   appendFileSync(historyFile(id), `${JSON.stringify({ at: now(), ...entry })}\n`);
 }
 const note = (id, text, extra = {}) => remember(id, { kind: 'note', text, ...extra });
+/** Merges facts into a "Work now" session's record (src/worknow.mjs). */
+export function updateWork(id, fields) {
+  const session = readSession(id);
+  if (session?.work) saveSession({ ...session, work: { ...session.work, ...fields } });
+}
+
 /** A note in a session's history from elsewhere in Chiefmate (the manager's answer to a request of the agent in charge). */
 export function noteSession(id, text, extra = {}) {
-  if (readSession(id)) note(id, text, extra);
+  // A notice: the agent of a project's session reads it with its next turn (projectChanges).
+  if (readSession(id)) note(id, text, { notice: true, ...extra });
 }
 
 /**
@@ -445,10 +549,27 @@ export function sayToSession(id, text, { by = 'owner' } = {}) {
   let session = appSession(id);
   if (session.status === 'ended') session = resumeSession(id);
   const item = { id: randomUUID().slice(0, 8), text: message, at: now(), ...(by === 'manager' ? { by } : {}) };
+  return enqueue(session, item);
+}
+
+function enqueue(session, item) {
+  const { id } = session;
   const queued = live.has(id) || session.status !== 'open' || !!session.paused || held() || isLocked() || (session.queue ?? []).length > 0;
   saveSession({ ...session, queue: [...(session.queue ?? []), item] });
   deliverSession(id);
   return { ...item, queued, position: queued ? (readSession(id)?.queue ?? []).length : 0 };
+}
+
+/**
+ * A system event goes to the project's live sessions in the app that were open when it happened. The conversation with
+ * the agent in charge is left out: it reads only, and a turn there would cost usage for nothing.
+ */
+export function tellProjectSessions(project, notice) {
+  for (const s of listSessions()) {
+    if (s.project !== project || s.mode !== 'app' || s.charge || s.status !== 'open' || (s.resumed ?? s.started) > notice.at) continue;
+    if ((s.queue ?? []).some(m => m.id === notice.id) || sessionHistory(s.id, null, 60).items.some(m => m.notice === notice.id)) continue;
+    enqueue(s, { ...notice, by: 'system' });
+  }
 }
 
 /** Takes a message out of a session's queue. Returns the queue. */
@@ -504,8 +625,14 @@ function turnText(config, session, items) {
   const first = items.find(m => m.first);
   const by = m => (m.by === 'manager' ? `, written by Chiefmate's manager at ${owner}'s request` : '');
   if (first) parts.push(first.text);
+  // A session opened with no first message: the manager's address goes with the owner's first one.
+  else if (!session.charge && !session.firstMessage && !(session.turns ?? 0)) parts.push(managerAddress(config, session.id));
   if (mine.length === 1 && !first && !mine[0].by) parts.push(mine[0].text);
-  else if (mine.length) parts.push(`${mine.length === 1 ? `A message from ${owner}` : `${mine.length} messages from ${owner}, oldest first`}:\n\n${mine.map(m => `[sent ${formatDateTime(m.at)}${by(m)}]\n${m.text}`).join('\n\n')}`);
+  else if (mine.some(m => m.by === 'system')) {
+    for (const m of mine) parts.push(m.by === 'system'
+      ? `[Chiefmate system notice, informational, ${formatDateTime(m.at)}]\n${m.text}`
+      : `[Message from ${owner}, sent ${formatDateTime(m.at)}${by(m)}]\n${m.text}`);
+  } else if (mine.length) parts.push(`${mine.length === 1 ? `A message from ${owner}` : `${mine.length} messages from ${owner}, oldest first`}:\n\n${mine.map(m => `[sent ${formatDateTime(m.at)}${by(m)}]\n${m.text}`).join('\n\n')}`);
   return parts.join('\n\n');
 }
 
@@ -534,7 +661,10 @@ export function deliverSession(id) {
   const config = loadConfig();
   const turn = { since: now(), last: null, pid: null, cancel: () => {}, interrupt: () => false, started: false, interrupted: false, ending: false, pausing: false };
   live.set(id, turn);
-  for (const m of items) remember(id, { kind: 'owner', text: m.text, ...(m.first ? { first: true } : {}), ...(m.by ? { by: m.by } : {}), sent: m.at });
+  for (const m of items) {
+    if (m.by === 'system') note(id, m.text, { by: m.by, notice: m.id, sent: m.at, error: m.error });
+    else remember(id, { kind: 'owner', text: m.text, ...(m.first ? { first: true } : {}), ...(m.by ? { by: m.by } : {}), sent: m.at });
+  }
   if (session.paused && !items.length) note(id, t('The agent carries on after the update of Chiefmate.'));
   const prompt = turnText(config, session, items);
   saveSession({ ...session, queue: [], working: turn.since, interrupted: null, paused: null });
@@ -545,6 +675,11 @@ export function deliverSession(id) {
     if (event.type === 'action') {
       turn.last = { at: now(), text: event.text };
       remember(id, { kind: 'action', text: event.text, ...(event.failed ? { failed: true } : {}) });
+      // "Work now": a commit is a milestone the manager hears of.
+      if (session.work && !event.failed && isCommit(event.text)) {
+        const latest = readSession(id);
+        if (latest && milestone(config, latest, `committed (${clip(event.text, 160)})`)) saveSession(latest);
+      }
     }
   };
   const mcp = sessionMcp(config, session);
@@ -553,20 +688,29 @@ export function deliverSession(id) {
   let charge = null;
   if (session.charge) {
     try {
-      charge = chargeTurn(config, session, { cloneOf: projectClone });
+      charge = chargeTurn(config, session, { cloneOf: projectClone, sessions: listSessions() });
     } catch (error) {
       charge = { error: error.message };
     }
   }
+  const changes = projectChanges(config, session, turn);
+  // "Work now": a push of the main branch the owner allowed on its card (src/decisions.mjs) goes once through the
+  // guard, the only push it lets go without the session's permission to push.
+  const work = !!session.work && !charge;
+  const granted = work && readPushes(pushesFile()).some(g => g.status === 'allowed' && Date.parse(g.expires) > Date.now() && g.session === id);
+  const mainCard = work ? { grants: pushesFile(), session: id, mainCard: mainPushTargets(config) } : {};
+  // News goes in the turn's own text: a resumed conversation reads nothing newer than its first instructions (see turnChanges).
+  const withNews = (...lead) => (lead.some(Boolean) ? `${lead.filter(Boolean).join('\n\n')}\n\n## This turn\n\n${prompt}` : prompt);
   // One call of Claude Code; when its session is not where the turn count says (see SESSION_EXISTS), once more the other way.
   const claudeTurn = (resume, retried = false) => {
     if (charge?.error) throw new Error(charge.error);
     const run = runClaude({
-      dir: session.cwd, prompt, system: charge?.system ?? appSystem(config.owner || 'the owner'), model: charge?.model ?? session.model ?? config.default_model,
+      dir: session.cwd, prompt: withNews(charge && !resume ? charge.requests : '', changes),
+      system: charge?.system ?? [appSystem(config.owner || 'the owner'), ...(session.work ? [workSystem(config, session)] : [])].join('\n'), model: charge?.model ?? session.model ?? config.default_model,
       tools: charge ? charge.tools : [...APP_TOOLS, ...mcp.tools, ...(session.allowed ?? []).filter(r => !ASK_FIRST.includes(r))],
-      disallowed: charge ? [...charge.disallowed, ...ASK_FIRST] : ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r)), mcpServers: charge ? {} : browserServers(config, mcp.servers, sessionBrowser(session)),
-      addDirs: charge?.addDirs ?? [], hooks: guardHooks({ log: guardLog(id), allowed: charge ? [] : session.allowed ?? [], who: 'session' }),
-      attribution: config.attribution !== false, maxMinutes: TURN_MINUTES,
+      disallowed: [...(charge ? [...charge.disallowed, ...ASK_FIRST] : ASK_FIRST.filter(r => !(session.allowed ?? []).includes(r) && !(granted && r === PUSH))), ...denyRules(ownerKeyFile(), false), ...denyRules(secretsFolder())], mcpServers: charge ? {} : browserServers(config, mcp.servers, sessionBrowser(session)),
+      addDirs: charge?.addDirs ?? [], hooks: guardHooks({ log: guardLog(id), allowed: charge ? [] : session.allowed ?? [], who: 'session', noMain: !!session.work, ...mainCard }),
+      attribution: config.attribution !== false, maxMinutes: TURN_MINUTES, env: sessionEnv(id),
       session: { id: session.toolSession, resume }, log: rawLog(id), onEvent,
     });
     Object.assign(turn, { pid: run.pid ?? null, cancel: () => run.cancel(t('interrupted by you')), interrupt: () => run.interrupt() });
@@ -579,7 +723,7 @@ export function deliverSession(id) {
   let promise;
   try {
     if (session.tool === 'codex') {
-      const run = runCodex({ session, prompt, log: rawLog(id), onEvent });
+      const run = runCodex({ session, prompt: withNews(changes), log: rawLog(id), onEvent });
       Object.assign(turn, { pid: run.pid ?? null, cancel: () => run.cancel(t('interrupted by you')) });
       promise = run.promise;
     } else {
@@ -590,6 +734,23 @@ export function deliverSession(id) {
   }
   promise.then(r => finishTurn(id, turn, r)).catch(error => finishTurn(id, turn, { ok: false, error: error.message }));
   return true;
+}
+
+/**
+ * What changed since the previous turn of a project's session (the agent in charge, "Work now"), as text for this
+ * turn's input ('' when nothing did, and on the first turn); the state read goes on "turn.seen", kept once the turn starts.
+ */
+function projectChanges(config, session, turn) {
+  if (!session.project || !(session.charge || session.work)) return '';
+  try {
+    const { items, next } = sessionHistory(session.id, session.seen?.history ?? Infinity);
+    const notices = session.seen ? items.filter(e => e.notice && e.kind !== 'request') : [];
+    const { text, seen } = turnChanges(config, session.project, session.seen ?? null, { notices, resumed: (session.turns ?? 0) > 0, sessions: listSessions() });
+    turn.seen = { ...seen, history: next };
+    return text;
+  } catch {
+    return '';
+  }
 }
 
 /**
@@ -619,7 +780,7 @@ export function pauseSessionTurns(why = 'update') {
   for (const [id, turn] of live) {
     if (turn.pausing || turn.ending || turn.interrupted || !turn.interrupt()) continue;
     turn.pausing = true;
-    note(id, why === 'stop' ? t('Pausing at a safe point: Chiefmate is shutting down, and the agent carries on by itself at the next start.') : t('Pausing at a safe point for an update of Chiefmate: the agent carries on by itself after the restart.'));
+    note(id, why === 'reboot' ? t('Pausing at a safe point: the computer is restarting, and the agent carries on by itself once Chiefmate is back.') : why === 'stop' ? t('Pausing at a safe point: Chiefmate is shutting down, and the agent carries on by itself at the next start.') : t('Pausing at a safe point for an update of Chiefmate: the agent carries on by itself after the restart.'));
     asked.push(id);
   }
   return asked;
@@ -642,7 +803,7 @@ function finishTurn(id, turn, r) {
   if (!session) return;
   // A turn that got to start counts: the next one resumes its session (Codex's thread, or Claude Code's own id).
   const started = session.tool === 'codex' ? r.session : turn.started || r.session ? session.toolSession : null;
-  Object.assign(session, { working: null, lastTurn: { at: now(), ok: !!r.ok }, ...(started ? { toolSession: started, turns: (session.turns ?? 0) + 1 } : {}) });
+  Object.assign(session, { working: null, lastTurn: { at: now(), ok: !!r.ok }, ...(started ? { toolSession: started, turns: (session.turns ?? 0) + 1, ...(turn.seen ? { seen: turn.seen } : {}) } : {}) });
   if (turn.pausing && r.interrupted && !turn.ending && !turn.interrupted) {
     // Paused for an update: the next turn carries on by itself (see deliverSession), after the restart.
     session.paused = now();
@@ -661,8 +822,19 @@ function finishTurn(id, turn, r) {
     }
   }) : [];
   rmSync(guardLog(id), { force: true });
+  // "Work now": a push of the main branch of a project that lets it go through the owner's card ("main_push": "card")
+  // becomes that card in Decisions (src/decisions.mjs), never a permission request: the session's permission to push
+  // never lets the main branch go.
+  const all = [...(r.denials ?? []), ...guarded];
+  const targets = session.work && !session.charge ? mainPushTargets(loadConfig()) : [];
+  const mains = !targets.length ? [] : all.flatMap(d => {
+    const target = d?.tool_name === 'Bash' ? mainPushTarget(String(d.tool_input?.command ?? ''), d.cwd || session.cwd, targets) : null;
+    return target ? [{ d, target }] : [];
+  });
+  const carded = new Set(mains.map(m => m.d.tool_use_id).filter(Boolean));
+  if (mains.length) mainPushCards(id, session, mains);
   // The agent in charge has nothing to ask permission for: it only reads, and sends requests to the manager.
-  const refused = [...(r.denials ?? []), ...guarded];
+  const refused = all.filter(d => !mains.some(m => m.d === d) && !(d?.tool_use_id && carded.has(d.tool_use_id)));
   if (session.charge && refused.length) note(id, t('The agent in charge tried to change something, which it never does: what is to be done goes to the manager as a request.'));
   for (const d of session.charge ? [] : refused) {
     const ask = permissionOf(d, session.cwd);
@@ -670,10 +842,32 @@ function finishTurn(id, turn, r) {
     const request = { id: randomUUID().slice(0, 8), kind: 'permission', ...ask, status: 'open', at: now() };
     (session.requests ??= []).push(request);
     remember(id, { kind: 'permission', request: request.id, status: 'open', text: request.what });
+    // "Work now": what is about to leave the computer is a milestone the manager hears of.
+    if (session.work) milestone(loadConfig(), session, `the agent asks the owner's permission to: ${clip(request.explain?.summary ?? request.what, 200)}`, { kind: `ask:${request.rule}` });
     notify(t('Needs you: {title}', { title: session.name }), t('The agent asks to: {what}', { what: request.explain?.summary ?? request.what }), 'chiefmate:operations', { urgent: true });
   }
   saveSession(session);
   deliverSession(id);
+}
+
+/**
+ * The pushes of the main branch a "Work now" session tried, as cards for the owner (src/decisions.mjs, loaded when
+ * needed: it loads this module): a note in the conversation and a milestone for the manager, once per card.
+ */
+function mainPushCards(id, session, mains) {
+  import('./decisions.mjs').then(({ addPushRequest }) => {
+    const config = loadConfig();
+    const latest = readSession(id);
+    for (const { d, target } of mains) {
+      const request = addPushRequest({ ...target, ...target.facts, command: String(d.tool_input?.command ?? ''), main: true, session: id, sessionName: session.name });
+      if (!request) continue;
+      note(id, t('The push of the main branch ({branch}) waits for your card in Decisions: {count} commit(s), {files} file(s), {migrations} migration(s). Once you allow it, the agent is told and sends it.', {
+        branch: request.branch, count: request.count, files: request.fileCount, migrations: request.migrationCount,
+      }));
+      if (latest?.work) milestone(config, latest, `the agent asks the owner, on a card, to push the main branch ${request.branch} to ${request.repo} (${request.count} commit(s))`, { kind: 'ask:main-push' });
+    }
+    if (latest?.work) saveSession(latest);
+  }).catch(error => note(id, t('The push of the main branch could not become a card: {error}', { error: error.message }), { error: true }));
 }
 
 /** A refused tool use, as a request: what it would do and the rule that allows it. */
@@ -782,6 +976,35 @@ function explainCommand(command, dir) {
     };
     return { where: repo, ...(of[action]?.() ?? { summary: t('Act on repositories on GitHub ({action})', { action }), ...unknownEffect() }) };
   }
+  if (program === 'gh' && ['gist', 'release', 'workflow', 'secret'].includes(group)) {
+    const [action = '', name = '?'] = plain;
+    const repo = ghRepo();
+    const account = t('Your GitHub account');
+    const visible = args.includes('--public') || args.includes('-p');
+    const of = {
+      gist: action === 'create' && {
+        summary: visible ? t('Publish a public gist on GitHub') : t('Publish a secret gist on GitHub'), where: account,
+        change: visible ? t('The files appear on your account, visible to anyone on the internet.') : t('The files appear on your account, hidden from listings but open to anyone with the address.'),
+        undo: t('Partly: it can be deleted, but it may have been read or copied.'), risk: visible ? 'high' : 'medium', why: t('Whatever goes into it may be read by others.'),
+      },
+      release: action === 'create' && {
+        summary: t('Publish a release of {repo} on GitHub', { repo }), where: repo,
+        change: t('A new version appears on the repository page, with its notes and files, and whoever follows the repository is notified.'),
+        undo: t('Partly: it can be deleted, but the notifications have already gone.'), risk: 'medium', why: t('Others may download it straight away.'),
+      },
+      workflow: action === 'run' && {
+        summary: t('Start the workflow {name} on {repo} (GitHub Actions)', { name, repo }), where: repo,
+        change: t('GitHub runs the automation as it is written: it may test, build, publish or deploy.'),
+        undo: t('It depends on the workflow: what it published or deployed stays.'), risk: 'high', why: t('What it does is in the workflow, not in this command.'),
+      },
+      secret: action === 'set' && {
+        summary: t('Store the secret {name} on GitHub ({repo})', { name, repo }), where: repo,
+        change: t('The workflows of the repository get this value from then on.'),
+        undo: t('Partly: it can be changed or removed, but the workflows may have used it already.'), risk: 'high', why: t('A secret sent to the wrong place can leak.'),
+      },
+    };
+    return of[group] || { summary: t('Act on GitHub ({what})', { what: `gh ${group} ${action}`.trim() }), where: group === 'gist' ? account : repo, ...unknownEffect() };
+  }
   if (program === 'git' && group === 'remote') {
     const [action, name = 'origin', url] = plain;
     const where = dir ?? '';
@@ -884,7 +1107,7 @@ export function codexItem(event, dir) {
 function runCodex({ session, prompt, log, onEvent }) {
   const tool = spawnable('codex');
   // Without Windows' app aliases on the PATH, which Codex's sandbox can't start (see codexEnvironment).
-  const child = spawn(tool.command, [...tool.prefix, ...codexArgs(session)], { cwd: session.cwd, env: codexEnvironment(), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  const child = spawn(tool.command, [...tool.prefix, ...codexArgs(session)], { cwd: session.cwd, env: codexEnvironment(sessionEnv(session.id)), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   const out = createWriteStream(log, { flags: 'a' });
   let thread = null;
   let failure = null;
@@ -996,11 +1219,25 @@ export function startSessions() {
     checkLogins().catch(error => console.error('Sessions:', error.message));
     try {
       watchEnded();
+      checkIdleWork();
     } catch (error) {
       console.error('Sessions:', error.message);
     }
   }, 15_000);
   watchEnded();
+}
+
+/**
+ * The "Work now" sessions quiet for IDLE_MINUTES (no turn going on, nothing new since the last summary): their summary
+ * is written for the next conversation and the manager told; they stay open. Returns the ids.
+ */
+export function checkIdleWork(at = Date.now(), close = closeWork) {
+  const idle = listSessions().filter(s => {
+    if (!s.work || s.mode !== 'app' || s.status !== 'open' || live.has(s.id) || !s.turns || !s.lastTurn?.at) return false;
+    return at - Date.parse(s.lastTurn.at) >= IDLE_MINUTES * 60_000 && !(s.work.summarized && s.work.summarized >= s.lastTurn.at);
+  });
+  for (const s of idle) close(s.id, { ended: false }).catch(error => console.error('Work now:', error.message));
+  return idle.map(s => s.id);
 }
 
 /**
@@ -1048,6 +1285,7 @@ export function sessionsState(config = loadConfig(), machine = computer(config))
     const app = s.mode === 'app';
     return {
       id: s.id, profile: s.profile, name: s.name, tool: s.tool, project: s.project, folder: s.library_folder, cwd: s.cwd, model: s.model, charge: !!s.charge,
+      ...(s.work ? { work: true, memberName: s.memberName ?? null, copy: !!s.work.copy, held: s.work.held ?? [], heldTitles: (s.work.held ?? []).map(run => s.work.titles?.[run] ?? run) } : {}),
       mode: app ? 'app' : 'window', status: s.status, started: s.started ?? s.created, ended: s.ended ?? null,
       alive: app ? live.has(s.id) : !!p, pid: p?.pid ?? (app ? live.get(s.id)?.pid : s.pid) ?? null, ram: p?.ram ?? 0,
       blocks: s.blocks ?? [], missing: s.missing ?? [], request: (s.requests ?? []).find(r => r.status === 'open') ?? null,

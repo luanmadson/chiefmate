@@ -8,7 +8,7 @@ import { appendFileSync, createWriteStream, existsSync, readFileSync, writeFileS
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
-import { describeAction, describeDoing, environment, executable as claudeExecutable } from './claude.mjs';
+import { describeAction, describeDoing, environment, executable as claudeExecutable, writtenFile } from './claude.mjs';
 import { t } from './i18n.mjs';
 import { clip, DATA, ensureDir, now, ROOT } from './util.mjs';
 
@@ -271,12 +271,12 @@ export function codexGuard(log) {
 /**
  * Grok takes no hook from the command line, so its steps get deny rules instead (--deny), checked by Grok on every
  * part of a command (split at &&, ;, |), inside "bash -c" and on the whole line. They are wider than the guard on
- * purpose: they refuse every git push and change of remotes, any gh pr, gh repo or gh api, and any web request to
+ * purpose: they refuse every git push and change of remotes, any gh pr, gh repo, gh api, gh gist, gh release, gh workflow or gh secret, and any web request to
  * GitHub's API, however written; a refusal comes back to the agent as a failed action.
  */
 export const GROK_DENY = [
   'Bash(*git *push*)', 'Bash(*send-pack*)', 'Bash(*git *remote*)', 'Bash(*gh *pr*)', 'Bash(*gh *repo*)', 'Bash(*gh *api*)',
-  'Bash(*api.github.com*)', 'Bash(*uploads.github.com*)',
+  'Bash(*gh *gist*)', 'Bash(*gh *release*)', 'Bash(*gh *workflow*)', 'Bash(*gh *secret*)', 'Bash(*api.github.com*)', 'Bash(*uploads.github.com*)',
 ];
 
 // What Grok would otherwise read of the owner's own Claude Code and Cursor configuration: hooks, MCP servers, skills,
@@ -287,6 +287,11 @@ const GROK_NO_COMPAT = Object.fromEntries(['CLAUDE', 'CURSOR'].flatMap(v => ['HO
 
 const CODEX_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh'];
 const GROK_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+/** The effort a step's tool is given: the member's level, or null when that tool doesn't take it (its own default). */
+export function toolEffort(tool, effort) {
+  const known = { codex: CODEX_EFFORTS, grok: GROK_EFFORTS }[tool];
+  return (known ? known.includes(effort) : !!effort) ? effort : null;
+}
 
 /**
  * Codex's arguments for a step: "codex exec" the first time, "codex exec resume <thread>" to go on, the events as JSON
@@ -295,9 +300,10 @@ const GROK_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
  * never asking (no one is there to answer), with Chiefmate's guard as a hook (trusted for this run only, as Claude
  * Code's hooks are given in --settings).
  */
-export function codexStepArgs({ dir, model, effort, session, guardLog }) {
+export function codexStepArgs({ dir, model, effort, session, guardLog, readOnly = false }) {
   const common = [
-    '--json', '--skip-git-repo-check', '--ignore-user-config', '-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"',
+    // readOnly: the emergency watch's analyst (src/sentinel.mjs), which only reads what it is given and answers.
+    '--json', '--skip-git-repo-check', '--ignore-user-config', '-c', `sandbox_mode="${readOnly ? 'read-only' : 'workspace-write'}"`, '-c', 'approval_policy="never"',
     '-c', 'windows.sandbox="unelevated"', '-c', codexGuard(guardLog), '--dangerously-bypass-hook-trust',
     ...(toolModel('codex', model) ? ['-m', toolModel('codex', model)] : []),
     ...(CODEX_EFFORTS.includes(effort) ? ['-c', `model_reasoning_effort="${effort}"`] : []),
@@ -437,14 +443,14 @@ export function grokEvents(event) {
  * interrupt() waits for the actions under way, then stops the tool: the same session goes on with session.resume.
  */
 export function runTool(tool, options) {
-  const { dir, prompt, system, model, effort, env = {}, maxMinutes = 60, isHeld = () => false, log, onEvent = () => {}, spentMs = 0, session = {}, guardLog } = options;
+  const { dir, prompt, system, model, effort, env = {}, maxMinutes = 60, isHeld = () => false, log, onEvent = () => {}, spentMs = 0, session = {}, guardLog, readOnly = false } = options;
   const first = session.resume || !system ? prompt : `## Your role (the agent's instructions)\n\n${system}\n\n---\n\n${prompt}`;
   let promptFile = null;
   if (tool === 'grok') {
     promptFile = `${log}.prompt.md`;
     writeFileSync(promptFile, first);
   }
-  const args = tool === 'codex' ? codexStepArgs({ dir, model, effort, session, guardLog }) : grokStepArgs({ dir, model, effort, session, promptFile });
+  const args = tool === 'codex' ? codexStepArgs({ dir, model, effort, session, guardLog, readOnly }) : grokStepArgs({ dir, model, effort, session, promptFile });
   const childEnv = tool === 'codex' ? codexEnvironment(env) : environment({ ...GROK_NO_COMPAT, ...env });
   let program;
   try {
@@ -525,7 +531,7 @@ export function runTool(tool, options) {
           break;
         }
         write({ type: 'assistant', message: { content: [{ type: 'tool_use', id: e.id ?? `a${Date.now()}`, name: e.tool, input: e.input }] } });
-        onEvent({ type: 'action', tool: e.tool, text: describeAction(e.tool, e.input, dir), doing: describeDoing(e.tool, e.input, dir) });
+        onEvent({ type: 'action', tool: e.tool, text: describeAction(e.tool, e.input, dir), doing: describeDoing(e.tool, e.input, dir), file: writtenFile(e.tool, e.input) });
         break;
       case 'done':
         // Grok's deny rules refused a command: noted as the guard notes its refusals.

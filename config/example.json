@@ -53,7 +53,9 @@
   },
   "mcp_servers": {},
   "needs_you": {
-    "max_wait_minutes": 120
+    "max_wait_minutes": 30,
+    "park_after_minutes": 15,
+    "on_call": false
   },
   "manager_updates": true,
   "autopilot": {
@@ -64,6 +66,7 @@
     "daily_report": "08:00"
   },
   "auto_update_mode": "pause",
+  "work_now_mode": "pause",
   "remote_access": {
     "enabled": false,
     "host": "",
@@ -77,6 +80,7 @@
     "voice_input": true
   },
   "security": {
-    "protected_folders": []
+    "protected_folders": [],
+    "sentinel": true
   }
 }

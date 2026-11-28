@@ -1,9 +1,12 @@
 // Starts a temporary Chiefmate on a spare port (only the app and the API: no queue, no schedule, no updates)
 // and checks that everything answers. Usage: npm run smoke
-import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { SAMPLE_CSV, SAMPLE_PNG, sampleXlsx } from './fixtures.mjs';
 
@@ -36,7 +39,8 @@ const feedLines = [
 const feedWhole = `${feedLines}\n`;
 writeFileSync(path.join(data, 'runs', 'smoke-feed', '01-generalist.jsonl'), `${feedWhole}{"type":"assistant","message":{"content":[{"type":"text","text":"half`);
 // The remote access through Tailscale Serve, made up: a second listener, with a tailnet name and a login of its own.
-const remote = { enabled: true, host: 'pc.smoke-tailnet.ts.net', logins: ['owner@example.com'], port: port + 1 };
+// This process stands in for Serve (serve_pid): the server takes the remote access only from the connections it opens.
+const remote = { enabled: true, host: 'pc.smoke-tailnet.ts.net', logins: ['owner@example.com'], port: port + 1, serve_pid: process.pid };
 // The file viewer's extra folder, made up: an image, a CSV, a workbook, and files it must never open.
 const files = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-files-'));
 mkdirSync(path.join(files, 'designs'));
@@ -91,9 +95,12 @@ try {
     const packed = await read({ 'accept-encoding': 'gzip' });
     expect(packed.status === 200 && packed.headers['content-encoding'] === 'gzip' && packed.size > 0, '/api/state is not compressed with gzip');
     let unchanged = false;
-    for (let i = 0; i < 5 && packed.headers.etag && !unchanged; i++) {
+    for (let i = 0, tag = packed.headers.etag; i < 5 && tag && !unchanged; i++) {
+      // A fresh tag after a miss: a new reading of this computer's processes (src/machine.mjs, in the background, at
+      // most every 15 s) may land between two requests, and it really changes the state.
       if (i) await new Promise(r => setTimeout(r, 200));
-      const again = await read({ 'if-none-match': packed.headers.etag });
+      if (i) tag = (await read({})).headers.etag;
+      const again = await read({ 'if-none-match': tag });
       unchanged = again.status === 304 && again.size === 0;
     }
     expect(unchanged, '/api/state has no tag, or an unchanged state did not answer 304');
@@ -110,7 +117,7 @@ try {
     expect(state.crew?.some(a => a.id === 'manager'), 'the crew has no manager');
     const context = state.manager?.context;
     expect(typeof context?.renewAt === 'number' && typeof context.renewing === 'boolean', "/api/state has no context for the manager's conversation");
-    for (const file of ['/', '/app.js', '/faces.js', '/i18n.js', '/style.css', '/manifest.webmanifest', '/locales/pt-BR.json', '/icon-32.png']) {
+    for (const file of ['/', '/app.js', '/asks.js', '/faces.js', '/i18n.js', '/countdown.js', '/style.css', '/manifest.webmanifest', '/locales/pt-BR.json', '/icon-32.png']) {
       const r = await fetch(base + file);
       expect(r.ok, `${file} answered ${r.status}`);
     }
@@ -140,7 +147,7 @@ try {
     // an urgent tab pulses, and stands still (lit) with reduced motion.
     expect(['view-decisions', 'decisions', 'focus-mode', 'focus-bar'].every(id => html.includes(`id="${id}"`)) && html.includes('href="#decisions"')
       && !/id="chat"[^]*?<\/section>/.exec(html)?.[0].includes('id="decisions"'), 'the app lacks the Decisions tab or the focus mode, or the decisions are still in the conversation');
-    expect(/html\.chat-focus \.titlebar, html\.chat-focus \.nav, html\.chat-focus \.alerts, html\.chat-focus \.statusbar/.test(styles)
+    expect(/html\.chat-focus \.app-header, html\.chat-focus \.nav, html\.chat-focus \.alerts, html\.chat-focus \.statusbar/.test(styles)
       && /prefers-reduced-motion: reduce\) \{ \.nav a\[data-level="urgent"\][^}]*animation: none/.test(styles), 'the focus mode leaves a bar or band on screen, or an urgent tab pulses with reduced motion');
     expect(['project-status', 'project-actions', 'project-more', 'project-needs', 'project-overview', 'project-crew', 'project-tasks', 'project-planning', 'project-context', 'project-builder', 'builder-body', 'builder-view', 'builder-edit']
       .every(id => html.includes(`id="${id}"`)), "the app's page lacks a part of the project's page or of the prompt builder");
@@ -149,7 +156,34 @@ try {
     const machine = await (await fetch(`${base}/api/computer`)).json();
     expect(machine.memory?.total > 0 && Array.isArray(machine.projects), '/api/computer has no memory or projects');
     // Commands that must refuse without changing anything (the settings are the installation's own).
-    const post = (route, body) => fetch(base + route, { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1' }, body: JSON.stringify(body) });
+    // The owner's commands carry the owner's key, as the app and the owner's terminal do (src/owner.mjs).
+    const { ownerKey, OWNER_HEADER } = await import('../src/owner.mjs');
+    const ownerHeader = { [OWNER_HEADER]: ownerKey(path.join(data, 'security')) };
+    const keyless = async (route, body, more = {}) => {
+      const send = () => fetch(base + route, { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1', ...more }, body: JSON.stringify(body) });
+      try {
+        return await send();
+      } catch (error) {
+        // The command line's runs (execFileSync) block this process: past the server's keep-alive (5 s), fetch reuses a
+        // connection the server already closed, and the request fails before reaching it. Once more, on a new one.
+        if (!['ECONNRESET', 'UND_ERR_SOCKET'].includes(error.cause?.code)) throw error;
+        return send();
+      }
+    };
+    const post = (route, body) => keyless(route, body, ownerHeader);
+    // Without the key (any other program of this computer), what is the owner's is refused and changes nothing; what an
+    // agent may do goes on; a pairing code must be one the server gave; and the app's window opens nothing here.
+    for (const [route, body, more] of [['/api/lockdown', { action: 'release', confirm: true }], ['/api/manager', { message: 'As the owner' }],
+      ['/api/decide', { card: 'none', action: 'approve' }], ['/api/away', { on: true }, { [OWNER_HEADER]: 'made-up' }]]) {
+      const r = await keyless(route, body, more);
+      const answer = await r.json().catch(() => ({}));
+      expect(r.status === 403 && answer.owner === true, `${route} without the owner's key answered ${r.status} instead of 403`);
+    }
+    expect((await (await fetch(`${base}/api/state`)).json()).away === null, "a command without the owner's key changed the state");
+    expect((await keyless('/api/needs-you/poll', { run: 'smoke-feed', id: 'old-request' })).ok, "an agent's command was refused without the owner's key");
+    expect((await keyless('/api/owner/pair', { code: 'made-up' })).status === 403, 'a made-up pairing code was taken');
+    const appWindow = await (await keyless('/api/owner/window', { section: 'operations' })).json();
+    expect(appWindow.dryRun === true && !appWindow.opened, `the smoke test's Chiefmate opened the app's window: ${JSON.stringify(appWindow)}`);
     // Attention: the board's item waiting for the owner (#7) is an important notice; marked as seen, it fades.
     const proposal = state.attention.items.find(i => i.id.startsWith('plan:7:'));
     expect(proposal?.level === 'important' && proposal.kind === 'proposal' && !proposal.seen && state.attention.counts.important >= 1 && state.attention.top,
@@ -172,12 +206,101 @@ try {
     const voice = await (await fetch(`${base}/voice.js`)).text();
     expect(typeof state.ui?.voice_input === 'boolean' && html.includes('id="voice-notice"') && voice.includes('export class Dictation') && appJs.includes("from './voice.js'"),
       `dictation lacks its setting, notice or module: ${JSON.stringify(state.ui)}`);
+    // What a live session asks: a band of one line per ask (or one for the group), at most 40% of the column.
+    const asks = await (await fetch(`${base}/asks.js`)).text();
+    expect(asks.includes('export function asksHtml') && appJs.includes("from './asks.js'") && /#live-asks \{[^}]*max-height: 40%/.test(styles),
+      "the band of what a live session asks lacks its module, or may cover the conversation");
     // The autopilot's panel in the Usage section: its state, and limits refused before anything is saved.
     const ap = state.autopilot;
     expect(ap && typeof ap.enabled === 'boolean' && ap.stop_at_5h_window > 0 && (ap.week_pace === null || ap.week_pace > 0) && typeof ap.mode === 'string' && ap.now?.state && Array.isArray(ap.changes) && Array.isArray(ap.queued) && Array.isArray(ap.wakes) && (ap.enabled || ap.blocked?.reason === 'off'),
       `/api/state has no autopilot's state: ${JSON.stringify(ap)}`);
     expect(html.includes('id="autopilot"') && html.includes('id="autopilot-form"'), "the Usage section has no autopilot's panel");
     expect((await post('/api/autopilot', { quiet_hours: 'soon' })).status === 400 && (await post('/api/autopilot', { week_pace: 'much' })).status === 400, "the autopilot's invalid limits were not refused");
+    // The owner's focus (src/steer.mjs): in the state with its line, invalid changes refused, the panel in Operations.
+    expect(state.steer?.mode === 'free' && typeof state.steer.line === 'string' && Array.isArray(state.steer.projects) && Array.isArray(state.steer.changes), `/api/state has no focus: ${JSON.stringify(state.steer)}`);
+    expect((await post('/api/steer', { action: 'focus', projects: ['no-such-project'] })).status === 400 && (await post('/api/steer', { action: 'free', until: 'yesterday' })).status === 400, 'an invalid change of focus was not refused');
+    expect(html.includes('id="steer"') && html.includes('id="steer-dialog"'), 'Operations has no Focus panel');
+    // The owner's queue controls (src/queue.mjs): the order given, a hold with its reason, "Do now" and its end, cancel;
+    // nothing changes without the owner's key, and the manager never undoes the owner's changes.
+    {
+      const made = (id, project, minutes) => ({ id, kind: 'task', project, title: `Queue ${id}`, summary: 'Made up.', status: 'queued', created: new Date(Date.now() - minutes * 60_000).toISOString(), steps: [{ agent: 'generalist', status: 'pending' }] });
+      const runs = [made('smoke-q1', 'smoke-a', 40), made('smoke-q2', 'smoke-a', 30), made('smoke-q3', 'smoke-b', 20), made('smoke-q4', 'smoke-b', 10)];
+      for (const r of runs) writeFileSync(path.join(data, 'runs', `${r.id}.json`), JSON.stringify(r));
+      const now = async () => (await (await fetch(`${base}/api/state`)).json());
+      const mine = s => s.queue.filter(r => r.id.startsWith('smoke-q'));
+      const ids = s => mine(s).map(r => r.id.slice(6)).join(',');
+      // Before any move, the order the turns go (src/queue.mjs): the two projects in turn, each in the order asked.
+      expect(ids(await now()) === 'q1,q3,q2,q4', `the queue is not in turn among its projects, in the order the runs were asked for: ${ids(await now())}`);
+      const unkeyed = await keyless('/api/queue', { action: 'move', id: 'smoke-q4', top: true });
+      expect(unkeyed.status === 403 && ids(await now()) === 'q1,q3,q2,q4', `a change to the queue without the owner's key answered ${unkeyed.status}, or changed it`);
+      for (const body of [{ id: 'smoke-q4', top: true }, { id: 'smoke-q1', down: true }, { id: 'smoke-q3', before: 'smoke-q4' }, { id: 'smoke-q2', up: true }]) {
+        const r = await post('/api/queue', { action: 'move', ...body });
+        expect(r.ok, `moving a run in the queue failed: ${JSON.stringify(body)} ${r.status}`);
+      }
+      // Each move goes from the order shown, and keeps it: the fair turn no longer rearranges the runs placed.
+      expect(ids(await now()) === 'q3,q4,q2,q1', `the owner's moves did not give the queue's order: ${ids(await now())}`);
+      const held = await post('/api/queue', { action: 'hold', id: 'smoke-q2', reason: 'Waiting for the API key' });
+      let s = await now();
+      const q2 = mine(s).find(r => r.id === 'smoke-q2');
+      expect(held.ok && q2?.onHold === true && q2.hold?.by === 'owner' && q2.hold.reason === 'Waiting for the API key' && q2.movedBy === 'owner',
+        `a run held by the owner does not say who held it and why: ${JSON.stringify(q2?.hold)}`);
+      // The manager (by "manager"): refused when it would undo the owner's hold or order.
+      const undo = [await post('/api/queue', { action: 'release', id: 'smoke-q2', by: 'manager' }), await post('/api/queue', { action: 'move', id: 'smoke-q4', top: true, by: 'manager' }),
+        await post('/api/queue', { action: 'cancel', id: 'smoke-q1', by: 'manager' }), await post('/api/queue', { action: 'do-now', id: 'smoke-q4', scope: 'all', by: 'manager' })];
+      s = await now();
+      expect(undo.every(r => r.status === 400) && ids(s) === 'q3,q4,q2,q1' && mine(s).find(r => r.id === 'smoke-q2')?.hold?.by === 'owner',
+        `the manager undid the owner's changes to the queue: ${undo.map(r => r.status).join(',')} ${ids(s)}`);
+      // "Do now" for its project: to the top, and only the other runs of its project wait; for all: every other run waits.
+      await post('/api/queue', { action: 'do-now', id: 'smoke-q4', scope: 'project' });
+      s = await now();
+      const hold = id => mine(s).find(r => r.id === id)?.hold;
+      expect(ids(s) === 'q4,q3,q2,q1' && s.queueControl?.doNow?.run === 'smoke-q4' && mine(s)[0].doNow && hold('smoke-q3')?.doNow?.run === 'smoke-q4' && !hold('smoke-q1') && hold('smoke-q2')?.reason,
+        `"Do now" for its project did not put it first and hold only its project's runs: ${ids(s)} ${JSON.stringify(mine(s).map(r => r.hold))}`);
+      // the run on "Do now" is never held: the runs it holds would wait for nothing
+      expect((await post('/api/queue', { action: 'hold', id: 'smoke-q4' })).status === 400, 'the run on "Do now" was held');
+      await post('/api/queue', { action: 'do-now', id: 'smoke-q4', scope: 'all' });
+      s = await now();
+      expect(s.queueControl?.doNow?.scope === 'all' && hold('smoke-q1')?.doNow?.run === 'smoke-q4' && s.focus?.run !== 'smoke-q1', `"Do now" for all did not hold every other run: ${JSON.stringify(mine(s).map(r => r.hold))}`);
+      // The manager sees the order, the holds and why, the "Do now" and the owner's changes, which it must keep.
+      const { queueManagerLines } = await import('../src/queue.mjs');
+      const lines = queueManagerLines().join('\n');
+      expect(/ON HOLD by .+ \(why: Waiting for the API key\)/.test(lines) && /"Do now": "Queue smoke-q4"/.test(lines) && lines.includes('never undo them'),
+        `the manager's situation lacks the queue's holds, "Do now" or the owner's changes: ${lines}`);
+      // Once its run ends, the others go on by themselves; ended early, at once.
+      writeFileSync(path.join(data, 'runs', 'smoke-q4.json'), JSON.stringify({ ...runs[3], status: 'done', ended: new Date().toISOString() }));
+      s = await now();
+      expect(!s.queueControl?.doNow && !hold('smoke-q1') && !hold('smoke-q3') && hold('smoke-q2')?.by === 'owner', `a "Do now" whose run ended still holds the others: ${JSON.stringify(s.queueControl)}`);
+      await post('/api/queue', { action: 'do-now', id: 'smoke-q3', scope: 'all' });
+      await post('/api/queue', { action: 'do-now-end' });
+      await post('/api/queue', { action: 'release', id: 'smoke-q2' });
+      const canceled = await (await post('/api/queue', { action: 'cancel', id: 'smoke-q1' })).json();
+      s = await now();
+      const actions = (s.queueControl?.changes ?? []).map(c => c.action);
+      expect(canceled.status === 'canceled' && !s.queueControl?.doNow && !mine(s).some(r => r.hold) && ids(s) === 'q3,q2'
+        && ['move', 'hold', 'do-now', 'do-now-end', 'release', 'cancel'].every(a => actions.includes(a)) && s.queueControl.changes.every(c => c.by === 'owner' && c.at),
+        `the owner's "Do now" end, release or cancel did not take, or was not recorded: ${ids(s)} ${JSON.stringify(s.queueControl)}`);
+      // A hold ends with its run: canceled, it keeps no hold for a later resume.
+      await post('/api/queue', { action: 'hold', id: 'smoke-q3', reason: 'Later' });
+      await post('/api/queue', { action: 'cancel', id: 'smoke-q3' });
+      const q3 = JSON.parse(readFileSync(path.join(data, 'runs', 'smoke-q3.json'), 'utf8'));
+      expect(q3.status === 'canceled' && !q3.onHold, `a held run canceled kept its hold: ${JSON.stringify(q3.onHold)}`);
+      expect(html.includes('id="do-now-dialog"') && html.includes('id="hold-dialog"') && appJs.includes('data-queue="move"') && appJs.includes("'/api/queue'"), "the app has no queue controls");
+      for (const r of runs) rmSync(path.join(data, 'runs', `${r.id}.json`), { force: true });
+      // "Do now" on the run shown first keeps it first, though only the fair turn put it there: once its project ran
+      // last, the turn alone would give the other project's run the next place.
+      const later = [made('smoke-q5', 'smoke-c', 8), made('smoke-q6', 'smoke-d', 6)];
+      for (const r of later) writeFileSync(path.join(data, 'runs', `${r.id}.json`), JSON.stringify(r));
+      const pair = s => s.queue.filter(r => r.id === 'smoke-q5' || r.id === 'smoke-q6').map(r => r.id).join(',');
+      s = await now();
+      expect(s.queue[0]?.id === 'smoke-q5' && pair(s) === 'smoke-q5,smoke-q6', `the runs for "Do now" are not in the order the turns go: ${s.queue.map(r => r.id).join(',')}`);
+      await post('/api/queue', { action: 'do-now', id: 'smoke-q5', scope: 'project' });
+      const ended = new Date().toISOString();
+      writeFileSync(path.join(data, 'runs', 'smoke-q7.json'), JSON.stringify({ ...made('smoke-q7', 'smoke-c', 7), status: 'done', started: ended, ended }));
+      s = await now();
+      expect(pair(s) === 'smoke-q5,smoke-q6' && s.queue[0]?.id === 'smoke-q5', `"Do now" on the run shown first did not keep it first: ${s.queue.map(r => r.id).join(',')}`);
+      await post('/api/queue', { action: 'do-now-end' });
+      for (const id of ['smoke-q5', 'smoke-q6', 'smoke-q7']) rmSync(path.join(data, 'runs', `${id}.json`), { force: true });
+    }
     expect((await post('/api/stop-project', { project: 'none' })).status === 400, 'stopping a project without a confirmed list was not refused');
     expect((await post('/api/reset-grants', { action: 'used', index: 9999 })).status === 400, 'marking a free reset that does not exist was not refused');
     // Updates are off in the smoke test: "update now" and "update check" answer so, and nothing is fetched or installed.
@@ -191,7 +314,18 @@ try {
     expect(standby.mode === 'standby' && standbyState.power?.mode === 'standby' && backOn.mode === 'on', `standby did not go on and off: ${JSON.stringify([standby, standbyState.power, backOn])}`);
     expect((await post('/api/power', { action: 'stop' })).status === 400 && (await post('/api/power', { action: 'nap' })).status === 400, 'a stop was tried in the smoke test, or an unknown power mode was accepted');
     const powerPreview = await (await post('/api/power', { action: 'preview' })).json();
-    expect(Array.isArray(powerPreview.runs) && Array.isArray(powerPreview.sessions) && Array.isArray(powerPreview.unsaved), `the power preview lacks the runs, sessions or changes: ${JSON.stringify(powerPreview)}`);
+    expect(Array.isArray(powerPreview.runs) && Array.isArray(powerPreview.sessions) && Array.isArray(powerPreview.unsaved) && typeof powerPreview.away === 'boolean', `the power preview lacks the runs, sessions, changes or away mode: ${JSON.stringify(powerPreview)}`);
+    // A restart: never without a reason; the manager's (without the owner's key, as the manager sends it), outside away
+    // mode, becomes a question card for the owner; the owner's own needs the key, and would begin, which the smoke test
+    // can't (shutting down is off here): nothing restarts.
+    const noReason = await keyless('/api/power', { action: 'reboot', by: 'manager' });
+    const managerReboot = await (await keyless('/api/power', { action: 'reboot', by: 'manager', reason: 'a file locked by the antivirus' })).json();
+    const rebootQuestion = (await (await fetch(`${base}/api/state`)).json()).decisions?.find(c => c.question === managerReboot.asked);
+    const ownerReboot = await post('/api/power', { action: 'reboot', by: 'owner', reason: 'test' });
+    const ownerRebootKeyless = await keyless('/api/power', { action: 'reboot', by: 'owner', reason: 'test' });
+    expect(noReason.status === 409 && managerReboot.asked && managerReboot.mode === 'on' && rebootQuestion?.options?.length === 2 && ownerReboot.status === 400 && ownerRebootKeyless.status === 403,
+      `a restart went without a reason, the manager's did not wait for the owner's card, the owner's went without the key, or one began in the smoke test: ${JSON.stringify([noReason.status, managerReboot, rebootQuestion, ownerReboot.status, ownerRebootKeyless.status])}`);
+    await post('/api/decide', { card: rebootQuestion?.id, action: 'discard' });
     expect(Array.isArray(state.teams) && state.teams.every(x => x.project && Array.isArray(x.members)), '/api/state has no crews by project');
     expect(Array.isArray(state.needs), "/api/state has no list of the owner's requests");
     expect((await post('/api/needs-you', { what: 'Sign in' })).status === 400, 'a request for the owner without a run was not refused');
@@ -205,6 +339,20 @@ try {
     const request = await (await post('/api/needs-you', { run: waitingRun.id, what: 'Which?', options: 'A|B' })).json();
     const answered = await (await post('/api/needs-you', { run: waitingRun.id, what: 'Which?', options: 'A|B' })).json();
     await post('/api/needs-you/done', { run: waitingRun.id, id: answered.id, answer: 'B', note: 'My reason' });
+    // A question also goes in the agent's speech bubble, as a call for the owner written by Chiefmate.
+    expect((JSON.parse(readFileSync(waitingFile, 'utf8')).speech ?? []).some(x => x.by === 'auto' && x.state === 'calling' && x.text.includes('Which?')), "a question for the owner left no call in the speech bubble");
+    // "Not now" (the owner's only): the call stays open, as important, out of the call bar; the calls' settings in the state.
+    const toAct = await (await post('/api/needs-you', { run: waitingRun.id, what: 'Sign in to the bank', wait: true })).json();
+    expect((await keyless('/api/needs-you/later', { run: waitingRun.id, id: toAct.id })).status === 403, '"Not now" went without the owner\'s key');
+    const leftForLater = await (await post('/api/needs-you/later', { run: waitingRun.id, id: toAct.id })).json();
+    const laterState = await (await fetch(`${base}/api/state`)).json();
+    expect(leftForLater.status === 'open' && !!leftForLater.deferred && laterState.needs.some(n => n.id === toAct.id && n.deferred && !n.waiting)
+      && laterState.attention.items.some(n => n.id === `needs:${waitingRun.id}:${toAct.id}` && n.level === 'important' && n.request?.deferred),
+    `"Not now" did not leave the call open for later: ${JSON.stringify(leftForLater)}`);
+    expect(laterState.calls?.maxWaitMinutes > 0 && Array.isArray(laterState.calls.choices) && laterState.calls.onCall?.enabled === false && laterState.calls.onCall.channel === false,
+      `the state has no calls' settings, or the on-call is on: ${JSON.stringify(laterState.calls)}`);
+    expect((await keyless('/api/needs-you/settings', { max_wait_minutes: 10 })).status === 403 && (await post('/api/needs-you/settings', { max_wait_minutes: 0 })).status === 400
+      && (await post('/api/needs-you/settings', { max_wait_minutes: 'abc' })).status === 400, "the longest wait changed without the owner's key, or took a wrong value");
     const noticeId = `needs:${waitingRun.id}:${request.id}`;
     const beforeCancel = await (await fetch(`${base}/api/state`)).json();
     expect(beforeCancel.attention.items.some(n => n.id === noticeId && n.level === 'urgent'), 'a paused run lost its open request');
@@ -239,6 +387,7 @@ try {
     expect((await post('/api/manager/remove', { id: 'smoke1' })).status === 404, 'removing a message twice did not answer 404');
     // Live sessions: an unknown profile or session is refused, and nothing opens.
     expect((await post('/api/session', { profile: 'no-such-profile' })).status === 400, 'opening a session of an unknown profile was not refused');
+    expect((await post('/api/work-now', { project: 'no-such-project' })).status === 400, '"Work now" on an unknown project was not refused');
     expect((await post('/api/session/end', { id: 'no-such-session' })).status === 400, 'ending a session that does not exist was not refused');
     expect((await post('/api/session/say', { id: 'no-such-session', text: 'Hello' })).status === 400, 'a message to a session that does not exist was not refused');
     expect((await fetch(`${base}/api/session/no-such-session`)).status >= 400, 'the conversation of a session that does not exist was given');
@@ -321,7 +470,17 @@ try {
     expect((await fetch(`${base}/api/run/none/feed`)).status === 404, 'the panel of a run that does not exist did not answer 404');
     expect((await post('/api/run/talk', { run: 'smoke-feed', text: 'Hello' })).status === 400, 'a message to a run not going on was not refused');
     expect((await post('/api/run/talk', { run: 'smoke-feed', text: ' ' })).status === 400, 'an empty message to an agent was not refused');
+    expect((await post('/api/say', { run: 'smoke-feed', step: 1, text: 'Hello' })).status === 400, 'a line for the speech bubble of a run not going on was not refused');
     expect(state.crew.every(a => Array.isArray(a.runs) && 'waitingFor' in a), "the crew has no runs to open a panel on, or no \"waiting for\"");
+    // Each agent's effort: shown with where it comes from; an unknown level or agent refused, the same level saves nothing.
+    const chief = state.crew.find(a => a.id === 'manager');
+    expect(state.crew.every(a => 'effort' in a && a.effortFrom) && 'chatEffort' in chief && Array.isArray(state.effortHistory), '/api/state has no effort for each member, or no effort history');
+    expect((await post('/api/effort', { member: 'manager', level: 'huge' })).status === 400, 'an unknown effort was not refused');
+    expect((await post('/api/effort', { member: 'nobody', level: 'low' })).status === 400, 'an effort for an unknown agent was not refused');
+    if (chief.effort) {
+      const same = await (await post('/api/effort', { member: 'manager', level: chief.effort })).json();
+      expect(same.changed === false, `the same effort was taken as a change: ${JSON.stringify(same)}`);
+    }
     // A request for a team lead: refused for a project that does not exist, and with no request.
     expect(state.teams.every(x => 'lead' in x), '/api/state has no team lead (or null) for each project');
     expect((await post('/api/ask', { project: 'none', request: 'Do something' })).status === 400, 'a request for a project that does not exist was not refused');
@@ -330,6 +489,8 @@ try {
     // (nothing opens: the actions are refused or asked for as a dry run).
     expect((await fetch(`${base}/api/project/no-such-project`)).status === 400, "the page of a project that does not exist did not answer 400");
     expect((await post('/api/project/open', { project: 'no-such-project', app: 'folder', dryRun: true })).status === 400, 'opening the folder of a project that does not exist was not refused');
+    const outsideHome = await post('/api/files/open', { path: path.join(path.parse(os.homedir()).root, 'Windows', 'win.ini'), dryRun: true });
+    expect(outsideHome.status === 403, `a file outside the user folder was not refused for opening on the computer: ${outsideHome.status}`);
     expect((await post('/api/project/dev', { project: 'no-such-project', action: 'start', dryRun: true })).status === 400, 'starting the environment of a project that does not exist was not refused');
     expect((await post('/api/project/dev', { project: 'no-such-project', action: 'other' })).status === 400, 'an unknown action on the development environment was not refused');
     expect((await post('/api/session', { profile: 'no-such-profile', dryRun: true })).status === 400, 'a dry run of an unknown session profile was not refused');
@@ -371,7 +532,7 @@ try {
       r.on('error', reject);
       r.end(body ? JSON.stringify(body) : undefined);
     });
-    const tailnet = { host: remote.host, 'tailscale-user-login': 'Owner@example.com' };
+    const tailnet = { host: remote.host, 'tailscale-user-login': 'Owner@example.com', 'x-forwarded-for': '100.101.102.103' };
     const command = { ...tailnet, origin: `https://${remote.host}`, 'x-chiefmate': '1' };
     const page = await ask(remote.port, '/', tailnet);
     expect(page.status === 200 && page.headers['x-content-type-options'] === 'nosniff' && /frame-ancestors 'none'/.test(page.headers['content-security-policy'] ?? ''),
@@ -386,9 +547,27 @@ try {
     const opens = await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder' });
     expect(opens.status === 403 && JSON.parse(opens.text).error?.includes('computer'), `opening a window on the computer from another device was not refused: ${opens.status}`);
     expect((await ask(remote.port, '/api/project/open', command, { project: 'none', app: 'folder', dryRun: true })).status !== 403, 'a dry run of opening a folder was refused through the remote access');
+    expect((await ask(remote.port, '/api/browser', command, { action: 'focus', pid: 0 })).status === 403, 'bringing a browser to the front from another device was not refused');
+    // A session asked in a window, or the development environment, is not refused there: it has a version from afar.
+    expect((await ask(remote.port, '/api/session', command, { profile: 'no-such-profile', window: true })).status === 400, 'a session in a window was refused from another device instead of opening in the app');
+    expect((await ask(remote.port, '/api/project/dev', command, { project: 'no-such-project', action: 'start' })).status === 400, 'the development environment was refused from another device instead of running in the background');
+    // A file of the user folder: opened only on the computer; from the phone, only found (its path to copy).
+    const missing = path.join(os.homedir(), 'chiefmate-smoke-no-such-file.html');
+    const fileOpens = await ask(remote.port, '/api/files/open', command, { path: missing });
+    expect(fileOpens.status === 403 && JSON.parse(fileOpens.text).error?.includes('computer'), `opening a file on the computer from another device was not refused: ${fileOpens.status}`);
+    const fileFound = await ask(remote.port, '/api/files/open', command, { path: missing, dryRun: true });
+    expect(fileFound.status === 404 && JSON.parse(fileFound.text).tried === missing, `looking for a file from another device did not say the path tried: ${fileFound.status} ${fileFound.text}`);
     const remoteStop = await ask(remote.port, '/api/power', command, { action: 'stop' });
     expect(remoteStop.status === 403 && JSON.parse(remoteStop.text).error?.includes('computer'), `stopping Chiefmate from another device was not refused: ${remoteStop.status}`);
+    expect((await ask(remote.port, '/api/power', command, { action: 'reboot', by: 'owner', reason: 'test' })).status === 403, 'restarting the computer from another device was not refused');
     expect((await ask(port, '/api/state', tailnet)).status === 403, "the app's own port answered the tailnet name");
+    // Serve's headers sent by another program of this computer, or a request from this computer's own node: refused.
+    const forged = spawnSync(process.execPath, ['-e', `require('node:http').get({ host: '127.0.0.1', port: ${remote.port}, path: '/api/state', headers: ${JSON.stringify(tailnet)} }, r => console.log(r.statusCode, r.headers.connection)).on('error', e => console.log(e.message))`], { encoding: 'utf8', windowsHide: true, timeout: 20_000 });
+    // Refused, and its connection closed, so a refusal never sticks to a connection that is kept open.
+    expect(forged.stdout.trim() === '403 close', `a program of this computer sending Tailscale Serve's headers was not refused, or kept its connection: ${forged.stdout.trim()}`);
+    const { 'x-forwarded-for': _from, ...noSource } = tailnet;
+    expect((await ask(remote.port, '/api/state', noSource)).status === 403, 'the remote access answered without the tailnet address of the device');
+    expect((await ask(remote.port, '/api/state', { ...tailnet, 'x-forwarded-for': '127.0.0.1' })).status === 403, 'the remote access answered a request from this computer');
 
     // The emergency lockdown (src/lockdown.mjs), engaged and released through the API. This server stops nothing for
     // real (no queue, no runs, no hooks given), and the lockdown's state lives in the temporary data folder.
@@ -398,13 +577,41 @@ try {
       `the lockdown was not engaged, or the app does not show it: ${JSON.stringify(lockState.lockdown)}`);
     const lockedMerge = await post('/api/merge', { run: 'smoke-feed' });
     expect(lockedMerge.status === 400 && /lockdown|emergência/i.test((await lockedMerge.json()).error ?? ''), 'a merge was not refused in the lockdown');
-    expect((await ask(remote.port, '/api/state', tailnet)).status === 423, 'the remote access answered in the lockdown');
+    const lockedAfar = await ask(remote.port, '/api/state', tailnet);
+    const lockedBody = JSON.parse(lockedAfar.text);
+    expect(lockedAfar.status === 423 && lockedBody.lockdown?.active && lockedBody.lockdown.reason === 'Smoke test' && lockedBody.language && !('runs' in lockedBody),
+      `the remote access answered in the lockdown, or without saying why: ${lockedAfar.status} ${lockedAfar.text.slice(0, 200)}`);
+    // The app itself still loads there, to show the lockdown instead of a lost connection; its data stays refused.
+    expect((await ask(remote.port, '/', tailnet)).status === 200, "the app's page did not load through the remote access in the lockdown");
+    expect((await ask(remote.port, '/', { host: remote.host })).status === 403, "the app's page loaded without a Tailscale login in the lockdown");
+    for (const disguised of ['/./api/state', '/%2e/api/state', '/ui/../api/state', `http://${remote.host}/api/state`]) {
+      expect((await ask(remote.port, disguised, tailnet)).status === 423, `the state answered through the remote access in the lockdown at ${disguised}`);
+    }
+    expect((await ask(remote.port, '/api/manager/interrupt', command, {})).status === 423, 'a command through the remote access was taken in the lockdown');
     expect((await ask(remote.port, '/api/lockdown', command, { action: 'release', confirm: true })).status === 403, 'the lockdown was released through the remote access');
+    // The phone's lockdown screen: it opens the app (its files hold no data), reads the lockdown and sends the owner's
+    // note, even with the rest off.
+    const phonePage = await ask(remote.port, '/', tailnet);
+    expect(phonePage.status === 200 && /<html/i.test(phonePage.text), `the phone could not open the app in the lockdown: ${phonePage.status}`);
+    const phoneView = await ask(remote.port, '/api/lockdown', tailnet);
+    expect(phoneView.status === 200 && JSON.parse(phoneView.text).lockdown?.active === true, `the phone could not read the lockdown: ${phoneView.status}`);
+    const phoneNote = await ask(remote.port, '/api/lockdown', command, { action: 'note', note: 'Seen from the phone' });
+    expect(phoneNote.status === 200 && JSON.parse(phoneNote.text).lockdown?.notes?.at(-1)?.from === 'remote', `the phone's note was not kept: ${phoneNote.status} ${phoneNote.text}`);
+    expect(lockState.watch?.members?.length === 3, `the emergency watch is not in the org chart: ${JSON.stringify(lockState.watch)}`);
     expect((await post('/api/lockdown', { action: 'release' })).status === 400, "the lockdown was released without the owner's confirmation");
-    const released = await post('/api/lockdown', { action: 'release', confirm: true });
+    const released = await post('/api/lockdown', { action: 'release', confirm: true, note: 'Released in the smoke test' });
     const afterRelease = await (await fetch(`${base}/api/state`)).json();
-    expect(released.ok && !afterRelease.lockdown?.active && afterRelease.lockdown?.last?.reason === 'Smoke test', 'the owner could not release the lockdown on this computer');
+    expect(released.ok && !afterRelease.lockdown?.active && afterRelease.lockdown?.last?.reason === 'Smoke test' && afterRelease.lockdown.last.notes?.length === 2, 'the owner could not release the lockdown on this computer, or the notes were lost');
     expect((await ask(remote.port, '/api/state', tailnet)).status === 200, 'the remote access stayed off after the release');
+    // Calling the owner outside the app (src/escalation.mjs): shown in the state with no secret, set up on this computer
+    // only (a PIN set here, refused through the remote access), and nothing sent to Telegram (no token in this data).
+    expect(afterRelease.escalation?.ready === false && afterRelease.escalation.telegram === null, `the escalation's view is missing: ${JSON.stringify(afterRelease.escalation)}`);
+    const pinSet = await post('/api/escalation', { action: 'pin', pin: '480215' });
+    const pinState = await (await fetch(`${base}/api/state`)).json();
+    expect(pinSet.ok && pinState.escalation.pin.set === true && !JSON.stringify(pinState).includes('480215'), 'the PIN was not set, or it shows in the state');
+    expect((await post('/api/escalation', { action: 'pin', pin: '123456' })).status === 400, 'an easy PIN was accepted');
+    expect((await ask(remote.port, '/api/escalation', command, { action: 'pin', pin: '480216' })).status === 403, 'the PIN was changed through the remote access');
+    expect((await post('/api/escalation', { action: 'test' })).status === 400, 'a test went out with no Telegram set up');
     // The refused requests above (a login not allowed, an unknown address) became signals for the detection.
     const signals = readFileSync(path.join(data, 'security', 'signals.jsonl'), 'utf8');
     expect(/"kind":"login_failed"/.test(signals) && /"kind":"unknown_origin"/.test(signals), 'the refused requests were not noted for the detection');
@@ -469,6 +676,32 @@ try {
     expect((await post('/api/level', { run: 'smoke-feed', level: '7' })).status !== 200, 'an unknown approval level was accepted');
     cli(['level', 'smoke-feed', 'none']);
     expect(runLevel() === null, "the run's approval level was not cleared");
+    // A defect a live session reports on its own, from the project's folder: recorded with the session as its sender
+    // (never the owner), a repeat joined to it, nothing written in that folder; only the manager or the owner closes it.
+    const projectDir = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-project-'));
+    try {
+      const fromSession = args => execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), ...args], {
+        cwd: projectDir, env: { ...process.env, CHIEFMATE_PORT: String(port), CHIEFMATE_SESSION: 'smoke-session', CHIEFMATE_RUN: '', CHIEFMATE_MANAGER: '' }, stdio: 'pipe', windowsHide: true, encoding: 'utf8',
+      });
+      const reported = fromSession(['defect', 'report', 'The notice of the finished run never came. Expected: a notice in the conversation.']);
+      const again = fromSession(['chat', 'say', '[Defeito] the notice of the finished run never came. Expected: a notice in the conversation!']);
+      const defects = JSON.parse(readFileSync(path.join(data, 'defects.json'), 'utf8'));
+      expect(/Defect #1 recorded/.test(reported) && /already open/.test(again) && defects.length === 1 && defects[0].count === 2 && defects[0].reporters.every(r => r.kind === 'session' && r.id === 'smoke-session'),
+        `a defect was not recorded with its session, or its repeat was not joined: ${reported} ${again} ${JSON.stringify(defects)}`);
+      expect(readdirSync(projectDir).length === 0, "reporting a defect wrote something in the project's folder");
+      let closedByAgent = true;
+      try {
+        fromSession(['defect', 'close', '1']);
+      } catch {
+        closedByAgent = false;
+      }
+      expect(!closedByAgent, 'a live session closed a defect');
+      cli(['defect', 'close', '1', '--note', 'Fixed'], { CHIEFMATE_RUN: '', CHIEFMATE_SESSION: '', CHIEFMATE_MANAGER: '' });
+      const closed = JSON.parse(readFileSync(path.join(data, 'defects.json'), 'utf8'))[0];
+      expect(closed.status === 'closed' && closed.note === 'Fixed' && closed.closedBy === 'owner', `the owner could not close a defect: ${JSON.stringify(closed)}`);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
     let askRefused = false;
     try {
       cli(['ask-owner', 'From a step?'], { CHIEFMATE_RUN: 'x' });
@@ -500,11 +733,361 @@ try {
       decisionRefused = /only adds and updates/.test(String(error.stderr));
     }
     expect(decisionRefused, "a step of a run made the owner's decision on a radar idea");
+    // A step and the manager update an idea without the owner's key (src/owner.mjs).
+    expect(/^Changed #3 /.test(cli(['radar', 'set', '3', '--summary', 'Updated by a step.'], { CHIEFMATE_RUN: 'x' })), 'a step could not update a radar idea');
+    expect(/^Changed #3 /.test(cli(['radar', 'set', '3', '--summary', 'Updated by the manager.'], { CHIEFMATE_MANAGER: '1' })), 'the manager could not update a radar idea');
+
+    // The commands the instructions give the manager, a step and a live session go without the owner's key, marked as
+    // theirs; what is the owner's stays refused (the server's answer, or the command line's own rule for a step).
+    const as = {
+      manager: { CHIEFMATE_MANAGER: '1', CHIEFMATE_RUN: '', CHIEFMATE_STEP: '', CHIEFMATE_SESSION: '' },
+      step: { CHIEFMATE_MANAGER: '', CHIEFMATE_RUN: 'smoke-feed', CHIEFMATE_STEP: '1', CHIEFMATE_SESSION: '' },
+      session: { CHIEFMATE_MANAGER: '', CHIEFMATE_RUN: '', CHIEFMATE_STEP: '', CHIEFMATE_SESSION: 'smoke-session' },
+    };
+    const refusal = (args, env) => {
+      try {
+        return { out: cli(args, env) };
+      } catch (error) {
+        return { error: String(error.stderr) };
+      }
+    };
+    const ownerRefused = /owner's key|chave do dono/;
+    const idOf = out => Number(/#(\d+)/.exec(out ?? '')?.[1]);
+    // The agents' own commands are no signal for the emergency lockdown (src/lockdown.mjs): only the refusals below are.
+    const signalCount = () => (existsSync(path.join(data, 'security', 'signals.jsonl')) ? readFileSync(path.join(data, 'security', 'signals.jsonl'), 'utf8').split('\n').filter(Boolean).length : 0);
+    const signalsBefore = signalCount();
+    try {
+      const fromStep = refusal(['plan', 'propose', 'Sample', 'Smoke keyless proposal', '--summary', 'From a step.', '--agent', 'generalist', '--priority', 'low'], as.step);
+      const keylessId = idOf(fromStep.out);
+      expect(keylessId > 0, `a step could not propose an item without the owner's key: ${fromStep.error}`);
+      for (const args of [['plan', 'triage', `${keylessId}`, '--recommend', 'now', '--priority', 'high', '--note', 'Keyless.'], ['plan', 'order', `${keylessId}`],
+        ['plan', 'set', `${keylessId}`, '--status', 'triaged'], ['plan', 'discard', `${keylessId}`, '--reason', 'Smoke.'], ['plan', 'restore', `${keylessId}`],
+        ['plan', 'add', 'Sample', 'Smoke manager item', '--status', 'proposed'], ['calls'], ['quarantine']]) {
+        const r = refusal(args, as.manager);
+        expect(r.out && !r.error, `the manager's "${args.slice(0, 2).join(' ')}" was refused without the owner's key: ${r.error}`);
+      }
+      expect(refusal(['plan', 'propose', 'Sample', 'Smoke session proposal', '--summary', 'From a session.'], as.session).out, "a live session could not propose an item without the owner's key");
+      // A step's line for its bubble: not refused as the owner's (this run is over, so the server says only that).
+      const said = refusal(['say', 'Comecei o teste'], as.step);
+      expect(said.error && !ownerRefused.test(said.error), `a step's line for its bubble was refused as the owner's: ${said.out ?? said.error}`);
+      const signals = signalCount() - signalsBefore;
+      expect(signals === 0, `the manager's, a step's or a session's own commands left ${signals} signal(s) for the emergency lockdown`);
+      for (const who of ['step', 'session']) {
+        const r = refusal(['plan', 'triage', `${keylessId}`, '--recommend', 'later'], as[who]);
+        expect(!r.out && (who === 'step' ? /only proposes/ : ownerRefused).test(r.error), `a ${who} triaged an item of the planning board: ${r.out ?? r.error}`);
+      }
+      expect((await keyless('/api/say', { text: 'As the owner' })).status === 403, "a line for a bubble without a run went without the owner's key");
+      // The manager parks a run and lifts a hold without the key (refused here only for the made-up run and project);
+      // as the owner, those need it.
+      for (const args of [['calls', 'park', 'smoke-no-run'], ['quarantine', 'release', 'smoke-no-project']]) {
+        const r = refusal(args, as.manager);
+        expect(r.error && !ownerRefused.test(r.error), `the manager's "${args.slice(0, 2).join(' ')}" was refused as the owner's: ${r.out ?? r.error}`);
+      }
+      for (const body of [{ action: 'park', run: 'smoke-no-run', by: 'owner' }, { action: 'release', project: 'smoke-no-project' }]) {
+        expect((await keyless(body.run ? '/api/calls' : '/api/quarantine', body)).status === 403, `${JSON.stringify(body)} went without the owner's key`);
+      }
+    } finally {
+      // Whatever failed above, the items it made leave the board, so the checks of the board further on stay true.
+      for (const id of (await import('../src/planning.mjs')).planItems().filter(i => /^Smoke (keyless|session|manager) /.test(i.title) && i.status !== 'discarded').map(i => i.id)) refusal(['plan', 'discard', `${id}`, '--reason', 'Smoke.'], as.manager);
+    }
+
+    // The manager's tools from the command line, through the running Chiefmate (whose queue never starts here):
+    // the queue numbered, moved, held and released; a queued run changed; a failed step redone; guidance refused
+    // with no agent at work; and a command Chiefmate lacks, recorded as a tool gap.
+    const at = minutes => new Date(Date.now() - minutes * 60_000).toISOString();
+    const readJson = file => JSON.parse(readFileSync(file, 'utf8'));
+    const queuedRun = (id, minutes, extra = {}) => writeFileSync(path.join(data, 'runs', `${id}.json`), JSON.stringify({
+      id, kind: 'task', project: 'none', title: `Smoke ${id}`, status: 'queued', created: at(minutes), steps: [{ agent: 'generalist', part: 'Do it.', status: 'pending' }], review: null, ...extra,
+    }));
+    queuedRun('smoke-q1', 30);
+    queuedRun('smoke-q2', 20);
+    const manager = { CHIEFMATE_MANAGER: '1', CHIEFMATE_RUN: '' };
+    const order = () => cli(['queue']).split('\n').filter(l => /smoke-q/.test(l)).map(l => /\[(smoke-q\d)\]/.exec(l)[1]).join();
+    expect(order() === 'smoke-q1,smoke-q2', `the queue is not listed in order: ${cli(['queue'])}`);
+    cli(['queue', 'move', 'smoke-q2', '--top'], manager);
+    expect(order() === 'smoke-q2,smoke-q1', `a run was not moved to the top of the queue: ${cli(['queue'])}`);
+    // the same queue controls as the owner's (src/queue.mjs): the move kept among the queue's changes, as the manager's
+    const movedByManager = (await (await fetch(`${base}/api/state`)).json()).queueControl?.changes?.find(c => c.run === 'smoke-q2' && c.action === 'move');
+    expect(movedByManager?.by === 'manager' && movedByManager.to === 'top', `the manager's move did not go through the queue's controls: ${JSON.stringify(movedByManager)}`);
+    cli(['queue', 'move', 'smoke-q2', '--before', 'smoke-q1'], manager);
+    cli(['queue', 'hold', 'smoke-q1'], manager);
+    expect(/smoke-q1\].*ON HOLD/.test(cli(['queue'])) && readJson(path.join(data, 'runs', 'smoke-q1.json')).onHold?.by === 'manager', 'a run was not held in the queue');
+    expect((await (await fetch(`${base}/api/state`)).json()).queue.find(r => r.id === 'smoke-q1')?.onHold === true, 'the app is not told that a run is on hold');
+    cli(['queue', 'release', 'smoke-q1'], manager);
+    expect(!readJson(path.join(data, 'runs', 'smoke-q1.json')).onHold, 'a held run was not released');
+    cli(['edit', 'smoke-q1', '--instruction-append', 'Also check the footer.', '--title', 'Smoke edited', '--agent', 'designer', '--level', '2'], manager);
+    const changedRun = readJson(path.join(data, 'runs', 'smoke-q1.json'));
+    expect(changedRun.title === 'Smoke edited' && changedRun.briefBy?.title === 'given' && changedRun.steps[0].agent === 'designer' && changedRun.level === 2
+      && changedRun.additions?.[0]?.text === 'Also check the footer.' && changedRun.edits?.[0]?.by === 'manager', `a queued run was not changed: ${JSON.stringify(changedRun)}`);
+    const refusedCli = (args, env) => {
+      try {
+        cli(args, env);
+        return '';
+      } catch (error) {
+        return String(error.stderr);
+      }
+    };
+    // The server's errors come in the installation's language: what is checked is that it refused and changed nothing.
+    expect(/Error/.test(refusedCli(['edit', 'smoke-q1', '--agent', 'nobody'], manager)) && readJson(path.join(data, 'runs', 'smoke-q1.json')).steps[0].agent === 'designer', 'a queued run took an agent outside the crew');
+    expect(/only the manager steers/.test(refusedCli(['queue', 'move', 'smoke-q1', '--top'], { CHIEFMATE_RUN: 'x', CHIEFMATE_MANAGER: '' })), 'a step of a run moved the queue');
+    queuedRun('smoke-failed', 10, { status: 'failed', ended: at(5), steps: [{ agent: 'generalist', part: 'One.', status: 'done' }, { agent: 'generalist', part: 'Two.', status: 'failed' }] });
+    expect(/Error/.test(refusedCli(['edit', 'smoke-failed', '--title', 'x'], manager)) && readJson(path.join(data, 'runs', 'smoke-failed.json')).title === 'Smoke smoke-failed', 'a run that ended was changed as if it were queued');
+    cli(['retry', 'smoke-failed', '--agent', 'designer'], manager);
+    const retried = readJson(path.join(data, 'runs', 'smoke-failed.json'));
+    expect(retried.status === 'queued' && retried.steps[0].status === 'done' && retried.steps[1].status === 'pending' && retried.steps[1].agent === 'designer' && retried.retries?.[0]?.step === 2,
+      `a failed step was not redone with another agent: ${JSON.stringify(retried)}`);
+    // A run stopped after its review: with every step done, retry points to resume and changes nothing; a step redone
+    // brings its review back. Steps of different members are never all given to one by edit.
+    queuedRun('smoke-delivery', 8, { status: 'failed', ended: at(4), steps: [{ agent: 'generalist', part: 'One.', status: 'done' }], review: { agent: 'manager', part: 'Review.', status: 'done' } });
+    expect(/Error/.test(refusedCli(['retry', 'smoke-delivery'], manager)) && readJson(path.join(data, 'runs', 'smoke-delivery.json')).status === 'failed', 'a run with every step done was retried with no step chosen');
+    cli(['retry', 'smoke-delivery', '--step', '1'], manager);
+    const redone = readJson(path.join(data, 'runs', 'smoke-delivery.json'));
+    expect(redone.status === 'queued' && redone.steps[0].status === 'pending' && redone.review?.status === 'pending', `a step redone after the review did not bring the review back: ${JSON.stringify(redone)}`);
+    queuedRun('smoke-q3', 15, { steps: [{ agent: 'generalist', part: 'One.', status: 'pending' }, { agent: 'designer', part: 'Two.', status: 'pending' }] });
+    expect(/Error/.test(refusedCli(['edit', 'smoke-q3', '--agent', 'generalist'], manager)) && readJson(path.join(data, 'runs', 'smoke-q3.json')).steps[1].agent === 'designer', 'the steps of different members were all given to one');
+    expect(/Error/.test(refusedCli(['guide', 'smoke-q1', 'Look at the footer'], manager)) && !readJson(path.join(data, 'runs', 'smoke-q1.json')).talk, 'guidance went to a run with no agent at work');
+    const firstGap = refusedCli(['frobnicate', 'x'], manager);
+    const secondGap = refusedCli(['frobnicate', 'y'], manager);
+    expect(/tool gap #\d+ \(1x\)/.test(firstGap) && /tool gap #\d+ \(2x\)/.test(secondGap) && /frobnicate/.test(cli(['gap', 'list'])), `a command the manager lacked was not recorded as a tool gap: ${firstGap} / ${secondGap}`);
+    expect(!/tool gap/.test(refusedCli(['frobnicate'], { CHIEFMATE_MANAGER: '' })), "the owner's unknown command was recorded as the manager's gap");
+    for (const id of ['smoke-q1', 'smoke-q2', 'smoke-q3', 'smoke-failed', 'smoke-delivery']) rmSync(path.join(data, 'runs', `${id}.json`), { force: true });
+
+    // The CLI sends the destination options to the running API. The queue is held while the approval is tested, and
+    // the run it queues (in a real project) is canceled: a later part of this test wakes the queue up.
+    const charge = await import('../src/charge.mjs');
+    const { readRun, readState, saveRun, saveState } = await import('../src/store.mjs');
+    const target = state.projects.find(p => state.charge?.[p.id])?.id;
+    if (target) {
+      const previous = readState();
+      let queuedRun = null;
+      try {
+        const held = await post('/api/power', { action: 'standby' });
+        if (!held.ok) throw new Error('Could not hold the smoke queue');
+        const answer = args => cli(['request', ...args], { CHIEFMATE_RUN: '' });
+        const source = { manager_updates: false, projects: { 'smoke-source': { name: 'Smoke source' } } };
+        const request = plan => charge.addRequest({ project: 'smoke-source', asked: plan, plan }, source);
+        const approve = request('Approve in another project');
+        answer([String(approve.id), 'approve', '--project', target, '--title', 'Smoke approval', '--summary', 'Made up.']);
+        const saved = charge.readRequests().find(r => r.id === approve.id);
+        queuedRun = saved?.run ?? null;
+        expect(saved?.project === 'smoke-source' && saved.status === 'approved' && readRun(saved.run)?.project === target,
+          'request approve --project did not queue in the destination project');
+        const forward = request('Forward to the project');
+        const progress = request('Already queued');
+        const forwarded = answer([String(forward.id), 'forward', '--project', target, '--note', 'Belongs to this project.']);
+        const linked = answer([String(progress.id), 'in-progress', '--run', saved.run, '--note', 'Covered by the queued run.']);
+        expect(forwarded.includes(`forwarded → project ${target}`) && linked.includes(`in-progress → run ${saved.run}`), 'the CLI did not send or show the request destinations');
+      } finally {
+        const left = queuedRun && readRun(queuedRun);
+        if (left) saveRun({ ...left, status: 'canceled', ended: new Date().toISOString() });
+        saveState(previous);
+      }
+    }
   }
 } catch (error) {
   failures.push(error.message);
 } finally {
   child.kill();
+}
+
+// Run two steps with a stand-in for Claude that changes the settings and reports 11% usage after the first step.
+{
+  const fixture = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-limits-'));
+  const env = { CHIEFMATE_DATA: process.env.CHIEFMATE_DATA, CHIEFMATE_SMOKE: process.env.CHIEFMATE_SMOKE, CHIEFMATE_CLAUDE: process.env.CHIEFMATE_CLAUDE };
+  try {
+    for (const entry of ['src', 'agents', 'ui/locales', 'package.json']) cpSync(path.join(root, entry), path.join(fixture, entry), { recursive: true });
+    const repo = path.join(fixture, 'repo');
+    mkdirSync(repo);
+    const git = (...args) => execFileSync('git', args, { cwd: repo, windowsHide: true, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'Start');
+    const fake = path.join(fixture, 'fake-claude.mjs');
+    Object.assign(process.env, { CHIEFMATE_DATA: path.join(fixture, 'records'), CHIEFMATE_SMOKE: '1', CHIEFMATE_CLAUDE: fake });
+    const load = name => import(pathToFileURL(path.join(fixture, 'src', `${name}.mjs`)).href);
+    const { CONFIG_FILE, saveConfig } = await load('config');
+    const { execute, live } = await load('runs');
+    const { recordUsage, readRun, saveRun } = await load('store');
+    const { nudgeQueue, startQueue } = await load('queue');
+    // This process runs the copy's queue when nudged (only the process that starts the queue runs it), with no timer.
+    startQueue({ timer: false });
+    const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+    const usage = utilization => ({ unifiedWindows: {
+      five_hour: { utilization, resetsAt }, seven_day: { utilization: 0.20, resetsAt: resetsAt + 86400 },
+    } });
+    writeFileSync(fake, [
+      "import { readFileSync, writeFileSync } from 'node:fs';",
+      `const file = ${JSON.stringify(CONFIG_FILE)};`,
+      "process.stdin.resume();",
+      "process.stdin.on('end', () => {",
+      "  const config = JSON.parse(readFileSync(file, 'utf8'));",
+      "  config.limits.pause_at_5h_window = config.nextLimit;",
+      "  writeFileSync(file, JSON.stringify(config));",
+      `  console.log(JSON.stringify({ type: 'rate_limit_event', rate_limit_info: ${JSON.stringify(usage(0.11))} }));`,
+      "  console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'Done', num_turns: 1 }));",
+      "});",
+    ].join('\n'));
+
+    const settings = (limit, nextLimit, week = 0.9) => saveConfig({
+      quick_model: false, max_parallel: 1, nextLimit, projects: { demo: { repository: repo, main_branch: 'main' } },
+      limits: { pause_at_5h_window: limit, pause_at_plan_week: week },
+    });
+    const makeRun = id => ({
+      id, kind: 'task', project: 'demo', title: id, created: new Date().toISOString(), status: 'queued',
+      branch: id, steps: Array.from({ length: 2 }, () => ({ agent: 'generalist', status: 'pending', instruction: 'Smoke test.' })),
+    });
+    settings(0.05, 0.70);
+    recordUsage(usage(0.03));
+    const raised = makeRun('raised');
+    await execute(raised);
+    expect(raised.status === 'done' && raised.steps.every(step => step.status === 'done'), `a run ignored the raised limit: ${raised.note ?? raised.result}`);
+
+    settings(0.70, 0.05);
+    recordUsage(usage(0.03));
+    const lowered = makeRun('lowered');
+    await execute(lowered);
+    const reset = new Date(resetsAt * 1000).toISOString();
+    expect(lowered.status === 'waiting' && lowered.notBefore === reset && lowered.steps.map(step => step.status).join() === 'done,pending',
+      `a run crossed the lowered limit: ${lowered.note ?? lowered.result}`);
+
+    // Keep the worker slot busy so the test can inspect the persisted return to the queue.
+    live.set('busy', { project: 'other' });
+    saveRun({ ...makeRun('legacy'), status: 'waiting', notBefore: reset, note: 'a janela de 5 horas da sua conta está em 11%' });
+    saveRun({ ...makeRun('exhausted'), status: 'waiting', notBefore: reset, note: 'Your account reached its limit in the middle of a step' });
+    saveRun({ ...makeRun('scheduled'), notBefore: reset });
+    settings(0.11, 0.70);
+    nudgeQueue();
+    expect(readRun(lowered.id).status === 'waiting', 'usage equal to the raised limit released a waiting run');
+    settings(0.70, 0.70, 0.10);
+    nudgeQueue();
+    expect(readRun(lowered.id).status === 'waiting', 'a run was released while the plan week still blocked it');
+    settings(0.70, 0.70);
+    nudgeQueue();
+    const requeued = readRun(lowered.id);
+    expect(requeued.status === 'queued' && requeued.notBefore === null && requeued.steps.map(step => step.status).join() === 'done,pending',
+      'raising the limit did not queue a waiting run before the reset');
+    expect(readRun('legacy').status === 'queued', 'an older run waiting for a configured limit was not queued');
+    expect(readRun('exhausted').notBefore === reset && readRun('scheduled').notBefore === reset,
+      'raising a configured limit cleared an account reset or a scheduled start');
+    live.delete('busy');
+    await execute(requeued);
+    expect(requeued.status === 'done' && requeued.steps.every(step => step.status === 'done'), 'the requeued run did not finish its remaining step');
+  } catch (error) {
+    failures.push(`run limits: ${error.message}`);
+  } finally {
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(fixture, { recursive: true, force: true, maxRetries: 5 });
+  }
+}
+
+// A run paused in the middle of a step, with a second run of the same project in the queue, in this process with a
+// stand-in for Claude: the second one waits, the first one's uncommitted work comes back, on the current main.
+{
+  const fixture = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-paused-'));
+  const identity = { GIT_AUTHOR_NAME: 'Smoke', GIT_AUTHOR_EMAIL: 'smoke@example.com', GIT_COMMITTER_NAME: 'Smoke', GIT_COMMITTER_EMAIL: 'smoke@example.com' };
+  const env = Object.fromEntries(['CHIEFMATE_DATA', 'CHIEFMATE_SMOKE', 'CHIEFMATE_CLAUDE', ...Object.keys(identity)].map(name => [name, process.env[name]]));
+  try {
+    for (const entry of ['src', 'agents', 'ui/locales', 'package.json']) cpSync(path.join(root, entry), path.join(fixture, entry), { recursive: true });
+    const repo = path.join(fixture, 'repo');
+    mkdirSync(repo);
+    const git = (dir, ...args) => execFileSync('git', ['-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd: dir, windowsHide: true, stdio: 'pipe', encoding: 'utf8' }).trim();
+    git(repo, 'init', '-q', '-b', 'main');
+    writeFileSync(path.join(repo, 'app.md'), 'App\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'Start');
+    // The stand-in: the first time, it leaves a new file and a changed one, starts an action and "works" on; resumed,
+    // it keeps the turn it got and ends; for any other run, it ends at once.
+    const fake = path.join(fixture, 'fake-claude.mjs');
+    const once = path.join(fixture, 'pause-once');
+    const turn = path.join(fixture, 'resumed-turn.txt');
+    writeFileSync(once, '');
+    writeFileSync(fake, [
+      "import { existsSync, rmSync, writeFileSync } from 'node:fs';",
+      `const once = ${JSON.stringify(once)};`,
+      "const args = process.argv.slice(2);",
+      "let prompt = ''; process.stdin.on('data', d => (prompt += d)); process.stdin.on('end', () => {",
+      "  const say = e => process.stdout.write(JSON.stringify(e) + '\\n');",
+      "  const id = args[args.indexOf(args.includes('--resume') ? '--resume' : '--session-id') + 1];",
+      "  say({ type: 'system', subtype: 'init', session_id: id, model: 'm' });",
+      `  if (args.includes('--resume')) writeFileSync(${JSON.stringify(turn)}, prompt);`,
+      "  if (!existsSync(once)) return say({ type: 'result', subtype: 'success', result: 'Done', session_id: id, num_turns: 1 });",
+      "  rmSync(once);",
+      "  writeFileSync('new.md', 'New\\n'); writeFileSync('app.md', 'App by A\\n');",
+      "  say({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test' } }] } });",
+      "  setTimeout(() => say({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } }), 500);",
+      "  setTimeout(() => say({ type: 'result', subtype: 'success', result: 'too late', session_id: id }), 30000);",
+      "});",
+    ].join('\n'));
+    Object.assign(process.env, identity, { CHIEFMATE_DATA: path.join(fixture, 'records'), CHIEFMATE_SMOKE: '1', CHIEFMATE_CLAUDE: fake });
+    const load = name => import(pathToFileURL(path.join(fixture, 'src', `${name}.mjs`)).href);
+    const { saveConfig } = await load('config');
+    const { execute, live, pauseLive } = await load('runs');
+    const { readRun, saveRun } = await load('store');
+    const { copyHolders, pickNext, queued } = await load('queue');
+    // Local delivery with no clone of the owner's: the work stays in the working copy, nothing is pushed.
+    saveConfig({
+      quick_model: false, max_parallel: 3, limits: { pause_at_5h_window: 1, pause_at_plan_week: 1 },
+      projects: { demo: { repository: repo, main_branch: 'main', deliver: 'local', no_trace: false } },
+    });
+    const makeRun = (id, created) => ({
+      id, kind: 'task', project: 'demo', title: id, created, status: 'queued',
+      branch: `chiefmate/${id}`, steps: [{ agent: 'generalist', status: 'pending', instruction: 'Smoke test.' }],
+    });
+    const first = makeRun('paused-a', '2026-11-26T12:00:00.000Z');
+    const second = makeRun('paused-b', '2026-11-26T12:01:00.000Z');
+    saveRun(second);
+    // A is paused for the owner's session in the middle of its step, once the stand-in has left its changes.
+    const going = execute(first);
+    const copy = path.join(fixture, 'workspaces', 'demo');
+    for (let n = 0; n < 200 && !(live.get(first.id)?.process && existsSync(path.join(copy, 'new.md'))); n++) await new Promise(r => setTimeout(r, 50));
+    expect(pauseLive(first.id, 'owner', { holdWhile: () => true }), 'the run going on could not be paused');
+    // It leaves `live` (what the update, the power modes and the queue wait for) only once its work is put aside and
+    // its record saved.
+    let leftLive = null;
+    const watchLive = setInterval(() => (leftLive ??= live.has(first.id) ? null : readRun(first.id)), 1);
+    await going;
+    clearInterval(watchLive);
+    expect(!leftLive || (leftLive.status === 'paused' && leftLive.shelf), `the paused run left "live" before its work was put aside: ${leftLive?.status}`);
+    const paused = readRun(first.id);
+    expect(paused.status === 'paused' && paused.shelf?.commit && paused.steps[0].paused,
+      `the paused run did not keep its step and its uncommitted work: ${JSON.stringify({ status: paused.status, shelf: paused.shelf, note: paused.note })}`);
+    expect(git(copy, 'status', '--porcelain') === '' && git(copy, 'stash', 'list').includes(`chiefmate: paused run ${first.id}`),
+      "the paused run's uncommitted work was not put aside in a stash named after it");
+    // B waits: the queue doesn't pick it, and execute refuses to prepare the copy under A.
+    expect(pickNext(queued(), [], 3, Date.now(), copyHolders()).every(r => r.id !== second.id), 'the queue picked another run of the project while one was paused in the middle of its work');
+    const before = git(copy, 'rev-parse', 'HEAD');
+    await execute(readRun(second.id));
+    expect(readRun(second.id).status === 'queued' && git(copy, 'rev-parse', 'HEAD') === before && git(copy, 'branch', '--show-current') === first.branch,
+      'another run of the project prepared the working copy of a paused run');
+    // Pull requests merged meanwhile; the owner's session ends and A resumes.
+    for (let n = 1; n <= 3; n++) {
+      writeFileSync(path.join(repo, `pr${n}.md`), `PR ${n}\n`);
+      git(repo, 'add', '-A');
+      git(repo, 'commit', '-q', '-m', `PR ${n}`);
+    }
+    const main = git(repo, 'rev-parse', 'main');
+    await execute(Object.assign(readRun(first.id), { status: 'queued' }));
+    const done = readRun(first.id);
+    const lf = file => readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+    expect(done.status === 'done' && !done.shelf && done.baseCommit === main, `the resumed run did not finish from the current main: ${done.status} ${done.result ?? ''}`);
+    expect(git(copy, 'rev-parse', `${first.branch}~1`) === main && lf(path.join(copy, 'new.md')) === 'New\n' && lf(path.join(copy, 'app.md')) === 'App by A\n' && existsSync(path.join(copy, 'pr3.md')),
+      "the resumed run's work did not come back on top of the current main");
+    expect(git(copy, 'stash', 'list') === '', 'the stash of a run resumed was left behind');
+    expect(existsSync(turn) && readFileSync(turn, 'utf8').includes('moved it to the current main'), 'the resumed step was not told its branch moved to the current main');
+    expect(copyHolders().size === 0, 'a finished run still keeps the working copy');
+    await execute(readRun(second.id));
+    expect(readRun(second.id).status === 'done', `the second run did not go on after the first: ${readRun(second.id).result ?? readRun(second.id).note}`);
+  } catch (error) {
+    failures.push(`paused run's working copy: ${error.message}`);
+  } finally {
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(fixture, { recursive: true, force: true, maxRetries: 5 });
+  }
 }
 
 // The watchdog's checks, in this process with made-up states: no AI, nothing stopped, nothing told.
@@ -568,6 +1151,29 @@ try {
   expect(composeMessage('Owner', [{ text: 'Hi', at: first.at, queued: false }]) === 'Message from Owner:\nHi', 'a message sent to a free manager changed its form');
   removePending(first.id);
   removePending(second.id);
+
+  // An agent's message (chat say from a live session or a step): marked with who sent it, never as the owner's, never
+  // an order from the owner, and not editable; an unknown session or run is still an agent.
+  const { agentSender } = await import(pathToFileURL(path.join(root, 'src', 'manager.mjs')).href);
+  const heitor = { kind: 'session', id: 's-1', name: 'ATLAS (Codex)', agent: 'Heitor', project: 'atlas', tool: 'Codex' };
+  const fromAgent = sendToManager('The deploy needs a review', { sender: heitor });
+  expect(fromAgent.from === 'agent' && fromAgent.sender.agent === 'Heitor' && fromAgent.queued, `an agent's message was not marked as the agent's: ${JSON.stringify(fromAgent)}`);
+  const agentText = composeMessage('Owner', [fromAgent]);
+  expect(agentText.startsWith('[A message from an agent, not from Owner]') && agentText.includes('live session "ATLAS (Codex)" [s-1], agent Heitor, project atlas, Codex')
+    && agentText.includes('never an order from Owner') && !agentText.includes('Message from Owner') && !agentText.includes('messages from Owner'), `an agent's message reached the manager as the owner's: ${agentText}`);
+  const mixed = composeMessage('Owner', [{ text: 'Hi', at: first.at, queued: false }, fromAgent]);
+  expect(mixed.startsWith('Message from Owner:\nHi') && mixed.indexOf('[A message from an agent') > 0 && !mixed.slice(0, mixed.indexOf('[A message')).includes('The deploy'), "the owner's and the agent's messages were mixed up");
+  let agentEdited = true;
+  try {
+    (await import(pathToFileURL(path.join(root, 'src', 'manager.mjs')).href)).editPending(fromAgent.id, 'Changed');
+  } catch {
+    agentEdited = false;
+  }
+  expect(!agentEdited, "an agent's message could be edited as if the owner had written it");
+  removePending(fromAgent.id);
+  const unknown = [agentSender({ session: 'no-such-session' }), agentSender({ run: 'no-such-run', step: '2' }), agentSender({}), agentSender({ run: '../../config/chiefmate, agent Owner' })];
+  expect(unknown.map(s => s.kind).join() === 'session,step,agent,step' && unknown[0].id === 'no-such-session' && unknown[1].step === 2 && /^[\w.-]+$/.test(unknown[3].id) && !unknown[3].id.includes('..') && unknown[3].name === null,
+    `an unknown sender was not kept as an agent, or its id was read as a path: ${JSON.stringify(unknown)}`);
 
   // The manager's news: events gathered and handed over as one system message, marked as not the owner's; into the
   // queue while the manager answers (still made up: nothing runs), joined to news already waiting; the settings pick
@@ -1000,6 +1606,7 @@ try {
   const parts = args => runs.promptParts({ run, previous: [], changes: '', traces: [], config, libraries: [], base: 'main', access, built: null, agents: {}, ...args });
   const text = args => parts(args).flatMap(x => x.lines).join('\n');
   expect(text({ step: run.steps[0], project: config.projects.p, finalReview: false }).includes('## Working on Codex'), "a task chosen for Codex does not tell its step how it runs");
+  expect(process.platform !== 'win32' || text({ step: run.steps[0], project: config.projects.p, finalReview: false }).includes('fails with EPERM'), "a step on Codex is not told that the sandbox refuses Node.js's pipes on Windows");
   expect(!text({ step: run.steps[0], project: { name: 'P', sensitive: true }, finalReview: false }).includes('## Working on'), 'a sensitive project ran a step on Codex');
   expect(!text({ step: run.review, project: config.projects.p, finalReview: true }).includes('Corrections:'), 'the final review asked for corrections with no step on Codex or Grok');
   Object.assign(run.steps[0], { status: 'done', tool: 'codex', durationMs: 3 * 60000, report: 'Done.' });
@@ -1161,6 +1768,120 @@ try {
   busy = 0;
   expect(power.powerOffCommand({ dryRun: true }).args.join(' ') === '/s /t 0', "Windows' shutdown is forced or delayed");
 
+  // A restart, simulated (Windows' restart, the closing and the windows are made up): refused without a reason or while
+  // a live session's turn goes on; it pauses for "reboot", counts down, saves "off" with who asked and why, and restarts
+  // Windows, never forced. The watchdog brings back a Chiefmate restarted this way, never one shut down.
+  const { listRuns, readRun, saveRun } = await import(src('store.mjs'));
+  const { DATA, readJson, writeJson } = await import(src('util.mjs'));
+  expect(power.rebootRefusal({ reason: '' }, hooks) && power.rebootRefusal({ reason: 'x' }, { ...hooks, sessionsBusy: () => true }) && !power.rebootRefusal({ reason: 'x' }, hooks),
+    "a restart went without a reason, or in the middle of a live session's turn");
+  let noReason = '';
+  try {
+    power.stopSystem('reboot', { by: 'manager', reason: ' ' });
+  } catch (error) {
+    noReason = error.message;
+  }
+  expect(noReason && !power.stopping(), 'a restart with no reason began');
+  calls.length = 0;
+  busy = 1;
+  hooks.powerOff = async target => calls.push(`poweroff:${target}`);
+  const reason = 'a file of the working copy locked by the antivirus';
+  const rebootJob = { target: 'reboot', since: new Date().toISOString(), by: 'manager', reason, stage: 'pausing', paused: [], sessions: [], waitingFor: [], countdownUntil: null, canceled: false };
+  expect(await power.shutDown(rebootJob, hooks), 'a restart did not go to the end');
+  const off = readState().power;
+  expect(calls[0] === 'pause:reboot' && calls.at(-2) === 'poweroff:reboot' && calls.at(-1) === 'finish' && rebootJob.countdownUntil
+    && off?.mode === 'off' && off.target === 'reboot' && off.by === 'manager' && off.reason === reason && off.paused.join() === 'smoke-power-a',
+    `a restart did not pause, count down, save who asked and why, and restart Windows: ${calls} ${JSON.stringify(off)}`);
+  expect(power.powerOffCommand({ dryRun: true, target: 'reboot' }).args.join(' ') === '/r /t 0', "Windows' restart is forced or delayed");
+  const since = Date.parse(off.since);
+  const late = since + 20 * 60_000;
+  expect(power.offOnPurpose(off, since - 60_000) && !power.offOnPurpose(off, since + 60_000) && power.offOnPurpose({ ...off, target: 'shutdown' }, since + 60_000)
+    && !power.offOnPurpose(off, since - 60_000, late) && power.offOnPurpose({ ...off, target: 'shutdown' }, since - 60_000, late),
+    'the watchdog would leave off a Chiefmate whose computer restarted (or never did), or bring back one the owner shut down');
+  // Back after the restart: on again, the windows of the live sessions and the app's window open again, the log says so.
+  let reopenedAt = null;
+  let appWindows = 0;
+  const openApp = () => appWindows++;
+  power.startPower({ ...hooks, boot: since + 30_000, reopenWindows: boot => ((reopenedAt = boot), ['smoke-window']), openApp });
+  expect(!readState().power && power.powerInfo().mode === 'on' && reopenedAt === since + 30_000 && appWindows === 1 && power.powerLog().at(-1)?.outcome === 'back' && power.powerLog().at(-1).by === 'manager',
+    `back from a restart, Chiefmate is not on, the windows did not open again or the log missed it: ${JSON.stringify([appWindows, power.powerLog().at(-1)])}`);
+  // A restart Windows did not make (a program held it): on again once the watchdog brings Chiefmate back, no window
+  // opened again (none was closed), the app's neither (a start after a recent note, as an update's), and the log says it
+  // did not restart.
+  saveState({ ...readState(), power: off });
+  let reopenedAgain = false;
+  power.startPower({ ...hooks, boot: since - 60_000, reopenWindows: () => ((reopenedAgain = true), []), openApp });
+  expect(!readState().power && power.powerInfo().mode === 'on' && !reopenedAgain && appWindows === 1 && power.powerLog().at(-1)?.outcome === 'not-restarted',
+    `a restart Windows did not make was taken for one, or its windows opened again: ${JSON.stringify([appWindows, power.powerLog().at(-1)])}`);
+  // The app's window opens on the first start since the computer started only: never without a note of being alive
+  // (the first start of a version that keeps them, as through an update), nor after a note newer than the start.
+  expect(power.firstSinceBoot({ last: new Date(since - 1000).toISOString(), boot: since }) && !power.firstSinceBoot({ last: null, boot: since })
+    && !power.firstSinceBoot({ last: new Date(since + 1000).toISOString(), boot: since }), "the app's window would open on a start that is not the first since the computer started");
+
+  // The computer went down without a stop (a power cut): Chiefmate's last note of being alive is older than the
+  // computer's start. The runs it cut off (still running, or failed a moment before) go back to the front of the queue;
+  // one that failed long before stays failed, and so does a step of a running run that failed long before. The records
+  // already running or failed here are put back afterwards.
+  const t0 = Date.now();
+  const last = new Date(t0 - 10 * 60_000).toISOString();
+  const boot = t0 - 5 * 60_000;
+  const kept = listRuns().filter(r => ['running', 'failed'].includes(r.status));
+  const cutRun = (id, status, ended, steps) => saveRun({ id, kind: 'task', project: 'Sample', title: id, status, created: new Date(t0 - 3600_000).toISOString(), ended, steps });
+  cutRun('smoke-cut-running', 'running', null, [
+    { agent: 'writer', status: 'failed', ended: new Date(t0 - 60 * 60_000).toISOString(), error: 'a real error' },
+    { agent: 'generalist', status: 'failed', ended: new Date(t0 - 11 * 60_000).toISOString(), error: 'claude exited with code 1' },
+    { agent: 'designer', status: 'running' },
+  ]);
+  cutRun('smoke-cut-failed', 'failed', new Date(t0 - 11 * 60_000).toISOString(), [{ agent: 'generalist', status: 'failed', error: 'claude exited with code 1' }, { agent: 'designer', status: 'pending' }]);
+  cutRun('smoke-cut-old', 'failed', new Date(t0 - 60 * 60_000).toISOString(), [{ agent: 'generalist', status: 'failed', error: 'a real error' }]);
+  expect(power.cutOff({ power: null, last, boot }) && !power.cutOff({ power: { mode: 'off' }, last, boot }) && !power.cutOff({ power: null, last: new Date(boot + 1000).toISOString(), boot }),
+    'a computer that went down without a stop was not found, or a stop or a plain restart of Chiefmate was taken for one');
+  power.beat(last);
+  let windowsBack = null;
+  power.startPower({ ...hooks, boot, reopenWindows: b => ((windowsBack = b), []), openApp });
+  const [running, failed, old] = ['smoke-cut-running', 'smoke-cut-failed', 'smoke-cut-old'].map(readRun);
+  expect(running.status === 'queued' && running.resumeFirst && running.cutOff?.was === 'running' && running.steps.map(s => s.status).join() === 'failed,pending,pending'
+    && failed.status === 'queued' && failed.resumeFirst && !failed.ended && !failed.result && failed.steps[0].status === 'pending' && !failed.steps[0].error
+    && old.status === 'failed' && windowsBack === boot && appWindows === 2 && power.powerLog().at(-1)?.action === 'cut-off' && Date.parse(power.lastBeat()) > t0 - 1000,
+    `the runs cut off by a power cut were not put back at the front of the queue, or an old failure was: ${JSON.stringify([running, failed, old].map(r => [r.status, r.resumeFirst, r.steps.map(s => s.status)]))}`);
+  // Nothing of this check stays in the queue for a later one to start.
+  for (const id of ['smoke-cut-running', 'smoke-cut-failed', 'smoke-cut-old']) rmSync(path.join(DATA, 'runs', `${id}.json`), { force: true });
+  for (const r of kept) saveRun(r);
+
+  // The manager's restart outside away mode waits for the owner's yes on a card: refused while a live session's turn
+  // goes on (the card stays), started with the yes (then canceled here), and an old yes does nothing.
+  const decisions = await import(src('decisions.mjs'));
+  const asked = decisions.askReboot({ by: 'manager', reason, runs: [{ title: 'A run', project: 'Sample' }], sessions: [] });
+  expect(decisions.askReboot({ by: 'manager', reason }).id === asked.id && asked.reboot?.yes && asked.options.length === 2, 'a second restart question was asked while one waits, or it has no yes');
+  const cardsNow = () => decisions.decisionCards({ attention: decisions.openQuestions().map(q => ({ id: `question:${q.id}`, kind: 'question', level: 'urgent' })), items: [] });
+  const card = `question:${asked.id}`;
+  power.startPower({ ...hooks, sessionsBusy: () => true });
+  const busyAnswer = await decisions.decide({ card, action: 'answer', option: asked.reboot.yes }, cardsNow()).then(() => '', error => error.message);
+  expect(busyAnswer && decisions.openQuestions().some(q => q.id === asked.id) && !power.stopping(), "a restart confirmed during a live session's turn began, or its card closed");
+  calls.length = 0;
+  power.startPower({ ...hooks, sessionsBusy: () => false, crewBusy: () => true, countdownMs: 60_000 });
+  const yes = await decisions.decide({ card, action: 'answer', option: asked.reboot.yes }, cardsNow());
+  const going = power.powerInfo();
+  expect(yes.reboot && going.mode === 'stopping' && going.target === 'reboot' && going.by === 'manager' && going.reason === reason && power.powerLog().at(-1)?.confirmedBy === 'owner',
+    `the owner's yes did not start the manager's restart: ${JSON.stringify([yes, going])}`);
+  expect(power.cancelStop().mode === 'on' && power.powerLog().at(-1)?.outcome === 'canceled', 'a restart could not be canceled');
+  await new Promise(resolve => setTimeout(resolve, 40));
+  const stale = decisions.askReboot({ by: 'manager', reason });
+  const questionsPath = path.join(DATA, 'manager', 'questions.json');
+  writeJson(questionsPath, readJson(questionsPath, []).map(q => (q.id === stale.id ? { ...q, at: new Date(t0 - 31 * 60_000).toISOString() } : q)));
+  const staleAnswer = await decisions.decide({ card: `question:${stale.id}`, action: 'answer', option: stale.reboot.yes }, cardsNow()).then(() => '', error => error.message);
+  expect(staleAnswer && !power.stopping() && !decisions.openQuestions().some(q => q.id === stale.id), 'a restart confirmed over 30 minutes late began, or its card stayed');
+  // Asked again once the card's confirmation is no longer valid, a fresh card replaces it; its "no" is not the card's
+  // own "Not now", and the manager recommends the restart it asks for.
+  const older = decisions.askReboot({ by: 'manager', reason });
+  writeJson(questionsPath, readJson(questionsPath, []).map(q => (q.id === older.id ? { ...q, at: new Date(t0 - 31 * 60_000).toISOString() } : q)));
+  const fresh = decisions.askReboot({ by: 'manager', reason });
+  const { t: say } = await import(src('i18n.mjs'));
+  expect(fresh.id !== older.id && !decisions.openQuestions().some(q => q.id === older.id) && !fresh.options.includes(say('Not now')) && fresh.recommend === fresh.reboot.yes,
+    `a stale restart card was handed out again, or its options clash with the card's own "Not now": ${JSON.stringify([older.id, fresh])}`);
+  await decisions.decide({ card: `question:${fresh.id}`, action: 'discard' }, cardsNow());
+  busy = 0;
+
   const at = Date.now();
   expect(schedule.isLate(new Date(at - 30 * 60_000), at) && !schedule.isLate(new Date(at - 10 * 60_000), at), 'a mission missed for 30 minutes is not late, or one 10 minutes behind is');
 } catch (error) {
@@ -1250,7 +1971,7 @@ try {
   const { claudeArgs } = await import(src('claude.mjs'));
   const { assemble, assembleBlocks, parseBlocks } = await import(src('prompts.mjs'));
   const { pickNext } = await import(src('queue.mjs'));
-  const { planSession, sessionArgs, sessionIdOf } = await import(src('sessions.mjs'));
+  const { planSession, reopenWindows, savedConversation, sessionArgs, sessionIdOf } = await import(src('sessions.mjs'));
 
   // The queue: runs of different projects at once, up to the limit; one per project, in order; not before their time.
   const later = new Date(Date.now() + 3600_000).toISOString();
@@ -1387,8 +2108,10 @@ try {
     const guarded = JSON.parse(claudeArgs({ model: 'm', hooks: crewGuard(guardLog) }).find((a, i, all) => all[i - 1] === '--settings'));
     const hook = guarded.hooks?.PreToolUse?.[0]?.hooks?.[0]?.command ?? '';
     const refuses = command => /"permissionDecision":"deny"/.test(execFileSync(hook, { shell: true, encoding: 'utf8', input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', tool_input: { command } }) }));
-    const publish = ['git -C . push origin main', 'gh api repos/a/b/pulls -f title=T -f head=h', 'cd x && git push', 'bash -c "gh pr create --fill"', 'git -c a=b remote add up u'];
-    const wrong = [...publish.filter(c => !refuses(c)), ...['git status', 'gh api repos/a/b/pulls', 'git commit -m "no git push here"'].filter(refuses)];
+    const publish = ['git -C . push origin main', 'gh api repos/a/b/pulls -f title=T -f head=h', 'cd x && git push', 'bash -c "gh pr create --fill"', 'git -c a=b remote add up u', 'gh gist create notes.md --public', 'gh release create v1'];
+    // A heredoc's text that only goes into a file is data, not a command.
+    const written = "cat > t.mjs <<'EOF'\ngh pr create\ngit push origin main\nEOF";
+    const wrong = [...publish.filter(c => !refuses(c)), ...['git status', 'gh api repos/a/b/pulls', 'git commit -m "no git push here"', 'gh release list', written].filter(refuses)];
     const noted = readFileSync(guardLog, 'utf8').trim().split('\n').length;
     expect(hook.includes('guard.mjs') && !hook.includes('--allow') && !wrong.length && noted === publish.length,
       `the guard of the crew and the manager misjudged what publishes: ${JSON.stringify({ hook, wrong, noted })}`);
@@ -1400,9 +2123,15 @@ try {
     const lockedRefused = refuses('git status');
     rmSync(path.join(security, 'lockdown.json'));
     const profileRefused = refuses(`ls "${path.join(data, 'browser-profile')}"`);
-    const protectedNoted = readFileSync(path.join(security, 'signals.jsonl'), 'utf8').includes('"kind":"protected_access"');
+    const protectedNoted = readFileSync(path.join(security, 'signals.jsonl'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+      .some(s => s.kind === 'protected_access' && s.refused === true && s.cwd && s.command?.startsWith('ls '));
     expect(lockedRefused && !refuses('git status') && profileRefused && protectedNoted,
       `the guard misjudged the lockdown or a protected folder: ${JSON.stringify({ lockedRefused, profileRefused, protectedNoted })}`);
+    // A folder a command creates outside the agent's own is noted, for the emergency watch (src/sentinel.mjs).
+    const outside = path.join(guardDir, 'made-outside');
+    execFileSync(hook, { shell: true, encoding: 'utf8', input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 'm', tool_input: { command: `mkdir "${outside.replaceAll('\\', '/')}"` }, cwd: path.join(guardDir, 'work') }) });
+    const created = readFileSync(path.join(security, 'created.jsonl'), 'utf8');
+    expect(created.includes(JSON.stringify(outside).slice(1, -1)), `the folder made outside the agent's own was not noted: ${created}`);
   } finally {
     rmSync(guardDir, { recursive: true, force: true });
   }
@@ -1468,6 +2197,30 @@ try {
     expect(JSON.parse(claude[claude.indexOf('--settings') + 1]).claudeMdExcludes?.includes(userFolder), "a Claude Code session would read the user's ~/.claude/CLAUDE.md");
     const codex = sessionArgs({ tool: 'codex', cwd: sessionTemp, model: null }, sessionConfig, 'Hello');
     expect(codex.join() === `-C,${sessionTemp},Hello`, `a Codex session's command line is wrong: ${codex.join(' ')}`);
+    // A Claude Code window keeps its own conversation id: it starts it, and after a restart of the computer carries it on
+    // when Claude Code saved it (a made-up ~/.claude here); Codex has none to carry on.
+    const own = { tool: 'claude', cwd: sessionTemp, toolSession: 'smoke-conversation-1' };
+    const started = sessionArgs(own, sessionConfig, 'Hello');
+    const resumed = sessionArgs(own, sessionConfig, null, undefined, { resume: true });
+    const claudeHome = path.join(sessionTemp, 'claude-home');
+    mkdirSync(path.join(claudeHome, 'projects', 'C--some-folder'), { recursive: true });
+    writeFileSync(path.join(claudeHome, 'projects', 'C--some-folder', 'smoke-conversation-1.jsonl'), '{}\n');
+    expect(started[started.indexOf('--session-id') + 1] === 'smoke-conversation-1' && started.at(-1) === 'Hello' && resumed[resumed.indexOf('--resume') + 1] === 'smoke-conversation-1' && !resumed.includes('--session-id')
+      && savedConversation(own, claudeHome) && !savedConversation({ ...own, toolSession: 'smoke-conversation-2' }, claudeHome) && !savedConversation({ ...own, tool: 'codex' }, claudeHome)
+      && !savedConversation({ ...own, toolSession: '../x' }, claudeHome),
+      `a Claude Code window can't start or carry on its own conversation: ${started.join(' ')} | ${resumed.join(' ')}`);
+    // After the computer restarted, the windows still open before it are the ones to open again (listed only here).
+    const sessionsDir = path.join((await import(src('util.mjs'))).DATA, 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    const old = new Date(Date.now() - 3600_000).toISOString();
+    const windowRecord = (id, extra) => writeFileSync(path.join(sessionsDir, `${id}.json`), JSON.stringify({ id, name: id, tool: 'claude', cwd: sessionTemp, mode: 'window', status: 'open', created: old, started: old, opened: old, ...extra }));
+    windowRecord('smoke-window-lost', {});
+    windowRecord('smoke-window-new', { opened: new Date().toISOString() });
+    windowRecord('smoke-window-ended', { status: 'ended' });
+    windowRecord('smoke-app-open', { mode: 'app' });
+    const lost = reopenWindows(Date.now() - 60_000, { dryRun: true });
+    expect(lost.includes('smoke-window-lost') && !lost.some(id => ['smoke-window-new', 'smoke-window-ended', 'smoke-app-open'].includes(id)), `the windows to open again after a restart are wrong: ${lost}`);
+    for (const id of ['smoke-window-lost', 'smoke-window-new', 'smoke-window-ended', 'smoke-app-open']) rmSync(path.join(sessionsDir, `${id}.json`), { force: true });
     let refused = false;
     try {
       planSession({ ...sessionConfig, sessions: { x: { tool: 'other', cwd: sessionTemp } } }, 'x');
@@ -1600,6 +2353,11 @@ try {
       && changes.some(c => c.what === 'blocks' && c.removed.join() === 'Browser access') && !changes.some(c => c.what === 'system' || c.name === 'Your part' || c.name === 'Office') && byId.designer.diff === null,
     `what changed since the last run is wrong: ${JSON.stringify(changes.map(c => [c.what, c.name, c.status]))}`);
     expect(context.sessions.length === 2 && context.sessions.every(s => s.error), "the project's live sessions without the owner's clone did not say why");
+    // With the clone: each first message as openSession writes it, the manager's address at its end.
+    const address = (await import(src('sessions.mjs'))).managerAddress(pageConfig, '<session id>');
+    const alphaSessions = ctx.projectContext(pageConfig, 'alpha').sessions;
+    expect(alphaSessions.length === 2 && alphaSessions.every(s => !s.error && s.text?.endsWith(address) && s.tokens === ctx.tokens(s.text)),
+      `the Context tab's live sessions lack the manager's address: ${JSON.stringify(alphaSessions.map(s => [s.profile, s.error, s.text?.slice(-80)]))}`);
     expect(ctx.contextText(context).includes('by a shared tag') && ctx.contextText(context, { full: false }).includes('# Context of Ctx'), 'the context as text is wrong');
     const applied = ctx.applyChanges(ctxConfig, 'ctx', { modules: ['Board', 'Unused module'], exclude: [], notes: 'N', extra: { generalist: 'G', lead: 'L', manager: 'M' }, agentNotes: { designer: '' } });
     const fields = applied.changed.map(c => c.field).join();
@@ -1617,6 +2375,12 @@ try {
     let saved = null;
     ctx.saveChanges('ctx', { notes: 'Hello' }, { config: ctxConfig, save: c => (saved = c) });
     expect(saved?.projects.ctx.notes === 'Hello' && ctx.readHistory('ctx')[0]?.changes[0]?.field === 'projects.ctx.notes', "a saved change was not recorded in the project's history");
+    // The main branch through the owner's card ("main_push": "card", src/guard.mjs): turned on and off from the same form.
+    const mainOn = ctx.applyChanges(ctxConfig, 'ctx', { mainPush: true });
+    const mainOff = ctx.applyChanges(mainOn.config, 'ctx', { mainPush: false });
+    expect(mainOn.config.projects.ctx.main_push === 'card' && mainOn.changed.map(c => c.field).join() === 'projects.ctx.main_push' && !('main_push' in mainOff.config.projects.ctx)
+      && ctx.projectContext(mainOn.config, 'ctx').settings.mainPush === true && !ctx.applyChanges(mainOn.config, 'ctx', { mainPush: true }).changed.length && !ctxConfig.projects.ctx.main_push,
+      `the main branch's card was not turned on and off from the Context tab: ${JSON.stringify([mainOn.changed, mainOff.changed])}`);
   } finally {
     rmSync(sessionTemp, { recursive: true, force: true });
   }
@@ -1682,7 +2446,7 @@ try {
 // info, the seen marks (an info notice goes away), and the urgent Windows notification that stays until seen.
 try {
   const src = file => pathToFileURL(path.join(root, 'src', file)).href;
-  const { attentionArchive, attentionItems, attentionSummary, checkPullRequests, markSeen, pullRequestTargets } = await import(src('attention.mjs'));
+  const { attentionArchive, attentionItems, attentionSummary, checkPullRequests, markSeen, pendingDeliveries, pullRequestTargets, staleLine } = await import(src('attention.mjs'));
   const { toastXml } = await import(src('notify.mjs'));
   // gh and git stand-ins; a check done now also keeps the background check (real gh) away for its 5 minutes.
   const checked = [];
@@ -1721,6 +2485,10 @@ try {
   const again = attentionItems(input);
   expect(!again.some(i => i.id === 'done:a-done') && again.find(i => i.id === 'failed:a-failed')?.seen, 'a seen info notice did not go away, or a seen urgent one did not fade');
   expect(attentionItems({ ...input, runs: [...runs, { id: 'a-redo', project: 'p', title: 'Broke', status: 'running', created: new Date().toISOString() }] }).every(i => i.id !== 'failed:a-failed'), 'a failed run redone still asks for attention');
+  // Claude Code's sign-in (made-up expiry): important 3 days before, urgent and never "seen" on its last day.
+  const signIn = step => attentionItems({ ...input, login: { expires: later, left: 1, step } }).find(i => i.kind === 'login');
+  expect(signIn('3d')?.level === 'important' && signIn('3d').seenable && signIn('1d')?.level === 'urgent' && !signIn('1d').seenable && signIn('1d').text.includes('claude auth login'),
+    "the warning before Claude Code's sign-in expires is missing, at the wrong level or without the command to renew it");
 
   // The archive: a pull request merged or closed on GitHub, a branch merged in the owner's clone, a board item done,
   // an info notice seen or a day old, and a cause that ended (and came back). Nothing is lost.
@@ -1776,10 +2544,164 @@ try {
     `a pull request closed on GitHub did not mark its run as discarded: ${JSON.stringify(readRun('c-pr'))}`);
   expect(planItem(closedTriaged.id).status === 'triaged' && planItem(closedTriaged.id).rank != null && planItem(closedTriaged.id).recommend === 'later' && planItem(closedPlain.id).status === 'todo',
     `a board item whose pull request was closed without a merge did not go back to the owner's decision: ${JSON.stringify([planItem(closedTriaged.id), planItem(closedPlain.id)])}`);
+  // A delivery past 12 hours with no merge nor discard: an alert (info for a project someone else reviews) and a line
+  // in the manager's situation; a fresh, merged or discarded one is neither.
+  const halfDay = new Date(Date.now() - 13 * 3600_000).toISOString();
+  const staleRuns = [
+    { id: 's-pr', project: 'p', title: 'Stalled PR', status: 'done', created: halfDay, ended: halfDay, pullRequest: 'https://github.com/o/r/pull/9', level: 1 },
+    { id: 's-local', project: 'q', title: 'Stalled branch', status: 'done', created: halfDay, ended: halfDay, branch: 'cm/stalled', delivered: 'C:/clone' },
+    { id: 's-other', project: 'third', title: 'Reviewed by others', status: 'done', created: halfDay, ended: halfDay, pullRequest: 'https://github.com/o/r/pull/10' },
+    { id: 's-fresh', project: 'p', title: 'Fresh PR', status: 'done', created: at, ended: at, pullRequest: 'https://github.com/o/r/pull/11' },
+    { id: 's-merged', project: 'p', title: 'Merged', status: 'done', created: halfDay, ended: halfDay, branch: 'cm/m', delivered: 'C:/clone', merged: { by: 'owner' } },
+    { id: 's-dropped', project: 'p', title: 'Dropped', status: 'done', created: halfDay, ended: halfDay, pullRequest: 'https://github.com/o/r/pull/12', discarded: { by: 'owner' } },
+  ];
+  const staleList = attentionItems({ config: { projects: { third: { merge_by_owner: false } } }, runs: staleRuns });
+  const stale = id => staleList.find(i => i.id === `stale:${id}`);
+  expect(stale('s-pr')?.level === 'important' && stale('s-local')?.level === 'important' && stale('s-other')?.level === 'info' && !stale('s-fresh') && !stale('s-merged') && !stale('s-dropped'),
+    `a stalled delivery is not an alert, or a fresh, merged or discarded one is: ${JSON.stringify(staleList.map(i => [i.id, i.level]))}`);
+  const managerStale = staleLine(staleRuns, 'Owner', { projects: { third: { merge_by_owner: false } } });
+  expect(managerStale.includes('[s-pr] Stalled PR (project p, level 1,') && managerStale.includes('branch cm/stalled') && managerStale.includes('(project third, someone else reviews it,')
+    && !managerStale.includes('s-fresh') && !managerStale.includes('s-merged') && staleLine([], 'Owner') === '',
+    `the manager's situation does not list the stalled deliveries: ${managerStale}`);
+  expect(pendingDeliveries(staleRuns, { project: 'q' }).map(d => d.run.id).join() === 's-local', "one project's deliveries include another's");
+  expect(pullRequestTargets(staleList, staleRuns, []).some(x => x.run?.id === 's-local'), "a stalled branch is not checked for a merge outside Chiefmate");
   const urgent = toastXml('Needs you', 'Sign in', 'chiefmate:operations', { urgent: true });
   expect(urgent.includes('scenario="reminder"') && urgent.includes('activationType="system"') && !toastXml('Done', 'x').includes('scenario'), 'an urgent Windows notification does not stay until seen');
 } catch (error) {
   failures.push(`attention levels: ${error.message}`);
+}
+
+// The reading of claude.ai: a notice marked as seen stays seen while its cause lasts (once a day it reminds), and the
+// sign-in window closes by itself (warning first, and waiting while the owner uses it), leaving one "Sign in" card; a
+// request's page window has the same time limit; a page with no limit is a failure of its own. Made-up records only:
+// stand-ins for the browser, Windows and the page, a made-up empty profile folder in this test's data, and nothing
+// opened or read.
+try {
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const { attentionItems, markSeen } = await import(src('attention.mjs'));
+  const { checkLogin, checkOwnerWindow, failed, LOGIN_MINUTES, loginState, openLogin, openOwnerPage, ownerWindowState, PROFILE_DIR, readingDue, readUsagePage, signInNeeded, WARN_MINUTES } = await import(src('usagepage.mjs'));
+  const { readState, saveState } = await import(src('store.mjs'));
+  const { DATA } = await import(src('util.mjs'));
+  const statusFile = path.join(DATA, 'usage-page.json');
+  const setStatus = s => writeFileSync(statusFile, JSON.stringify(s));
+  mkdirSync(PROFILE_DIR, { recursive: true });
+  const config = { usage_reader: { enabled: true, browser: 'C:/made-up/msedge.exe' } };
+  const readerNotices = () => attentionItems({ config }).filter(i => i.id.startsWith('reader:'));
+  const minutes = m => new Date(Date.now() - m * 60_000).toISOString();
+  const open = Object.assign(new Error('The browser with the reading profile is open.'), { readerCause: 'profile_open' });
+
+  // The same cause, tried again and again (even with another wording): one notice, seen once.
+  let status = { attempted: minutes(300), ...failed({}, open, minutes(300)) };
+  setStatus(status);
+  const first = readerNotices();
+  expect(first.length === 1 && first[0].id === 'reader:profile_open' && !first[0].seen, `a failed reading is not one notice of its cause: ${JSON.stringify(first)}`);
+  markSeen(['reader:profile_open']);
+  for (const m of [240, 60]) {
+    status = { ...status, attempted: minutes(m), ...failed(status, m === 60 ? Object.assign(new Error('Still open.'), { readerCause: 'profile_open' }) : open, minutes(m)) };
+    setStatus(status);
+    const again = readerNotices();
+    expect(again.length === 1 && again[0].seen, `the same failure tried again came back as a new notice: ${JSON.stringify(again)}`);
+  }
+  expect(status.failing_since === first[0].at, 'the failure did not keep the time it started');
+  // A day after it was marked, it reminds once; marked again, it stays seen.
+  const state = readState();
+  saveState({ ...state, attention_seen: { ...state.attention_seen, 'reader:profile_open': new Date(Date.now() - 25 * 3600_000).toISOString() } });
+  expect(!readerNotices()[0].seen, 'a failure lasting for over a day did not remind the owner');
+  markSeen(['reader:profile_open']);
+  expect(readerNotices()[0].seen, 'a reminder marked as seen did not fade');
+  // Read again, then failing again: a new situation, a new notice.
+  setStatus({ ok: true, error: null, cause: null, failing_since: null, attempted: minutes(30), read_at: minutes(30) });
+  expect(!readerNotices().length, 'a reading that worked still shows a failure');
+  setStatus({ attempted: minutes(1), ...failed({ ok: true }, open, minutes(1)) });
+  expect(readerNotices()[0]?.seen === false, 'a failure back after a good reading did not come back as new');
+
+  // The sign-in window: opened once, noted, closed after LOGIN_MINUTES, and then a single card to open it again.
+  const started = [];
+  const start = (browser, args) => (started.push(args), 4242);
+  const opened = openLogin(config, { start, alive: () => false });
+  expect(opened.pid === 4242 && opened.image === 'msedge.exe' && loginState().pid === 4242 && started[0].includes('https://claude.ai/login'), `the sign-in window was not noted: ${JSON.stringify(loginState())}`);
+  expect(openLogin(config, { start: () => 5555, alive: () => true }).pid === 4242 && loginState().pid === 4242, 'a second sign-in window replaced the one open');
+  setStatus({ attempted: minutes(1), ...failed({}, Object.assign(new Error('Signed out.'), { readerCause: 'signed_out' }), minutes(1)) });
+  expect(!signInNeeded() && !readerNotices().some(i => i.kind === 'reader-login'), 'the sign-in card shows while its window is open');
+  const closedPids = [];
+  const close = async login => closedPids.push(login.pid);
+  const warnings = [];
+  const warn = win => warnings.push(win.pid);
+  const stand = (at, more = {}) => ({ at, alive: () => true, close, warn, inUse: () => false, ...more });
+  const opening = Date.parse(loginState().opened);
+  expect(await checkLogin(stand(opening + (LOGIN_MINUTES - WARN_MINUTES - 1) * 60_000)) === 'open' && !warnings.length && !closedPids.length, 'the sign-in window warned or closed before its time');
+  expect(await checkLogin(stand(opening + (LOGIN_MINUTES - WARN_MINUTES) * 60_000)) === 'warned' && warnings.join() === '4242' && !closedPids.length, 'the sign-in window did not warn before closing');
+  expect(await checkLogin(stand(opening + (LOGIN_MINUTES - 1) * 60_000)) === 'open' && warnings.length === 1, 'the sign-in window warned twice or closed before its time');
+  const atLimit = opening + LOGIN_MINUTES * 60_000;
+  // Still in use at the limit (in front, the owner typing): it waits; once the owner stops using it, it closes.
+  expect(await checkLogin(stand(atLimit, { inUse: async () => true })) === 'open' && !closedPids.length, 'the sign-in window closed while the owner was using it');
+  expect(await checkLogin(stand(atLimit)) === 'timed_out' && closedPids.join() === '4242' && loginState().timed_out, 'the sign-in window was left open past its time');
+  expect(await checkLogin(stand(atLimit + 60_000)) === null && closedPids.length === 1, 'a closed sign-in window was closed again');
+  const cards = readerNotices();
+  expect(cards.length === 1 && cards[0].id === 'reader:login' && cards[0].kind === 'reader-login' && signInNeeded(), `there is not one "Sign in" card: ${JSON.stringify(cards)}`);
+  // Tried once a minute after it closed, away or not (it tells whether the owner signed in); after that, a failure only
+  // the owner can fix waits for their return.
+  const login = loginState();
+  const beforeClose = { attempted: new Date(atLimit - 60_000).toISOString(), ok: false, cause: 'signed_out' };
+  expect(!readingDue({ status: beforeClose, login, everyHours: 4, at: atLimit + 30_000 }) && readingDue({ status: beforeClose, login, everyHours: 4, at: atLimit + 61_000 }),
+    'the reading was not tried again a minute after the sign-in window closed');
+  expect(readingDue({ status: beforeClose, login, everyHours: 4, away: true, at: atLimit + 61_000 }), 'with the owner away, no reading told whether they signed in before the window closed');
+  const signedOut = { attempted: new Date(atLimit + 61_000).toISOString(), ok: false, cause: 'signed_out' };
+  const later = atLimit + 5 * 3600_000;
+  expect(!readingDue({ status: signedOut, login, everyHours: 4, away: true, at: later }) && readingDue({ status: signedOut, login, everyHours: 4, at: later }),
+    'a failure only the owner can fix was retried while away, or not once they were back');
+  expect(readingDue({ status: { ...signedOut, cause: 'other' }, login, everyHours: 4, away: true, at: later }), 'a passing failure was not retried while the owner was away');
+  // Closed by the owner: noted, with no forced close.
+  openLogin(config, { start: () => 6060, alive: () => false });
+  expect(await checkLogin({ alive: () => false, close }) === 'closed' && closedPids.length === 1 && loginState().timed_out === false, 'a sign-in window closed by the owner was not noted');
+  // A browser that never started is an error, never a window noted as open.
+  let refused = null;
+  try {
+    openLogin(config, { start: () => null, alive: () => false });
+  } catch (error) {
+    refused = error;
+  }
+  expect(refused?.readerCause === 'no_start' && loginState().pid === 6060, 'a sign-in window that never started was noted as open');
+
+  // A request's page (needs-you) on the reading profile: noted, the full time again with each new page (even one arriving
+  // while it is checked), no time limit with the reading off, a warning before closing (late, if the server was off at
+  // the time), and no "Sign in" card once it closes by its time limit.
+  const pages = [];
+  const owner = openOwnerPage('https://example.com/first', config, { start: (browser, args) => (pages.push(args.at(-1)), 7070), alive: () => false });
+  expect(owner.pid === 7070 && ownerWindowState().pid === 7070 && pages.join() === 'https://example.com/first', `the request's page window was not noted: ${JSON.stringify(ownerWindowState())}`);
+  const ownerOpened = Date.parse(owner.opened);
+  writeFileSync(path.join(DATA, 'owner-window.json'), JSON.stringify({ ...ownerWindowState(), opened: new Date(ownerOpened - 9 * 60_000).toISOString() }));
+  expect(await checkOwnerWindow(stand(ownerOpened)) === 'warned' && warnings.at(-1) === 7070, "the request's page window did not warn before closing");
+  const again = openOwnerPage('https://example.com/second', config, { start: (browser, args) => (pages.push(args.at(-1)), 8080), alive: () => true });
+  expect(again.pid === 7070 && !again.warned && Date.parse(again.opened) >= ownerOpened && pages.at(-1) === 'https://example.com/second', `a new page did not give the window its full time again: ${JSON.stringify(again)}`);
+  const ownerLimit = Date.parse(again.opened) + LOGIN_MINUTES * 60_000;
+  // With the reading off, nothing needs the profile: the page stays open past its time, with no warning.
+  const warnedBefore = warnings.length;
+  expect(await checkOwnerWindow(stand(ownerLimit + 5 * 60_000, { timed: false })) === 'open' && warnings.length === warnedBefore && !closedPids.includes(7070),
+    "a request's page was warned or closed with the reading off");
+  expect(await checkOwnerWindow(stand(ownerLimit + 5 * 60_000)) === 'warned', 'a window found past its time was closed with no warning');
+  expect(await checkOwnerWindow(stand(ownerLimit + 6 * 60_000)) === 'open', "the request's page window closed right after its warning");
+  const closedBefore = closedPids.length;
+  // A new page while the owner's input is looked up: the window stays, with its full time again.
+  const third = { inUse: async () => (openOwnerPage('https://example.com/third', config, { start: () => 9090, alive: () => true }), false) };
+  expect(await checkOwnerWindow(stand(ownerLimit + 7 * 60_000, third)) === 'open' && closedPids.length === closedBefore && !ownerWindowState().warned && !ownerWindowState().closed,
+    'a new page while the window was being checked was closed with it');
+  expect(await checkOwnerWindow(stand(ownerLimit + 7 * 60_000)) === 'warned', "the request's page window did not warn again after a new page");
+  expect(await checkOwnerWindow(stand(ownerLimit + 9 * 60_000)) === 'timed_out' && closedPids.at(-1) === 7070 && closedPids.length === closedBefore + 1 && ownerWindowState().timed_out,
+    "the request's page window was left open past its time");
+
+  // The page opened, signed in, but showed no limit: a failure with a cause of its own, and a notice; the latest values stay.
+  const good = { ok: true, error: null, cause: null, failing_since: null, attempted: minutes(300), read_at: minutes(300), five_hour: 0.4, seven_day: 0.2 };
+  setStatus(good);
+  expect(!readerNotices().length, `a request's page closed by its time limit asked to sign in: ${JSON.stringify(readerNotices())}`);
+  const empty = await readUsagePage(config, { open: async () => ({ url: 'https://claude.ai/settings/usage', text: 'Settings\nUsage\nLoading' }) });
+  expect(empty.ok === false && empty.cause === 'no_data' && empty.error.includes('/settings/usage') && empty.five_hour === 0.4 && empty.read_at === good.read_at,
+    `a page with no limit was not a failure of its own: ${JSON.stringify(empty)}`);
+  expect(readerNotices().some(i => i.id === 'reader:no_data' && !i.seen), `a page with no limit left no notice: ${JSON.stringify(readerNotices())}`);
+  const full = await readUsagePage(config, { open: async () => ({ url: 'https://claude.ai/settings/usage', text: 'Current session\n35% used\nWeekly limits\n12% used' }) });
+  expect(full.ok === true && full.five_hour === 0.35 && full.seven_day === 0.12 && !full.cause && !readerNotices().some(i => i.id === 'reader:no_data'), `a page with its limits was not read: ${JSON.stringify(full)}`);
+} catch (error) {
+  failures.push(`usage reading notices and sign-in window: ${error.message}`);
 }
 
 // The owner's decision cards, in this process with made-up records (no gh, no git, nothing told to the manager): what
@@ -2054,7 +2976,13 @@ try {
     'git push --force origin feature': 'forced', 'git push origin +feature': 'forced', 'git push --force-with-lease origin feature': 'forced',
     'git push --mirror origin': 'forced', 'git push --delete origin feature': 'forced', 'git push origin :feature': 'forced', 'git push -fu origin feature': 'forced',
     'git push origin main': 'main', 'git push origin HEAD:master': 'main', 'git push origin refs/heads/main': 'main',
-    'git push': 'shape', 'git push origin': 'shape', 'cd x && git push origin feature': 'shape', 'git -c a=b push origin feature': 'shape',
+    'git push -u origin feature 2>&1': 'ok', 'cd x && git push --set-upstream origin feature 2>/dev/null': 'ok', 'git push -u origin main 2>&1': 'main', 'git push -f origin feature 2>&1': 'forced',
+    'git push': 'shape', 'git push origin': 'shape', 'cd x; git push origin feature': 'shape', 'cd x | git push origin feature': 'shape', 'git -c a=b push origin feature': 'shape',
+    'git push origin feature > out.txt': 'shape', 'git push origin feature 2>&1 | tail': 'shape', 'cd $X && git push origin feature': 'shape',
+    // Redirections count only unquoted at the end: a quoted "2>&1" or ">" is one more branch for git. A backquote runs a
+    // command for the folder.
+    'git push origin feature "2>&1"': 'shape', "git push origin feature '>' nul": 'shape', 'git push 2>&1 origin feature': 'shape',
+    'git -C "`echo x`" push origin feature': 'shape', 'cd "`echo x`" && git push origin feature': 'shape',
     'git push origin $B': 'shape', 'git push --tags origin feature': 'shape', 'git push origin a b': 'shape', 'bash -c "git push origin feature"': 'shape',
   };
   const misjudged = Object.entries(kinds).filter(([c, k]) => (plainPush(c, repo).branch ? 'ok' : plainPush(c, repo).refused) !== k);
@@ -2082,8 +3010,11 @@ try {
   const other = path.join(pushDir, 'other');
   expect(!goes('git push origin other') && !goes('git push origin feature', other) && !goes('git push --force origin feature') && !goes('git push origin HEAD:feature'),
     'an allowed push let another branch, folder, source or a forced push through');
-  expect(goes('git push origin feature') && readPushes(pushesFile()).find(p => p.id === card.push)?.status === 'used' && !goes('git push origin feature'),
-    'the allowed push did not go once, or was not used up');
+  expect(!goes('git push -u local feature 2>&1') && !goes('git push -u origin main 2>&1') && !goes('git push -f origin feature 2>&1'),
+    'an allowed push let another remote, the main branch or a forced push through when written with -u or 2>&1');
+  // The same push written another way (-u, its messages redirected, a cd before it) is the push the owner allowed.
+  expect(goes(`cd ${JSON.stringify(repo)} && git push -u origin feature 2>&1`, pushDir) && readPushes(pushesFile()).find(p => p.id === card.push)?.status === 'used' && !goes('git push origin feature'),
+    'the allowed push did not go once in an equivalent form, or was not used up');
   // A grant for the main branch, or expired, lets nothing through; a refusal is recorded.
   const later = new Date(Date.now() + 600_000).toISOString();
   writeFileSync(pushesFile(), JSON.stringify([...readPushes(pushesFile()),
@@ -2111,6 +3042,64 @@ try {
   const sent = cli([repo, 'feature']);
   expect(sent.ok && git(bare, 'rev-parse', 'refs/heads/feature') === git(repo, 'rev-parse', 'feature') && !cli([repo, 'feature']).ok,
     `cli.mjs push did not send the allowed push once: ${sent.out}`);
+
+  // The main branch (here "trunk", the remote's default) through the owner's card, only in a project with
+  // "main_push": "card": a plain push of it alone is refused and becomes a card with what goes (commits, files,
+  // migrations); allowed, it goes once. A forced push, a deleted branch, a push with an option, and any push of the
+  // main branch of a project without the setting are always refused, card or not.
+  const { guardHooks, mainPushTarget, mainPushTargets, pushLogFile } = await import(src('guard.mjs'));
+  mkdirSync(path.join(repo, 'db', 'migrations'), { recursive: true });
+  writeFileSync(path.join(repo, 'db', 'migrations', '001_init.sql'), 'create table t (id int);');
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-q', '-m', 'Add a migration');
+  const withCard = { projects: { sample: { name: 'Sample', main_push: 'card', local_clone: repo } } };
+  const withoutCard = { projects: { sample: { name: 'Sample', local_clone: repo } } };
+  const targets = mainPushTargets(withCard);
+  const mainLog = path.join(pushDir, 'main-guard.jsonl');
+  const commandOf = hooks => hooks.PreToolUse[0].hooks[0].command;
+  const passes = (h, command, cwd = repo) => !/"permissionDecision":"deny"/.test(execFileSync(h, { shell: true, encoding: 'utf8', input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', tool_input: { command }, cwd }) }));
+  const mainHook = commandOf(crewGuard(mainLog, pushesFile(), targets));
+  const noCardHook = commandOf(crewGuard(mainLog, pushesFile(), mainPushTargets(withoutCard)));
+  expect(targets.length === 1 && !passes(mainHook, 'git push origin trunk') && !passes(mainHook, 'git push --force origin trunk') && !passes(mainHook, 'git push origin --delete trunk') && !passes(mainHook, 'git push -u origin trunk'),
+    'a push of the main branch went before the owner allowed it on its card');
+  const mainMade = pushRequestsFrom(mainLog, null, withCard);
+  const mainAsked = mainMade[0];
+  expect(mainMade.length === 1 && mainAsked.main && mainAsked.branch === 'trunk' && mainAsked.project === 'sample' && mainAsked.count === 2 && mainAsked.fileCount === 2
+    && mainAsked.migrationCount === 1 && mainAsked.migrations[0] === 'db/migrations/001_init.sql', `a push of the main branch did not become one request with what goes: ${JSON.stringify(mainMade)}`);
+  passes(mainHook, 'git push origin trunk');
+  expect(!pushRequestsFrom(mainLog, null, withoutCard).length, 'a push of the main branch became a request in a project without the setting');
+  const mainPushes = openPushes();
+  const mainCards = decisionCards({ config: withCard, attention: attentionItems({ config: withCard, pushes: mainPushes }), pushes: mainPushes });
+  const mainCard = mainCards.find(c => c.main);
+  const hiddenCards = decisionCards({ config: withoutCard, attention: attentionItems({ config: withoutCard, pushes: mainPushes }), pushes: mainPushes });
+  expect(mainCard?.approve && mainCard.approval === 3 && mainCard.title.includes('trunk') && /\b2\b.*\b2\b.*\b1\b/.test(mainCard.title) && mainCard.detail.includes('db/migrations/001_init.sql') && !hiddenCards.length,
+    `the push of the main branch is not a card with what goes at a glance, or shows in a project without the setting: ${JSON.stringify(mainCards)}`);
+  expect((await decide({ card: mainCard.id, action: 'approve' }, mainCards)).done === 'allowed', 'the owner could not allow the push of the main branch from its card');
+  expect(!passes(mainHook, 'git push --force origin trunk') && !passes(mainHook, 'git push -u origin trunk') && !passes(mainHook, 'git push origin :trunk') && !passes(noCardHook, 'git push origin trunk'),
+    'an allowed push of the main branch let a forced push, an option, a deletion or a project without the setting through');
+  // The grant serves only the commits its card showed: one made after it needs a new card.
+  writeFileSync(path.join(repo, 'later.txt'), 'later');
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-q', '-m', 'Later');
+  expect(!passes(mainHook, 'git push origin trunk'), 'the main branch went with a commit its card did not show');
+  git(repo, 'reset', '-q', '--hard', 'HEAD~1');
+  expect(passes(mainHook, `cd ${JSON.stringify(repo)} && git push origin trunk 2>&1`, pushDir) && !passes(mainHook, 'git push origin trunk'), 'the allowed push of the main branch did not go once');
+  const written = readFileSync(pushLogFile(pushesFile()), 'utf8');
+  expect(/"event":"allowed"[^\n]*"main":true/.test(written) && /"event":"used"[^\n]*"main":true/.test(written), `the push of the main branch was not written down: ${written}`);
+  // A "Work now" session: its permission to push never lets the main branch go; it takes only its own grant, and the
+  // manager never takes it.
+  const sessionHook = commandOf(guardHooks({ log: mainLog, allowed: ['Bash(git push:*)'], who: 'session', noMain: true, grants: pushesFile(), session: 'smoke-work', mainCard: targets }));
+  const fromSession = mainPushTarget('git push origin trunk', repo, targets);
+  const sessionAsked = addPushRequest({ ...fromSession, ...fromSession.facts, command: 'git push origin trunk', main: true, session: 'smoke-work', sessionName: 'Work now' });
+  expect(!passes(sessionHook, 'git push origin trunk') && sessionAsked?.session === 'smoke-work' && answerPush(sessionAsked.id, true).status === 'allowed',
+    'a "Work now" session pushed the main branch on its permission to push, or its card could not be allowed');
+  expect(!passes(mainHook, 'git push origin trunk') && passes(sessionHook, 'git push origin trunk') && !passes(sessionHook, 'git push origin trunk'),
+    "the session's grant for the main branch went to the manager, or did not go once for the session");
+  // The command line: a grant for the main branch of a project without the setting (the settings in use here have
+  // none) sends nothing.
+  const viaCli = addPushRequest({ ...fromSession, ...fromSession.facts, command: 'git push origin trunk', main: true });
+  answerPush(viaCli.id, true);
+  expect(!cli([repo, 'trunk']).ok && readPushes(pushesFile()).find(p => p.id === viaCli.id)?.status === 'allowed', 'cli.mjs push sent the main branch of a project without the setting');
 } catch (error) {
   failures.push(`the manager's push: ${error.message}`);
 } finally {
@@ -2243,7 +3232,7 @@ try {
     "const args = process.argv.slice(2);",
     "const id = args.includes('--resume') ? args[args.indexOf('--resume') + 1] : args[args.indexOf('--session-id') + 1];",
     "let prompt = ''; process.stdin.on('data', d => (prompt += d)); process.stdin.on('end', () => {",
-    `  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ tool: 'claude', args, prompt }) + '\\n');`,
+    `  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ tool: 'claude', args, prompt, session: process.env.CHIEFMATE_SESSION }) + '\\n');`,
     "  if (prompt.includes('already there') && args.includes('--session-id')) { process.stderr.write('Error: Session ID ' + id + ' is already in use.'); process.exit(1); }",
     "  const say = e => process.stdout.write(JSON.stringify(e) + '\\n');",
     "  say({ type: 'system', subtype: 'init', session_id: id, model: 'm' });",
@@ -2256,7 +3245,8 @@ try {
     "    const run = command => execSync(hook, { input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't3', tool_input: { command } }), encoding: 'utf8' });",
     `    appendFileSync(${JSON.stringify(path.join(liveDir, 'guard.txt'))},JSON.stringify([run('cd x && gh api repos/a/b/pulls -f title=T -f head=h'), run('git -C sub push origin main'), run('git status')]));`,
     "  }",
-    "  setTimeout(() => say({ type: 'result', subtype: 'success', result: 'done', session_id: id, num_turns: 1, permission_denials: denials }), prompt.includes('take long') ? 20000 : 300);",
+    "  const wait = prompt.includes('waiting for the environment test') ? 750 : prompt.includes('take long') ? 20000 : 300;",
+    "  setTimeout(() => say({ type: 'result', subtype: 'success', result: 'done', session_id: id, num_turns: 1, permission_denials: denials }), wait);",
     "});",
   ].join('\n'));
   const fakeCodex = path.join(liveDir, 'fake-codex.mjs');
@@ -2266,7 +3256,7 @@ try {
     "if (args[0] === 'login') process.exit(0);",
     "const thread = args.includes('resume') ? args[args.length - 2] : 'thread-1';",
     "let prompt = ''; process.stdin.on('data', d => (prompt += d)); process.stdin.on('end', () => {",
-    `  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ tool: 'codex', args, prompt }) + '\\n');`,
+    `  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ tool: 'codex', args, prompt, session: process.env.CHIEFMATE_SESSION }) + '\\n');`,
     "  const say = e => process.stdout.write(JSON.stringify(e) + '\\n');",
     "  say({ type: 'thread.started', thread_id: thread });",
     "  say({ type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'pwsh.exe -Command \"npm test\"', status: 'in_progress' } });",
@@ -2294,7 +3284,13 @@ try {
     await idle(s.id);
     const [first, second] = called();
     const sid = first.args[first.args.indexOf('--session-id') + 1];
-    expect(first.prompt === 'Start here' && second?.args[second.args.indexOf('--resume') + 1] === sid && second.prompt.includes('Second message'), 'the second turn did not resume the same Claude Code session with the queued message');
+    expect(first.prompt.startsWith('Start here\n\n') && second?.args[second.args.indexOf('--resume') + 1] === sid && second.prompt.includes('Second message'), 'the second turn did not resume the same Claude Code session with the queued message');
+    // The manager's fixed address: the full command, with this session's id, when to use it, and that it is not in Claude Code's list.
+    const cli = sessions.cliCommand();
+    expect(path.isAbsolute(cli.replace(/^node "?/, '').replace(/"$/, '')) && first.prompt.includes(`${cli} chat say --from ${s.id} "<message>"`) && first.prompt.includes('report a problem')
+      && first.prompt.includes("Claude Code's session list") && first.prompt.includes(`${cli} defect report --from ${s.id}`) && first.prompt.includes('without waiting for Owner to ask'),
+      `a live session's first message lacks the manager's address or the rule to report defects: ${first.prompt}`);
+    expect(first.session === s.id && second.session === s.id, "a live session's turns don't know which session they are, so a message to the manager would pass for the owner's");
     expect(first.args[first.args.indexOf('--setting-sources') + 1] === 'project,local' && first.args.includes('--strict-mcp-config') && first.args.includes('Bash') && first.args.includes('Bash(git push:*)'), "a session in the app would load the user's own configuration, lack the terminal, or push without asking");
     expect(kinds(s.id) === 'owner,say,action,owner,say,action', `the history of a session in the app is wrong: ${kinds(s.id)}`);
     const { items, next } = sessions.sessionHistory(s.id);
@@ -2322,6 +3318,30 @@ try {
       'gh api repos/a/b/pulls -f title=T': 'gh api', 'gh api -X POST repos/a/b/pulls': 'gh api', 'curl -X POST https://api.github.com/repos/a/b/pulls -d @pr.json': 'gh api',
       'git -C x remote set-url origin u': 'git remote', 'gh pr create --fill': 'gh pr',
       'git status && git log': '', 'git commit -m "explain git push"': '', 'gh api repos/a/b/pulls': '', 'curl https://api.github.com/repos/a/b': '',
+      // What only reads publishes nothing; what writes, however placed, does.
+      'gh pr view 12': '', 'gh pr list --repo a/b --state open': '', 'gh -R a/b pr checks 3': '', 'gh pr diff 3': '', 'gh pr status': '', 'gh repo view a/b --json name': '', 'gh repo list': '',
+      'gh pr --repo a/b merge 3': 'gh pr', 'gh repo create x --public': 'gh repo', 'gh pr': 'gh pr', 'gh repo delete a/b': 'gh repo',
+      // An instruction for Chiefmate's command line, a commit message or an issue's body that only names a command is
+      // text, when the whole command is in plain words; what the command itself does still counts.
+      'node src/cli.mjs task p generalist "Fix it.\ngh pr create, then git push (gh repo view)"': '', 'git commit -m "Guard\n\ngit push origin main stays refused"': '',
+      'gh issue create --title "Guard" --body "Refused:\ngh pr create --fill; git push"': '', 'gh pr create --title "x" --body "y; git push"': 'gh pr',
+      // Text that a shell, inline code, git itself, a script or a --check runs is still looked at.
+      'echo "git push" | sh': 'git push', 'eval "git push"': 'git push', 'node -e "run(\'git push\')"': 'git push', 'gh alias set p --shell "git push"': 'git push',
+      'python tool.py "a; git push"': 'git push', 'git commit -m "$(git push origin x)"': 'git push', 'git commit -m "`git push origin x`"': 'git push',
+      'git commit -m "x\\" "; git push origin x"': 'git push', 'git rebase --exec "git push origin x" main': 'git push', 'git submodule foreach "git push"': 'git push',
+      'git -c core.editor=x commit -m "a; git push"': 'git push', 'node src/cli.mjs needs-you "Done?" --wait --check "git push origin x"': 'git push',
+      'node src/cli.mjs task p generalist "a; git push" | sh': 'git push',
+      // Only reading the remote or GitHub, and a message to the manager that only quotes a command, publish nothing.
+      'git remote -v': '', 'git -C x remote get-url origin': '', 'git remote show origin': '', 'echo "git remote -v"': '', 'gh pr list': '', 'gh pr -R a/b view 3': '', 'gh issue list': '', 'gh repo view': '',
+      'node src/cli.mjs chat say "Refused: git push -u origin x 2>&1; git remote add y z"': '', "node src/cli.mjs chat say 'run `git push origin x`'": '',
+      'node src/cli.mjs chat say "$(git push origin x)"': 'git push', 'node src/cli.mjs chat say "`git push origin x`"': 'git push', 'node src/cli.mjs chat say hi && git push origin x': 'git push',
+      'node C:/x/src/cli.mjs defect report "Refused: git push origin x; gh pr create.\nExpected: C:\\Users ok"': '',
+      // A message that bash or PowerShell would read another way (an escaped quote, $'...', a comment, $(...) after a
+      // backslash, curly quotes) is looked at whole: what runs after it is found.
+      'node src/cli.mjs chat say "x\\" "; git push origin x': 'git push', "node src/cli.mjs chat say $'x\\' '; git push origin x": 'git push',
+      'node src/cli.mjs chat say hi #"\ngit push origin x\n"': 'git push', 'node src/cli.mjs chat say "\\$(git push origin x)"': 'git push',
+      'node src/cli.mjs chat say "a\u201c; git push origin x;\u201d"': 'git push',
+      'git remote add y z': 'git remote', 'gh pr merge 3': 'gh pr',
     };
     const misread = Object.entries(guarded).filter(([c, r]) => rules(c) !== r);
     expect(!misread.length, `the guard misreads what a command publishes: ${misread.map(([c]) => `${c} -> ${rules(c) || '(nothing)'}`).join('; ')}`);
@@ -2397,7 +3417,213 @@ try {
     const said = sessions.sessionHistory(c.id).items;
     expect(said.some(e => e.kind === 'say' && e.text === 'Codex: Hi codex') && said.some(e => e.kind === 'action' && e.failed && e.text.includes('npm test')) && said.some(e => e.kind === 'action' && e.text.includes('a.txt')), "Codex's text and actions did not reach the history");
     expect(sessions.sessionView(c.id).session.turns === 2, "a Codex session's view is wrong");
+    expect(cx1.session === c.id && cx1.prompt.includes(`chat say --from ${c.id}`), "a Codex session lacks the manager's address, or doesn't know which session it is");
     await sessions.endSession(c.id);
+
+    // Environment notices use both real session queues with stand-in tools and a simulated launcher and stop.
+    const { deliverDevNotices, devState, runDev, startDev, stopDev } = await import('../src/projects.mjs');
+    const devProject = 'smoke-dev';
+    const devClone = path.join(liveDir, 'dev-clone');
+    mkdirSync(devClone);
+    const projectConfig = { name: 'Sample dev', local_clone: devClone, dev_start: 'sample dev command' };
+    const devConfig = { ...liveConfig, projects: { [devProject]: projectConfig } };
+    for (const session of [s, c]) {
+      const record = sessions.readSession(session.id);
+      writeFileSync(path.join(data, 'sessions', `${session.id}.json`), JSON.stringify({ ...record, project: devProject, status: 'open' }));
+    }
+    const isolated = 'smoke-dev-other';
+    writeFileSync(path.join(data, 'sessions', `${isolated}.json`), JSON.stringify({
+      id: isolated, project: 'another-project', status: 'open', mode: 'app', tool: 'claude', cwd: liveDir,
+    }));
+    // The conversation with the project's agent in charge reads only: no turn of its own for the environment.
+    const inCharge = 'smoke-dev-charge';
+    writeFileSync(path.join(data, 'sessions', `${inCharge}.json`), JSON.stringify({
+      id: inCharge, project: devProject, status: 'open', mode: 'app', tool: 'claude', cwd: null, charge: true, member: 'generalist',
+    }));
+    const devRecord = path.join(data, 'dev', `${devProject}.json`);
+    const open = (_name, cwd, args) => {
+      expect(cwd === devClone && args[0] === 'dev-run' && args[1] === devProject, 'the environment did not launch in its own clone');
+      token = args[2];
+      return 'terminal';
+    };
+    let token;
+    const launch = () => startDev(devProject, { config: devConfig, open, readWindows: async () => [] });
+    const machine = { dev: [] };
+    const address = 'http://localhost:5173/';
+    const devChild = () => Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough() });
+    const service = devChild();
+    const closeDev = (child, code, signal = null) => {
+      child.stdout.end();
+      child.stderr.end();
+      child.emit('close', code, signal);
+    };
+    const notices = id => sessions.sessionHistory(id).items.filter(m => m.by === 'system');
+    await launch();
+    const serving = runDev(devProject, token, { config: devConfig, spawnCommand: () => service, probe: async url => url.href === address });
+    try {
+      service.stderr.write('Container sample-db Started\n');
+      service.stdout.write(`  Local: ${address}\n`);
+      for (let i = 0; i < 40 && !devState(devProject, projectConfig, machine).url; i++) await delay(50);
+      expect(devState(devProject, projectConfig, machine).url === address, 'an address reported by the command and listening was not exposed while running');
+      sessions.sayToSession(s.id, 'Keep working while waiting for the environment test');
+      const turn = sessions.turnOf(s.id);
+      deliverDevNotices();
+      const queuedNotice = sessions.readSession(s.id).queue.find(m => m.by === 'system');
+      expect(turn && sessions.turnOf(s.id)?.since === turn.since && queuedNotice?.text.includes(address) && queuedNotice.text.includes('sample-db'),
+        'the startup notice did not wait for the current turn with the service and address');
+      deliverDevNotices();
+      expect(sessions.readSession(s.id).queue.filter(m => m.by === 'system').length === 1, 'the startup notice was queued twice');
+      await Promise.all([idle(s.id), idle(c.id)]);
+      for (const session of [s, c]) {
+        expect(notices(session.id).some(n => n.kind === 'note' && n.text.includes(address))
+          && called().some(call => call.session === session.id && call.prompt.includes('[Chiefmate system notice, informational,') && call.prompt.includes(address)),
+          `the environment notice did not reach ${session.tool} as a system message`);
+      }
+      const pids = [];
+      const stopped = await stopDev(devProject, { config: devConfig, readWindows: async () => [{ pid: 42 }], stopTree: pid => pids.push(pid) });
+      closeDev(service, null, 'SIGTERM');
+      await serving;
+      deliverDevNotices();
+      await Promise.all([idle(s.id), idle(c.id)]);
+      // The stop names no services: what the command started on its own (containers with "-d") may still be up.
+      expect(stopped.stopped === 1 && pids.join() === '42' && !devState(devProject, projectConfig, machine).url
+        && notices(c.id).length === 2 && !notices(c.id).at(-1).error && !notices(c.id).at(-1).text.includes('sample-db'),
+      'stopping did not clear the system link and deliver the stop result');
+    } finally {
+      if (!service.stdout.writableEnded) closeDev(service, null, 'SIGINT');
+      await serving;
+    }
+    await launch();
+    const failed = devChild();
+    const starting = runDev(devProject, token, { config: devConfig, spawnCommand: () => failed, keepFailedWindow: false });
+    failed.stderr.write('Sample port is already in use\n');
+    closeDev(failed, 7);
+    await starting;
+    deliverDevNotices();
+    await Promise.all([idle(s.id), idle(c.id)]);
+    expect(!devState(devProject, projectConfig, machine).url && notices(s.id).at(-1)?.error
+      && notices(s.id).at(-1).text.includes('Sample port is already in use'), 'a failed startup did not reach the session with its short error');
+    // Ctrl+C in the window: the command ends with an error code (Windows reports no signal), and that is a stop.
+    await launch();
+    const interrupted = devChild();
+    const running = runDev(devProject, token, { config: devConfig, spawnCommand: () => interrupted, probe: async url => url.href === address, keepFailedWindow: false });
+    try {
+      interrupted.stdout.write(`  Local: ${address}\n`);
+      for (let i = 0; i < 40 && !devState(devProject, projectConfig, machine).url; i++) await delay(50);
+      process.emit('SIGINT');
+      closeDev(interrupted, 3221225786);
+      await running;
+    } finally {
+      if (!interrupted.stdout.writableEnded) closeDev(interrupted, null, 'SIGINT');
+      await running;
+    }
+    deliverDevNotices();
+    await Promise.all([idle(s.id), idle(c.id)]);
+    const told = notices(s.id).slice(-2);
+    expect(told.length === 2 && told[0].text.includes(address) && told.every(n => !n.error) && !told[1].text.includes('3221225786') && !existsSync(devRecord),
+      'Ctrl+C in the window was told as a failure, or its stop was not told');
+    // From another device: no window, the launcher in the background with its output in a log, the address read as in a window.
+    let detached;
+    const noWindow = () => expect(false, 'a window opened for the environment started from afar');
+    const behind = await startDev(devProject, { config: devConfig, background: true, open: noWindow, readWindows: async () => [], detach: (cwd, args, log) => (detached = { cwd, args, log }, null) });
+    expect(behind.background && behind.window === null && detached?.cwd === devClone && detached.args.join(' ') === `dev-run ${devProject} ${detached.args[2]} --background`
+      && detached.log === path.join(data, 'projects', devProject, 'dev.log'), `the environment started from afar did not run in the background: ${JSON.stringify(detached)}`);
+    const quiet = devChild();
+    let hidden;
+    const unseen = runDev(devProject, detached.args[2], { background: true, config: devConfig, spawnCommand: (command, options) => (hidden = options, quiet), probe: async url => url.href === address });
+    try {
+      quiet.stdout.write(`  Local: ${address}\n`);
+      for (let i = 0; i < 40 && !devState(devProject, projectConfig, machine).url; i++) await delay(50);
+      expect(devState(devProject, projectConfig, machine).url === address, 'the address of the environment run in the background was not exposed');
+      // With no console of the launcher's, the command would get a visible one of its own.
+      expect(hidden?.windowsHide === true && hidden.stdio[0] === 'ignore', `the command run in the background may open a window: ${JSON.stringify(hidden)}`);
+    } finally {
+      closeDev(quiet, 0);
+      await unseen;
+    }
+    deliverDevNotices();
+    await Promise.all([idle(s.id), idle(c.id)]);
+    expect(!existsSync(devRecord), 'the environment run in the background left its record when it ended');
+    // A record left by a window that closed, its process id since given to another process (here, this one).
+    const reading = dev => ({ supported: true, measured: new Date().toISOString(), dev });
+    const leftOver = () => writeFileSync(devRecord, JSON.stringify({ token: 'old', at: Date.now() - 120_000, name: 'Sample dev', status: 'running', pid: process.pid, url: address }));
+    leftOver();
+    expect(devState(devProject, projectConfig, reading([])).status === 'stopped'
+      && devState(devProject, projectConfig, reading([{ project: devProject, pids: [process.pid], ram: 1 }])).url === address,
+    'a record whose process id belongs to another process still showed the environment running');
+    const toldBefore = notices(c.id).length;
+    const reused = await stopDev(devProject, { config: devConfig, readWindows: async () => [], stopTree: () => expect(false, 'a process that is not the window was stopped') })
+      .catch(error => ({ error: error.message }));
+    if (process.platform === 'win32') {
+      leftOver();
+      const refused = await launch().then(() => null, error => error.message);
+      expect(!refused, `a record whose process id belongs to another process blocked the start: ${refused}`);
+      await stopDev(devProject, { config: devConfig, readWindows: async () => [], stopTree: () => {} });
+    }
+    deliverDevNotices();
+    await Promise.all([idle(s.id), idle(c.id)]);
+    expect(reused.stopped === 0 && !existsSync(devRecord) && notices(c.id).length > toldBefore && notices(c.id).slice(toldBefore).every(n => !n.error),
+      `a record whose process id belongs to another process blocked the stop: ${reused.error ?? ''}`);
+    expect(!notices(isolated).length && !sessions.readSession(isolated).queue?.length && !notices(inCharge).length
+      && !sessions.readSession(inCharge).queue?.length && !readdirSync(devClone).length,
+    'notices reached another project or the agent in charge, or wrote to the project clone');
+    await Promise.all([s, c, { id: isolated }, { id: inCharge }].map(session => sessions.endSession(session.id)));
+
+    // Read the actual stdin of a resumed turn after a manager answer and a subsequent run status change.
+    const charge = await import('../src/charge.mjs');
+    const { loadConfig } = await import('../src/config.mjs');
+    const { saveRun } = await import('../src/store.mjs');
+    const config = loadConfig();
+    const project = Object.keys(config.projects).find(id => charge.inCharge(config, id));
+    if (project) {
+      const id = 'smoke-charge-live';
+      writeFileSync(path.join(data, 'sessions', `${id}.json`), JSON.stringify({
+        id, project, charge: true, status: 'open', mode: 'app', tool: 'claude', cwd: liveDir, toolSession: '11111111-1111-4111-8111-111111111111',
+      }));
+      // A "Work now" session on Codex of the same project: resumed with the message alone, it gets the news too.
+      const cxId = 'smoke-work-codex';
+      writeFileSync(path.join(data, 'sessions', `${cxId}.json`), JSON.stringify({
+        id: cxId, project, status: 'open', mode: 'app', tool: 'codex', cwd: liveDir, toolSession: null, turns: 0, work: { copy: false, held: [], crew: [] },
+      }));
+      sessions.sayToSession(id, 'First charge turn');
+      sessions.sayToSession(cxId, 'First work turn');
+      await idle(id);
+      await idle(cxId);
+      const firstPrompt = called().findLast(x => x.tool !== 'codex')?.prompt;
+      const request = charge.addRequest({ project, session: id, asked: 'Change the menu', plan: 'Fix the menu' }, config);
+      const { run } = await charge.answerRequest(request.id, 'approve', { note: 'Please keep the layout.', title: 'Smoke menu', summary: 'Made up.' }, config);
+      saveRun({ ...run, status: 'running' });
+      sessions.sayToSession(id, 'Where is my request?');
+      await idle(id);
+      const resumed = called().at(-1);
+      const news = 'What changed since your previous turn';
+      expect(firstPrompt?.includes('Your requests to the manager') && !firstPrompt.includes(`- #${request.id},`) && !firstPrompt.includes(news)
+        && resumed?.args.includes('--resume') && resumed.prompt.includes('Where is my request?') && resumed.prompt.includes(news) && resumed.prompt.includes(`- Request #${request.id},`)
+        && resumed.prompt.includes('approved; the manager: Please keep the layout.') && resumed.prompt.includes(`(#log/${run.id}) (running)`),
+      `the resumed charge turn did not receive the latest request, the manager note and the linked run state in its input: ${resumed?.prompt}`);
+      expect(sessions.sessionHistory(id).items.some(e => e.kind === 'request' && e.request === request.id && e.status === 'approved' && e.run === run.id),
+        'the original conversation did not receive the approval and its run link');
+      // Nothing new: the turn carries the message alone, without repeating the requests.
+      sessions.sayToSession(id, 'Thanks');
+      await idle(id);
+      const quiet = called().at(-1).prompt;
+      expect(!quiet.includes(news) && !quiet.includes('Your requests to the manager') && quiet.includes('Thanks'), `a resumed charge turn repeats what did not change: ${quiet}`);
+      // A notice from elsewhere in Chiefmate comes with the next turn, once.
+      sessions.noteSession(id, 'Smoke notice: the crew started.');
+      sessions.sayToSession(id, 'Any news?');
+      await idle(id);
+      const noticed = called().at(-1).prompt;
+      expect(noticed.includes(news) && noticed.includes('Smoke notice: the crew started.') && !noticed.includes(`- Request #${request.id},`), `a resumed charge turn did not get the notice alone: ${noticed}`);
+      sessions.sayToSession(cxId, 'Where do we stand?');
+      await idle(cxId);
+      const cxResumed = called().filter(x => x.tool === 'codex').at(-1);
+      expect(cxResumed?.args.slice(0, 2).join() === 'exec,resume' && cxResumed.prompt.includes(news) && cxResumed.prompt.includes(`- Request #${request.id},`)
+        && cxResumed.prompt.includes('Please keep the layout.') && cxResumed.prompt.includes('Where do we stand?'),
+      `the resumed Codex turn of a project's session did not receive what changed: ${cxResumed?.prompt}`);
+      saveRun({ ...run, status: 'done', ended: new Date().toISOString() });
+      await sessions.endSession(id);
+      writeFileSync(path.join(data, 'sessions', `${cxId}.json`), JSON.stringify({ ...sessions.readSession(cxId), work: undefined, status: 'ended' }));
+    }
   } finally {
     process.env.CHIEFMATE_CLAUDE = path.join(data, 'no-claude.exe');
     delete process.env.CHIEFMATE_CODEX;
@@ -2647,20 +3873,19 @@ try {
 
 // The project's agent in charge, in this process with made-up settings and records: who is in charge, a conversation
 // that only reads and sees only its project, a request sent from it (its block taken out of the text), the manager's
-// answers back in the conversation (hold, ask-owner decided on the owner's card, reject), what the manager, the agent
-// and the app see; and an approval that queues a run linked to the request, only with a project of this installation's
-// settings (read only). Nothing starts: the queue is never nudged here, and nothing is told to a manager.
+// answers back in the conversation, what the manager, the agent and the app see, and the linked runs and projects.
+// Nothing starts: the queue is never nudged here, and nothing is told to a manager.
 try {
   process.env.CHIEFMATE_SMOKE = '1';
   const src = file => pathToFileURL(path.join(root, 'src', file)).href;
   const charge = await import(src('charge.mjs'));
-  const { loadAgents, loadConfig } = await import(src('config.mjs'));
+  const { loadAgents } = await import(src('config.mjs'));
   const { saveMemory } = await import(src('leads.mjs'));
   const { openSession, planSession, sessionHistory } = await import(src('sessions.mjs'));
   const { decide } = await import(src('decisions.mjs'));
   const { rulePath } = await import(src('access.mjs'));
   const { NEWS_EVENTS } = await import(src('news.mjs'));
-  const { readRun } = await import(src('store.mjs'));
+  const { readRun, listRuns, saveRun } = await import(src('store.mjs'));
   const { WORKSPACES } = await import(src('util.mjs'));
   const { t } = await import(src('i18n.mjs'));
   const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-charge-'));
@@ -2701,6 +3926,59 @@ try {
   const denied = dir => turn.disallowed.includes(`Read(${rulePath(dir)}/**)`);
   expect(denied(path.join(WORKSPACES, 'alpha')) && denied(path.join(temp, 'alpha-clone')) && denied(data), "the agent in charge may read other projects or Chiefmate's data/");
 
+  // Its open matters: the board's open items, the deliveries waiting (a stalled one marked), the week's runs with their
+  // final summary and the live sessions, of its project alone, within their ceilings.
+  const hoursAgo = h => new Date(Date.now() - h * 3600_000).toISOString();
+  const mRuns = [
+    { id: 'm-branch', project: 'gamma', title: 'Gamma menu fix', status: 'done', ended: hoursAgo(20), branch: 'cm/menu', delivered: temp, summary: 'The menu on phones.' },
+    { id: 'm-pr', project: 'gamma', title: 'Gamma footer', status: 'done', ended: hoursAgo(2), pullRequest: 'https://example.com/pull/7' },
+    { id: 'm-merged', project: 'gamma', title: 'Gamma header', status: 'done', ended: hoursAgo(30), pullRequest: 'https://example.com/pull/6', merged: { by: 'owner' }, outcome: { done: ['Header redone'], change: 'A new header.', needs: '' } },
+    { id: 'm-old', project: 'gamma', title: 'Gamma ancient', status: 'done', ended: hoursAgo(24 * 10), merged: { by: 'owner' } },
+    { id: 'm-alpha', project: 'alpha', title: 'Alpha secret', status: 'done', ended: hoursAgo(20), branch: 'cm/alpha', delivered: temp },
+    ...Array.from({ length: 14 }, (_, i) => ({ id: `m-many-${i}`, project: 'gamma', title: `Gamma batch ${i}`, status: 'failed', ended: hoursAgo(3 + i), result: 'tests failed' })),
+  ];
+  const mItems = [
+    { id: 41, project: 'gamma', title: 'Gamma menu', status: 'waiting_owner', priority: 'high', run: 'm-branch' },
+    { id: 42, project: 'Gamma', title: 'Gamma search', status: 'triaged', priority: 'medium', recommend_note: 'Worth it.' },
+    { id: 43, project: 'gamma', title: 'Gamma done', status: 'done', priority: 'low' },
+    { id: 44, project: 'alpha', title: 'Alpha plan', status: 'todo', priority: 'high' },
+  ];
+  const mSessions = [
+    { id: 's-g', project: 'gamma', name: 'Gamma live', tool: 'codex', mode: 'app', status: 'open', created: hoursAgo(1) },
+    { id: 's-g-old', project: 'gamma', name: 'Gamma closed', tool: 'claude', status: 'ended', created: hoursAgo(5) },
+    { id: 's-charge', project: 'gamma', name: 'Gamma charge', tool: 'claude', mode: 'app', status: 'open', charge: true, created: hoursAgo(1) },
+    { id: 's-a', project: 'alpha', name: 'Alpha live', tool: 'claude', status: 'open', created: hoursAgo(1) },
+  ];
+  const matters = charge.openMatters(made, 'gamma', { runs: mRuns, items: mItems, sessions: mSessions });
+  expect(matters.plan.map(i => i.id).join() === '41,42' && matters.deliveries.map(d => d.run).join() === 'm-branch,m-pr' && matters.deliveries[0].stale && !matters.deliveries[1].stale,
+    `the open items or the deliveries waiting (oldest first, the stalled one marked) are wrong: ${JSON.stringify([matters.plan, matters.deliveries])}`);
+  expect(matters.recent.length === 10 && !matters.recent.some(r => r.run === 'm-old') && matters.sessions.map(s => s.id).join() === 's-g',
+    `the runs of the week (at most 10) or the live sessions (open, not the conversation itself) are wrong: ${JSON.stringify([matters.recent.map(r => r.run), matters.sessions])}`);
+  const mattersAll = JSON.stringify(matters);
+  expect(!mattersAll.includes('Alpha') && !mattersAll.includes('alpha'), `another project's matters reached this one: ${mattersAll}`);
+  const mText = charge.mattersText(matters, 'Owner');
+  expect(mText.includes('Gamma menu fix') && mText.includes('branch cm/menu') && mText.includes('stalled') && mText.includes("waits for the owner's decision") && mText.includes('Worth it.') && mText.includes('Gamma live') && mText.length <= 9000,
+    `the agent in charge does not read its open matters: ${mText}`);
+  const crowded = charge.mattersText({ ...matters, recent: matters.recent.map(r => ({ ...r, outcome: 'x'.repeat(400) })), plan: Array(12).fill(matters.plan[1]) }, 'Owner');
+  expect(crowded.length <= 9000, `the open matters have no ceiling: ${crowded.length} characters`);
+  // Between two turns of a project's session, an item that only moves past the board's ceiling of 12 (coming back up
+  // or pushed down) is told neither as closed nor as new; a resumed session with no state kept gets the whole state once.
+  const board = Array.from({ length: 13 }, (_, i) => ({ id: 70 + i, project: 'gamma', title: `Gamma item ${i}`, status: 'todo', priority: 'low' }));
+  const boardSeen = charge.turnChanges(made, 'gamma', null, { resumed: false, runs: mRuns, items: board }).seen;
+  const risen = charge.turnChanges(made, 'gamma', boardSeen, { runs: mRuns, items: [{ ...board[0], status: 'done' }, ...board.slice(1)] }).text;
+  const pushed = charge.turnChanges(made, 'gamma', boardSeen, { runs: mRuns, items: [{ id: 90, project: 'gamma', title: 'Gamma urgent', status: 'todo', priority: 'high' }, ...board] }).text;
+  expect(risen.includes('Board #70 Gamma item 0: off the open items (done)') && !risen.includes('Board #82') && pushed.includes('Board #90 Gamma urgent: new, todo') && !pushed.includes('Board #81'),
+    `an item that only moved past the board's ceiling was told as closed or new: ${risen} / ${pushed}`);
+  const whole = charge.turnChanges(made, 'gamma', null, { runs: mRuns, items: board }).text;
+  expect(whole.includes('## Your requests to the manager') && whole.includes("## The project's open matters, now") && whole.includes("## The project's memory now"),
+    `a resumed session with no state kept did not get the whole state once: ${whole}`);
+  const { saveRun: saveMatterRun } = await import(src('store.mjs'));
+  saveMatterRun({ id: 'm-saved', kind: 'task', project: 'gamma', title: 'Gamma saved delivery', status: 'done', created: hoursAgo(14), ended: hoursAgo(13), branch: 'cm/saved', delivered: temp, steps: [] });
+  saveMatterRun({ id: 'm-saved-alpha', kind: 'task', project: 'alpha', title: 'Alpha saved delivery', status: 'done', created: hoursAgo(14), ended: hoursAgo(13), branch: 'cm/alpha', delivered: temp, steps: [] });
+  const withMatters = charge.chargeSystem(made, 'gamma', undefined, { sessions: mSessions });
+  expect(withMatters.includes("## The project's open matters") && withMatters.includes('Gamma saved delivery') && withMatters.includes('Gamma live') && !withMatters.includes('Alpha saved delivery') && !withMatters.includes('Alpha live'),
+    "each turn of the agent in charge does not carry its project's open matters, or carries another project's");
+
   // A request from the conversation: recorded once, for the manager; the answers go back to the conversation.
   const sessionId = 'smoke-charge';
   mkdirSync(path.join(data, 'sessions'), { recursive: true });
@@ -2717,7 +3995,8 @@ try {
   const held = (await charge.answerRequest(r1.id, 'hold', { note: 'The 5-hour window is at 80%.' }, made)).request;
   const answers = () => sessionHistory(sessionId).items.filter(e => e.kind === 'request').map(e => e.text);
   expect(noReason && held.status === 'waiting' && answers().some(x => x.includes(`#${r1.id}`) && x.includes('80%')), 'a hold without a reason was taken, or the hold did not reach the conversation');
-  expect(charge.chargeSystem(made, 'gamma').includes(`- #${r1.id}`) && charge.chargeSystem(made, 'gamma').includes(': waiting (the manager: The 5-hour window'), "the agent in charge does not see its request's state");
+  const requestContext = (project = 'gamma') => charge.chargeTurn(made, { project, cwd: temp }).requests;
+  expect(requestContext().includes(`- #${r1.id}`) && requestContext().includes(': waiting; the manager: The 5-hour window'), "the agent in charge does not see its request's state");
   const asked = await charge.answerRequest(r1.id, 'ask-owner', { note: 'Large and risky: your call.', recommend: 'hold', level: 3 }, made);
   const q = asked.question;
   expect(asked.request.status === 'owner' && q.options.join('|') === [t('Authorize'), t('Wait'), t('Refuse')].join('|') && q.recommend === t('Wait') && q.request === r1.id && q.project === 'gamma' && q.level === 3 && asked.request.level === 3,
@@ -2733,6 +4012,7 @@ try {
   const decided = await decide({ card: card.id, action: 'answer', option: t('Refuse') }, [card]);
   const after = charge.readRequests().find(x => x.id === r1.id);
   expect(decided.done === 'answered' && after.status === 'rejected' && after.by === 'owner' && !decided.run, `the owner's answer on the card did not decide the request: ${JSON.stringify(after)}`);
+  expect(requestContext().includes('rejected; the manager: Large and risky: your call.'), 'the owner decision hid the manager note from the agent');
   let again = false;
   try {
     await charge.answerRequest(r1.id, 'approve', {}, made);
@@ -2754,20 +4034,684 @@ try {
   }
   expect(stepRefused, 'a step of a run answered a request of an agent in charge');
 
-  // Approved: a run for the project, linked to the request: an "ask" for a team lead, else a task with the review.
-  const config = loadConfig();
-  const real = Object.keys(config.projects ?? {}).find(id => charge.inCharge(config, id));
-  if (real) {
-    const r3 = charge.addRequest({ asked: 'Smoke ask', plan: 'Smoke: change nothing', size: 'S', risk: 'low', project: real }, config);
-    const approved = await charge.answerRequest(r3.id, 'approve', { note: 'Small and safe.', title: 'Smoke request', summary: 'Made up.', level: '1' }, config);
-    const run = readRun(approved.run?.id);
-    const lead = charge.inCharge(config, real).lead;
-    expect(approved.request.status === 'approved' && approved.request.run === run?.id && run.ownerRequest === r3.id && run.status === 'queued' && run.kind === (lead ? 'ask' : 'task')
-      && (lead || run.review) && run.level === 1 && run.instruction.includes('Smoke ask') && run.instruction.includes('Small and safe.'), `an approved request did not queue its run: ${JSON.stringify(run)}`);
+  // Both approval paths select the destination's crew and keep the request in the original conversation.
+  const request = plan => charge.addRequest({ asked: plan, plan, project: 'gamma', session: sessionId }, made);
+  const approval = { note: 'Small and safe.', title: 'Smoke request', summary: 'Made up.', level: '1' };
+  const own = request('Use our team lead');
+  const askRun = readRun((await charge.answerRequest(own.id, 'approve', approval, made)).run.id);
+  expect(askRun.project === 'gamma' && askRun.kind === 'ask' && askRun.ownerRequest === own.id, 'default approval did not go to the source team lead');
+  const cross = request('Use the other crew');
+  const approve = () => charge.answerRequest(cross.id, 'approve', { ...approval, project: 'alpha' }, made);
+  const approvals = await Promise.allSettled([approve(), approve()]);
+  const run = approvals.find(a => a.status === 'fulfilled')?.value.run;
+  expect(approvals.filter(a => a.status === 'fulfilled').length === 1 && listRuns().filter(r => r.ownerRequest === cross.id).length === 1,
+    'simultaneous approvals created duplicate runs');
+  expect(run?.project === 'alpha' && run.kind === 'task' && run.steps[0].agent === 'builder' && run.review && run.level === 1
+    && run.instruction.includes(cross.asked) && run.instruction.includes(approval.note), 'cross-project approval did not use the destination crew and review');
+
+  const forwarded = request('Direct to a project');
+  const redirected = request('Direct to a specific run');
+  const ongoing = request('Covered by an active run');
+  const total = listRuns().length;
+  for (const options of [{}, { project: 'missing' }, { run: '../smoke-feed' }, { project: 'alpha', run: run.id }]) {
+    const [result] = await Promise.allSettled([charge.answerRequest(forwarded.id, 'forward', { ...approval, ...options }, made)]);
+    expect(result.status === 'rejected' && charge.readRequests().find(r => r.id === forwarded.id)?.status === 'pending', 'an invalid destination closed a request');
   }
+  const [finishedRun] = await Promise.allSettled([charge.answerRequest(ongoing.id, 'in-progress', { note: 'Already covered.', run: 'smoke-feed' }, made)]);
+  expect(finishedRun.status === 'rejected', 'a finished run was accepted as still in progress');
+  await charge.answerRequest(forwarded.id, 'forward', { note: 'Belongs to Alpha.', project: 'alpha' }, made);
+  await charge.answerRequest(redirected.id, 'forward', { note: 'See this delivery.', run: 'smoke-feed' }, made);
+  await charge.answerRequest(ongoing.id, 'in-progress', { note: 'Already covered.', run: run.id }, made);
+  const events = sessionHistory(sessionId).items;
+  expect(listRuns().length === total && events.some(e => e.request === forwarded.id && e.status === 'forwarded' && e.targetProject === 'alpha')
+    && events.some(e => e.request === redirected.id && e.status === 'forwarded' && e.run === 'smoke-feed')
+    && events.some(e => e.request === ongoing.id && e.status === 'in-progress' && e.run === run.id),
+  'the new outcomes did not return their destinations to the conversation, or queued extra work');
+  expect(requestContext().includes('forwarded; the manager: Belongs to Alpha.; project alpha [open project](#project/alpha)')
+    && requestContext().includes(`in-progress; the manager: Already covered.; run "Smoke request" [open run](#log/${run.id}) (queued)`)
+    && requestContext('alpha').endsWith('None yet.'), 'the request context did not show the new outcomes and links, or leaked across projects');
+  // The runs queued here never start: a later part of this test wakes the queue up.
+  for (const queued of [askRun, run]) saveRun({ ...readRun(queued.id), status: 'canceled', ended: new Date().toISOString() });
   rmSync(temp, { recursive: true, force: true, maxRetries: 5 });
 } catch (error) {
   failures.push(`agent in charge checks: ${error.message}`);
+}
+
+// The manager's tools, in this process: its guidance to an agent at work (recorded as the manager's, never answering a
+// request made to the owner), a run on hold skipped by the queue, and a tool gap that comes back proposed on the board.
+try {
+  process.env.CHIEFMATE_SMOKE = '1'; // the proposals here never reach the manager
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const { live } = await import(src('runs.mjs'));
+  const { ownerTurn, pendingTalk, talkSection, talkSituation, talkTo } = await import(src('talk.mjs'));
+  const run = { id: 'smoke-guide', title: 'Generalist: smoke', project: 'none', status: 'running', created: new Date().toISOString(), steps: [{ agent: 'generalist', status: 'running' }], requests: [] };
+  let interrupted = 0;
+  run.requests.push({ id: 'r1', step: 1, agent: 'generalist', what: 'Which file?', wait: true, status: 'open', at: new Date().toISOString() });
+  live.set(run.id, { run: run.id, memory: run, agent: 'generalist', step: 1, talking: true, heldUntil: Date.now() + 20_000, actions: [], process: { interrupt: () => interrupted++ } });
+  const guided = talkTo(run.id, 'Run the tests before you commit', { by: 'manager' });
+  expect(guided.who === 'manager' && guided.status === 'pending' && interrupted === 1 && run.requests[0].status === 'open' && pendingTalk(run, 1).length === 1,
+    `the manager's guidance was not kept for the agent, or answered a request made to the owner: ${JSON.stringify(guided)}`);
+  const turn = ownerTurn([guided], { owner: 'Owner', language: 'en' });
+  expect(turn.includes("Chiefmate's manager") && turn.includes('Run the tests before you commit') && turn.includes('First answer the manager'), `the agent is not told the guidance is the manager's: ${turn}`);
+  expect(talkSection(run, 1, id => id, { owner: 'Owner', language: 'en' }).includes('Run the tests before you commit') && talkSituation([run], 'Owner').includes('You (the manager) guided step 1'),
+    "the manager's guidance is not in the step's report or in its situation");
+  live.delete(run.id);
+
+  const { pickNext } = await import(src('queue.mjs'));
+  const waiting = [{ id: 'h1', project: 'a', onHold: { by: 'manager' } }, { id: 'h2', project: 'a' }, { id: 'h3', project: 'b' }];
+  expect(pickNext(waiting, [], 3).map(r => r.id).join() === 'h2,h3', `the queue started a run on hold, or held up its project: ${pickNext(waiting, [], 3).map(r => r.id).join()}`);
+
+  const gaps = await import(src('gaps.mjs'));
+  const config = { projects: { mine: { name: 'Mine', repository: 'https://github.com/someone/chiefmate.git' } } };
+  expect(gaps.chiefmateProject(config) === 'mine' && gaps.chiefmateProject({ projects: { x: { repository: 'a/b' } } }) === null, "Chiefmate's own project was not found by its repository");
+  const once = await gaps.recordGap({ what: 'Rename a mission', example: 'node src/cli.mjs mission rename a b' }, { config });
+  const twice = await gaps.recordGap({ what: 'rename a  mission', example: 'node src/cli.mjs mission-rename a b' }, { config });
+  const { readBoard } = await import(src('planning.mjs'));
+  const item = readBoard().items.find(i => i.id === twice.plan);
+  expect(once.id === twice.id && !once.plan && twice.count === 2 && twice.status === 'proposed' && item?.title === 'Manager tool: Rename a mission' && item.status === 'proposed',
+    `a tool gap that came back did not become a proposal: ${JSON.stringify([twice, item])}`);
+  expect(gaps.gapsLine().includes(`#${twice.id} Rename a mission (2x, proposed as board item #${item?.id})`), `the manager's situation does not list the open gaps: ${gaps.gapsLine()}`);
+  gaps.closeGap(twice.id, 'Done.');
+  expect(!gaps.readGaps().some(g => g.id === twice.id && g.status !== 'closed'), 'a gap was not closed');
+} catch (error) {
+  failures.push(`manager tools checks: ${error.message}`);
+}
+
+// The owner's focus (src/steer.mjs), in this process with made-up settings and the temporary records: focus on one
+// project, a project paused alone, pause all and back to no restriction; the preview that lists the work going on it
+// would hold and the pause of that work on the owner's choice; a timed change that comes back by itself; what the
+// autopilot, the board's approved items and the manager see; the command refused inside a step. Nothing starts.
+try {
+  process.env.CHIEFMATE_SMOKE = '1';
+  const steer = await import(pathToFileURL(path.join(root, 'src', 'steer.mjs')).href);
+  const { idleProjects } = await import(pathToFileURL(path.join(root, 'src', 'autopilot.mjs')).href);
+  const { t } = await import(pathToFileURL(path.join(root, 'src', 'i18n.mjs')).href); // the app's lines are in the installation's language
+  const config = { owner: 'Owner', projects: { shop: { name: 'Webshop' }, music: { name: 'Music' }, book: { name: 'Book' } } };
+  const fresh = steer.readSteer();
+  expect(fresh.mode === 'free' && ['shop', 'music', 'book'].every(id => !steer.holdReason(id, fresh)), `the focus does not start free: ${JSON.stringify(fresh)}`);
+  const at = new Date();
+  // the preview saves nothing and lists the work going on the change would hold
+  const live = [{ run: 'r-shop', project: 'shop' }, { run: 'r-music', project: 'music' }];
+  const preview = steer.changeSteer({ action: 'focus', projects: ['shop'], preview: true }, { config, at, live });
+  expect(preview.held.map(h => h.run).join() === 'r-music' && steer.readSteer().mode === 'free', `the preview of a focus is wrong, or saved: ${JSON.stringify(preview)}`);
+  // focus on Webshop, the work going on elsewhere paused on the owner's choice
+  const asked = [];
+  const focused = steer.changeSteer({ action: 'focus', projects: ['shop'], running: 'pause' }, { config, at, live, pause: id => asked.push(id) > 0 });
+  const s1 = steer.readSteer();
+  expect(asked.join() === 'r-music' && focused.paused.join() === 'r-music', `the focus did not pause only the other project's work: ${asked}`);
+  expect(!steer.holdReason('shop', s1) && steer.holdReason('music', s1) === 'focus' && steer.holdReason('book', s1) === 'focus', `the focus holds the wrong projects: ${JSON.stringify(s1)}`);
+  const focusLine = steer.steerLine(s1, config, at);
+  expect(focusLine.startsWith(`${t('Focus: only {list}', { list: 'Webshop' })} ${t('since {time}', { time: '' })}`) && focusLine.endsWith(t("at the owner's request")), `the focus's line is wrong: ${focusLine}`);
+  // "finish" (the default) leaves the work going on alone
+  const none = [];
+  steer.changeSteer({ action: 'project', project: 'music', to: 'paused' }, { config, at, live, pause: id => none.push(id) > 0 });
+  const s2 = steer.readSteer();
+  expect(!none.length && steer.holdReason('music', s2) === 'paused' && steer.controlOf('music', s2) === 'paused' && steer.controlOf('shop', s2) === 'focus', `a project paused alone is wrong: ${JSON.stringify(s2)}`);
+  // what the queue, the autopilot and the manager see: a held project's queued run is never next
+  const { focus } = await import(pathToFileURL(path.join(root, 'src', 'queue.mjs')).href);
+  const { saveRun } = await import(pathToFileURL(path.join(root, 'src', 'store.mjs')).href);
+  saveRun({ id: 'smoke-held', kind: 'task', project: 'music', title: 'Held', status: 'queued', created: new Date().toISOString(), steps: [{ agent: 'writer', status: 'pending' }] });
+  const next = focus(config);
+  expect(next?.run !== 'smoke-held', `a held project's run is next in the queue: ${JSON.stringify(next)}`);
+  saveRun({ id: 'smoke-held', kind: 'task', project: 'music', title: 'Held', status: 'canceled', created: new Date().toISOString(), steps: [{ agent: 'writer', status: 'pending' }] });
+  const idle = idleProjects(config, []);
+  expect(idle.has('shop') && !idle.has('music') && !idle.has('book'), `the autopilot sees held projects as free: ${[...idle]}`);
+  const line = steer.steerManagerLine(config, s2);
+  expect(line.startsWith("Owner's focus: focus on shop (Webshop)") && line.includes('paused alone: music (Music)') && line.includes('focus off'), `the manager's line about the focus is wrong: ${line}`);
+  // pause all, then no restriction: every pause ends
+  steer.changeSteer({ action: 'pause-all' }, { config, at, by: 'manager' });
+  expect(steer.holdReason('shop') === 'all' && steer.readSteer().by === 'manager', 'pause all did not hold every project, or lost who changed it');
+  steer.changeSteer({ action: 'free' }, { config, at });
+  const s3 = steer.readSteer();
+  expect(s3.mode === 'free' && !s3.paused.length && ['shop', 'music', 'book'].every(id => !steer.holdReason(id, s3)), `no restriction left a project held: ${JSON.stringify(s3)}`);
+  // a timed change comes back by itself to the state before it, recorded as the automatic return
+  const until = new Date(at.getTime() + 2 * 3600_000).toISOString();
+  steer.changeSteer({ action: 'project', project: 'book', to: 'paused', until }, { config, at });
+  const timed = steer.readSteer(at.getTime() + 3600_000);
+  expect(timed.until === until && steer.holdReason('book', timed) === 'paused' && steer.steerView(config, new Date(at.getTime() + 3600_000)).back === t('No restriction'), `a timed change is wrong: ${JSON.stringify(timed)}`);
+  const back = steer.readSteer(at.getTime() + 3 * 3600_000);
+  expect(back.mode === 'free' && !back.paused.length && !back.until && back.by === 'time' && back.changes.at(-1).by === 'time', `a timed change did not come back: ${JSON.stringify(back)}`);
+  expect(steer.steerView(config).changes[0].who === t('back automatically'), 'the automatic return is not in the latest changes');
+  // a timed change over another still pending comes back to the state before both, never to the one in between
+  steer.changeSteer({ action: 'pause-all', until: new Date(at.getTime() + 3600_000).toISOString() }, { config, at });
+  steer.changeSteer({ action: 'focus', projects: ['shop'], until: new Date(at.getTime() + 2 * 3600_000).toISOString() }, { config, at: new Date(at.getTime() + 1800_000) });
+  const chained = steer.readSteer(at.getTime() + 3 * 3600_000);
+  expect(chained.mode === 'free' && !chained.paused.length && !chained.until, `a timed change over another came back to the one in between: ${JSON.stringify(chained)}`);
+  // invalid changes are refused, and change nothing
+  for (const body of [{ action: 'focus', projects: [] }, { action: 'focus', projects: ['nope'] }, { action: 'project', project: 'shop', to: 'gone' }, { action: 'free', until: at.toISOString() }]) {
+    let refused = false;
+    try {
+      steer.changeSteer(body, { config, at });
+    } catch {
+      refused = true;
+    }
+    expect(refused, `an invalid change of focus was accepted: ${JSON.stringify(body)}`);
+  }
+  expect(steer.parseFor('2h') === 7_200_000 && steer.parseFor('1h30m') === 5_400_000 && steer.parseFor('soon') === null, 'the length of a timed focus is misread');
+  const eight = new Date(steer.parseUntil('08:00', new Date(2026, 10, 26, 23, 0)));
+  expect(eight.getDate() === 27 && eight.getHours() === 8 && steer.parseUntil('whenever') === null, 'the end of a timed focus is misread');
+  // the board's approved items of a held project wait (only with a project of this installation's settings, read only)
+  const { loadConfig } = await import(pathToFileURL(path.join(root, 'src', 'config.mjs')).href);
+  const real = Object.keys(loadConfig().projects ?? {})[0];
+  if (real) {
+    const planning = await import(pathToFileURL(path.join(root, 'src', 'planning.mjs')).href);
+    const { readState, saveState } = await import(pathToFileURL(path.join(root, 'src', 'store.mjs')).href);
+    const before = readState().steer;
+    saveState({ ...readState(), steer: { mode: 'free', only: [], paused: [real], changes: [] } });
+    const waiting = planning.planItems().filter(i => i.project === real && i.status === 'approved').map(i => i.id);
+    const started = await planning.startApproved();
+    expect(!started.some(r => r.project === real) && waiting.every(id => planning.planItem(id).status === 'approved'), "an approved item of a paused project started");
+    saveState({ ...readState(), steer: before });
+  }
+  // a step never changes the focus
+  let refused = '';
+  try {
+    execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'focus', 'off'], { env: { ...process.env, CHIEFMATE_RUN: 'smoke-run', CHIEFMATE_MANAGER: '' }, stdio: 'pipe', windowsHide: true });
+  } catch (error) {
+    refused = String(error.stderr);
+  }
+  expect(refused.includes("A step doesn't change the owner's focus"), `a step could change the focus: ${refused}`);
+} catch (error) {
+  failures.push(`focus checks: ${error.message}`);
+}
+
+// "Work now", in this process with made-up settings and records: the profile with the agent in charge's name, opened
+// only through the owner's button (never as a profile, in a window or with a prompt), the first message with the
+// project's context (the documentation's index, notes, memory, the earlier session's summary, the rules), the choice
+// when the crew is on the project (a made-up run going on), the summary kept for the next session, the idle check,
+// the manager's line and news, and the guard that never lets a push reach the main branch. Nothing opens or starts.
+try {
+  process.env.CHIEFMATE_SMOKE = '1';
+  const src = file => pathToFileURL(path.join(root, 'src', file)).href;
+  const work = await import(src('worknow.mjs'));
+  const { saveMemory } = await import(src('leads.mjs'));
+  const { checkIdleWork, openSession, planSession, planWork } = await import(src('sessions.mjs'));
+  const { live } = await import(src('runs.mjs'));
+  const { NEWS_EVENTS } = await import(src('news.mjs'));
+  const { guardHooks } = await import(src('guard.mjs'));
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-work-'));
+  const library = path.join(temp, 'library');
+  mkdirSync(path.join(library, 'Docs Delta'), { recursive: true });
+  writeFileSync(path.join(library, 'Docs Delta', 'INSTRUCOES_IA.md'), '# Index');
+  writeFileSync(path.join(library, 'Docs Delta', 'details.md'), '# Details');
+  const made = {
+    owner: 'Owner', language: 'en', default_model: 'some-model',
+    library: { notes: { local_clone: library } },
+    projects: { delta: { name: 'Delta', about: 'A made-up app.', notes: 'Delta notes.', local_clone: temp, docs: 'notes/Docs Delta', deliver: 'local', crew: { generalist: { name: 'Fixer' } } } },
+  };
+  expect(work.workProfileId('delta') === 'project-delta-work' && work.workProject('project-delta-work-codex') === 'delta' && work.workProject('project-delta-claude') === null, 'the "Work now" profile ids are wrong');
+  let refused = 0;
+  for (const open of [() => planSession(made, 'project-delta-work'), () => openSession('project-delta-work', { config: made }), () => openSession('project-delta-work', { config: made, window: true, work: { dir: temp } })]) {
+    try {
+      await open();
+    } catch {
+      refused++;
+    }
+  }
+  expect(refused === 3, '"Work now" opened as a plain profile, in a window, or without the owner\'s button');
+  saveMemory('delta', 'Delta memory line.');
+  work.saveWorkNote('delta', { session: 'earlier', tool: 'claude', done: 'Fixed the login.', open: 'The footer.' });
+  const planned = planWork(made, 'project-delta-work', { dir: temp, copy: false, crew: [] });
+  const text = planned.prompt.text;
+  expect(planned.profile.work && planned.profile.memberName === 'Fixer' && planned.profile.name.includes('Fixer') && planned.folder.dir === temp, `the "Work now" profile is not the agent in charge's, in the owner's clone: ${JSON.stringify(planned.profile)}`);
+  expect(text.includes(path.join(library, 'Docs Delta', 'INSTRUCOES_IA.md')) && text.includes('details.md') && text.includes('Delta notes.') && text.includes('Delta memory line.')
+    && text.includes('Fixed the login.') && text.includes('The footer.') && text.includes('main branch') && text.includes('no trace of Chiefmate'),
+  `the first message of "Work now" misses the project's context or its rules: ${text}`);
+  // The board, deliveries and runs come from the agent in charge's open matters (src/charge.mjs), not a list of its own.
+  expect(text.includes("## The project's open matters, as this session opens") && text.includes('### Deliveries waiting for Owner') && !text.includes("## Open items on"),
+    `"Work now" does not reuse the project's open matters: ${text.slice(0, 400)}`);
+  const dry = await work.openWork('delta', { dryRun: true, config: made });
+  expect(dry.dryRun && dry.cwd === temp && !dry.copy && dry.prompt.includes('## Now'), `"Work now" (dry run) does not open in the owner's clone: ${JSON.stringify(dry).slice(0, 300)}`);
+  live.set('smoke-work-run', { run: 'smoke-work-run', project: 'delta', title: 'A crew task', agent: 'generalist', since: new Date().toISOString() });
+  try {
+    // By default it opens at once in the owner's clone, the crew's task paused; "work_now_mode" may choose otherwise.
+    expect(work.workMode({}) === 'pause' && work.workMode({ work_now_mode: 'copy' }) === 'copy' && work.workMode({ work_now_mode: 'ask' }) === 'ask' && work.workMode({ work_now_mode: 'x' }) === 'pause',
+      '"work_now_mode" does not default to "pause", or "copy" and "ask" are not kept');
+    const paused = await work.openWork('delta', { dryRun: true, config: made });
+    expect(paused.dryRun && !paused.conflict && paused.cwd === temp && !paused.copy && paused.crew?.[0]?.paused && paused.prompt.includes("paused at Owner's click"),
+      `"Work now" with the crew on the project did not open at once in the owner's clone, its task paused: ${JSON.stringify(paused).slice(0, 300)}`);
+    const asked = await work.openWork('delta', { dryRun: true, config: { ...made, work_now_mode: 'ask' } });
+    expect(asked.conflict?.[0]?.title === 'A crew task' && !asked.dryRun, 'with "work_now_mode": "ask", the crew working on the project did not ask the owner to choose');
+    for (const copy of [await work.openWork('delta', { dryRun: true, choice: 'copy', config: made }), await work.openWork('delta', { dryRun: true, config: { ...made, work_now_mode: 'copy' } })]) {
+      expect(copy.copy && copy.cwd === work.copyFolder('delta') && copy.prompt.includes('separate copy') && !copy.crew[0].paused, `"Work in a separate copy" does not work elsewhere: ${copy.cwd}`);
+    }
+  } finally {
+    live.delete('smoke-work-run');
+  }
+  const summary = await work.summarize(made, { id: 's1', project: 'delta', tool: 'claude' }, [{ kind: 'owner', text: 'Fix the menu' }, { kind: 'say', text: 'Fixed it.' }], async () => 'Done: Fixed the menu in header.html.\nOpen: none');
+  expect(summary?.done === 'Fixed the menu in header.html.' && summary.open === '' && work.readWorkNotes('delta', 1)[0].done === summary.done, `the session's summary was not kept: ${JSON.stringify(summary)}`);
+  const sessions = path.join(data, 'sessions');
+  mkdirSync(sessions, { recursive: true });
+  const quiet = new Date(Date.now() - (work.IDLE_MINUTES + 5) * 60_000).toISOString();
+  const record = { id: 'smoke-work', profile: 'project-delta-work', name: 'Delta', tool: 'claude', project: 'delta', mode: 'app', status: 'open', memberName: 'Fixer', turns: 2, lastTurn: { at: quiet, ok: true }, cwd: temp, created: quiet, work: { copy: false, held: [] } };
+  writeFileSync(path.join(sessions, 'smoke-work.json'), JSON.stringify(record));
+  const closed = [];
+  expect(checkIdleWork(Date.now(), async id => closed.push(id)).includes('smoke-work') && closed.includes('smoke-work'), 'a quiet "Work now" session did not get its summary');
+  writeFileSync(path.join(sessions, 'smoke-work.json'), JSON.stringify({ ...record, work: { ...record.work, summarized: new Date().toISOString() } }));
+  expect(!checkIdleWork(Date.now(), async () => {}).includes('smoke-work'), 'a quiet session was summarized twice');
+  expect(work.workLine([record], made).includes('Delta with Fixer') && NEWS_EVENTS.includes('owner_working') && work.openedNews(made, record).includes('Nothing waits for your answer'), "the manager doesn't hear of the owner working now");
+  expect(work.isCommit('Ran: git -C "x y" commit -m "Fix"') && work.isCommit('Rodou: git commit -am x') && !work.isCommit('Ran: git status'), 'a commit is not recognized as a milestone');
+  const translated = work.parseSummary('**Feito:** Corrigi o menu.\n**Em aberto:** nada');
+  expect(translated?.done === 'Corrigi o menu.' && translated.open === '', `a summary with its labels in Portuguese was misread: ${JSON.stringify(translated)}`);
+  // Ending the session: a crew run it paused, but canceled meanwhile, stays canceled.
+  const { readRun, saveRun } = await import(src('store.mjs'));
+  const { readSession } = await import(src('sessions.mjs'));
+  saveRun({ id: 'smoke-held-run', kind: 'task', project: 'delta', title: 'A crew task', status: 'canceled', created: quiet, ended: quiet, steps: [] });
+  writeFileSync(path.join(sessions, 'smoke-work-held.json'), JSON.stringify({ ...record, id: 'smoke-work-held', status: 'ended', ended: new Date().toISOString(), work: { copy: false, held: ['smoke-held-run'] } }));
+  await work.closeWork('smoke-work-held');
+  expect(readRun('smoke-held-run')?.status === 'canceled' && !readSession('smoke-work-held')?.work?.held?.length, 'ending "Work now" brought back a crew run canceled while it was paused');
+  // A crew run it paused goes back to the queue when the session ends, or before, with "Let it go on". A made-up run
+  // going on in the project keeps the queue from starting them.
+  live.set('smoke-work-busy', { run: 'smoke-work-busy', project: 'delta', title: 'Busy', agent: 'generalist', since: quiet });
+  try {
+    saveRun({ id: 'smoke-paused-run', kind: 'task', project: 'delta', title: 'A paused task', status: 'paused', created: quiet, steps: [] });
+    writeFileSync(path.join(sessions, 'smoke-work-ends.json'), JSON.stringify({ ...record, id: 'smoke-work-ends', status: 'ended', ended: new Date().toISOString(), work: { copy: false, held: ['smoke-paused-run'] } }));
+    await work.closeWork('smoke-work-ends');
+    expect(readRun('smoke-paused-run')?.status === 'queued' && !readSession('smoke-work-ends')?.work?.held?.length, 'ending "Work now" did not bring back the crew run it paused');
+    saveRun({ ...readRun('smoke-paused-run'), status: 'paused' });
+    writeFileSync(path.join(sessions, 'smoke-work-goes.json'), JSON.stringify({ ...record, id: 'smoke-work-goes', work: { copy: false, held: ['smoke-paused-run'], titles: { 'smoke-paused-run': 'A paused task' } } }));
+    const { sessionsState } = await import(src('sessions.mjs'));
+    expect(sessionsState(made, { sessions: [], supported: false }).open.find(s => s.id === 'smoke-work-goes')?.heldTitles?.[0] === 'A paused task', "the session doesn't show the crew's task it paused");
+    const released = await work.releaseWork('smoke-work-goes');
+    expect(released[0] === 'smoke-paused-run' && readRun('smoke-paused-run')?.status === 'queued' && !readSession('smoke-work-goes')?.work?.held?.length,
+      '"Let it go on" did not let the crew run paused by "Work now" go back to the queue');
+  } finally {
+    live.delete('smoke-work-busy');
+    saveRun({ ...readRun('smoke-paused-run'), status: 'canceled', ended: quiet });
+  }
+  // The guard of a "Work now" session: with pushing allowed, a branch of the work goes; the main branch never does,
+  // however it is named (HEAD is the branch checked out). Before pushing is allowed, a push that could never go is
+  // refused at once, without a permission request for the owner (nothing in the log); a branch of the work asks.
+  const hookFor = (allowed, log) => guardHooks({ log, allowed, who: 'session', noMain: true }).PreToolUse[0].hooks[0].command;
+  const hook = hookFor(['Bash(git push:*)'], path.join(temp, 'guard.jsonl'));
+  const denies = (command, { cwd = temp, h = hook } = {}) => /"permissionDecision":"deny"/.test(execFileSync(h, { shell: true, encoding: 'utf8', cwd, input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', cwd, tool_input: { command } }) }));
+  expect(denies('git push origin main') && denies('git push') && denies('git push --force origin feature') && !denies('git push origin feature/menu'), 'a "Work now" session may push to the main branch, or may not push a branch of the work once allowed');
+  expect(!denies('git push -u origin feature/menu 2>&1') && denies('git push -u origin main 2>&1') && denies('git push -f origin feature/menu 2>&1'),
+    'a "Work now" session may not push its branch with -u and 2>&1 once allowed, or may push the main branch or force that way');
+  const repo = path.join(temp, 'repo');
+  execFileSync('git', ['init', '-q', repo], { windowsHide: true });
+  execFileSync('git', ['-C', repo, 'symbolic-ref', 'HEAD', 'refs/heads/main'], { windowsHide: true });
+  const mainAsHead = denies('git push origin HEAD', { cwd: repo }) && denies('git push -u origin heads/main', { cwd: repo });
+  execFileSync('git', ['-C', repo, 'symbolic-ref', 'HEAD', 'refs/heads/feature/menu'], { windowsHide: true });
+  expect(mainAsHead && !denies('git push -u origin HEAD', { cwd: repo }), 'a "Work now" session may push the main branch as HEAD, or may not push its own branch as HEAD');
+  const askLog = path.join(temp, 'asked.jsonl');
+  const asking = hookFor([], askLog);
+  const mainNotAsked = denies('git push origin main', { h: asking }) && !existsSync(askLog);
+  expect(mainNotAsked && denies('git push origin feature/menu', { h: asking }) && existsSync(askLog), 'before pushing is allowed, a push to the main branch became a permission request, or a branch of the work did not');
+  rmSync(temp, { recursive: true, force: true, maxRetries: 5 });
+} catch (error) {
+  failures.push(`work now checks: ${error.message}`);
+}
+
+// The owner's calls handled by the manager (src/needs.mjs), in this process with made-up runs going on: a run parked
+// while it waits leaves its project's turn and resumes first once answered; a call marked done on the owner's words
+// only while the manager answers and with words the owner wrote; away mode parks a call left unanswered; the summary
+// when the owner is back lists what still waits. Then a project held for a file the antivirus probably took
+// (src/quarantine.mjs), and a local merge that saves the clone's changes first (src/merge.mjs).
+{
+  const smokeFlag = process.env.CHIEFMATE_SMOKE;
+  process.env.CHIEFMATE_SMOKE = '1';
+  const load = name => import(pathToFileURL(path.join(root, 'src', `${name}.mjs`)).href);
+  try {
+    const { askOwner, callOnDuty, confirmByOwnerWords, deferRequest, finishRequest, openCalls, parkRun, parkWaitingWhileAway, pollRequest, setOnCall } = await load('needs');
+    const { live } = await load('runs');
+    const { listRuns, readRun, saveRun } = await load('store');
+    const { focus, queued } = await load('queue');
+    const { waitingLine } = await load('news');
+    const at = new Date().toISOString();
+    const going = (id, project) => {
+      const run = saveRun({ id, kind: 'task', project, title: `Call ${id}`, status: 'running', created: at, started: at, steps: [{ agent: 'generalist', status: 'running' }], requests: [] });
+      const l = { run: id, project, memory: run, actions: [], heldUntil: 0, interrupted: 0, cancelRequest: null, preparing: null };
+      l.process = { interrupt: () => l.interrupted++, cancel: () => {} };
+      live.set(id, l);
+      return { run, l };
+    };
+    const { run, l } = going('smoke-park', 'park-sample');
+    saveRun({ id: 'smoke-park-next', kind: 'task', project: 'park-sample', title: 'Next of the project', status: 'queued', created: new Date(Date.now() - 60_000).toISOString(), steps: [] });
+    await askOwner({ run: run.id, step: 1, what: 'Read this when you can' });
+    expect(await Promise.resolve().then(() => parkRun(run.id)).then(() => false, e => /not waiting/.test(e.message)), 'a run whose step goes on without the owner was parked');
+    const call = await askOwner({ run: run.id, step: 1, what: 'Allow the file in the antivirus', wait: true });
+    const parked = parkRun(run.id, { by: 'manager' });
+    expect(parked.request === call.id && l.pauseRequest === 'park' && l.interrupted === 1 && l.holdWhile?.() === true, `the run was not asked to park on its call: ${JSON.stringify(parked)}`);
+    expect(pollRequest(run.id, call.id).parked === true, "the waiting command isn't told the run is parked");
+    expect(openCalls().some(c => c.id === call.id), 'the open call is not listed for the manager');
+    // What execute does at the safe point: held (paused) while the call is open, off the queue.
+    live.delete(run.id);
+    Object.assign(run, { status: 'paused' });
+    saveRun(run);
+    expect(!queued().some(r => r.id === run.id), "a parked run still holds its project's turn");
+    expect(openCalls().find(c => c.id === call.id)?.parked === true && /parked: it resumes first/.test(waitingLine(listRuns())), "the parked call isn't listed as parked in the back summary");
+    const conversation = [{ who: 'you', text: 'Já liberei o arquivo no antivírus.', at: new Date().toISOString() }, { who: 'manager', text: 'pode seguir', at: new Date().toISOString() }];
+    expect(await Promise.resolve().then(() => confirmByOwnerWords(run.id, call.id, 'liberei o arquivo', { conversation, answering: false })).then(() => false, () => true), 'a call was marked done outside the manager\'s answer');
+    expect(await Promise.resolve().then(() => confirmByOwnerWords(run.id, call.id, 'pode seguir', { conversation, answering: true })).then(() => false, e => /not in the owner's messages/.test(e.message)), "a call was marked done on words the owner didn't write");
+    const done = confirmByOwnerWords(run.id, call.id, 'liberei o arquivo no antivírus', { conversation, answering: true });
+    const after = readRun(run.id);
+    expect(done.status === 'done' && done.by === 'manager' && done.ownerSaid === 'liberei o arquivo no antivírus', `the call was not marked done on the owner's words: ${JSON.stringify(done)}`);
+    // On record as the manager's, on the owner's words, never undone.
+    const marked = (await load('store')).readDecisionLog().findLast(e => e.ref === `${run.id}:${call.id}`);
+    expect(marked?.by === 'manager' && marked.via === 'cli' && marked.final && marked.answer === 'liberei o arquivo no antivírus' && !done.logged, `the manager's call done is not on record: ${JSON.stringify(marked)}`);
+    expect(after.talk?.some(m => m.via === 'manager' && m.request === call.id && /liberei o arquivo/.test(m.text)), "the owner's words are not in the run's conversation");
+    expect(after.status === 'queued' && after.resumeFirst && queued()[0]?.id === run.id, 'the answered run did not go back to the front of the queue');
+    expect(await Promise.resolve().then(() => finishRequest(run.id, call.id)).then(r => r.by === 'manager', () => false), 'a second answer changed the call');
+    try {
+      execFileSync(process.execPath, [path.join(root, 'src', 'cli.mjs'), 'calls', 'done', run.id, call.id, '--owner-said', 'x'], { env: { ...process.env, CHIEFMATE_MANAGER: '', CHIEFMATE_RUN: '' }, stdio: 'pipe', windowsHide: true, encoding: 'utf8' });
+      failures.push('calls done ran outside the manager');
+    } catch (error) {
+      expect(/Only the manager/.test(String(error.stderr ?? error.message)), `calls done outside the manager failed for another reason: ${error.stderr ?? error.message}`);
+    }
+    // Away mode: a call older than "park_after_minutes" parks its run by itself; a newer one doesn't.
+    const away = going('smoke-away', 'away-sample');
+    const fresh = going('smoke-fresh', 'fresh-sample');
+    const old = await askOwner({ run: away.run.id, step: 1, what: 'Sign in to the site', wait: true });
+    away.run.requests.find(r => r.id === old.id).at = new Date(Date.now() - 20 * 60_000).toISOString();
+    await askOwner({ run: fresh.run.id, step: 1, what: 'Choose a name', wait: true });
+    expect(parkWaitingWhileAway({ away: null, force: true }).length === 0, 'a call was parked with away mode off');
+    const byAway = parkWaitingWhileAway({ away: { since: at }, settings: { parkAfterMinutes: 15 }, force: true });
+    expect(byAway.length === 1 && byAway[0].run === away.run.id && away.run.parked?.by === 'away' && !fresh.l.pauseRequest, `away mode parked the wrong runs: ${JSON.stringify(byAway)}`);
+    expect(parkWaitingWhileAway({ away: { since: at }, settings: { parkAfterMinutes: 0 }, force: true }).length === 0, 'park_after_minutes 0 still parked');
+    for (const x of [away, fresh]) live.delete(x.run.id);
+
+    // The wait ends without an answer: away mode, "Not now" or past the longest wait (30 minutes by default). The step
+    // is told and goes on, its bubble says so, its call stays open and away mode never parks it; the on-call is off.
+    const ends = going('smoke-ends', 'ends-sample');
+    const holding = await askOwner({ run: ends.run.id, step: 1, what: 'Sign in to the bank', wait: true });
+    const held = pollRequest(ends.run.id, holding.id, { away: false });
+    const listed = openCalls().find(c => c.id === holding.id);
+    expect(held.ended === null && ends.l.heldUntil > Date.now() && listed?.waiting === true && Date.parse(listed.until) > Date.now(),
+      `a call within its wait did not hold its step, or has no deadline: ${JSON.stringify([held, listed])}`);
+    const awayNow = pollRequest(ends.run.id, holding.id, { away: true });
+    expect(awayNow.away && awayNow.status === 'open' && ends.run.requests[0].waitEnded?.why === 'away' && openCalls().find(c => c.id === holding.id)?.waiting === false,
+      `away mode did not end the wait: ${JSON.stringify(awayNow)}`);
+    ends.l.heldUntil = 0;
+    expect(parkWaitingWhileAway({ away: { since: at }, settings: { parkAfterMinutes: 0.01 }, at: Date.now() + 60_000, force: true }).every(p => p.run !== ends.run.id) && !ends.l.pauseRequest,
+      'away mode parked a run whose step went on');
+    const again = pollRequest(ends.run.id, holding.id, { away: false });
+    expect(again.ended === null && !ends.run.requests[0].waitEnded, 'a step waiting again once the owner is back was not held');
+    const leftLater = deferRequest(ends.run.id, holding.id);
+    const notNow = pollRequest(ends.run.id, holding.id, { away: false });
+    expect(notNow.later && notNow.status === 'open' && ends.run.requests[0].waitEnded?.why === 'later' && (ends.run.speech ?? []).some(x => x.by === 'auto' && /not now/i.test(x.text)),
+      `"Not now" did not end the wait with a line in the bubble: ${JSON.stringify(notNow)}`);
+    expect(await Promise.resolve().then(() => parkRun(ends.run.id)).then(() => false, e => /not waiting/.test(e.message)) && !ends.l.pauseRequest,
+      'a call left for later still parked its run');
+    // "Not now" is on record and undone while the call is open: the call is back in the bar, its step on its way.
+    const { undoDecision } = await load('decisions');
+    const { readDecisionLog } = await load('store');
+    const laterEntry = readDecisionLog().find(e => e.id === leftLater.logged);
+    undoDecision(leftLater.logged);
+    expect(laterEntry?.kind === 'request' && laterEntry.to === 'later' && laterEntry.by === 'owner' && !ends.run.requests[0].deferred && ends.run.requests[0].waitEnded?.why === 'later'
+      && openCalls().some(c => c.id === holding.id && !c.deferred && !c.waiting), `"Not now" undone did not bring the call back: ${JSON.stringify(laterEntry)}`);
+    // Answered after its step stopped waiting: the step still at work hears it at its next safe point (src/talk.mjs),
+    // at once, so that answer can't be undone.
+    Object.assign(ends.l, { talking: true, step: 1 });
+    const lateAnswer = finishRequest(ends.run.id, holding.id, 'owner', null, 'Use the test key.');
+    const lateTalk = ends.run.talk?.find(m => m.who === 'owner' && m.request === holding.id);
+    expect(lateTalk?.status === 'pending' && lateTalk.text.includes('Sign in to the bank') && lateTalk.text.includes('Use the test key.') && ends.l.interrupted === 1
+      && !lateAnswer.logged && !lateAnswer.undo_until && readDecisionLog().some(e => e.ref === `${ends.run.id}:${holding.id}` && e.to === 'answered' && e.final),
+      `an answer given after the step went on did not reach it at once, on record: ${JSON.stringify(lateTalk)}`);
+    ends.l.talking = false;
+    const late = await askOwner({ run: ends.run.id, step: 1, what: 'Confirm the domain', wait: true });
+    ends.run.requests.find(r => r.id === late.id).at = new Date(Date.now() - 31 * 60_000).toISOString();
+    const timedOut = pollRequest(ends.run.id, late.id, { away: false });
+    expect(timedOut.timedOut && timedOut.maxWaitMinutes === 30 && ends.run.requests.find(r => r.id === late.id).waitEnded?.why === 'timeout', `the longest wait is not 30 minutes: ${JSON.stringify(timedOut)}`);
+    // A request to act answered in the owner's own words (the call bar's "Answer here"): done, with the words.
+    const words = await askOwner({ run: ends.run.id, step: 1, what: 'Send me the invoice', wait: true });
+    finishRequest(ends.run.id, words.id, 'owner', null, '  It is in the shared folder.  ');
+    // The waiting command gets it once its undo window is over (made so here).
+    const settling = pollRequest(ends.run.id, words.id, { away: false });
+    ends.run.requests.find(r => r.id === words.id).undo_until = new Date(Date.now() - 1000).toISOString();
+    const inWords = pollRequest(ends.run.id, words.id, { away: false });
+    expect(settling.status === 'open' && settling.ended === null && inWords.status === 'done' && inWords.note === 'It is in the shared folder.' && inWords.question === false
+      && ends.run.talk?.some(m => m.via === 'request' && m.request === words.id && m.text === 'It is in the shared folder.'), `an answer in words to a request to act was lost: ${JSON.stringify(inWords)}`);
+    // In away mode a step doesn't wait at all, and its bubble doesn't call.
+    const { setAway } = await load('news');
+    setAway(true, { owner: 'Owner' });
+    const whileAway = await askOwner({ run: ends.run.id, step: 1, what: 'Approve the payment', wait: true });
+    setAway(false, { owner: 'Owner' });
+    expect(whileAway.away && ends.run.requests.find(r => r.id === whileAway.id).waitEnded?.why === 'away' && !(ends.run.speech ?? []).some(x => x.state === 'calling' && x.text.includes('Approve the payment')),
+      `a call made in away mode waited, or its bubble called: ${JSON.stringify(whileAway)}`);
+    // The on-call: nothing while off; once on with a channel, each call handed over once.
+    const handed = [];
+    setOnCall(call => handed.push(call));
+    const first = ends.run.requests[0];
+    expect(callOnDuty(ends.run, first, 'timeout', { onCall: false }) === false && callOnDuty(ends.run, first, 'timeout', { onCall: true }) === true && callOnDuty(ends.run, first, 'timeout', { onCall: true }) === false,
+      'the on-call acted while off, or twice for one call');
+    setOnCall(null);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(handed.length === 1 && handed[0].why === 'timeout' && handed[0].run === ends.run.id && callOnDuty(ends.run, ends.run.requests[1], 'away', { onCall: true }) === false,
+      'the on-call channel did not get the call, or acted with no channel');
+    live.delete(ends.run.id);
+    // "Not now" on a parked run: back to the front of its project's queue, to go on without the answer.
+    const parkedLater = going('smoke-parked-later', 'parked-later-sample');
+    const parkedCall = await askOwner({ run: parkedLater.run.id, step: 1, what: 'Allow the macro', wait: true });
+    parkRun(parkedLater.run.id, { by: 'manager' });
+    live.delete(parkedLater.run.id);
+    saveRun(Object.assign(parkedLater.run, { status: 'paused' }));
+    const parkedDefer = deferRequest(parkedLater.run.id, parkedCall.id);
+    const resumed = readRun(parkedLater.run.id);
+    // Back in the queue already: that "Not now" can't be undone.
+    expect(resumed.status === 'queued' && resumed.resumeFirst && resumed.requests[0].status === 'open' && !!resumed.requests[0].deferred && !parkedDefer.logged,
+      `"Not now" left a parked run parked, or can be undone: ${JSON.stringify({ status: resumed.status, resumeFirst: resumed.resumeFirst, logged: parkedDefer.logged })}`);
+    // "Not now" while its run is still parking: not held at its safe point, so it goes back to the queue there.
+    const parking = going('smoke-parking-later', 'parking-later-sample');
+    const parkingCall = await askOwner({ run: parking.run.id, step: 1, what: 'Allow the script', wait: true });
+    parkRun(parking.run.id, { by: 'manager' });
+    deferRequest(parking.run.id, parkingCall.id);
+    expect(parking.l.pauseRequest === 'park' && parking.l.holdWhile?.() === false, 'a call left for later while its run parked kept the run held');
+    live.delete(parking.run.id);
+    for (const id of ['smoke-park', 'smoke-park-next', 'smoke-away', 'smoke-fresh', 'smoke-ends', 'smoke-parked-later', 'smoke-parking-later'])saveRun(Object.assign(readRun(id), { status: 'canceled', ended: new Date().toISOString() }));
+
+    // A file the antivirus probably took: the project's queue waits, the notice carries the steps, it goes on once the file is back.
+    const { checkQuarantine, holdForQuarantine, quarantineHold, releaseQuarantine } = await load('quarantine');
+    const { attentionItems } = await load('attention');
+    const folder = path.join(data, 'quarantine-copy');
+    const file = path.join(folder, 'tool.ps1');
+    mkdirSync(folder, { recursive: true });
+    saveRun({ id: 'smoke-q-next', kind: 'task', project: 'q-sample', title: 'After the quarantine', status: 'queued', created: new Date(Date.now() - 3_600_000).toISOString(), steps: [] });
+    holdForQuarantine({ project: 'q-sample', file, state: 'missing', run: 'smoke-q', step: 1 });
+    expect(quarantineHold('q-sample')?.file === file && focus()?.run !== 'smoke-q-next', 'a project waiting for a quarantined file was next in the queue');
+    const notice = attentionItems({ config: {}, quarantine: [quarantineHold('q-sample')] }).find(i => i.kind === 'quarantine');
+    expect(notice?.level === 'urgent' && notice.text.includes(file) && /Protection history/.test(notice.text) && notice.seenable === false, `the quarantine notice lacks the path or the steps: ${JSON.stringify(notice)}`);
+    expect(checkQuarantine({ force: true }).length === 0 && quarantineHold('q-sample'), 'a hold was lifted while the file is still gone');
+    writeFileSync(file, 'back');
+    expect(checkQuarantine({ force: true })[0] === 'q-sample' && !quarantineHold('q-sample'), 'the hold stayed after the file came back');
+    holdForQuarantine({ project: 'q-sample', file: path.join(folder, 'other.dll'), state: 'unreadable' });
+    expect(releaseQuarantine('q-sample', 'owner').by === 'owner' && !quarantineHold('q-sample'), 'the owner could not lift a hold');
+    expect(await Promise.resolve().then(() => releaseQuarantine('q-sample')).then(() => false, () => true), 'a project not held was released');
+    saveRun(Object.assign(readRun('smoke-q-next'), { status: 'canceled', ended: new Date().toISOString() }));
+
+    // A local merge into a clone with changes not committed: refused, unless asked to save them first.
+    const { mergeRun } = await load('merge');
+    const clone = path.join(data, 'save-clone');
+    mkdirSync(clone);
+    const git = (...args) => execFileSync('git', ['-c', 'user.name=smoke', '-c', 'user.email=smoke@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd: clone, encoding: 'utf8', windowsHide: true, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    writeFileSync(path.join(clone, 'a.txt'), 'a\n');
+    git('add', '.');
+    git('commit', '-q', '-m', 'start');
+    git('checkout', '-q', '-b', 'work/save');
+    writeFileSync(path.join(clone, 'b.txt'), 'b\n');
+    git('add', '.');
+    git('commit', '-q', '-m', 'the run');
+    git('checkout', '-q', 'main');
+    writeFileSync(path.join(clone, 'a.txt'), 'the owner\n');
+    writeFileSync(path.join(clone, 'scratch.txt'), 'untracked\n');
+    saveRun({ id: 'smoke-save', kind: 'task', project: 'save-sample', title: 'Save first', status: 'done', created: at, branch: 'work/save', base: 'main', delivered: clone, steps: [] });
+    const config = { projects: { 'save-sample': { local_clone: clone, main_branch: 'main', deliver: 'local' } } };
+    expect(await mergeRun('smoke-save', { by: 'manager' }, config).then(() => false, e => e.pending === true), 'a clone with changes was merged without saving them');
+    const merged = await mergeRun('smoke-save', { by: 'manager', savePending: true }, config);
+    const subjects = git('log', '--format=%s', '-3').trim().split('\n');
+    expect(merged.saved?.files?.join() === 'a.txt' && readRun('smoke-save').merged?.saved?.commit === merged.saved.commit && /a\.txt/.test(merged.savedNote), `the saved changes are not in the merge's report: ${JSON.stringify(merged.saved)}`);
+    expect(subjects[1] === 'Save local changes before merge' && existsSync(path.join(clone, 'b.txt')) && git('status', '--porcelain').trim() === '?? scratch.txt', `the merge with the changes saved went wrong: ${subjects.join(' | ')}`);
+  } catch (error) {
+    failures.push(`owner's calls, quarantine and saved changes: ${error.stack ?? error.message}`);
+  } finally {
+    for (const id of ['smoke-park', 'smoke-away', 'smoke-fresh']) (await load('runs')).live.delete(id);
+    if (smokeFlag === undefined) delete process.env.CHIEFMATE_SMOKE;
+    else process.env.CHIEFMATE_SMOKE = smokeFlag;
+  }
+}
+
+// A run whose step writes a file that is gone at its end (a stand-in for Claude that "writes" a file it never creates):
+// the step pauses without committing, the project waits for the file, and once it is back the step resumes in the
+// same session, told why, and the run finishes.
+{
+  const fixture = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-quarantine-'));
+  const env = { CHIEFMATE_DATA: process.env.CHIEFMATE_DATA, CHIEFMATE_SMOKE: process.env.CHIEFMATE_SMOKE, CHIEFMATE_CLAUDE: process.env.CHIEFMATE_CLAUDE };
+  try {
+    for (const entry of ['src', 'agents', 'ui/locales', 'package.json']) cpSync(path.join(root, entry), path.join(fixture, entry), { recursive: true });
+    const repo = path.join(fixture, 'repo');
+    mkdirSync(repo);
+    const git = (...args) => execFileSync('git', args, { cwd: repo, windowsHide: true, stdio: 'pipe', encoding: 'utf8' });
+    git('init', '-q', '-b', 'main');
+    git('-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'Start');
+    const fake = path.join(fixture, 'fake-claude.mjs');
+    const told = path.join(fixture, 'told.txt');
+    Object.assign(process.env, { CHIEFMATE_DATA: path.join(fixture, 'records'), CHIEFMATE_SMOKE: '1', CHIEFMATE_CLAUDE: fake });
+    writeFileSync(fake, [
+      "import { writeFileSync } from 'node:fs';",
+      'let input = "";',
+      "process.stdin.on('data', d => (input += d));",
+      "process.stdin.on('end', () => {",
+      "  const say = event => console.log(JSON.stringify(event));",
+      "  say({ type: 'system', subtype: 'init', session_id: 's-quarantine', model: 'claude-opus-5-5' });",
+      "  if (input.includes('quarantined by the antivirus')) writeFileSync(" + JSON.stringify(told) + ', input);',
+      "  else {",
+      "    writeFileSync('notes.md', 'Notes');",
+      "    say({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Write', input: { file_path: 'tool.ps1', content: 'x' } }] } });",
+      "    say({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } });",
+      "  }",
+      "  say({ type: 'result', subtype: 'success', result: 'Done', num_turns: 1, session_id: 's-quarantine' });",
+      "});",
+    ].join('\n'));
+    const load = name => import(pathToFileURL(path.join(fixture, 'src', `${name}.mjs`)).href);
+    const { saveConfig } = await load('config');
+    const { execute } = await load('runs');
+    const { readRun, saveRun } = await load('store');
+    const { checkQuarantine, quarantineHold } = await load('quarantine');
+    const { projectDir } = await load('workspace');
+    saveConfig({ quick_model: false, max_parallel: 1, projects: { demo: { repository: repo, main_branch: 'main', deliver: 'local' } }, limits: {} });
+    const run = saveRun({
+      id: 'quarantined', kind: 'task', project: 'demo', title: 'quarantined', created: new Date().toISOString(), status: 'queued', branch: 'work/quarantined',
+      steps: [{ agent: 'generalist', status: 'pending', instruction: 'Smoke test.' }],
+    });
+    await execute(run);
+    const file = path.join(projectDir('demo'), 'tool.ps1');
+    const paused = readRun('quarantined');
+    expect(paused.status === 'queued' && paused.resumeFirst && paused.steps[0].status === 'pending' && paused.steps[0].paused?.why === 'quarantine',
+      `a step whose file vanished was not paused for the antivirus: ${paused.status}, ${JSON.stringify(paused.steps[0].paused ?? paused.steps[0].error)}`);
+    expect(path.resolve(quarantineHold('demo')?.file ?? '') === path.resolve(file), `the project was not held for the file: ${JSON.stringify(quarantineHold('demo'))}`);
+    expect(execFileSync('git', ['log', '--format=%s', 'main..work/quarantined'], { cwd: projectDir('demo'), encoding: 'utf8', windowsHide: true }).trim() === '', 'the step was committed with its file gone');
+    // The rest of the step's work stays in the copy as it was (not put aside in a stash), for the file restored beside it.
+    const inCopy = (...args) => execFileSync('git', args, { cwd: projectDir('demo'), encoding: 'utf8', windowsHide: true }).trim();
+    expect(!paused.shelf && inCopy('stash', 'list') === '' && existsSync(path.join(projectDir('demo'), 'notes.md')), "the quarantined step's other work was put aside instead of staying in the copy");
+    writeFileSync(file, 'restored');
+    expect(checkQuarantine({ force: true })[0] === 'demo', 'the hold stayed once the file was back');
+    await execute(readRun('quarantined'));
+    const finished = readRun('quarantined');
+    expect(finished.status === 'done' && existsSync(told) && readFileSync(told, 'utf8').includes(file), `the step did not resume told about the file: ${finished.status} ${finished.result ?? ''}`);
+    expect(['notes.md', 'tool.ps1'].every(f => inCopy('ls-tree', '-r', '--name-only', 'work/quarantined').split('\n').includes(f)), "the resumed step's work and the file restored were not committed");
+  } catch (error) {
+    failures.push(`antivirus quarantine in a run: ${error.stack ?? error.message}`);
+  } finally {
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(fixture, { recursive: true, force: true, maxRetries: 5 });
+  }
+}
+
+// A run parked in the middle of a step while it waits for the owner, with a stand-in for Claude: its work is committed
+// on its branch and it leaves the working copy, so the project's next run starts and finishes; once the owner answers,
+// the parked run resumes on its own branch, in the same session, without what another run left in the copy.
+{
+  const fixture = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-parked-'));
+  const identity = { GIT_AUTHOR_NAME: 'Smoke', GIT_AUTHOR_EMAIL: 'smoke@example.com', GIT_COMMITTER_NAME: 'Smoke', GIT_COMMITTER_EMAIL: 'smoke@example.com' };
+  const env = Object.fromEntries(['CHIEFMATE_DATA', 'CHIEFMATE_SMOKE', 'CHIEFMATE_CLAUDE', ...Object.keys(identity)].map(name => [name, process.env[name]]));
+  try {
+    for (const entry of ['src', 'agents', 'ui/locales', 'package.json']) cpSync(path.join(root, entry), path.join(fixture, entry), { recursive: true });
+    const repo = path.join(fixture, 'repo');
+    mkdirSync(repo);
+    const git = (dir, ...args) => execFileSync('git', ['-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd: dir, windowsHide: true, stdio: 'pipe', encoding: 'utf8' }).trim();
+    git(repo, 'init', '-q', '-b', 'main');
+    writeFileSync(path.join(repo, 'app.md'), 'App\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'Start');
+    // The stand-in: for A, it leaves a new file and a changed one and "works" on until it is parked; resumed, it keeps
+    // the turn it got and ends. For B, it writes its own file and ends.
+    const fake = path.join(fixture, 'fake-claude.mjs');
+    const turn = path.join(fixture, 'resumed-turn.txt');
+    writeFileSync(fake, [
+      "import { writeFileSync } from 'node:fs';",
+      "const args = process.argv.slice(2);",
+      "let prompt = ''; process.stdin.on('data', d => (prompt += d)); process.stdin.on('end', () => {",
+      "  const say = e => process.stdout.write(JSON.stringify(e) + '\\n');",
+      "  const id = args[args.indexOf(args.includes('--resume') ? '--resume' : '--session-id') + 1];",
+      "  say({ type: 'system', subtype: 'init', session_id: id, model: 'm' });",
+      `  if (args.includes('--resume')) { writeFileSync(${JSON.stringify(turn)}, prompt); return say({ type: 'result', subtype: 'success', result: 'Done', session_id: id, num_turns: 1 }); }`,
+      "  if (!prompt.includes('Park the file')) { writeFileSync('b.md', 'B\\n'); return say({ type: 'result', subtype: 'success', result: 'Done', session_id: id, num_turns: 1 }); }",
+      "  writeFileSync('new.md', 'New\\n'); writeFileSync('app.md', 'App by A\\n');",
+      "  say({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test' } }] } });",
+      "  setTimeout(() => say({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } }), 500);",
+      "  setTimeout(() => say({ type: 'result', subtype: 'success', result: 'too late', session_id: id }), 30000);",
+      "});",
+    ].join('\n'));
+    Object.assign(process.env, identity, { CHIEFMATE_DATA: path.join(fixture, 'records'), CHIEFMATE_SMOKE: '1', CHIEFMATE_CLAUDE: fake });
+    const load = name => import(pathToFileURL(path.join(fixture, 'src', `${name}.mjs`)).href);
+    const { saveConfig } = await load('config');
+    const { execute, live } = await load('runs');
+    const { readRun, saveRun } = await load('store');
+    const { copyHolders, pickNext, queued } = await load('queue');
+    const { askOwner, finishRequest, parkRun } = await load('needs');
+    saveConfig({
+      quick_model: false, max_parallel: 3, limits: { pause_at_5h_window: 1, pause_at_plan_week: 1 },
+      projects: { demo: { repository: repo, main_branch: 'main', deliver: 'local', no_trace: false } },
+    });
+    const makeRun = (id, created, instruction) => ({
+      id, kind: 'task', project: 'demo', title: id, instruction, created, status: 'queued', branch: `chiefmate/${id}`, steps: [{ agent: 'generalist', status: 'pending', part: instruction }],
+    });
+    const first = makeRun('parked-a', '2026-11-27T12:00:00.000Z', 'Park the file.');
+    const second = makeRun('next-b', '2026-11-27T12:01:00.000Z', 'Write b.');
+    saveRun(second);
+    const going = execute(first);
+    const copy = path.join(fixture, 'workspaces', 'demo');
+    for (let n = 0; n < 200 && !(live.get(first.id)?.process && existsSync(path.join(copy, 'new.md'))); n++) await new Promise(r => setTimeout(r, 50));
+    const started = readRun(first.id);
+    if (!live.has(first.id)) throw new Error(`the run to park ended first: ${started.status} ${started.result ?? ''} ${JSON.stringify(started.steps.map(s => s.error ?? s.status))}`);
+    const call = await askOwner({ run: first.id, step: 1, what: 'Allow the file in the antivirus', wait: true });
+    expect(parkRun(first.id, { by: 'manager' }).request === call.id, 'the run going on was not parked on its call');
+    await going;
+    const parked = readRun(first.id);
+    expect(parked.status === 'paused' && parked.parked?.committed && !parked.shelf && parked.steps[0].paused?.why === 'park' && parked.steps[0].paused?.request === call.id,
+      `the parked run did not commit its work and keep its step: ${JSON.stringify({ status: parked.status, parked: parked.parked, shelf: parked.shelf, paused: parked.steps[0].paused })}`);
+    expect(git(copy, 'status', '--porcelain') === '' && git(copy, 'log', '-1', '--format=%s', first.branch) === `Chiefmate: work in progress (${first.id})`,
+      "the parked run's work was not committed on its branch");
+    // The project's next run takes the copy and finishes.
+    expect(pickNext(queued(), [], 3, Date.now(), copyHolders()).some(r => r.id === second.id), "a parked run still keeps its project's working copy");
+    await execute(readRun(second.id));
+    expect(readRun(second.id).status === 'done', `the next run of the project did not go on while the other was parked: ${readRun(second.id).result ?? readRun(second.id).note}`);
+    // What a run left in the copy, then the owner's answer: the parked run resumes first, on its own branch.
+    writeFileSync(path.join(copy, 'app.md'), 'Left by another run\n');
+    writeFileSync(path.join(copy, 'stray.md'), 'Left by another run\n');
+    finishRequest(first.id, call.id);
+    expect(readRun(first.id).status === 'queued' && queued()[0]?.id === first.id, 'the answered run did not go back to the front of the queue');
+    await execute(readRun(first.id));
+    const done = readRun(first.id);
+    const files = git(copy, 'ls-tree', '-r', '--name-only', first.branch).split('\n');
+    expect(done.status === 'done' && files.includes('new.md') && !files.includes('stray.md') && !files.includes('b.md') && git(copy, 'show', `${first.branch}:app.md`) === 'App by A',
+      `the parked run did not resume on its own work: ${done.status} ${done.result ?? ''} ${files.join(',')}`);
+    expect(existsSync(turn) && /parked your run/.test(readFileSync(turn, 'utf8')) && readFileSync(turn, 'utf8').includes('Allow the file in the antivirus'),
+      'the resumed step was not told it was parked and what the owner answered');
+    expect(git(copy, 'ls-tree', '-r', '--name-only', second.branch).split('\n').includes('b.md'), "the next run's branch lost its work");
+  } catch (error) {
+    failures.push(`parked run in a run: ${error.stack ?? error.message}`);
+  } finally {
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(fixture, { recursive: true, force: true, maxRetries: 5 });
+  }
 }
 
 try {

@@ -1,7 +1,11 @@
 // The Chiefmate app: fetches the state every 2.5 seconds (once a minute with the tab hidden) and redraws only what changed.
+import { offered, onThisComputer } from './afar.js';
 import { face } from './faces.js';
 import { language, locale, setLanguage, t, translatePage } from './i18n.js';
+import { resetLabel, spare } from './countdown.js';
 import { Dictation, recognizer } from './voice.js';
+import { asksHtml, keepFolds, newFolds, toggleFold } from './asks.js';
+import { announce, blinkTitle, callsLayout, callsOf, chime, keepChoice, NOTIFY_KEY, notifyCalls, notifyState, SOUND_KEY, soundOn, waitLine } from './calls.js';
 
 const $ = selector => document.querySelector(selector);
 let state = null;
@@ -12,16 +16,52 @@ const signatures = {};
 let selectedRun = null;
 let detail = null;
 
+// The owner's local key (src/owner.mjs), kept in this browser for the app's own address: the commands that are the
+// owner's carry it on this computer. The app gets it once, in a window Chiefmate opens with a pairing code.
+const OWNER_KEY = 'chiefmate-owner-key';
+let windowAsked = false;
+
 async function api(route, body) {
+  const owner = body && onThisComputer() ? localStorage.getItem(OWNER_KEY) : null;
   const r = await fetch(
     route,
     body
-      ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1' }, body: JSON.stringify(body) }
+      ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-chiefmate': '1', ...(owner ? { 'x-chiefmate-owner': owner } : {}) }, body: JSON.stringify(body) }
       : { cache: 'no-store' },
   );
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || t('Error {code}', { code: r.status }));
+  if (r.status === 403 && data.owner) {
+    // No key here, or one Chiefmate no longer has: a window with a new pairing code opens.
+    if (owner) localStorage.removeItem(OWNER_KEY);
+    askOwnerWindow();
+    throw Object.assign(new Error(t('This is yours to do: Chiefmate is opening the app again to recognize you. Try again in the new window.')), { status: r.status, data });
+  }
+  if (!r.ok) throw Object.assign(new Error(data.error || t('Error {code}', { code: r.status })), { status: r.status, data });
   return data;
+}
+
+/** Asks Chiefmate for a window of the app with a pairing code, once per page, on this computer only. */
+function askOwnerWindow() {
+  if (windowAsked || !onThisComputer()) return;
+  windowAsked = true;
+  api('/api/owner/window', { section: location.hash.slice(1) }).catch(() => {});
+}
+
+/** Trades the pairing code of a window Chiefmate opened ("?pair=") for the key; without a key, asks for such a window. */
+async function pairOwner() {
+  if (!onThisComputer()) return;
+  const code = new URLSearchParams(location.search).get('pair');
+  if (!code) {
+    if (!localStorage.getItem(OWNER_KEY)) askOwnerWindow();
+    return;
+  }
+  history.replaceState(null, '', location.pathname + location.hash);
+  windowAsked = true; // a window opened to pair never asks for another
+  try {
+    localStorage.setItem(OWNER_KEY, (await api('/api/owner/pair', { code })).key);
+  } catch (error) {
+    toast(error.message);
+  }
 }
 
 function toast(text) {
@@ -167,7 +207,7 @@ document.addEventListener('click', async event => {
   let back = null;
   try {
     back = await api('/api/undo', { id: button.dataset.undo });
-    toast({ request: t('Undone: the request is open again, in Operations.'), plan: t('Undone: the item is back on the board as it was.') }[back.kind] ?? t('Undone: it is back for your decision.'));
+    toast({ request: t('Undone: the call is open again, at the top of the page.'), plan: t('Undone: the item is back on the board as it was.') }[back.kind] ?? t('Undone: it is back for your decision.'));
   } catch (error) {
     toast(error.message);
   }
@@ -182,15 +222,18 @@ document.addEventListener('click', async event => {
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
-// A file's path in a text, which opens the viewer: absolute (C:\… or C:/…), or relative with a folder and a known
-// extension, with an optional ":line"; inside `code`, a file's name alone too.
+// A file's path in a text, which opens the viewer: absolute (C:\… or C:/…, with spaces inside `code`), or relative with
+// a folder and a known extension (from the project, or from your user folder: Documents\…, ~\…), with "/" or "\", any
+// letter (accents too) and an optional ":line"; inside `code`, a file's name alone too.
 const FILE_EXT = 'png|jpe?g|gif|webp|svg|bmp|avif|ico|pdf|md|markdown|txt|log|csv|tsv|xlsx|xlsm|json|jsonl|ya?ml|xml|html?|css|m?js|cjs|tsx?|jsx|py|ps1|sh|toml|ini|sql|docx?|pptx?|zip';
 const LINE = '(?::\\d+(?:-\\d+)?)?';
-const ABS_PATH = /^[A-Za-z]:[\\/](?![\\/])[^\s<>"'`|*?]*$/;
-const REL_PATH = new RegExp(`^(?:\\.[\\\\/])?(?:[\\w@.-]+[\\\\/])+[\\w@.-]+\\.(?:${FILE_EXT})${LINE}$`, 'i');
-const NAME_PATH = new RegExp(`^[\\w@.-]+\\.(?:${FILE_EXT})${LINE}$`, 'i');
+const PART = '[\\p{L}\\p{N}_@.-]+';
+const REL = `(?:[.~][\\\\/])?(?:${PART}[\\\\/])+${PART}\\.(?:${FILE_EXT})${LINE}`;
+const ABS_PATH = /^[A-Za-z]:[\\/](?![\\/])(?:[^<>"'`|*?\n]*[^\s<>"'`|*?])?$/;
+const REL_PATH = new RegExp(`^${REL}$`, 'iu');
+const NAME_PATH = new RegExp(`^${PART}\\.(?:${FILE_EXT})${LINE}$`, 'iu');
 const ABS_IN_TEXT = /(^|[\s(“"'])([A-Za-z]:[\\/](?![\\/])[^\s<>"'`|*?]+)/g;
-const REL_IN_TEXT = new RegExp(`(^|[\\s(“"'])((?:\\.[\\\\/])?(?:[\\w@.-]+[\\\\/])+[\\w@.-]+\\.(?:${FILE_EXT})${LINE})(?=$|[\\s),.;:!?”"'])`, 'gi');
+const REL_IN_TEXT = new RegExp(`(^|[\\s(“"'])(${REL})(?=$|[\\s),.;:!?”"'])`, 'giu');
 const fileLink = (p, label) => `<a class="file-link" role="button" tabindex="0" data-file="${esc(p)}">${label}</a>`;
 
 function inline(s) {
@@ -199,6 +242,7 @@ function inline(s) {
   const keep = html => `\u0000${kept.push(html) - 1}\u0000`;
   const text = String(s ?? '').replace(/\u0000/g, '')
     .replace(/`([^`]+)`/g, (m, c) => keep(ABS_PATH.test(c) || REL_PATH.test(c) || NAME_PATH.test(c) ? fileLink(c, `<code>${esc(c)}</code>`) : `<code>${esc(c)}</code>`))
+    .replace(/\[([^\]\n\u0000]+)\]\((#(?:log|project)\/(?:[\w.-]|%[\da-f]{2})+)\)/gi, (_, label, href) => keep(`<a href="${esc(href)}">${esc(label)}</a>`))
     .replace(ABS_IN_TEXT, (m, before, p) => {
       const tail = p.match(/[.,;:!?)\]]+$/)?.[0] ?? '';
       const file = p.slice(0, p.length - tail.length);
@@ -301,6 +345,34 @@ function toolTitle(a) {
 const toolBadge = a => (a?.tool ? `<span class="tool-mark" data-tool="${esc(a.tool)}" title="${esc(toolTitle(a))}">${esc(TOOL_LABELS[a.tool] ?? a.tool)}</span>` : '');
 /** The tools other than Claude Code a run's crew works (or will work) on, as "on Codex". */
 const runToolsLabel = r => (r?.tools ?? []).map(x => t('on {tool}', { tool: TOOL_LABELS[x] ?? x }));
+// Each agent's effort (docs/effort.md): a colored mark and a picker. A change counts from the next step.
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const effortName = level => ({ low: t('effort low'), medium: t('effort medium'), high: t('effort high'), xhigh: t('effort xhigh'), max: t('effort max') })[level] ?? t('effort default');
+function effortFromLabel(from, project) {
+  return ({
+    project: t('set for {project} only', { project: projectName(project) }),
+    member: t("set in this project's crew"),
+    installation: t('set for this installation'),
+    agent: t("the agent's own"),
+    none: t("Claude Code's default for the model"),
+  })[from] ?? '';
+}
+const effortBadge = (level, title = '') => `<span class="effort-mark" data-effort="${esc(level ?? 'default')}"${title ? ` title="${esc(title)}"` : ''}>${esc(level ?? t('default'))}</span>`;
+/** The mark and its picker for a member: chat, the manager's conversation; project, that project only. */
+function effortPick(a, { project = null, chat = false } = {}) {
+  const level = chat ? a.chatEffort ?? null : a.effort ?? null;
+  const title = chat ? t("Effort of the conversation with you: {level}", { level: effortName(level) }) : `${effortName(level)} · ${effortFromLabel(a.effortFrom, project)}`;
+  const options = [`<option value="default"${level ? '' : ' selected'}>${esc(t('default'))}</option>`, ...EFFORTS.map(e => `<option value="${e}"${e === level ? ' selected' : ''}>${esc(e)}</option>`)];
+  return `<span class="effort-pick">${effortBadge(level, title)}<select class="effort-select" data-effort-member="${esc(a.id)}"${project ? ` data-effort-project="${esc(project)}"` : ''}${chat ? ' data-effort-chat="1"' : ''} aria-label="${esc(chat ? t('Change the effort of the conversation') : t('Change the effort of {agent}', { agent: t(a.name ?? a.id) }))}" title="${esc(t('Counts from the next step'))}">${options.join('')}</select></span>`;
+}
+/** An effort picker of this place has the focus: it is not drawn again under the owner's hand (its list would close). */
+const pickingEffort = selector => !!document.activeElement?.matches?.('.effort-select') && !!$(selector)?.contains(document.activeElement);
+/** A recorded effort change in one line: when, who, the member, from and to. */
+function effortChangeHtml(e) {
+  const who = e.by === 'manager' ? t('Manager') : t('You');
+  return `<div class="effort-change"><span class="num">${shortDate(e.at)}</span> ${esc(who)}: ${esc(agentName(e.member, e.project))}${e.chat ? ` (${esc(t('conversation'))})` : ''}${e.project ? ` · ${esc(projectName(e.project))}` : ''} ${effortBadge(e.from)} → ${effortBadge(e.to)}</div>`;
+}
+
 /** A model's short name; none: the tool's own default. */
 const modelLabel = a => (a.model ? shortModel(a.model) : t('default model'));
 
@@ -488,14 +560,99 @@ function agentDetail(agent) {
   }
 }
 
+// ---------- Speech bubbles (src/speech.mjs) ----------
+
+/** A bubble's state in words and level: working, calling you (the step waits for you), waiting, stuck or done. */
+function speechState(s) {
+  switch (s) {
+    case 'calling': return [t('Calling you'), 'urgent'];
+    case 'waiting': return [t('Waiting'), 'warn'];
+    case 'stuck': return [t('Stuck'), 'error'];
+    case 'done': return [t('Part done'), 'ok'];
+    default: return [t('Working'), 'info'];
+  }
+}
+
+/** "Name (Role)", as the bubbles' history names a member. */
+function memberLabel(id, project) {
+  const m = member(id, project);
+  return m.title ? `${t(m.name ?? id)} (${t(m.title)})` : t(m.name ?? id);
+}
+
+/** A line's words: the agent's own, or who asked it for something ("Name (Role) asked: …"). */
+function speechText(line, project) {
+  if (line.by === 'manager' || line.by === 'lead') return t('{who} asked: {text}', { who: memberLabel(line.by, project), text: line.text });
+  if (line.by === 'owner') return t('You asked: {text}', { text: line.text });
+  return line.text;
+}
+
+/**
+ * The bubble of a crew member: its line now in a run going on, its last line in a run going on where its part is done
+ * (quiet), or its last line in a paused or waiting run. Null when it has nothing going on.
+ */
+function speechFor(agentId, project = null) {
+  if (!online || !state) return null;
+  const mine = r => !project || r.project === project;
+  const live = going().find(r => mine(r) && r.agent === agentId && r.speech?.now);
+  if (live) return { run: live, line: live.speech.now, quiet: false };
+  const goingIds = new Set(going().map(r => r.id));
+  for (const r of [...going(), ...(state.queue ?? [])].filter(mine)) {
+    const line = (r.speech?.lines ?? []).filter(x => x.agent === agentId).at(-1);
+    if (!line) continue;
+    // A run in the queue is not at work: a line of it that says nothing of its state shows as waiting.
+    const still = !goingIds.has(r.id) && (!line.state || line.state === 'working');
+    return { run: r, line: still ? { ...line, state: 'waiting' } : line, quiet: line.state === 'done' };
+  }
+  return null;
+}
+
+/** The bubble: the line, its state (color and word), its time and, when Chiefmate wrote it, "automatic". A click opens the run's history. */
+function speechBubble(found) {
+  if (!found) return '';
+  const { run, line, quiet } = found;
+  const [label, level] = speechState(line.state);
+  const auto = line.auto || line.by === 'auto';
+  return `<button type="button" class="speech${quiet ? ' quiet' : ''}" data-level="${level}" data-speech-run="${esc(run.id)}" title="${esc(t('See what was said in this run'))}">`
+    + `<span class="speech-text">${esc(speechText(line, run.project))}</span>`
+    + `<span class="speech-meta">${stateHtml([label, level])}${line.at ? `<time>${clockTime(line.at)}</time>` : ''}${auto ? `<span class="speech-auto" title="${esc(t('Written by Chiefmate from what the agent is doing'))}">${esc(t('automatic'))}</span>` : ''}</span>`
+    + '</button>';
+}
+
+/** The run whose speech history is open, if any. */
+let speechRun = null;
+
+function openSpeech(runId) {
+  speechRun = runId;
+  delete signatures['#speech-list'];
+  drawSpeechDialog();
+  $('#speech-dialog').showModal();
+}
+
+/** The history of a run's speech, newest first, with the automatic line of now on top. Redrawn while open. */
+function drawSpeechDialog() {
+  if (!speechRun) return;
+  const run = [...going(), ...(state?.queue ?? [])].find(r => r.id === speechRun);
+  const lines = [...(run?.speech?.lines ?? [])].reverse();
+  const now = run?.speech?.now;
+  if (now?.auto && now.by === 'auto') lines.unshift({ ...now, current: true });
+  // A line's state shows only when it says something new: waiting, stuck, done, or the line of now.
+  const item = x => {
+    const shown = x.current || (x.state && x.state !== 'working');
+    const [label, level] = speechState(x.state);
+    const auto = x.auto || x.by === 'auto';
+    return `<li${shown ? ` data-level="${level}"` : ''}>${face(member(x.agent, run.project), 'still', 24)}<div>`
+      + `<div class="speech-who"><strong>${esc(memberLabel(x.agent, run.project))}</strong>${x.at ? `<time>${clockTime(x.at)}</time>` : ''}${shown ? stateHtml([label, level]) : ''}${auto ? `<span class="speech-auto">${esc(x.current ? t('automatic, now') : t('automatic'))}</span>` : ''}</div>`
+      + `<div class="speech-said">${esc(speechText(x, run.project))}</div></div></li>`;
+  };
+  $('#speech-run').textContent = run ? `${run.title} · ${projectName(run.project)}` : t('This run has ended: its reports are in the Log.');
+  const empty = run ? `<li class="hint">${esc(t('Nothing said yet.'))}</li>` : '';
+  draw('#speech-list', JSON.stringify([speechRun, !!run, lines.map(x => [x.id, x.at, x.text, x.state])]), lines.map(item).join('') || empty);
+}
+
 const nextMission = () => state.missions.filter(m => m.next).sort((x, y) => x.next.localeCompare(y.next))[0];
 
-/** The queue in the order it will run, as the server picks: the runs ready to start by age, then the others by start time. */
-function queueOrder() {
-  const ready = r => !r.notBefore || new Date(r.notBefore).getTime() <= Date.now() + skew;
-  const later = state.queue.filter(r => !ready(r)).sort((x, y) => x.notBefore.localeCompare(y.notBefore));
-  return [...state.queue.filter(ready), ...later];
-}
+/** The queue in the order it runs, as the server keeps it (the owner's moves included); a run waiting for a time says so. */
+const queueOrder = () => state.queue ?? [];
 
 const liveDot = () => '<span class="live-dot" aria-hidden="true"></span>';
 
@@ -513,7 +670,7 @@ const toolName = tool => (tool === 'codex' ? 'Codex' : 'Claude Code');
 // or "#builder/<id>" for a project (also shown in the project's "builder" tab).
 const VIEWS = ['manager', 'decisions', 'operations', 'planning', 'radar', 'missions', 'crew', 'projects', 'builder', 'log', 'usage', 'project', 'session'];
 const pageProject = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length).split('/')[0]) : null);
-const PROJECT_TABS = ['overview', 'charge', 'live', 'crew', 'tasks', 'planning', 'files', 'context', 'builder'];
+const PROJECT_TABS = ['overview', 'charge', 'live', 'manager', 'crew', 'tasks', 'planning', 'files', 'context', 'builder'];
 const pageTab = () => {
   const tab = location.hash.startsWith('#project/') ? location.hash.slice('#project/'.length).split('/')[1] : null;
   return PROJECT_TABS.includes(tab) ? tab : 'overview';
@@ -525,7 +682,8 @@ const builderTarget = () => (builderHash() ? builderProjectOf() : pageProject() 
 // A live session's conversation: "#project/<id>/live/<session>" for a project's, "#session/<id>" for the others.
 const pageSession = () => (location.hash.startsWith('#session/') ? decodeURIComponent(location.hash.slice('#session/'.length)) : null);
 const pageLiveSession = () => (location.hash.startsWith('#project/') ? decodeURIComponent(location.hash.slice('#project/'.length).split('/')[2] ?? '') : '');
-const currentView = () => (pageProject() ? 'project' : pageSession() ? 'session' : builderHash() ? 'builder' : VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
+const pageRun = () => /^#log\/([\w-]+)$/.exec(location.hash)?.[1] ?? null;
+const currentView = () => (pageProject() ? 'project' : pageSession() ? 'session' : pageRun() ? 'log' : builderHash() ? 'builder' : VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'manager');
 const touchScreen = () => matchMedia('(pointer: coarse)').matches;
 const phoneQuery = matchMedia('(max-width: 600px)'); // the phone layout of ui/style.css
 /** In a message field, Enter sends and Shift+Enter starts a new line; on a touch screen, Enter starts a new line and the Send button sends. */
@@ -583,7 +741,16 @@ function drawFocusBar() {
 
 function showView() {
   const view = currentView();
+  const run = pageRun();
+  if (run && selectedRun !== run) {
+    selectedRun = run;
+    if (state) {
+      drawLog();
+      refreshDetail();
+    }
+  }
   if (view !== 'manager' && focusMode()) setFocusMode(false);
+  if (!(view === 'project' && pageTab() === 'manager')) placeChat();
   if (view !== 'session' && !(view === 'project' && ['live', 'charge'].includes(pageTab()))) stopLive();
   if (view === 'session' && state) drawSessionPage();
   for (const v of VIEWS) $(`#view-${v}`).classList.toggle('active', v === view);
@@ -592,6 +759,8 @@ function showView() {
   for (const a of document.querySelectorAll('.nav a')) a.classList.toggle('active', a.dataset.view === section);
   $('#nav-more').classList.toggle('active', !!document.querySelector('.nav a.nav-extra.active'));
   setNavMore(false);
+  // Another page: the call bar folds back to its first call (an answer being written keeps its draft).
+  [callsOpen, callAnswer] = [false, null];
   if (state) drawAlerts();
   $('#project-jump').value = pageProject() ?? '';
   // Not on a touch screen: the keyboard would cover half of it at every visit.
@@ -607,6 +776,37 @@ function showView() {
     placeBuilder(false);
     openBuilder(builderProjectOf());
   }
+  // Coming into a project's In charge, Live or Manager tab: its conversation is brought into view, ready to write.
+  const charge = view === 'project' && ['charge', 'live', 'manager'].includes(pageTab()) && state ? `${pageProject()}/${pageTab()}/${pageLiveSession() ?? ''}` : null;
+  if (charge && charge !== chargeShown) showChargeChat();
+  chargeShown = charge;
+}
+
+let chargeShown = null; // the project's conversation on screen (project/tab/session), brought into view once
+
+/**
+ * The conversation with the agent in charge in view and its field focused: with the tabs above it on a wide screen;
+ * on a phone, the conversation's column (its height is the visible area's) down to its field.
+ */
+function showChargeChat() {
+  const manager = pageTab() === 'manager';
+  const body = manager ? $('#manager-form').closest('.chat-column') : $('#live-body');
+  if (manager ? body.parentElement !== $('#project-manager') : body.hidden || !['project-charge', 'project-live'].includes(body.parentElement?.id)) return;
+  const behavior = calm() ? 'auto' : 'smooth';
+  if (phoneQuery.matches) (manager ? body : body.querySelector('.chat-column')).scrollIntoView({ block: 'end', behavior });
+  else $('#project-tabs').scrollIntoView({ block: 'start', behavior });
+  // Not on a touch screen: the keyboard would cover the conversation it just brought up.
+  if (!touchScreen()) $(manager ? '#message' : '#live-text').focus({ preventScroll: true });
+}
+
+/**
+ * The conversation with the manager lives in the Conversation; a project's Manager tab borrows it, so the owner talks
+ * to the manager without leaving the project. home: where it goes (the Conversation when none).
+ */
+function placeChat(home = $('#view-manager')) {
+  const column = $('#manager-form').closest('.chat-column');
+  if (column.parentElement !== home) home.append(column);
+  column.classList.toggle('in-project', home.id !== 'view-manager');
 }
 window.addEventListener('hashchange', showView);
 phoneQuery.addEventListener('change', () => {
@@ -634,7 +834,7 @@ $('#project-jump').addEventListener('change', event => {
 /** The manager's presence in words: [text, kind, the face's look]. */
 function presence() {
   let text, kind, look;
-  if (!online) [text, kind, look] = [t('No connection to Chiefmate'), 'error', 'offline'];
+  if (!online) [text, kind, look] = lockedAfar ? [t('Emergency lockdown'), 'error', 'offline'] : [t('No connection to Chiefmate'), 'error', 'offline'];
   else if (state.ai.claude.found === false) [text, kind, look] = [t('Claude Code not found'), 'error', 'offline'];
   else if (state.ai.account.status === 'rejected') [text, kind, look] = [t('Account limit reached'), 'warn', 'waiting'];
   else if (going().length > 1) [text, kind, look] = [t('On duty: {count} runs at once', { count: going().length }), 'info', 'working'];
@@ -650,29 +850,80 @@ function drawPresence() {
   draw('#presence', html, html);
 }
 
-// A crescent moon in line art.
-const MOON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 10.2A6 6 0 0 1 5.8 2.5a6 6 0 1 0 7.7 7.7z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>';
+// ---------- Away mode (src/news.mjs) ----------
 
-/** The away mode's button (src/news.mjs): tells the manager the owner stepped out or is back. */
+let pendingAwayPace = null; // the mode being saved from the notice's selector
+
+/** The away button and, while away, the notice with the autopilot's pace and a selector to change it. */
 function drawAway() {
   const button = $('#away');
+  const notice = $('#away-notice');
+  const away = state?.away;
+  const autopilot = state?.autopilot;
   button.hidden = !online;
+  notice.hidden = !online || !away || !autopilot;
   if (!online) return;
-  const away = state.away;
-  const label = away ? t('Away since {time}', { time: clockTime(away.since) }) : t('Away mode');
+  const since = $('#away-since');
+  const sinceText = away ? t('Since {time}', { time: clockTime(away.since) }) : '';
   const help = away
-    ? t('Away mode is on: notices that can wait are kept for you ({count} so far). Click when you are back: the manager writes you a summary.', { count: away.held })
-    : t('Stepping out or going to sleep? The manager is told, the work goes on alone, and notices that can wait come as a summary when you are back.');
+    ? t('Away since {time}. Notices that can wait are held ({count} so far). Click when you are back to get a summary from the manager.', { time: clockTime(away.since), count: away.held })
+    : t('Stepping away? The team keeps working as configured, and the manager summarizes notices that can wait when you return.');
   button.setAttribute('aria-pressed', String(!!away));
+  // the name stays when narrow screens show the icon only
+  button.setAttribute('aria-label', away ? `${t('Away mode')} · ${sinceText}` : t('Away mode'));
   button.title = help;
-  button.setAttribute('aria-label', `${label}. ${help}`);
-  draw('#away', label, `${MOON}<span class="away-label">${esc(label)}</span>`);
+  since.hidden = !away;
+  since.textContent = sinceText;
+  if (notice.hidden) return;
+  $('#away-pace-label').textContent = autopilot.enabled ? t('Autopilot pace') : t('Autopilot pace (off)');
+  const custom = $('#away-custom-pace');
+  custom.hidden = autopilot.mode !== 'custom';
+  if (!custom.hidden) custom.textContent = t('Custom target {target}', { target: percent(autopilot.week_pace) });
+  const pace = pendingAwayPace ?? autopilot.mode;
+  const select = $('#away-pace');
+  if (select.value !== pace) select.value = pace;
 }
+
+$('#away').addEventListener('click', async () => {
+  const on = !state?.away;
+  const button = $('#away');
+  button.disabled = true;
+  try {
+    await api('/api/away', { on });
+    if (on) toast(t('You are away. The team keeps working as configured, and the manager holds notices for your return.'));
+    else {
+      toast(t('Welcome back: the manager is writing the summary of the time away.'));
+      location.hash = '#manager';
+    }
+    await refresh();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$('#away-pace').addEventListener('change', async event => {
+  if (pendingAwayPace) {
+    event.target.value = pendingAwayPace;
+    return;
+  }
+  pendingAwayPace = event.target.value;
+  try {
+    await setAutopilotMode(pendingAwayPace);
+    await refresh();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    pendingAwayPace = null;
+    drawAway();
+  }
+});
 
 // ---------- Emergency lockdown (src/lockdown.mjs) ----------
 
-/** Whether the app is open on this computer (not through the remote access): only here is the lockdown released. */
-const onThisComputer = () => ['localhost', '127.0.0.1'].includes(location.hostname);
+// The lockdown seen through the remote access, which then refuses the state: { active, since, reason }, or null.
+let lockedAfar = null;
 
 /**
  * The red button, in the power dialog, apart from the everyday buttons: engages the lockdown after a strong
@@ -708,18 +959,81 @@ $('#lockdown').addEventListener('click', async () => {
 
 /** The red band at the top while the lockdown is on, on every page. */
 function lockdownBand() {
-  const l = state?.lockdown;
-  if (!online || !l?.active) return '';
+  const l = online ? state?.lockdown : lockedAfar;
+  if (!l?.active) return '';
   const action = onThisComputer()
     ? `<button type="button" class="button small lockdown-release" data-lockdown-review>${esc(t('Review and release'))}</button>`
     : `<span class="lockdown-note">${esc(t('Release it on the computer where Chiefmate runs.'))}</span>`;
   return `<div class="lockdown-band" role="alert">
       <strong>${esc(t('EMERGENCY LOCKDOWN'))}</strong>
       <span>${esc(t('Since {time}: {reason}', { time: shortDate(l.since), reason: l.reason ?? '' }))}</span>
-      <span class="lockdown-note">${esc(t('Everything is stopped. Pushes, merges, new repositories, external actions and the remote access are refused.'))}</span>
+      <span class="lockdown-note">${esc(watchLine(l) || (online ? t('Everything is stopped. Pushes, merges, new repositories, external actions and the remote access are refused.') : t('Everything is stopped, and the remote access shows nothing else until you release it.')))}</span>
       ${action}
     </div>`;
 }
+
+/** What the emergency watch (src/sentinel.mjs) is doing about the alarm, in one line, or ''. */
+function watchLine(l) {
+  const s = l?.sentinel;
+  if (s?.status === 'reviewing') return t('Everything is stopped. Sentinel (Emergency watch) is checking whether it is a false alarm.');
+  if (s?.status === 'escalated') return t('Sentinel (Emergency watch) kept everything stopped: it needs you.');
+  return '';
+}
+
+const VERDICT_NAMES = () => ({ false_alarm: t('false alarm'), real: t('real'), uncertain: t('uncertain') });
+const yesNo = v => (v === null || v === undefined ? t("couldn't check") : v ? t('yes') : t('no'));
+
+/** The emergency watch's report: who, what ran or was refused, what was checked, each analyst's verdict and why it stays. */
+function watchReportHtml(s) {
+  if (!s || s.status === 'off') return '';
+  if (s.status === 'reviewing') return `<p class="lockdown-watch">${esc(t('Sentinel (Emergency watch) is checking it now: the checks in code, then two analysts. Everything stays stopped meanwhile.'))}</p>`;
+  const people = (s.incident?.involved ?? []).map(x => `<li>
+      <strong>${esc(x.agent ? `${t(x.agent.name)}${x.agent.title ? ` (${t(x.agent.title)})` : ''}` : x.who ?? '—')}</strong>
+      ${esc([x.projectName && t('project: {name}', { name: x.projectName }), x.task && t('task: {title}', { title: x.task }), x.step && t('step {n} of {total}', { n: x.step, total: x.steps ?? '?' })].filter(Boolean).join(' · '))}
+      <div><code>${esc(x.command)}</code></div>
+      <div class="muted">${esc([x.cwd && t('in {folder}', { folder: x.cwd }), x.refused ? t('refused by the guard') : t('it ran')].filter(Boolean).join(' · '))}</div>
+    </li>`).join('');
+  const c = s.checks ?? {};
+  const changes = c.protected === null || c.protected === undefined ? t("couldn't check") : c.protected.length ? c.protected.map(x => `${x.path} (${x.what})`).join('; ') : t('none');
+  const out = c.outbound === null || c.outbound === undefined ? t("couldn't check") : c.outbound.length ? c.outbound.map(x => x.command).join('; ') : t('none');
+  const types = { own_folder_delete: t('deleting a folder the same step created'), github_read: t('reading GitHub with a command taken for a publication') };
+  const checks = [
+    [t('Refused or harmless'), yesNo(c.refused || c.harmless)],
+    [t('Changes in protected places'), changes],
+    [t('Sent out'), out],
+    [t('Kind of alarm'), types[c.type] ?? t('not on the list the watch may release')],
+    [t('Second alarm in 24 h'), yesNo(c.repeat)],
+    [t('Involves the manager'), yesNo(c.manager)],
+  ].map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+  const tools = { claude: 'Claude Code', codex: 'Codex' };
+  const verdicts = (s.verdicts ?? []).map((v, i) => `<li><strong>${esc(t('Analyst {letter}', { letter: 'AB'[i] }))}</strong> (${esc(tools[v.tool] ?? v.tool)}): ${esc(VERDICT_NAMES()[v.verdict] ?? v.verdict)}, ${esc(t('confidence {n}%', { n: Math.round((v.confidence ?? 0) * 100) }))}${v.reason ? ` · ${esc(v.reason)}` : ''}${v.error ? ` <span class="muted">(${esc(v.error)})</span>` : ''}</li>`).join('');
+  const why = (s.decision?.reasons ?? []).map(r => reasonName(r)).join('; ');
+  return `<div class="lockdown-watch">
+      <div class="label">${esc(t('Sentinel (Emergency watch)'))}</div>
+      ${s.status === 'escalated' ? `<p><strong>${esc(t('Kept stopped for you'))}:</strong> ${esc(why)}</p>` : ''}
+      ${people ? `<ul class="lockdown-evidence">${people}</ul>` : ''}
+      <dl class="facts">${checks}</dl>
+      ${verdicts ? `<ul class="lockdown-evidence">${verdicts}</ul>` : ''}
+    </div>`;
+}
+
+/** Why the watch kept the lockdown, in words (src/sentinel.mjs, REASONS). */
+const reasonName = key => ({
+  ran: t('the command ran and is not known to be harmless'),
+  protected_unknown: t("the protected places couldn't be compared with their state before"),
+  protected_changed: t('something changed in a protected place'),
+  outbound_unknown: t("it couldn't check whether anything was sent out"),
+  outbound: t('something may have been sent out'),
+  type: t('this kind of alarm is not on the list the watch may release'),
+  analysts: t('the analysts did not both say false alarm'),
+  analysts_disagree: t('the analysts disagree'),
+  unsure: t('an analyst said false alarm without enough confidence'),
+  repeat: t('it is the second alarm within {hours} hours', { hours: 24 }),
+  manager: t('it involves the manager'),
+  new_evidence: t('more evidence came while it reviewed'),
+  engaged_again: t('someone engaged the lockdown again while it reviewed'),
+  error: t('its review failed'),
+}[key] ?? key);
 
 /** What triggered the lockdown and what it stopped, for the owner to read before releasing it. */
 function lockdownSummaryHtml(l) {
@@ -727,12 +1041,34 @@ function lockdownSummaryHtml(l) {
   const where = { app: t('the app'), remote: t('the remote access'), cli: t('the command line'), detection: t('the detection') }[l.from] ?? l.from;
   const names = { runs: t('runs'), manager: t("manager's answer"), sessions: t('live session turns'), browsers: t('browsers') };
   const stopped = Object.entries(l.stopped ?? {}).filter(([k]) => names[k]).map(([k, n]) => `${names[k]}: ${n}`).join(' · ') || t('nothing was going on');
-  const evidence = (l.evidence ?? []).map(e => `<li><span class="muted">${esc(shortDate(e.at))}</span> ${esc(e.what)}${e.who ? ` (${esc(e.who)})` : ''}: <code>${esc(e.detail)}</code></li>`).join('');
+  const evidence = (l.evidence ?? []).map(e => `<li><span class="muted">${esc(shortDate(e.at))}</span> ${esc(e.what)}${e.who ? ` (${esc(e.who)})` : ''}: <code>${esc(e.command ?? e.detail)}</code>${e.cwd ? ` <span class="muted">${esc(t('in {folder}', { folder: e.cwd }))}</span>` : ''}</li>`).join('');
+  const notes = (l.notes ?? []).map(n => `<li><span class="muted">${esc(shortDate(n.at))}</span> ${esc(n.text)}</li>`).join('');
   return `<p>${esc(t('Since {time}, engaged by {who} from {where}.', { time: shortDate(l.since), who, where }))}</p>
     <p><strong>${esc(t('Reason'))}:</strong> ${esc(l.reason ?? '')}</p>
     <p><strong>${esc(t('What was stopped'))}:</strong> ${esc(stopped)}</p>
     ${evidence ? `<div class="label">${esc(t('Evidence'))}</div><ul class="lockdown-evidence">${evidence}</ul>` : ''}
+    ${watchReportHtml(l.sentinel)}
+    ${escalationSummaryHtml(l.escalation)}
+    ${notes ? `<div class="label">${esc(t('Your notes'))}</div><ul class="lockdown-evidence">${notes}</ul>` : ''}
     <p class="muted">${esc(t('After the release, the queue goes on. The runs it stopped stay canceled until you resume them.'))}</p>`;
+}
+
+/** Whether the owner was called outside the app (src/escalation.mjs), and what they chose on Telegram. */
+function escalationSummaryHtml(x) {
+  if (!x) return '';
+  const where = (x.channels ?? []).map(c => (c === 'telegram' ? 'Telegram' : t('e-mail'))).join(', ');
+  const errors = (x.errors ?? []).map(e => e.error).join('; ');
+  const lines = [where ? t('Called you on {where} at {time}.', { where, time: shortDate(x.at) })
+    : errors ? t("Couldn't reach you outside the app: {errors}", { errors }) : t('Not called outside the app: Telegram and the e-mail are not set up.')];
+  const names = { keep: t('Keep stopped'), release: t('Release'), pin_blocked: t('blocked after wrong PINs') };
+  for (const d of x.decisions ?? []) lines.push(t('On Telegram, {time}: {choice}.', { time: shortDate(d.at), choice: names[d.action] ?? d.action }));
+  return `<p class="muted">${lines.map(esc).join('<br>')}</p>`;
+}
+
+/** Sends the owner's note on the alarm: kept in its record, and told to the manager as the owner's message. */
+async function sendLockdownNote(note) {
+  await api('/api/lockdown', { action: 'note', note });
+  toast(t('Note sent: it is in the alarm record and goes to the manager.'));
 }
 
 document.addEventListener('click', event => {
@@ -743,13 +1079,21 @@ document.addEventListener('click', event => {
   $('#lockdown-summary').innerHTML = lockdownSummaryHtml(l);
   $('#lockdown-reviewed').checked = false;
   $('#lockdown-release').disabled = true;
+  $('#lockdown-note').value = '';
   dialog.returnValue = '';
   dialog.showModal();
   dialog.addEventListener('close', async () => {
-    if (dialog.returnValue !== 'yes' || !$('#lockdown-reviewed').checked) return;
+    const note = $('#lockdown-note').value.trim();
     try {
-      await api('/api/lockdown', { action: 'release', confirm: true });
-      toast(t('Lockdown released: the queue goes on.'));
+      if (dialog.returnValue === 'note' && note) {
+        await sendLockdownNote(note);
+      } else if (dialog.returnValue === 'yes' && $('#lockdown-reviewed').checked) {
+        await api('/api/lockdown', { action: 'release', confirm: true, note });
+        toast(t('Lockdown released: the queue goes on.'));
+      } else if (note) {
+        // Kept locked, with a note: the note still goes.
+        await sendLockdownNote(note);
+      }
       refresh();
     } catch (error) {
       toast(error.message);
@@ -760,24 +1104,59 @@ $('#lockdown-reviewed').addEventListener('change', event => {
   $('#lockdown-release').disabled = !event.target.checked;
 });
 
-$('#away').addEventListener('click', async () => {
-  const on = !state?.away;
-  const button = $('#away');
-  button.disabled = true;
+/**
+ * The phone's screen during a lockdown (the remote access answers 423 to everything else): what triggered it, the
+ * watch's report and a field for the owner's note; the release stays on the computer. Returns whether it was drawn.
+ */
+async function drawLockdownScreen() {
+  let data;
   try {
-    await api('/api/away', { on });
-    if (on) toast(t('Away mode on: the manager knows, and notices that can wait are kept for a summary.'));
-    else {
-      toast(t('Welcome back: the manager is writing the summary of the time away.'));
-      location.hash = '#manager';
-    }
-    refresh();
-  } catch (error) {
-    toast(error.message);
-  } finally {
-    button.disabled = false;
+    const r = await fetch('/api/lockdown', { cache: 'no-store' });
+    if (!r.ok) return false;
+    data = await r.json();
+  } catch {
+    return false;
   }
-});
+  const l = data.lockdown;
+  if (!l?.active) return false;
+  // Opened during the lockdown: the owner's language, read once.
+  if (!started && language() !== (data.language || 'en')) {
+    await setLanguage(data.language);
+    translatePage();
+  }
+  let screen = $('#lockdown-screen');
+  if (!screen) {
+    screen = document.createElement('section');
+    screen.id = 'lockdown-screen';
+    screen.className = 'lockdown-screen';
+    screen.setAttribute('role', 'alert');
+    screen.innerHTML = `<div class="lockdown-band"><strong>${esc(t('EMERGENCY LOCKDOWN'))}</strong><span class="lockdown-note">${esc(t('Release it on the computer where Chiefmate runs.'))}</span></div>
+      <div class="lockdown-screen-body"><div data-lockdown-screen-summary></div>
+        <label class="label" for="lockdown-screen-note">${esc(t('Your note (it goes to the manager and stays in the alarm record)'))}</label>
+        <textarea id="lockdown-screen-note" rows="3"></textarea>
+        <div class="actions left"><button type="button" class="button" data-lockdown-screen-send>${esc(t('Send note'))}</button></div>
+      </div>`;
+    document.body.append(screen);
+    screen.querySelector('[data-lockdown-screen-send]').addEventListener('click', async () => {
+      const field = $('#lockdown-screen-note');
+      if (!field.value.trim()) return;
+      try {
+        await sendLockdownNote(field.value.trim());
+        field.value = '';
+        drawLockdownScreen();
+      } catch (error) {
+        toast(error.message);
+      }
+    });
+  }
+  const html = lockdownSummaryHtml(l);
+  const box = screen.querySelector('[data-lockdown-screen-summary]');
+  if (box.drawn !== html) {
+    box.innerHTML = html;
+    box.drawn = html;
+  }
+  return true;
+}
 
 // ---------- Power modes (src/power.mjs): standby, stop Chiefmate, shut the computer down ----------
 
@@ -796,8 +1175,8 @@ function powerLook() {
   if (p.mode === 'stopping') {
     const cancel = p.stage === 'closing' ? '' : `<button type="button" class="button danger small" data-power="cancel">${esc(t('Cancel'))}</button>`;
     const label = p.stage === 'countdown'
-      ? `${t('Shutting down')} · <span class="num" data-until="${esc(p.countdownUntil)}"></span> s`
-      : esc(p.target === 'shutdown' ? t('Shutting down…') : t('Stopping…'));
+      ? `${p.target === 'reboot' ? t('Restarting') : t('Shutting down')} · <span class="num" data-until="${esc(p.countdownUntil)}"></span> s`
+      : esc(p.target === 'reboot' ? t('Restarting…') : p.target === 'shutdown' ? t('Shutting down…') : t('Stopping…'));
     return [label, 'error', cancel, true];
   }
   return [t('On'), 'ok', ''];
@@ -886,12 +1265,14 @@ document.addEventListener('click', event => {
 /** The project in focus: the run going on now, else the next one in the queue. */
 function drawFocus() {
   const f = online ? state.focus : null;
-  const label = `<span class="label">${esc(t('Focus'))}</span>`;
+  // the owner's focus (src/steer.mjs), when it holds a project: a mark that opens the Focus panel
+  const label = `<span class="label">${esc(t('Focus'))}</span>${online ? steerChip() : ''}`;
   // A run going on in focus: a click opens the panel of its agent at work.
   if (f?.state === 'running') $('#focus').dataset.agentRun = f.run;
   else delete $('#focus').dataset.agentRun;
   if (!f) {
-    const text = online ? t('No project in focus') : '—';
+    // with the owner's focus on, "no project in focus" would contradict its mark: nothing runs, that's all
+    const text = online ? (steerMode() ? t('Nothing running') : t('No project in focus')) : '—';
     const html = `${label}<span class="focus-none">${esc(text)}</span>`;
     $('#focus').title = text;
     draw('#focus', html, html);
@@ -910,6 +1291,186 @@ function drawFocus() {
   $('#focus').title = [f.projectName, ...parts, f.summary].filter(Boolean).join(' · ');
   draw('#focus', html, html);
 }
+
+// ---------- The owner's focus (src/steer.mjs): the Focus panel at the top of Operations ----------
+
+// The "Focus on…" picker (open, and the projects ticked) and the "until when" choice for the next change.
+const steerPick = { open: false, chosen: new Set() };
+let steerUntil = '';
+
+/** The mode in a few words, for the mark at the top; none with no restriction. */
+function steerMode(s = state?.steer) {
+  if (!s) return null;
+  const names = ids => ids.map(projectName).join(', ');
+  if (s.mode === 'paused-all') return { text: t('Everything paused'), level: 'warn' };
+  if (s.mode === 'focus') return { text: s.only.length ? t('Only {list}', { list: names(s.only) }) : t('Nothing starts'), level: 'accent' };
+  if (s.paused.length) return { text: t('{count} paused', { count: s.paused.length }), level: 'warn' };
+  return null;
+}
+
+function steerChip() {
+  const m = steerMode();
+  return m ? `<a class="steer-chip state-${m.level}" href="#operations" title="${esc(state.steer.line)}">${esc(m.text)}</a>` : '';
+}
+
+// Before 8:00 the next 8:00 is today's: a choice made after midnight lasts the night, not a day more.
+const beforeEight = () => new Date().getHours() < 8;
+
+/** When a change ends by itself: in 1, 2 or 4 hours, or at the next 8:00. */
+function steerUntilIso(choice = steerUntil) {
+  if (!choice) return null;
+  const d = new Date();
+  if (choice === 'at8') {
+    if (!beforeEight()) d.setDate(d.getDate() + 1);
+    d.setHours(8, 0, 0, 0);
+    return d.toISOString();
+  }
+  return new Date(d.getTime() + Number(choice) * 3600_000).toISOString();
+}
+
+/** A project's activity: who works there now, its queue, its memory and its live sessions. */
+function steerActivity(id) {
+  const runs = going().filter(a => a.project === id);
+  const queued = (state.queue ?? []).filter(r => r.project === id).length;
+  const machine = state.computer?.projects.find(p => p.id === id);
+  return { runs, queued, ram: machine?.ram ?? 0, session: !!machine?.session, measured: !!state.computer?.supported };
+}
+
+/** The card's state, in words and color: working, paused by you, waiting for the focus, queued or stopped. */
+function steerState(p, act) {
+  if (act.runs.length) return [t('Working now'), 'ok', 'working'];
+  if (p.hold === 'paused') return [t('Paused by you'), 'warn', 'paused'];
+  if (p.hold === 'all') return [t('Paused: everything is paused'), 'warn', 'paused'];
+  if (p.hold === 'focus') return [t('Waiting for the focus to end'), 'neutral', 'waiting'];
+  if (act.queued) return [t('In the queue: {count}', { count: act.queued }), 'info', 'queued'];
+  return [t('Stopped'), 'neutral', 'idle'];
+}
+
+function steerCard(p) {
+  const act = steerActivity(p.id);
+  const [label, level, kind] = steerState(p, act);
+  const who = act.runs.map(a => {
+    const m = member(a.agent, p.id);
+    const role = a.agent && m.title ? ` (${t(m.title)})` : '';
+    return `<div class="steer-who"${opensPanel(a.id)}>${liveDot()}<strong>${esc(a.agent ? agentName(a.agent, p.id) : t('preparing'))}</strong>${esc(role)}<span class="hint"> · ${esc(a.title)}</span></div>`;
+  }).join('') || `<div class="steer-who hint">${esc(t('Nobody working'))}</div>`;
+  const meta = [];
+  // what waits behind the work going on, and what happens to it
+  if (act.runs.length && act.queued) meta.push(t('In the queue: {count}', { count: act.queued }));
+  else if (!act.runs.length && act.queued && p.hold) meta.push(t('{count} waiting in the queue', { count: act.queued }));
+  if (act.runs.length && p.hold) meta.push(t('Finishes what it is doing, then waits'));
+  meta.push(act.measured ? t('Memory: {size}', { size: bytes(act.ram) }) : t('Memory: not measured'));
+  if (act.session) meta.push(t('Your live session is open (never held)'));
+  const waits = state.steer.mode !== 'free';
+  const buttons = [
+    ['active', waits ? t('Waits') : t('Active'), waits ? t('Not paused: it works when the focus or the pause ends') : t('Works normally')],
+    ['paused', t('On pause'), t('Starts nothing new until you resume it')],
+    ['focus', t('Focus'), t('Only the projects in focus start new work')],
+  ].map(([to, text, title]) => `<button type="button" class="steer-option" data-to="${to === 'active' && waits ? 'waits' : to}" data-steer-project="${esc(p.id)}" data-steer-to="${to}" aria-pressed="${p.control === to}" title="${esc(title)}">${esc(text)}</button>`).join('');
+  return `<article class="steer-card" data-state="${kind}">
+    <div class="steer-card-head"><span class="steer-name">${projectLink(p.id)}</span><span class="state state-${level}">${esc(label)}</span></div>
+    ${who}
+    <div class="steer-meta hint">${meta.map(esc).join(' · ')}</div>
+    <div class="steer-options" role="group" aria-label="${esc(t('{project}: active, paused or in focus', { project: projectName(p.id) }))}">${buttons}</div>
+  </article>`;
+}
+
+function drawSteer() {
+  const s = online ? state.steer : null;
+  if (!s) {
+    draw('#steer', 'off', '');
+    return;
+  }
+  const modes = [
+    ['free', t('No restriction'), s.mode === 'free' && !s.paused.length],
+    ['focus', t('Focus on…'), s.mode === 'focus' || steerPick.open],
+    ['pause-all', t('Pause all'), s.mode === 'paused-all'],
+  ].map(([action, text, on]) => `<button type="button" class="steer-mode" data-steer-mode="${action}" aria-pressed="${on}"${action === 'focus' ? ` aria-expanded="${steerPick.open}"` : ''}>${esc(text)}</button>`).join('');
+  const until = [['', t('No end')], ['1', t('For 1 hour')], ['2', t('For 2 hours')], ['4', t('For 4 hours')], ['at8', beforeEight() ? t('Until today at 8:00') : t('Until tomorrow at 8:00')]]
+    .map(([value, text]) => `<option value="${value}"${value === steerUntil ? ' selected' : ''}>${esc(text)}</option>`).join('');
+  const pick = steerPick.open
+    ? `<div class="steer-pick"><span class="hint">${esc(t('Only these start new work; the others wait, their missions kept for after the focus.'))}</span>
+      <div class="steer-pick-list">${s.projects.map(p => `<label class="steer-pick-item"><input type="checkbox" data-steer-pick="${esc(p.id)}"${steerPick.chosen.has(p.id) ? ' checked' : ''}> ${esc(projectName(p.id))}</label>`).join('')}</div>
+      <div class="steer-pick-actions"><button type="button" class="button" data-steer-apply${steerPick.chosen.size ? '' : ' disabled'}>${esc(t('Focus on these'))}</button><button type="button" class="button secondary" data-steer-cancel>${esc(t('Cancel'))}</button></div></div>`
+    : '';
+  const mode = steerMode(s);
+  const line = `<div class="steer-line"><span class="state state-${mode?.level ?? 'ok'}">${esc(s.line)}</span>${s.back ? `<span class="hint">${esc(t('then back to: {state}', { state: s.back }))}</span>` : ''}</div>`;
+  const changes = s.changes.length
+    ? `<details class="steer-history" data-keep-open="steer-history"><summary>${esc(t('Latest changes ({count})', { count: s.changes.length }))}</summary><ul>${s.changes.map(c => `<li><span class="hint">${esc(shortDate(c.at))}</span> ${esc(c.text)}<span class="hint">, ${esc(c.who)}${c.until ? `, ${esc(t('until {time}', { time: shortDate(c.until) }))}` : ''}</span></li>`).join('')}</ul></details>`
+    : '';
+  const top = `<div class="steer-head"><div class="label">${esc(t('Focus'))}</div>${line}</div>
+    <div class="steer-controls"><div class="steer-modes" role="group" aria-label="${esc(t('Which projects may work'))}">${modes}</div>
+    <label class="steer-until"><span class="hint">${esc(t('Until when'))}</span><select id="steer-until">${until}</select></label></div>${pick}`;
+  // three parts drawn apart, so the memory read every few seconds never redraws the controls in use
+  if (draw('#steer', 'on', '<div id="steer-top"></div><div id="steer-cards" class="steer-cards"></div><div id="steer-foot"></div>')) {
+    for (const key of ['#steer-top', '#steer-cards', '#steer-foot']) delete signatures[key];
+  }
+  draw('#steer-top', JSON.stringify([s.line, s.back, s.mode, s.only, s.paused, s.projects, steerPick.open, steerUntil, beforeEight()]), top);
+  const cards = s.projects.map(steerCard).join('');
+  draw('#steer-cards', JSON.stringify([s.mode, s.projects, going().map(a => [a.id, a.project, a.agent, a.title]), (state.queue ?? []).map(r => r.project), state.computer?.projects.map(p => [p.id, Math.round((p.ram ?? 0) / 2 ** 20), p.session])]), cards);
+  const foot = `<div class="hint steer-note">${esc(t('Your live sessions and the conversation with the manager are never held.'))}</div>${changes}`;
+  draw('#steer-foot', JSON.stringify(s.changes), foot);
+}
+
+/** Sends a change; when it would hold work going on, the owner chooses first: let it finish or pause it now. */
+async function changeSteer(body) {
+  try {
+    const full = { ...body, until: steerUntilIso() };
+    const { held } = await api('/api/steer', { ...full, preview: true });
+    if (held.length) {
+      const names = [...new Set(held.map(h => projectName(h.project)))].join(', ');
+      const choice = await steerChoice(t('{list}: work going on now. What should happen to it?', { list: names }));
+      if (!choice) return;
+      full.running = choice;
+    }
+    const r = await api('/api/steer', full);
+    toast(r.paused.length ? t('{line}. The work going on pauses at a safe point.', { line: r.steer.line }) : r.steer.line);
+    steerPick.open = false;
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function steerChoice(text) {
+  const dialog = $('#steer-dialog');
+  $('#steer-dialog-text').textContent = text;
+  dialog.returnValue = '';
+  dialog.showModal();
+  return new Promise(resolve => dialog.addEventListener('close', () => resolve(['finish', 'pause'].includes(dialog.returnValue) ? dialog.returnValue : null), { once: true }));
+}
+
+document.addEventListener('click', event => {
+  const option = event.target.closest('[data-steer-to]');
+  if (option) {
+    if (option.getAttribute('aria-pressed') !== 'true') changeSteer({ action: 'project', project: option.dataset.steerProject, to: option.dataset.steerTo });
+    return;
+  }
+  const mode = event.target.closest('[data-steer-mode]');
+  if (mode) {
+    if (mode.dataset.steerMode === 'focus') {
+      steerPick.open = !steerPick.open;
+      steerPick.chosen = new Set(state.steer.mode === 'focus' ? state.steer.only : []);
+      drawSteer();
+    } else changeSteer({ action: mode.dataset.steerMode });
+    return;
+  }
+  if (event.target.closest('[data-steer-apply]')) changeSteer({ action: 'focus', projects: [...steerPick.chosen] });
+  else if (event.target.closest('[data-steer-cancel]')) {
+    steerPick.open = false;
+    drawSteer();
+  }
+});
+
+document.addEventListener('change', event => {
+  if (event.target.id === 'steer-until') steerUntil = event.target.value;
+  const pick = event.target.closest('[data-steer-pick]');
+  if (!pick) return;
+  if (pick.checked) steerPick.chosen.add(pick.dataset.steerPick);
+  else steerPick.chosen.delete(pick.dataset.steerPick);
+  // the ticks stay as they are (no redraw): only the button follows them
+  $('[data-steer-apply]').disabled = !steerPick.chosen.size;
+});
 
 function drawCounters() {
   const runs = going().length;
@@ -963,6 +1524,22 @@ function drawFavicon(mode) {
   iconMode = mode;
 }
 
+// The title as drawTitle makes it, and the call it blinks with while the app is out of sight (announceCalls).
+let baseTitle = 'Chiefmate';
+let blinkLine = '';
+let blinkOn = false;
+const setTitle = () => {
+  const title = blinkTitle(baseTitle, blinkLine, blinkOn);
+  if (document.title !== title) document.title = title;
+};
+// Every second, the call and the title in turn, until the owner is back on the app.
+setInterval(() => {
+  if (!blinkLine) return;
+  if (!document.hidden && document.hasFocus()) [blinkLine, blinkOn] = ['', false];
+  else blinkOn = !blinkOn;
+  setTitle();
+}, 1000);
+
 function drawTitle() {
   const runs = going();
   const a = runs[0];
@@ -980,7 +1557,8 @@ function drawTitle() {
     const more = fresh.filter(i => i.level !== 'info').length - 1;
     title = `${level === 'urgent' ? '!!' : '!'} ${first.title}${more > 0 ? ` (+${more})` : ''} · ${title.replace(/^[●○] /, '')}`;
   }
-  if (document.title !== title) document.title = title;
+  baseTitle = title;
+  setTitle();
   drawFavicon(level === 'urgent' || level === 'important' ? level : a ? 'running' : count ? 'queued' : level ?? '');
   // The badge on the app's icon in the taskbar, where the browser supports it: the urgent and important notices.
   const needs = fresh.filter(i => i.level !== 'info').length;
@@ -1013,9 +1591,9 @@ document.addEventListener('input', event => {
   if (key) replyDrafts.set(key, event.target.value);
 });
 
-/** The field to write an answer, with its "Send" button ("send": the button's attributes). */
-const replyField = (key, send, size = '') => `<div class="reply">
-    <textarea data-reply="${esc(key)}" rows="1" maxlength="2000" placeholder="${esc(t('Explain / another answer (optional)'))}" aria-label="${esc(t('Explain / another answer (optional)'))}">${esc(replyDrafts.get(key) ?? '')}</textarea>
+/** The field to write an answer, with its "Send" button ("send": the button's attributes; "label": what it asks for). */
+const replyField = (key, send, size = '', label = t('Explain / another answer (optional)')) => `<div class="reply">
+    <textarea data-reply="${esc(key)}" rows="1" maxlength="2000" placeholder="${esc(label)}" aria-label="${esc(label)}">${esc(replyDrafts.get(key) ?? '')}</textarea>
     <button type="button" class="button secondary${size}" ${send} data-reply-send>${esc(t('Send'))}</button>
   </div>`;
 
@@ -1094,7 +1672,9 @@ function attnNotice(i, brief = false) {
     : r && brief && r.options?.length ? `<a class="button small" href="#${esc(i.view)}">${esc(t('Answer'))}</a>`
     : r ? needsButtons({ ...r, project: i.project }, ' small')
     : decide ? `<a class="button small" href="#decisions">${esc(t('Decide'))}</a>`
-    : `${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
+    // the session renewing with usage to spare (src/spending.mjs): spend all until then, or not now
+    : i.kind === 'spare' ? `<button type="button" class="button small" data-session-boost="on">${esc(t('Spend all until {time}', { time: clockTime(i.until) }))}</button><button type="button" class="button secondary small" data-spending-dismiss>${esc(t('Not now'))}</button>`
+    : `${i.kind === 'reader-login' ? `<button type="button" class="button small" data-reader="login">${esc(t('Open the sign-in window'))}</button>` : ''}${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
   return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
       <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
       <div class="attn-text"><span class="attn-title">${esc(i.title)}</span> ${esc(i.text)}${brief ? '' : requestWhy(r)}${brief || !r?.run ? '' : requestReply(r.run, r, ' small')}${where || links.length ? `<span class="hint">${[esc(where), ...links].filter(Boolean).join(' · ')}</span>` : ''}${brief ? '' : permissionFacts(r?.explain, r?.id)}</div>
@@ -1119,6 +1699,28 @@ function attnList(list, label, { archived = false } = {}) {
   return `<div class="attn-list"${topLevel(list) === 'urgent' ? ' role="alert"' : ''}>${head}${list.map(i => attnNotice(i)).join('')}</div>`;
 }
 
+/**
+ * The same notices folded into one line (the mark, the count per level) and grouped by level once opened, so a long
+ * list doesn't push what is under it down. "key" keeps it open across redraws.
+ */
+function attnFold(list, label, key) {
+  if (!list.length) return '';
+  const named = { urgent: n => t('{count} urgent', { count: n }), important: n => t('{count} important', { count: n }), info: n => t('{count} for your information', { count: n }) };
+  const fresh = unseen(list);
+  // Each count in its level's color; the seen ones stay grey.
+  const counts = [...LEVELS.map(l => [fresh.filter(i => i.level === l).length, named[l], l]), [list.length - fresh.length, n => t('{count} seen', { count: n }), '']]
+    .filter(([n]) => n).map(([n, name, level]) => `<span${level ? ` data-level="${level}"` : ''}>${esc(name(n))}</span>`).join(' · ');
+  const groups = [...LEVELS.map(l => [levelName(l), list.filter(i => !i.seen && i.level === l)]), [t('Seen'), list.filter(i => i.seen)]]
+    .filter(([, items]) => items.length)
+    .map(([name, items]) => `<div class="attn-group"><span class="label">${esc(t('{label} ({count})', { label: name, count: items.length }))}</span></div>${items.map(i => attnNotice(i)).join('')}`).join('');
+  const fold = `<details class="attn-list attn-fold" data-keep-open="${esc(key)}">
+      <summary class="attn-head">${attnMark(list, '', true)}<span class="label">${esc(label)}</span><span class="attn-counts">${counts}</span><span class="attn-toggle"><span class="when-closed">${esc(t('See all'))}</span><span class="when-open">${esc(t('Hide'))}</span></span></summary>
+      ${groups}
+    </details>`;
+  // The alert goes around it: a details element takes no other role.
+  return topLevel(list) === 'urgent' ? `<div role="alert">${fold}</div>` : fold;
+}
+
 /** Why a notice went to the archive (src/attention.mjs). */
 const archivedWhy = reason => ({
   merged: t('Pull request merged'), closed: t('Pull request closed'), branch: t('Branch already merged'), deleted: t('Local branch deleted'),
@@ -1138,21 +1740,125 @@ function archiveHtml(items) {
   }).join('');
 }
 
+// ---------- Calls: a step of the crew needs you (src/needs.mjs, ui/calls.js) ----------
+// The call bar, at the top of every page (focus mode and phones too), above the notices' band: who calls (the agent's
+// face, name and role), the project and the task, what it needs and where its step stands, with Open (the agent's
+// panel), I did it, Answer here (the answer written in the bar: a question's options or the owner's own words) and Not
+// now (left for later: the step stops waiting and goes on). Several calls stack: the first in full, the others counted,
+// opening into all of them. A new call also blinks the title while the app is out of sight, shows the browser's
+// notification there and, when turned on, plays a short sound.
+
+let callsOpen = false; // every call shown, not only the first
+let callAnswer = null; // "<run>:<id>": the call whose answer is open in the bar
+const callsNow = () => (online ? callsOf(state?.needs) : []);
+const callKey = c => `${c.run}:${c.id}`;
+const callerName = c => (c.agent ? agentName(c.agent, c.project) : t('A step'));
+
+/** A call in the bar: its mark, the agent, the project and task, what it needs, its step's wait and the buttons. */
+function callHtml(c, count) {
+  const key = callKey(c);
+  const answering = callAnswer === key;
+  const question = !!c.options?.length;
+  const where = [c.project ? projectName(c.project) : '', c.title].filter(Boolean).join(' · ');
+  const meta = esc([waitLine(c, { t, clockTime }), t('called at {time}', { time: clockTime(c.at) })].join(' · '));
+  const address = c.url ? ` · <a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : '';
+  const answer = !answering ? '' : `<div class="call-answer">
+      ${question ? `${requestWhy(c)}${requestButtons(c.run, c, ' small')}` : `<span class="hint">${esc(t('What you write goes to the agent as your answer, and the call closes.'))}</span>`}
+      ${replyField(`req:${c.id}`, `data-needs-done="${esc(c.run)}" data-request="${esc(c.id)}"`, ' small', question ? undefined : t('Your answer to the agent'))}
+    </div>`;
+  const buttons = [
+    `<button type="button" class="button secondary small" data-call-open="${esc(c.run)}" title="${esc(t("The agent's panel: what it is doing, its request and your conversation with it"))}">${esc(t('Open'))}</button>`,
+    question ? '' : `<button type="button" class="button small" data-needs-done="${esc(c.run)}" data-request="${esc(c.id)}">${esc(t('I did it'))}</button>`,
+    `<button type="button" class="button${question && !answering ? '' : ' secondary'} small" data-call-answer="${esc(key)}" aria-expanded="${answering}">${esc(t('Answer here'))}</button>`,
+    `<button type="button" class="button secondary small" data-call-later="${esc(c.run)}" data-request="${esc(c.id)}" title="${esc(t('It stays in Operations for later; the agent stops waiting and goes on with what it can.'))}">${esc(t('Not now'))}</button>`,
+  ].join('');
+  return `<div class="call">
+      <span class="call-level"><span class="attn-mark" data-level="urgent" aria-hidden="true">${count > 1 ? count : ''}</span>${esc(t('Calling you'))}</span>
+      <span class="call-face" aria-hidden="true">${face(member(c.agent ?? 'manager', c.project), 'queued', 30)}</span>
+      <div class="call-body">
+        <div class="call-head"><span class="call-who">${esc(c.agent ? memberLabel(c.agent, c.project) : t('A step'))}</span>${where ? `<span class="call-where">${esc(where)}</span>` : ''}</div>
+        <div class="call-what">${esc(c.what)}</div>
+        <div class="call-meta">${meta}${address}</div>
+        ${answer}
+      </div>
+      <div class="call-actions">${buttons}</div>
+    </div>`;
+}
+
+/** The call bar, or '' with no call: the first call in full, then how many more (who and where), opening into all. */
+function callsBar() {
+  const calls = callsNow();
+  if (!calls.length) return '';
+  const { shown, more, count } = callsLayout(calls, callsOpen);
+  const others = calls.slice(1).map(c => [callerName(c), c.project ? projectName(c.project) : ''].filter(Boolean).join(', ')).join(' · ');
+  const stack = count > 1
+    ? `<button type="button" class="call-stack" data-calls-more aria-expanded="${callsOpen}">${callsOpen ? '' : `<span class="call-others">${esc(t('+{count} calling you: {who}', { count: more, who: others }))}</span>`}<span class="call-toggle">${esc(callsOpen ? t('Show less') : t('See all {count}', { count }))}</span></button>`
+    : '';
+  const label = count > 1 ? t('Calling you ({count})', { count }) : t('Calling you');
+  return `<section class="call-bar" role="alert" aria-label="${esc(label)}">
+      ${shown.map((c, i) => callHtml(c, i === 0 && !callsOpen ? count : 1)).join('')}
+      ${stack}
+    </section>`;
+}
+
+/** The notices the call bar shows: a crew step's call not left for later. */
+const inCallBar = i => i.kind === 'needs' && !!i.request?.run && !i.request.deferred;
+
+// The calls already announced in this page (null before the first reading, whose calls the bar shows unannounced).
+let knownCalls = null;
+let audio = null; // the sound's AudioContext, made on the owner's first click (browsers keep sound off until then)
+const wakeAudio = () => {
+  if (!soundOn(localStorage) || !('AudioContext' in window)) return;
+  audio ??= new AudioContext();
+  if (audio.state === 'suspended') audio.resume().catch(() => {});
+};
+document.addEventListener('pointerdown', wakeAudio, { capture: true });
+document.addEventListener('keydown', wakeAudio, { capture: true });
+
+/** A new call: the sound when turned on; out of sight, the blinking title and the browser's notification. */
+function announceCalls() {
+  const calls = callsNow();
+  const { fresh, known } = announce(calls, knownCalls);
+  knownCalls = known;
+  if (callAnswer && !calls.some(c => callKey(c) === callAnswer)) callAnswer = null;
+  if (!calls.length) blinkLine = '';
+  if (!fresh.length) return;
+  if (soundOn(localStorage)) {
+    wakeAudio();
+    chime(audio);
+  }
+  if (!document.hidden && document.hasFocus()) return;
+  const newest = fresh.at(-1);
+  if (!calm()) blinkLine = t('Calling you: {who}', { who: callerName(newest) });
+  if (notifyState({ Notification: window.Notification, here: onThisComputer(), storage: localStorage }) !== 'on') return;
+  const text = c => ({ title: t('{who} is calling you', { who: c.agent ? memberLabel(c.agent, c.project) : t('A step') }), body: [c.project ? projectName(c.project) : '', c.what].filter(Boolean).join(': ') });
+  const more = n => ({ title: t('Calling you'), body: t('{count} more calls are waiting in the app.', { count: n }) });
+  swReady().then(registration => notifyCalls(fresh, { Notification: window.Notification, registration, text, more }));
+}
+
+/** The service worker that shows the notifications (ui/sw.js; phones need one), or null where there is none. */
+function swReady() {
+  if (!('serviceWorker' in navigator) || !window.isSecureContext) return Promise.resolve(null);
+  return navigator.serviceWorker.register('/sw.js')
+    .then(() => Promise.race([navigator.serviceWorker.ready, new Promise(resolve => setTimeout(() => resolve(null), 3000))]))
+    .catch(() => null);
+}
+
 let attnOpen = false; // the band shows every notice, not only the most urgent
 /** The band at the top: the most urgent notice and how many others, opening into all of them. Nothing is paused. */
 function drawAlerts() {
-  // The notices with a decision card are left to the Decisions tab, and those a page lists (Operations, Planning, a
-  // project) to that page. The conversation shows only its own notices (the others mark their tabs), and none in focus
-  // mode. A permission asked shows there without its facts, as a way to them. On a phone, the band keeps its room for
-  // what needs the owner: the info notices stay in each section's list.
+  // The notices with a decision card are left to the Decisions tab, those a page lists (Operations, Planning, a
+  // project) to that page, and the crew's calls to the call bar above it. The conversation shows only its own notices
+  // (the others mark their tabs), and none in focus mode. A permission asked shows there without its facts, as a way
+  // to them. On a phone, the band keeps its room for what needs the owner: the info notices stay in each section's list.
   const phone = phoneQuery.matches;
   const carded = cardedIds();
   const view = currentView();
   const listed = { operations: ['operations', 'log'], planning: ['planning'] }[view] ?? [];
   const skip = i => (view === 'manager' ? i.view !== 'manager' : listed.includes(i.view) || (view === 'project' && ofProject(pageProject())(i)));
-  // The lockdown has its own red band, on every page and in focus mode too.
-  const band = lockdownBand();
-  const list = focusMode() ? [] : attnItems().filter(i => !carded.has(i.id) && !(phone && i.level === 'info') && !skip(i) && i.kind !== 'lockdown');
+  // The lockdown has its own red band, on every page and in focus mode too; so does the call bar.
+  const band = `${lockdownBand()}${callsBar()}`;
+  const list = focusMode() ? [] : attnItems().filter(i => !carded.has(i.id) && !inCallBar(i) && !(phone && i.level === 'info') && !skip(i) && i.kind !== 'lockdown');
   const fresh = unseen(list);
   if (!fresh.length && !attnOpen) return draw('#alerts', band, band);
   const others = fresh.length - 1;
@@ -1201,9 +1907,10 @@ function drawNavAttention() {
 }
 
 function drawStatusbar() {
-  $('#statusbar').classList.toggle('offline', !online); // phones show the bar only then
+  $('#statusbar').classList.toggle('offline', !online); // a lost connection shows on phones even while typing
   if (!online) {
-    draw('#statusbar', 'off', `<div class="group">${stateHtml([t('No connection to Chiefmate. Trying again…'), 'error'])}</div>`);
+    const text = lockedAfar ? t('Emergency lockdown: release it on the computer where Chiefmate runs.') : t('No connection to Chiefmate. Trying again…');
+    draw('#statusbar', `off ${text}`, `<div class="group">${stateHtml([text, 'error'])}</div>`);
     return;
   }
   const runs = going();
@@ -1215,15 +1922,35 @@ function drawStatusbar() {
   else if (state.queue.length) left = stateHtml([t('{count} in the queue', { count: state.queue.length }), 'info']);
   else left = stateHtml([t('Idle'), 'ok']);
   const claude = state.ai.claude;
+  const now = Date.now() + skew;
+  // Each window: its share and when it renews (live, as the state is read every few seconds); a phone shows the short name.
+  const usage = (cls, name, short, w) => {
+    const renews = resetLabel(w?.resets, now, { t, locale: locale() });
+    const title = w?.resets ? ` title="${esc(t('Resets {when} ({relative}).', { when: shortDate(w.resets), relative: relative(w.resets) }))}"` : '';
+    return `<span class="${cls}"${title}><span class="sb-long">${esc(name)}</span><span class="sb-short">${esc(short)}</span> <span class="num">${percent(w?.used)}</span>${renews ? ` · ${esc(renews)}` : ''}</span>`;
+  };
+  const left5h = spare(account.five_hour, now, t);
   const right = [
-    claude.found ? `Claude Code <span class="num">${esc(claude.version ?? '')}</span>` : esc(claude.found === false ? t('Claude Code not found') : t('Checking Claude Code…')),
-    `${esc(t('5-hour window'))} <span class="num">${percent(account.five_hour?.used)}</span>`,
-    `${esc(t("Plan's week"))} <span class="num">${percent(account.seven_day?.used)}</span>`,
-    `${esc(t('Free memory'))} <span class="num">${percent(state.computer.memory.free / state.computer.memory.total)}</span>`,
-  ].map(s => `<span>${s}</span>`).join('');
-  const html = `<div class="group">${left}</div><div class="group">${right}</div>`;
+    `<span class="sb-desk">${claude.found ? `Claude Code <span class="num">${esc(claude.version ?? '')}</span>` : esc(claude.found === false ? t('Claude Code not found') : t('Checking Claude Code…'))}</span>`,
+    left5h ? `<span class="sb-spare">${esc(t('{free} spare, renews in {left}', { free: percent(left5h.free), left: left5h.left }))} · <a href="#usage" data-goto="spending">${esc(t('Session'))}</a></span>` : '',
+    usage('sb-five', t('5-hour window'), t('5 h'), account.five_hour),
+    usage('sb-week', t("Plan's week"), t('Week'), account.seven_day),
+    `<span class="sb-desk">${esc(t('Free memory'))} <span class="num">${percent(state.computer.memory.free / state.computer.memory.total)}</span></span>`,
+  ].join('');
+  const html = `<div class="group sb-run">${left}</div><div class="group">${right}</div>`;
   draw('#statusbar', html, html);
 }
+// The status bar's shortcut to the session's spending: to the Usage section, its panel in view. Not the browser's own jump to
+// #usage (the meters, at the top); a hidden section can't be scrolled, so the panel waits for showView's hashchange.
+$('#statusbar').addEventListener('click', e => {
+  const link = e.target.closest('a[data-goto]');
+  if (!link) return;
+  e.preventDefault();
+  const go = () => $(`#${link.dataset.goto}`)?.scrollIntoView({ block: 'start', behavior: calm() ? 'auto' : 'smooth' });
+  if (location.hash === link.hash) return go();
+  addEventListener('hashchange', go, { once: true });
+  location.hash = link.hash;
+});
 
 function drawClock() {
   $('#clock').textContent = new Date().toLocaleString(locale(), { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -1382,11 +2109,15 @@ $('#decisions').addEventListener('click', async event => {
   if (c.kind === 'merge' && action === 'approve' && !(await confirmDialog(t('Approve and merge'), `${c.label}: ${c.title}. ${how}`, t('Approve'), t("A merge can't be undone from Chiefmate.")))) return;
   const closes = c.url ? t('The pull request is closed on GitHub; it can be reopened there.') : t('The branch stays in your clone, not merged.');
   if (c.kind === 'merge' && action === 'discard' && !(await confirmDialog(t('Discard this work'), `${c.label}: ${c.title}. ${closes}`, t('Discard'), t("This can't be undone from Chiefmate.")))) return;
-  // Allowing a push is confirmed too: it lets the manager send that branch to GitHub once.
-  const used = t('You can take the permission back until the manager uses it; what is sent to GitHub then stays there.');
-  if (c.kind === 'push' && action === 'approve' && !(await confirmDialog(t('Allow this push'), `${c.title}. ${c.what} ${c.change}`, t('Allow push'), used))) return;
+  // Allowing a push is confirmed too: it lets the manager (or the session that asked) send that branch to GitHub once
+  // (the main branch, with its risk). The permission can be taken back until it is used; what is sent stays sent.
+  const used = t('You can take the permission back until it is used; what is sent to GitHub then stays there.');
+  if (c.kind === 'push' && action === 'approve' && !(await confirmDialog(t('Allow this push'), `${c.title}. ${c.what} ${c.change}${c.main ? ` ${c.risk}` : ''}`, t('Allow push'), used))) return;
   // And creating a repository: the manager may then create it, private, and send the folder once.
   if (c.kind === 'repo' && action === 'approve' && !(await confirmDialog(t('Allow this repository'), `${c.what} ${c.change}`, t('Allow creation'), used))) return;
+  // Restarting the computer takes a strong confirmation, as shutting it down: no accidental click.
+  if (c.restartYes && action === 'answer' && button.dataset.option === c.restartYes
+    && !(await strongConfirm(t('Restart the computer'), [c.title, c.what].filter(Boolean).join('\n\n'), c.restartYes, t('RESTART')))) return;
   // What the owner wrote goes with the answer; "Send" needs something written.
   const note = action === 'answer' ? replyText(`card:${c.id}`) : '';
   if (button.hasAttribute('data-reply-send') && !note) return toast(t('Write your answer first.'));
@@ -1395,14 +2126,17 @@ $('#decisions').addEventListener('click', async event => {
   try {
     const r = await api('/api/decide', { card: c.id, action, option: button.dataset.option, note });
     if (r.done === 'answered') replyDrafts.delete(`card:${c.id}`);
-    // What can be undone gets the band ("Done: … Undo"); a merge or a discard only the toast.
+    // What can be undone gets the band ("Done: … Undo"); the rest (a merge, a discard, a restart) only the toast.
     const answer = [r.answer, r.note].filter(Boolean).join(' — ');
     const word = r.done === 'answered' ? t('answered "{answer}"', { answer }) : r.done === 'later' && c.thirdParty ? t('hidden') : decisionWord(r.done);
     if (r.logged) showUndo(r.logged, word, c.title);
     else {
       toast({
         merged: [t('Merged.'), r.merge?.copiesNote].filter(Boolean).join(' '), discarded: t('Discarded.'),
-        already_merged: t('Branch already merged'), branch_deleted: t('Local branch deleted'), answered: t('Answer sent to the manager: {answer}', { answer }),
+        already_merged: t('Branch already merged'), branch_deleted: t('Local branch deleted'),
+        approved: t('Approved: it becomes a task for its agent, in its turn.'),
+        allowed: c.session ? t('Allowed: the session is told and may send it once now.') : t('Allowed: the manager may send it once now.'),
+        refused: c.session ? t('Refused: the session is told.') : t('Refused: the manager is told.'), answered: t('Answer sent to the manager: {answer}', { answer }),
       }[r.done] ?? word);
     }
   } catch (error) {
@@ -1421,7 +2155,17 @@ const newsEvent = kind => ({
   memory_alert: t('memory alert'), usage_alert: t('usage alert'), session_ended: t('live session ended'), plan_proposed: t('new proposal'),
   idle: t('empty queue'), autopilot_report: t('autopilot report'), watchdog: t('watchdog'), lockdown: t('emergency lockdown'), security_warning: t('security warning'),
   away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'), power: t('power mode'),
+  owner_working: t('you working now'), defect: t('defect reported'), agent_message: t('message from an agent'), focus: t('focus changed'),
+  run_parked: t('run parked'), quarantine: t('antivirus quarantine'), session_spare: t('session with usage to spare'),
 }[kind] ?? kind);
+
+// Who wrote an agent's message to the manager (a live session or a step of a run, from the command line).
+const senderName = s => {
+  const agent = s?.agent ?? t('An agent');
+  if (s?.kind === 'session') return t('{agent} · session {name}', { agent, name: s.name ?? s.id });
+  if (s?.kind === 'step') return t('{agent} · step {step} of {run}', { agent, step: s.step ?? '?', run: s.name ?? s.id });
+  return agent;
+};
 
 let chatScrolled = false;
 function drawChat() {
@@ -1433,6 +2177,12 @@ function drawChat() {
   for (const m of g.messages) {
     if (m.who === 'system') {
       html += `<div class="msg system">${esc(m.text)}</div>`;
+      continue;
+    }
+    // An agent's message (chat say from a session or a step): never shown as yours.
+    if (m.who === 'agent') {
+      const about = [clockTime(m.at), m.sender?.project ?? '', m.sender?.tool ?? ''].filter(Boolean).join(' · ');
+      html += `<div class="msg agent"><div class="msg-head"><span class="msg-author">${esc(senderName(m.sender))}</span><span class="msg-meta">${esc(about)}</span><span class="tag">${esc(t('agent, not you'))}</span></div><div class="msg-body">${md(m.text)}</div></div>`;
       continue;
     }
     const you = m.who === 'you';
@@ -1495,6 +2245,13 @@ function drawChatQueue() {
         <span class="queued-actions"><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
       <div class="msg-body">${(m.events ?? []).map(e => `<div class="news-event"><time>${esc(clockTime(e.at))}</time> ${esc(newsEvent(e.kind))}</div>`).join('')}</div>
     </div>`
+    : m.from === 'agent'
+    // An agent's message: not yours, so it can't be edited (only removed).
+    ? `<div class="queued-msg agent" data-pending="${esc(m.id)}">
+      <div class="msg-head"><span class="tag">${esc(t('from an agent'))}</span><span class="msg-meta">${esc([clockTime(m.at), senderName(m.sender)].join(' · '))}</span>
+        <span class="queued-actions"><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
+      <div class="msg-body">${md(m.text)}</div>
+    </div>`
     : `<div class="queued-msg" data-pending="${esc(m.id)}">
       <div class="msg-head"><span class="tag">${esc(t('queued'))}</span><span class="msg-meta">${esc([clockTime(m.at), m.edited ? t('edited') : ''].filter(Boolean).join(' · '))}</span>
         <span class="queued-actions"><button type="button" class="button secondary small" data-pending-edit="${esc(m.id)}">${esc(t('Edit'))}</button><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
@@ -1549,7 +2306,7 @@ function drawBridge() {
   else if (online && !job && update.waiting && !['changes', 'merge'].includes(update.blocked)) updateButton = `<button type="button" class="button small" data-update-now="now">${esc(t('Update now'))}</button>`;
   const roster = others.map(a => {
     const s = agentStatus(a);
-    return `<li>${face(a, faceState(a), 30, `${t(a.name)}: ${s[0]}`)}<div><div class="roster-name"><span>${esc(t(a.name))}</span>${stateHtml(s)}</div><div class="hint">${esc(agentDetail(a))} · ${esc(TOOL_LABELS[a.tool] && a.tool !== 'claude' ? `${TOOL_LABELS[a.tool]} · ` : '')}${esc(modelLabel(a))}</div></div></li>`;
+    return `<li>${face(a, faceState(a), 30, `${t(a.name)}: ${s[0]}`)}<div><div class="roster-name"><span>${esc(t(a.name))}</span>${stateHtml(s)}</div><div class="hint">${esc(agentDetail(a))} · ${esc(TOOL_LABELS[a.tool] && a.tool !== 'claude' ? `${TOOL_LABELS[a.tool]} · ` : '')}${esc(modelLabel(a))}</div>${speechBubble(speechFor(a.id))}</div></li>`;
   });
   const html = `
     <div class="bridge-head">${face(manager, faceState(manager), 72, `${t(manager.name)}: ${status[0]}`)}
@@ -1559,7 +2316,7 @@ function drawBridge() {
     <div class="label">${esc(t('Crew on board'))}</div>
     <ul class="roster">${roster.join('')}</ul>
     <div class="connection hint">${esc(claudeLine)}<br>${esc(accountLine)}${online && account.updated ? ` · ${esc(t('measured {when}', { when: relative(account.updated) }))}` : ''}${updateLine ? `<br>${esc(updateLine)}` : ''}${updateButton ? `<div class="actions left update-actions">${updateButton}</div>` : ''}</div>`;
-  const signature = JSON.stringify([online, (state?.crew ?? []).map(a => [a.id, a.status, a.run, a.last?.at, a.model, a.tool]), claude, account, update, Math.floor(Date.now() / 60000)]);
+  const signature = JSON.stringify([online, (state?.crew ?? []).map(a => [a.id, a.status, a.run, a.last?.at, a.model, a.tool]), roster, claude, account, update, Math.floor(Date.now() / 60000)]);
   draw('#bridge', signature, html);
 }
 
@@ -1578,30 +2335,271 @@ function drawSituation() {
 
 // ---------- Operations ----------
 
-/** The queue, numbered in the order it will run, with the next run marked. */
+// ---------- The queue's controls: the owner moves, holds and releases runs, "Do now" and cancel (src/queue.mjs) ----------
+
+const CHEVRON = { up: 'M2.5 7.5 6 4l3.5 3.5', down: 'M2.5 4.5 6 8l3.5-3.5' };
+const chevron = dir => `<svg viewBox="0 0 12 12" aria-hidden="true"><path d="${CHEVRON[dir]}" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>`;
+
+/** Who holds a run and until when, in a tag: by you, by the manager, or by your "Do now" of another run. */
+const holdTag = h => `<span class="tag held" title="${esc(holdWhy(h))}">${esc(h.by === 'owner' ? t('Held by you') : t('Held by the manager'))}</span>`;
+
+/** Why a held run waits, in one line: the reason given, or the run to do now. */
+const holdWhy = h => (h.doNow ? t('Waits for “{title}” to end (Do now)', { title: h.doNow.title })
+  : h.reason ? t('Why: {reason}', { reason: h.reason }) : h.by === 'owner' ? t('No reason given') : t('Held by the manager, no reason given'));
+
+/** A run's marks in the queue: do now, held (by whom), resumes first. */
+const queueTags = r => `${r.doNow ? `<span class="tag do-now">${esc(t('Do now'))}</span>` : ''}${r.hold ? holdTag(r.hold) : ''}${r.first ? `<span class="tag first" title="${esc(t("It keeps its project's working copy as its step left it, so it goes first."))}">${esc(t('Resumes first'))}</span>` : ''}`;
+
+/**
+ * A queued run's controls: up and down (within the list shown: prev and next, or the whole queue), Release when held,
+ * and the menu with the rest (to the top, Do now, hold, cancel). list: the whole queue, for the place at the top.
+ */
+function queueControls(r, { prev = null, next = null, list = queueOrder(), key = 'all' } = {}) {
+  const id = esc(r.id);
+  const firsts = list.filter(x => x.first).length;
+  const top = !r.first && list.indexOf(r) > firsts;
+  const move = (dir, target) => {
+    const where = key === 'all' ? `data-where="${dir}"` : `data-where="${dir === 'up' ? 'before' : 'after'}" data-other="${esc(target?.id ?? '')}"`;
+    const label = dir === 'up' ? t('Move “{title}” up', { title: r.title }) : t('Move “{title}” down', { title: r.title });
+    const off = r.first || !target || target.first;
+    return `<button type="button" class="button secondary small queue-move" data-queue="move" data-id="${id}" ${where} aria-label="${esc(label)}" title="${esc(dir === 'up' ? t('Up one place') : t('Down one place'))}"${off ? ' disabled' : ''}>${chevron(dir)}</button>`;
+  };
+  const item = (action, label, extra = '') => `<button type="button" class="menu-item${action === 'cancel' ? ' danger' : ''}" data-queue="${action}" data-id="${id}" ${extra}>${esc(label)}</button>`;
+  const held = r.hold && !r.hold.doNow;
+  const items = [
+    top ? item('move', t('Move to the top'), 'data-where="top"') : '',
+    r.doNow ? item('do-now-end', t('Release the others')) : item('do-now', t('Do now…')),
+    held ? item('release', t('Release it')) : r.keepsCopy || r.doNow ? '' : item('hold', r.hold ? t('Hold until you release it…') : t('Hold…')),
+    item('cancel', t('Cancel…')),
+  ].join('');
+  return `${move('up', prev)}${move('down', next)}${held ? `<button type="button" class="button secondary small" data-queue="release" data-id="${id}">${esc(t('Release it'))}</button>` : ''}<details class="menu queue-menu" data-keep-open="queue-menu-${key}-${id}"><summary class="button secondary small" aria-label="${esc(t('Actions for “{title}”', { title: r.title }))}">${esc(t('Actions'))}</summary><div class="menu-list">${items}</div></details>`;
+}
+
+/** When a queued run is expected to start, given what holds it (the owner, the manager, a "Do now", the focus). */
+function queueStart(r, expected) {
+  const steer = state.steer?.projects.find(p => p.id === r.project)?.hold ?? null;
+  if (r.hold) return r.hold.doNow ? t('after the “Do now” run') : r.hold.by === 'owner' ? t('when you release it') : t('when the manager releases it');
+  if (steer) return { paused: t('when you resume its project'), all: t('when you resume the work'), focus: t('when the focus ends') }[steer];
+  if (r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew) return `${shortDate(r.notBefore)} (${relative(r.notBefore)})`;
+  return expected();
+}
+
+/** The owner's "Do now" in force: which run goes first, which wait, and the button that lets them go now. */
+function doNowBand() {
+  const d = state.queueControl?.doNow;
+  if (!d) return '';
+  const waits = d.scope === 'all' ? t('every other run waits until it ends') : t('the other runs of {project} wait until it ends', { project: projectName(d.project) });
+  return `<div class="do-now-band" role="status"><span class="tag do-now">${esc(t('Do now'))}</span>
+    <span class="do-now-text"><strong>${esc(d.title)}</strong> · ${esc(projectName(d.project))}: ${esc(waits)}, ${esc(t('then they go on by themselves.'))}</span>
+    <button type="button" class="button secondary small" data-queue="do-now-end">${esc(t('Release the others'))}</button></div>`;
+}
+
+/** A change to the queue, in words: who moved, held, released, chose to do now or canceled which run. */
+function queueChangeText(c) {
+  const who = c.by === 'owner' ? t('You') : c.by === 'manager' ? t('The manager') : 'Chiefmate';
+  const title = c.title ?? c.run;
+  switch (c.action) {
+    case 'move': return c.to === 'top' ? t('{who} moved “{title}” to the top', { who, title }) : c.to === 'up' ? t('{who} moved “{title}” up', { who, title })
+      : c.to === 'down' ? t('{who} moved “{title}” down', { who, title }) : t('{who} moved “{title}” to place {place}', { who, title, place: c.place });
+    case 'hold': return c.reason ? t('{who} held “{title}”: {reason}', { who, title, reason: c.reason }) : t('{who} held “{title}”', { who, title });
+    case 'release': return t('{who} released “{title}”', { who, title });
+    case 'do-now': return c.scope === 'all' ? t('{who} chose “{title}” to do now; every other run waits', { who, title }) : t('{who} chose “{title}” to do now; the others of its project wait', { who, title });
+    case 'do-now-end': return t('{who} released the runs held for “{title}”', { who, title });
+    case 'do-now-ended': return t('“{title}” ended: the runs it held went on by themselves', { title });
+    case 'cancel': return t('{who} canceled “{title}”', { who, title });
+    default: return `${who}: ${c.action} “${title}”`;
+  }
+}
+
+// A drag of a row of the queue going on (a mouse or a pen): the queue is not drawn again meanwhile (at most a minute, in
+// case the row went away with the drag).
+let queueDrag = null;
+
+/** The queue, numbered in the order it will run, with the next run marked, what holds each run and the controls. */
 function drawQueue() {
+  if (queueDrag && Date.now() - queueDrag.at < 60_000) return;
+  queueDrag = null;
   const list = queueOrder();
   // Runs of different projects go on at once, up to the limit; within a project, one at a time.
   const busy = new Set(going().map(a => a.project));
   let room = (state.parallel?.max ?? 1) - going().length;
-  const expected = r => {
+  // a project the owner's focus holds (src/steer.mjs) starts nothing: its runs wait, and none of them is next; nor a
+  // run held in the queue
+  const steerHold = id => state.steer?.projects.find(p => p.id === id)?.hold ?? null;
+  const expected = r => () => {
     if (busy.has(r.project)) return t('when the run of its project ends');
     busy.add(r.project);
     return room-- > 0 ? t('in a moment') : t('when a run ends');
   };
-  const rows = list.map((r, i) => `<tr class="${i === 0 ? 'next' : ''}">
-      <td class="num">${i + 1}</td>
-      <td>${i === 0 ? `<span class="tag">${esc(t('Next'))}</span>` : ''}${lateTag(r)}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span></td>
-      <td>${stateHtml(runState(r.status))}</td>
-      <td class="num">${r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? `${shortDate(r.notBefore)} (${esc(relative(r.notBefore))})` : esc(expected(r))}</td>
-      <td class="row-actions"><button type="button" class="button danger small" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button></td>
+  // the run the server starts next (focus in src/queue.mjs): the first free one ready now, else the one that waits the least
+  const startable = list.filter(r => !steerHold(r.project) && !r.hold);
+  const soon = r => !r.notBefore || new Date(r.notBefore).getTime() <= Date.now() + skew;
+  const next = startable.find(soon) ?? [...startable].sort((x, y) => x.notBefore.localeCompare(y.notBefore))[0];
+  const rows = list.map((r, i) => `<tr class="${r === next ? 'next' : ''}" data-queue-row="${esc(r.id)}"${r.hold ? ` data-held="${r.hold.doNow ? 'do-now' : r.hold.by}"` : ''}${r.first ? ' data-pinned' : ''}>
+      <td class="num queue-place"${r.first ? '' : ` draggable="true" title="${esc(t('Drag to change the order'))}"`}><span class="queue-grip" aria-hidden="true"></span>${i + 1}</td>
+      <td>${r === next ? `<span class="tag">${esc(t('Next'))}</span>` : ''}${lateTag(r)}${queueTags(r)}<span class="primary">${esc(r.title)}</span>${summaryLine(r)}<span class="secondary">${esc([projectName(r.project), ...runToolsLabel(r), r.note].filter(Boolean).join(' · '))}</span>${r.hold ? `<span class="queue-why">${esc(holdWhy(r.hold))}</span>` : ''}</td>
+      <td class="queue-start">${r.status !== 'queued' || r.needsYou ? `${stateHtml(runLabel(r))}<br>` : ''}${esc(queueStart(r, expected(r)))}</td>
+      <td class="row-actions queue-actions"><div class="queue-buttons">${queueControls(r, { prev: list[i - 1], next: list[i + 1], list })}</div></td>
     </tr>`);
-  const html = list.length
-    ? `<div class="label" style="margin-top:24px">${esc(t('Queue'))}</div>
-    <table class="table queue"><thead><tr><th>#</th><th>${esc(t('Run'))}</th><th>${esc(t('Status'))}</th><th>${esc(t('Expected start'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
+  const changes = state.queueControl?.changes ?? [];
+  const history = changes.length
+    ? `<details class="steer-history queue-history" data-keep-open="queue-history"><summary>${esc(t('Latest changes to the queue ({count})', { count: changes.length }))}</summary><ul>${changes.map(c => `<li><span class="hint">${esc(shortDate(c.at))}</span> ${esc(queueChangeText(c))}</li>`).join('')}</ul></details>`
     : '';
-  draw('#op-queue', JSON.stringify([going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools, r.due]), Math.floor(Date.now() / 60000)]), html);
+  const html = list.length || state.queueControl?.doNow
+    ? `<div class="label" style="margin-top:24px">${esc(t('Queue'))}</div>${doNowBand()}
+    ${list.length ? `<table class="table queue"><thead><tr><th>#</th><th>${esc(t('Run'))}</th><th>${esc(t('Expected start'))}</th><th><span class="visually-hidden">${esc(t('Actions'))}</span></th></tr></thead><tbody>${rows.join('')}</tbody></table>` : ''}${history}`
+    : history ? `<div class="label" style="margin-top:24px">${esc(t('Queue'))}</div><div class="hint">${esc(t('Nothing in the queue'))}</div>${history}` : '';
+  const signature = [going().map(a => a.project), state.parallel, list.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.note, r.tools, r.due, r.needsYou, steerHold(r.project), r.hold, r.first, r.keepsCopy, r.doNow]), state.queueControl, Math.floor(Date.now() / 60000)];
+  if (draw('#op-queue', JSON.stringify(signature), html)) restoreQueueFocus();
 }
+
+// After a move with ▲ or ▼, the focus stays on the same button of the run moved, so the keyboard can go on (for the
+// redraws of the next few seconds: the list is drawn again once the move is saved).
+let queueFocus = null;
+
+function restoreQueueFocus() {
+  if (!queueFocus) return;
+  if (Date.now() - queueFocus.at > 4000) {
+    queueFocus = null;
+    return;
+  }
+  // the same arrow, or the other one once the run reached the end of the list
+  const { id, where } = queueFocus;
+  const buttons = [...document.querySelectorAll('[data-queue="move"]')].filter(b => b.dataset.id === id && !b.disabled && b.dataset.where !== 'top');
+  const button = buttons.find(b => b.dataset.where === where) ?? buttons[0];
+  if (button && document.activeElement !== button) button.focus({ preventScroll: true });
+}
+
+/** "Do now": which runs wait until it ends (those of its project, or all the others), or null when the owner gives up. */
+function doNowChoice(r) {
+  const dialog = $('#do-now-dialog');
+  const name = projectName(r.project);
+  $('#do-now-text').textContent = t('“{title}” goes to the top of the queue. Which runs wait until it ends? Then they go on by themselves.', { title: r.title });
+  const notes = [];
+  if (going().some(a => a.project === r.project)) notes.push(t('{project} has a run going on now: it finishes first, then this one starts.', { project: name }));
+  if (state.steer?.projects.find(p => p.id === r.project)?.hold) notes.push(t('Its project is held in Focus: it starts only once you free it there.'));
+  const current = state.queueControl?.doNow;
+  if (current && current.run !== r.id) notes.push(t('It takes the place of “{title}” as the run to do now: the runs held for it go on.', { title: current.title }));
+  $('#do-now-note').textContent = notes.join(' ');
+  $('#do-now-note').hidden = !notes.length;
+  $('#do-now-project').textContent = t('Only those of {project}', { project: name });
+  dialog.returnValue = '';
+  dialog.showModal();
+  return new Promise(resolve => dialog.addEventListener('close', () => resolve(['project', 'all'].includes(dialog.returnValue) ? dialog.returnValue : null), { once: true }));
+}
+
+/** Hold: the reason the owner gives (it shows in the queue), '' for none, or null when they give up. */
+function holdChoice(r) {
+  const dialog = $('#hold-dialog');
+  const field = $('#hold-reason');
+  $('#hold-text').textContent = t('“{title}” keeps its place in the queue and doesn’t start until you release it.', { title: r.title });
+  field.value = r.hold?.reason ?? '';
+  dialog.returnValue = '';
+  dialog.showModal();
+  field.focus();
+  return new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue === 'hold' ? field.value.trim() : null), { once: true }));
+}
+
+// Enter in the reason holds (the form's first button is Cancel).
+document.addEventListener('keydown', event => {
+  if (event.key === 'Enter' && event.target.id === 'hold-reason') {
+    event.preventDefault();
+    $('#hold-dialog').close('hold');
+  }
+});
+
+/** Sends a change to the queue (the owner's key goes with it) and shows the queue as it is now. */
+async function changeQueue(body, done) {
+  await api('/api/queue', body);
+  if (done) toast(done);
+  await refresh();
+}
+
+document.addEventListener('click', async event => {
+  const button = event.target.closest('[data-queue]');
+  if (!button || button.disabled) return;
+  const { queue: action, id = '', where, other } = button.dataset;
+  const r = queueOrder().find(x => x.id === id);
+  try {
+    if (action === 'move') {
+      const body = { action: 'move', id, ...(where === 'before' || where === 'after' ? { [where]: other } : { [where]: true }) };
+      if (where !== 'top') queueFocus = { id, where, at: Date.now() };
+      await changeQueue(body, where === 'top' ? t('“{title}” is now at the top of the queue.', { title: r?.title ?? '' }) : '');
+    } else if (action === 'release') {
+      await changeQueue({ action: 'release', id }, t('Released: “{title}” waits for its turn again.', { title: r?.title ?? '' }));
+    } else if (action === 'hold' && r) {
+      const reason = await holdChoice(r);
+      if (reason === null) return;
+      await changeQueue({ action: 'hold', id, reason }, t('Held: “{title}” keeps its place until you release it.', { title: r.title }));
+    } else if (action === 'do-now' && r) {
+      const scope = await doNowChoice(r);
+      if (!scope) return;
+      await changeQueue({ action: 'do-now', id, scope }, t('Do now: “{title}” goes first.', { title: r.title }));
+    } else if (action === 'do-now-end') {
+      await changeQueue({ action: 'do-now-end' }, t('The runs held for “Do now” go on.'));
+    } else if (action === 'cancel' && r) {
+      const ok = await confirmDialog(t('Cancel run'), t('“{title}” leaves the queue without running. You can resume it later from its page in the Log.', { title: r.title }), t('Cancel run'));
+      if (!ok) return;
+      await changeQueue({ action: 'cancel', id }, t('Canceled.'));
+    }
+  } catch (error) {
+    queueFocus = null;
+    toast(error.message);
+  }
+});
+
+// Dragging a row of the queue by its place (a mouse or a pen): a brass line shows where it goes, and the drop moves it.
+const dropMarks = () => document.querySelectorAll('[data-queue-row][data-drop]');
+
+function endQueueDrag() {
+  for (const row of dropMarks()) delete row.dataset.drop;
+  document.querySelector('[data-queue-row].dragging')?.classList.remove('dragging');
+  queueDrag = null;
+}
+
+document.addEventListener('dragstart', event => {
+  const handle = event.target.closest?.('.queue-place[draggable="true"]');
+  const row = handle?.closest('[data-queue-row]');
+  if (!row) return;
+  queueDrag = { id: row.dataset.queueRow, at: Date.now() };
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', queueDrag.id);
+  event.dataTransfer.setDragImage(row, 16, 16);
+  row.classList.add('dragging');
+});
+
+document.addEventListener('dragover', event => {
+  if (!queueDrag) return;
+  const row = event.target.closest?.('[data-queue-row]');
+  for (const marked of dropMarks()) if (marked !== row) delete marked.dataset.drop;
+  if (!row || row.dataset.queueRow === queueDrag.id || row.hasAttribute('data-pinned')) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+  const box = row.getBoundingClientRect();
+  row.dataset.drop = event.clientY > box.top + box.height / 2 ? 'after' : 'before';
+});
+
+document.addEventListener('drop', async event => {
+  if (!queueDrag) return;
+  const row = event.target.closest?.('[data-queue-row][data-drop]');
+  const { id } = queueDrag;
+  const where = row?.dataset.drop;
+  const other = row?.dataset.queueRow;
+  endQueueDrag();
+  if (!row) return;
+  event.preventDefault();
+  try {
+    await changeQueue({ action: 'move', id, [where]: other }, '');
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+document.addEventListener('dragend', () => {
+  if (!queueDrag) return;
+  endQueueDrag();
+  drawQueue();
+});
 
 /** A run going on: who is at work, the step out of how many, the time counting and the last action, all live. */
 function liveCard(a, key) {
@@ -1619,6 +2617,7 @@ function liveCard(a, key) {
         <div class="hint">${esc([projectName(a.project), kindLabel(a.kind), ...runToolsLabel(a), t('started at {time}', { time: clockTime(a.started) })].join(' · '))}</div>
       </div>
       <div class="live-clock"><span class="label">${esc(t('Elapsed'))}</span><strong>${ticking(a.started)}</strong></div>
+      <div class="live-speech" id="${key}-speech"></div>
       <div class="live-progress">
         <div class="live-step"><strong>${esc(t('Step {n} of {total}', { n: a.step ?? 1, total: a.steps.length }))}</strong> · ${esc(who)}${step && stepRole(step) ? ` · ${esc(stepRole(step))}` : ''}${a.agent && a.stepStarted ? ` · ${ticking(a.stepStarted)} ${esc(t('on this step'))}` : ''}</div>
         <div class="live-steps">${segments.join('')}</div>
@@ -1666,7 +2665,12 @@ function drawRun(a) {
   if (block && block.dataset.level !== (a.needsYou ? 'urgent' : '')) block.dataset.level = a.needsYou ? 'urgent' : '';
   const statuses = a.steps.map(s => s.status);
   const working = a.agent ? member(a.agent, a.project) : null;
-  if (draw(`#${k}-live`, JSON.stringify([online, a.title, a.summary, a.step, a.agent, a.stepStarted, statuses, working?.status]), liveCard(a, k))) delete signatures[`#${k}-last`];
+  if (draw(`#${k}-live`, JSON.stringify([online, a.title, a.summary, a.step, a.agent, a.stepStarted, statuses, working?.status]), liveCard(a, k))) {
+    delete signatures[`#${k}-last`];
+    delete signatures[`#${k}-speech`];
+  }
+  const said = a.agent && a.speech?.now ? speechBubble({ run: a, line: a.speech.now, quiet: false }) : '';
+  draw(`#${k}-speech`, said, said);
   const last = a.actions.at(-1);
   draw(`#${k}-last`, JSON.stringify([last?.at, last?.text, a.doing]), lastAction(a));
   const steps = a.steps.map((s, i) => `<li${s.status === 'running' ? opensPanel(a.id) : ''}>${face(member(s.agent, a.project), online ? stepFace(s) : 'offline', 30)}<div><div class="name">${i + 1}. ${esc(agentName(s.agent, a.project))}${stepRole(s) ? `, ${esc(stepRole(s))}` : ''}</div><div class="hint">${esc(runState(s.status)[0])}${s.status === 'running' && a.stepStarted ? ` · ${ticking(a.stepStarted)}` : ''}</div></div></li>`);
@@ -1707,6 +2711,7 @@ function leadPlan(a) {
 }
 
 function drawOperations() {
+  drawSteer();
   const runs = going();
   const parallel = state.parallel?.max ?? 1;
   const head = runs.length > 1 || (runs.length && parallel > 1)
@@ -1852,7 +2857,7 @@ function livePhaseLine(x) {
 }
 
 function liveFeedHtml(x) {
-  const agent = x.charge && state.charge?.[x.project] ? t(state.charge[x.project].name) : toolName(x.tool);
+  const agent = (x.charge || x.work) && state.charge?.[x.project] ? t(state.charge[x.project].name) : toolName(x.tool);
   let html = '';
   let actions = [];
   const flush = () => {
@@ -1872,10 +2877,12 @@ function liveFeedHtml(x) {
     } else if (e.kind === 'say') {
       html += `<div class="msg manager"><div class="msg-head"><span class="msg-author">${esc(agent)}</span><span class="msg-meta">${esc(clockTime(e.at))}</span></div><div class="msg-body">${md(e.text)}</div></div>`;
     } else if (e.kind === 'request') {
-      html += `<div class="msg system ask">${esc(e.text)}</div>`;
+      html += e.status && e.status !== 'pending' ? requestAnswerHtml(e, x.project) : `<div class="msg system ask">${esc(e.text)}</div>`;
     } else if (e.kind === 'permission') {
       const said = { open: t('The agent asked your permission: {what}', { what: e.text }), done: t('You allowed: {what}', { what: e.text }), refused: t('You refused: {what}', { what: e.text }) }[e.status] ?? e.text;
       html += `<div class="msg system ask">${esc(said)}</div>`;
+    } else if (e.by === 'system') {
+      html += `<div class="msg system${e.error ? ' error' : ''}">${esc(t('Chiefmate system notice'))} · ${esc(e.text)}</div>`;
     } else {
       html += `<div class="msg system${e.error ? ' error' : ''}">${esc(e.text)}</div>`;
     }
@@ -1889,6 +2896,11 @@ function liveFeedHtml(x) {
   return html;
 }
 
+// The folds of the band of what the session asks (ui/asks.js), kept while its conversation is shown.
+let askFolds = newFolds(null);
+const askFacts = r => (r.explain ? permissionFacts(r.explain, r.id)
+  : `<span class="ask-full">${esc(t('The agent asks to: {what}', { what: r.what }))}</span><span class="hint">${esc(t('Allowed, it is told to go ahead; the permission lasts for this session.'))}</span>`);
+
 function drawLive() {
   const d = liveChat.data;
   if (!liveChat.id) return;
@@ -1901,14 +2913,19 @@ function drawLive() {
   const x = { ...(d?.session ?? {}), ...(allSessions().find(s => s.id === liveChat.id) ?? {}), ...(d?.session ? { phase: d.session.phase, turn: d.session.turn } : {}) };
   if (!x.id) return;
   const ended = x.status === 'ended';
+  const system = openSystem(state?.projects?.find(p => p.id === x.project)?.devUrl);
   const actions = [
+    system,
     ended && x.resumable ? `<button type="button" class="button small" data-live-resume="${esc(x.id)}">${esc(t('Resume'))}</button>` : '',
-    !ended ? `<button type="button" class="button danger small" data-session-end="${esc(x.id)}">${esc(t('End'))}</button>` : '',
+    !ended ? `<button type="button" class="button danger small" data-session-end="${esc(x.id)}">${esc(x.work ? t('End and summarize') : t('End'))}</button>` : '',
   ].join('');
-  const head = `<div class="live-title"><span class="primary">${esc(x.name)}</span><span class="secondary">${esc([toolName(x.tool), sessionWhere(x), x.cwd ?? '', x.model ?? ''].filter(Boolean).join(' · '))}</span></div>
+  const work = x.work ? ` <span class="tag">${esc(t('Work now'))}</span>${x.copy ? ` <span class="hint">${esc(t('In a separate copy: the crew goes on in the project.'))}</span>` : ''}` : '';
+  // The crew's task paused for this session: what it is, that it resumes at the end, and "Let it go on" meanwhile.
+  const paused = x.work && !ended && x.held?.length ? `<div class="live-phase">${esc(t('Paused while you work: {tasks}. It resumes by itself when you end.', { tasks: (x.heldTitles ?? x.held).map(v => `"${v}"`).join(', ') }))} <button type="button" class="button secondary small" data-work-release="${esc(x.id)}" title="${esc(t("The crew's task goes on now in its own working copy; you keep working in your clone."))}">${esc(t('Let it go on'))}</button></div>` : '';
+  const head = `<div class="live-title"><span class="primary">${esc(x.name)}${work}</span><span class="secondary">${esc([toolName(x.tool), sessionWhere(x), x.cwd ?? '', x.model ?? ''].filter(Boolean).join(' · '))}</span></div>
     <div class="live-facts">${stateHtml(sessionState(x))}<span>${esc(t('Memory'))} <span class="num">${x.ram ? bytes(x.ram) : '—'}</span></span><span>${esc(t('Open for'))} ${ended ? '—' : ticking(x.started)}</span><span>${esc(t('{count} turn(s)', { count: x.turns ?? 0 }))}</span><span class="compose-buttons">${actions}</span></div>
-    <div class="live-phase${['permission', 'login'].includes(x.phase) || x.status === 'login' ? ' warn' : ''}">${esc(livePhaseLine(x))}</div>`;
-  draw('#live-head', JSON.stringify([x.id, x.status, x.phase, x.ram, x.turns, x.resumable, language()]), head);
+    <div class="live-phase${['permission', 'login'].includes(x.phase) || x.status === 'login' ? ' warn' : ''}">${esc(livePhaseLine(x))}</div>${paused}`;
+  draw('#live-head', JSON.stringify([x.id, x.status, x.phase, x.ram, x.turns, x.resumable, x.work, x.copy, x.held, system, language()]), head);
 
   const box = $('#live-feed');
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
@@ -1919,19 +2936,18 @@ function drawLive() {
     }
   }
 
-  // What the agent asks of you: each permission, with Allow and Refuse.
-  const asks = (d?.requests ?? []).filter(r => r.kind === 'permission').map(r => `<div class="needs live-ask" role="alert">
-      <div class="needs-text"><span class="needs-label">${esc(t('Needs you'))}</span>${r.explain ? `<strong class="perm-what">${esc(r.explain.summary)}</strong>${permissionFacts(r.explain, r.id)}` : `${esc(t('The agent asks to: {what}', { what: r.what }))}<span class="hint">${esc(t('Allowed, it is told to go ahead; the permission lasts for this session.'))}</span>`}</div>
-      <span class="compose-buttons"><button type="button" class="button secondary small" data-live-refuse="${esc(r.id)}">${esc(t('Refuse'))}</button><button type="button" class="button small" data-live-allow="${esc(r.id)}">${esc(t('Allow'))}</button></span>
-    </div>`).join('');
-  draw('#live-asks', JSON.stringify([x.id, d?.requests ?? [], language()]), asks);
+  // What the agent asks of you: a compact band (ui/asks.js), each permission with Allow and Refuse.
+  const asks = (d?.requests ?? []).filter(r => r.kind === 'permission');
+  if (askFolds.session !== x.id) askFolds = newFolds(x.id);
+  askFolds = keepFolds(askFolds, asks);
+  draw('#live-asks', JSON.stringify([x.id, asks, askFolds, language()]), asksHtml(asks, askFolds, { t, esc, facts: askFacts }));
 
   const queue = d?.queue ?? [];
   $('#live-queue').hidden = !queue.length;
   const queued = `<div class="chat-queue-head"><span class="label">${esc(t('In the queue'))}</span><span class="hint">${esc(t('They go together, in order, when the agent finishes this turn.'))}</span></div>${queue.map(m => `<div class="queued-msg">
-      <div class="msg-head"><span class="tag">${esc(m.first ? t('first message') : t('queued'))}</span><span class="msg-meta">${esc(clockTime(m.at))}</span>
-        ${m.first ? '' : `<span class="queued-actions"><button type="button" class="button danger small" data-live-unqueue="${esc(m.id)}">${esc(t('Remove'))}</button></span>`}</div>
-      <div class="msg-body">${m.first ? esc(t('{count} characters', { count: m.text.length })) : md(m.text)}</div></div>`).join('')}`;
+      <div class="msg-head"><span class="tag">${esc(m.first ? t('first message') : m.by === 'system' ? t('Chiefmate system notice') : t('queued'))}</span><span class="msg-meta">${esc(clockTime(m.at))}</span>
+        ${m.first || m.by === 'system' ? '' : `<span class="queued-actions"><button type="button" class="button danger small" data-live-unqueue="${esc(m.id)}">${esc(t('Remove'))}</button></span>`}</div>
+      <div class="msg-body">${m.first ? esc(t('{count} characters', { count: m.text.length })) : m.by === 'system' ? esc(m.text) : md(m.text)}</div></div>`).join('')}`;
   draw('#live-queue', JSON.stringify([x.id, queue, language()]), queue.length ? queued : '');
 
   const working = x.phase === 'working';
@@ -1950,7 +2966,7 @@ function drawProjectLive(id) {
   const profiles = (state.sessions?.profiles ?? []).filter(p => p.project === id && !open.some(x => x.profile === p.id));
   const noClone = noCloneAttr(projectPage.data?.id === id ? projectPage.data : null);
   const card = x => `<a class="live-card${chosen?.id === x.id ? ' active' : ''}" href="${esc(sessionHash(x))}">
-      <span class="primary">${esc(toolName(x.tool))}</span>${stateHtml(sessionState(x))}
+      <span class="primary">${esc(x.work ? `${t('Work now')} · ${toolName(x.tool)}` : toolName(x.tool))}</span>${stateHtml(sessionState(x))}
       <span class="hint">${esc([x.status === 'ended' ? t('ended {when}', { when: relative(x.ended) }) : t('open since {time}', { time: clockTime(x.started) }), x.ram ? bytes(x.ram) : ''].filter(Boolean).join(' · '))}</span></a>`;
   const html = `<div class="live-list">
       ${open.map(card).join('')}
@@ -2030,19 +3046,26 @@ function drawCrew() {
         <div class="crew-top"><div><h2>${esc(t(a.name))}</h2><div class="hint">${esc(t(a.title ?? ''))}</div></div><span class="marks">${toolBadge(a)}<span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></span></div>
         ${stateHtml(status)}
         ${busy ? `<div class="crew-now">${esc(agentDetail(a))}</div>` : ''}
+        ${speechBubble(speechFor(a.id))}
         <p class="crew-role">${esc(t(a.role ?? ''))}</p>
         <dl class="facts">
           <dt>${esc(t('Last work'))}</dt><dd>${esc(last)}</dd>
           <dt>${esc(t('This week'))}</dt><dd>${esc(a.id === 'manager' ? t('{count} answer(s) · {steps} review(s)', { count: a.week.answers, steps: a.week.steps }) : t('{count} step(s) · {minutes} min', { count: a.week.steps, minutes: a.week.minutes }))}</dd>
           <dt>${esc(t('Time limit'))}</dt><dd class="num">${a.maxMinutes ? esc(t('{minutes} min per step', { minutes: a.maxMinutes })) : '—'}</dd>
+          <dt>${esc(a.id === 'manager' ? t('Effort (reviews)') : t('Effort'))}</dt><dd>${effortPick(a)}</dd>
+          ${a.id === 'manager' ? `<dt>${esc(t('Effort (conversation)'))}</dt><dd>${effortPick(a, { chat: true })}</dd>` : ''}
         </dl>
         <div class="actions left">${a.id === 'manager' ? `<a href="#manager" class="button secondary small">${esc(t('Talk'))}</a>` : `<button type="button" class="button secondary small" data-assign="${esc(a.id)}">${esc(t('Assign a task'))}</button>`}</div>
       </div>
     </article>`;
   });
-  const html = `<div class="crew-grid">${cards.join('')}</div>`;
-  draw('#crew', html, html);
+  const changes = state.effortHistory ?? [];
+  const html = `<div class="crew-grid">${cards.join('')}</div>
+    <details class="effort-history" data-keep-open="effort-history"><summary>${esc(t('Effort changes ({count})', { count: changes.length }))}</summary>${changes.map(effortChangeHtml).join('') || `<div class="hint">${esc(t('No effort change recorded.'))}</div>`}<p class="hint">${esc(t('A change counts from the next step and shows in the report of the runs going on. Guide: docs/effort.md.'))}</p></details>`;
+  if (!pickingEffort('#crew')) draw('#crew', html, html);
   drawTeams();
+  drawCallsSettings();
+  drawEscalation();
   drawPromptBuilder();
   if (!$('#task-project').options.length) {
     $('#task-project').innerHTML = state.projects.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
@@ -2061,20 +3084,20 @@ function fillTaskAgents() {
 }
 
 /** A project's team lead, above its crew: its base agent, its memory and what it is doing. */
-function teamLead(a) {
+function teamLead(a, project, bubbles = false) {
   const facts = [
     t('Team lead'),
     a.base ? t('Based on {agent}', { agent: agentName(a.base) }) : '',
     a.extra ? t('with instructions for this project') : '',
     a.memory ? t('memory: {count} line(s), updated {when}', { count: a.memory.lines, when: relative(a.memory.updated) }) : t('no memory yet'),
   ];
-  return `<div class="team-member team-lead"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 34)}<div><div class="name">${esc(t(a.name))}</div><div class="hint">${esc(facts.filter(Boolean).join(' · '))}</div></div>${stateHtml(agentStatus(a))}</div>`;
+  return `<div class="team-member team-lead"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 34)}<div><div class="name">${esc(t(a.name))} <span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></div><div class="hint">${esc(facts.filter(Boolean).join(' · '))}</div>${bubbles ? speechBubble(speechFor(a.id, project)) : ''}</div><div class="team-side">${effortPick(a, { project })}${stateHtml(agentStatus(a))}</div></div>`;
 }
 
-/** A project's crew: its lead, then its members, each with what it is doing. */
-function teamBody(team) {
-  const members = team.members.map(a => `<div class="team-member"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 30)}<div><div class="name">${esc(t(a.name))}</div><div class="hint">${esc([a.base && a.base !== a.id ? t('Based on {agent}', { agent: agentName(a.base) }) : t(a.title ?? ''), a.extra ? t('with instructions for this project') : '', (a.mcp ?? []).length ? t('tools: {list}', { list: a.mcp.join(', ') }) : ''].filter(Boolean).join(' · '))}</div></div>${stateHtml(agentStatus(a))}</div>`);
-  return `${team.lead ? teamLead(team.lead) : ''}${members.join('') || `<div class="hint">${esc(t('No members.'))}</div>`}`;
+/** A project's crew: its lead, then its members, each with what it is doing (with bubbles: its speech bubble too). */
+function teamBody(team, bubbles = false) {
+  const members = team.members.map(a => `<div class="team-member"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 30)}<div><div class="name">${esc(t(a.name))} <span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></div><div class="hint">${esc([a.base && a.base !== a.id ? t('Based on {agent}', { agent: agentName(a.base) }) : t(a.title ?? ''), a.extra ? t('with instructions for this project') : '', (a.mcp ?? []).length ? t('tools: {list}', { list: a.mcp.join(', ') }) : ''].filter(Boolean).join(' · '))}</div>${bubbles ? speechBubble(speechFor(a.id, team.project)) : ''}</div><div class="team-side">${effortPick(a, { project: team.project })}${stateHtml(agentStatus(a))}</div></div>`);
+  return `${team.lead ? teamLead(team.lead, team.project, bubbles) : ''}${members.join('') || `<div class="hint">${esc(t('No members.'))}</div>`}`;
 }
 
 function drawTeams() {
@@ -2083,9 +3106,213 @@ function drawTeams() {
     <div class="team">
       <div class="team-top"><h3>${projectLink(team.project, team.name)}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>
       ${teamBody(team)}
-    </div>`).join('')}</div>`;
-  draw('#teams', html, html);
+    </div>`).join('')}${watchTeamHtml(state.watch)}</div>`;
+  if (!pickingEffort('#teams')) draw('#teams', html, html);
 }
+
+/** The emergency watch (src/sentinel.mjs), its own team: the Sentinel and its two analysts, each with name and role. */
+function watchTeamHtml(w) {
+  if (!w) return '';
+  const look = { sentinel: { color: '#c96a5d', face: 'cap' }, 'analyst-a': { color: '#8a93a0' }, 'analyst-b': { color: '#8a93a0' } };
+  const members = w.members.map(m => `<div class="team-member">${face({ ...m, ...look[m.id] }, online ? (m.status === 'working' ? 'working' : 'idle') : 'offline', 30)}<div><div class="name">${esc(`${m.name} (${m.title})`)}</div><div class="hint">${esc(m.role)}</div></div><div class="team-side">${stateHtml(m.status === 'working' ? [t('Reviewing an alarm'), 'warn'] : [t('On watch'), 'ok'])}</div></div>`).join('');
+  return `<div class="team">
+      <div class="team-top"><h3>${esc(t('Emergency watch'))}</h3><span class="hint">${esc(w.on ? t('Reviews every automatic alarm') : t('Off: every alarm waits for you'))}</span></div>
+      ${members}
+    </div>`;
+}
+
+// ---------- Calling you outside the app (src/escalation.mjs): Telegram, the PIN and the e-mail ----------
+
+let escalationLink = null; // the last link to the bot, while its code is good
+
+/** Where each part of the setup stands, in words. */
+function escalationStatus(e, key) {
+  if (key === 'telegram') return e.telegram ? t('Bot @{bot} checked.', { bot: e.telegram.bot }) : t('Not set up.');
+  if (key === 'link') return !e.telegram ? t('Save the token first.') : e.telegram.linking ? t('Waiting for your Start in Telegram…') : t('{count} chat(s) linked.', { count: e.telegram.chats });
+  if (key === 'pin') return e.pin.blocked ? t('Blocked after wrong PINs: set it again to use Telegram again.') : e.pin.set ? t('Set: only its salted hash is kept.') : t('Not set: releasing by Telegram needs it.');
+  if (key === 'email') return e.email ? t('To {to}, through {host}.', { to: e.email.to, host: e.email.host }) : t('Not set up (optional).');
+  return '';
+}
+
+function drawEscalation() {
+  const e = state.escalation;
+  if (!e) return draw('#escalation', '', '');
+  const facts = [['Telegram', 'telegram'], [t('Linked chat'), 'link'], ['PIN', 'pin'], [t('E-mail'), 'email']]
+    .map(([k, key]) => `<dt>${esc(k)}</dt><dd data-esc-status="${key}">${esc(escalationStatus(e, key))}</dd>`).join('');
+  const html = `<div class="panel">
+      <div class="label">${esc(t('Calling you outside the app'))}</div>
+      <p class="hint">${esc(t('When an emergency lockdown waits for you, Chiefmate writes to your own Telegram bot (Release with your PIN, Keep stopped, Details), or sends an e-mail when Telegram fails. Nothing else is sent: a false alarm the watch released stays here.'))}</p>
+      <dl class="facts">${facts}</dl>
+      ${e.ready ? '' : `<p>${stateHtml([t('Not set up: an escalation reaches you only in the app.'), 'warn'])}</p>`}
+      <div class="actions left"><button type="button" class="button small" data-escalation-open>${esc(e.ready ? t('Change') : t('Set up'))}</button></div>
+    </div>`;
+  draw('#escalation', JSON.stringify(e), html);
+  // The setup open: its statuses follow (a chat just linked), without touching what is being typed.
+  if ($('#escalation-dialog').open) for (const box of $('#escalation-steps').querySelectorAll('[data-esc-status]')) box.textContent = escalationStatus(e, box.dataset.escStatus);
+}
+
+/** This browser's notification of the calls (ui/calls.js): "on", "off", "ask", "blocked", "windows" or "none". */
+const callsNotify = () => notifyState({ Notification: window.Notification, here: onThisComputer(), storage: localStorage });
+
+/**
+ * The Calls panel (Crew): how long a step waits for you (the settings' needs_you.max_wait_minutes), that away mode
+ * doesn't wait, this browser's notification and sound (kept in the browser) and the on-call outside the app (off).
+ */
+function drawCallsSettings() {
+  const c = state.calls;
+  if (!c) return draw('#calls-settings', '', '');
+  const notify = callsNotify();
+  const sound = soundOn(localStorage);
+  const choices = [...new Set([...c.choices, c.maxWaitMinutes])].sort((a, b) => a - b);
+  const wait = `<select data-call-wait aria-label="${esc(t('Longest wait with you here'))}">${choices.map(m => `<option value="${m}"${m === c.maxWaitMinutes ? ' selected' : ''}>${esc(t('{count} min', { count: m }))}</option>`).join('')}</select>`;
+  const notifyText = {
+    on: t('On in this browser, while the app is open.'), off: t('Off in this browser.'), ask: t('Not allowed yet in this browser.'),
+    blocked: t("Blocked in this browser's settings: allow notifications for this site there."), windows: t('On this computer, Windows already notifies each call.'),
+    none: t('This browser has no notifications.'),
+  }[notify];
+  const notifyButton = { ask: ['allow', t('Allow notifications')], on: ['off', t('Turn off')], off: ['on', t('Turn on')] }[notify];
+  const html = `<div class="panel calls-panel">
+      <div class="label">${esc(t('Calls from the crew'))}</div>
+      <p class="hint">${esc(t("When a step needs you, a bar at the top of every page calls you: the agent and its role, the project and what it needs, with Open, I did it, Answer here and Not now. Out of sight, the window's title blinks and the browser notifies you; the sound is optional."))}</p>
+      <dl class="facts">
+        <dt>${esc(t('Longest wait with you here'))}</dt><dd>${wait} <span class="hint">${esc(t('then the step goes on with what it can, and the call stays open.'))}</span></dd>
+        <dt>${esc(t('In away mode'))}</dt><dd>${esc(t('No wait: the call stays open and the step goes on with what it can.'))}</dd>
+        <dt>${esc(t("This browser's notification"))}</dt><dd>${esc(notifyText)}${notifyButton ? ` <button type="button" class="button secondary small" data-calls-notify="${notifyButton[0]}">${esc(notifyButton[1])}</button>` : ''}</dd>
+        <dt>${esc(t("This browser's sound"))}</dt><dd>${esc(sound ? t('On: a short chime for each new call.') : t('Off: no sound.'))} <button type="button" class="button secondary small" data-calls-sound="${sound ? 'off' : 'on'}" aria-pressed="${sound}">${esc(sound ? t('Turn off') : t('Turn on'))}</button> <button type="button" class="button secondary small" data-calls-sound="test">${esc(t('Test'))}</button></dd>
+        <dt>${esc(t('On-call outside the app (Telegram)'))}</dt><dd>${esc(c.onCall.enabled && c.onCall.channel ? t('On.') : t('Off: nothing is sent. Telegram calls you today only for an emergency lockdown (below).'))}</dd>
+      </dl>
+    </div>`;
+  draw('#calls-settings', JSON.stringify([c, notify, sound, language()]), html);
+}
+
+document.addEventListener('change', async event => {
+  const select = event.target.closest('select[data-call-wait]');
+  if (!select) return;
+  try {
+    const calls = await api('/api/needs-you/settings', { max_wait_minutes: Number(select.value) });
+    toast(t('A step now waits for you at most {count} min.', { count: calls.maxWaitMinutes }));
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+document.addEventListener('click', async event => {
+  const button = event.target.closest('[data-calls-notify],[data-calls-sound]');
+  if (!button) return;
+  const { callsNotify: notify, callsSound: sound } = button.dataset;
+  if (notify === 'allow') {
+    // A promise in today's browsers; nothing in older ones, which then keep the permission as it was.
+    const answer = await Promise.resolve(window.Notification?.requestPermission?.()).catch(() => 'default') ?? window.Notification?.permission;
+    if (answer === 'granted') {
+      keepChoice(localStorage, NOTIFY_KEY, true);
+      swReady();
+      toast(t('Notifications allowed: a new call shows here while the app is out of sight.'));
+    } else toast(t('The browser did not allow notifications.'));
+  } else if (notify) keepChoice(localStorage, NOTIFY_KEY, notify === 'on');
+  else if (sound === 'test') {
+    audio ??= 'AudioContext' in window ? new AudioContext() : null;
+    await audio?.resume?.().catch(() => {});
+    if (!chime(audio)) toast(t('This browser played no sound.'));
+  } else if (sound) {
+    keepChoice(localStorage, SOUND_KEY, sound === 'on');
+    if (sound === 'on') wakeAudio();
+  }
+  drawCallsSettings();
+});
+
+/** The setup, step by step: the bot from BotFather, the chat linked with /start, the PIN, the e-mail and a test. */
+function fillEscalationDialog() {
+  const e = state.escalation;
+  const box = $('#escalation-steps');
+  // What was typed in the fields that are not secret stays.
+  const kept = Object.fromEntries([...box.querySelectorAll('input:not([type="password"]), select')].map(x => [x.id, x.value]));
+  const m = e.email ?? {};
+  const field = (id, label, value = '', type = 'text', extra = '') => `<label>${esc(label)}<input id="esc-${id}" type="${type}" value="${esc(value)}" autocomplete="off" ${extra}></label>`;
+  const link = escalationLink && Date.parse(escalationLink.until) > Date.now() && e.telegram?.linking
+    ? `<p><a href="${esc(escalationLink.link)}" target="_blank" rel="noopener noreferrer">${esc(escalationLink.link)}</a><br><span class="hint">${esc(t('Or send "{command}" to @{bot}.', { command: escalationLink.command, bot: escalationLink.bot }))}</span></p>` : '';
+  box.innerHTML = `
+    <div class="escalation-step">
+      <div class="label">${esc(t('1. Your bot'))}</div>
+      <p class="hint">${esc(t('In Telegram, open @BotFather, send /newbot, choose a name and a username ending in "bot", and paste the token it gives here. It stays on this computer, out of git.'))}</p>
+      <p data-esc-status="telegram">${esc(escalationStatus(e, 'telegram'))}</p>
+      ${field('token', t('Token'), '', 'password')}
+      <div class="actions left"><button type="button" class="button small" data-esc="token">${esc(t('Save the token'))}</button>${e.telegram ? `<button type="button" class="button secondary small" data-esc="remove-telegram">${esc(t('Remove Telegram'))}</button>` : ''}</div>
+    </div>
+    <div class="escalation-step">
+      <div class="label">${esc(t('2. Your chat'))}</div>
+      <p class="hint">${esc(t('Open the link on your phone and press Start: only the chats linked this way get the calls, and nobody else gets an answer.'))}</p>
+      <p data-esc-status="link">${esc(escalationStatus(e, 'link'))}</p>
+      ${link}
+      <div class="actions left"><button type="button" class="button small" data-esc="link" ${e.telegram ? '' : 'disabled'}>${esc(t('Get the link'))}</button></div>
+    </div>
+    <div class="escalation-step">
+      <div class="label">${esc(t('3. Your PIN'))}</div>
+      <p class="hint">${esc(t('Release on Telegram asks for it. 6 to 12 digits; only its salted hash is kept; each alarm has a single-use code that expires in 30 minutes; 3 wrong PINs block the release by Telegram.'))}</p>
+      <p data-esc-status="pin">${esc(escalationStatus(e, 'pin'))}</p>
+      <div class="fields">${field('pin', t('PIN'), '', 'password', 'inputmode="numeric"')}${field('pin2', t('The same PIN again'), '', 'password', 'inputmode="numeric"')}</div>
+      <div class="actions left"><button type="button" class="button small" data-esc="pin">${esc(t('Save the PIN'))}</button></div>
+    </div>
+    <div class="escalation-step">
+      <div class="label">${esc(t('4. E-mail, when Telegram fails (optional)'))}</div>
+      <p class="hint">${esc(t("It only warns you: the actions stay on Telegram and in the app. Use your provider's SMTP, with an app password where it asks for one."))}</p>
+      <p data-esc-status="email">${esc(escalationStatus(e, 'email'))}</p>
+      <div class="fields">
+        ${field('host', t('SMTP server'), m.host ?? '')}
+        <label>${esc(t('Security'))}<select id="esc-security">${['starttls', 'tls'].map(s => `<option value="${s}"${(m.security ?? 'starttls') === s ? ' selected' : ''}>${s === 'tls' ? 'TLS (465)' : 'STARTTLS (587)'}</option>`).join('')}</select></label>
+        ${field('port', t('Port'), m.port ?? '', 'text', 'inputmode="numeric"')}
+        ${field('user', t('Login'), m.user ?? '')}
+        ${field('pass', t('Password'), '', 'password', `placeholder="${esc(m.host ? t('Kept; type to change') : '')}"`)}
+        ${field('from', t('Sender'), m.from ?? '', 'email')}
+        ${field('to', t('Your address'), m.to ?? '', 'email')}
+      </div>
+      <div class="actions left"><button type="button" class="button small" data-esc="email">${esc(t('Save the e-mail'))}</button>${e.email ? `<button type="button" class="button secondary small" data-esc="remove-email">${esc(t('Remove the e-mail'))}</button>` : ''}</div>
+    </div>
+    <div class="escalation-step">
+      <div class="label">${esc(t('5. Test'))}</div>
+      <div class="actions left"><button type="button" class="button small" data-esc="test-telegram" ${e.telegram?.chats ? '' : 'disabled'}>${esc(t('Send a test to Telegram'))}</button><button type="button" class="button secondary small" data-esc="test-email" ${e.email ? '' : 'disabled'}>${esc(t('Send a test e-mail'))}</button></div>
+    </div>`;
+  for (const [id, value] of Object.entries(kept)) if (box.querySelector(`#${id}`)) box.querySelector(`#${id}`).value = value;
+}
+
+document.addEventListener('click', event => {
+  if (!event.target.closest('[data-escalation-open]') || !state?.escalation) return;
+  $('#escalation-steps').innerHTML = '';
+  fillEscalationDialog();
+  $('#escalation-dialog').showModal();
+});
+
+$('#escalation-dialog').addEventListener('click', async event => {
+  const button = event.target.closest('[data-esc]');
+  if (!button) return;
+  const action = button.dataset.esc;
+  const value = id => $(`#esc-${id}`)?.value.trim() ?? '';
+  let body;
+  if (action === 'token') body = { action: 'token', token: value('token') };
+  else if (action === 'link') body = { action: 'link' };
+  else if (action === 'pin') {
+    if (value('pin') !== value('pin2')) return toast(t('The two PINs differ.'));
+    body = { action: 'pin', pin: value('pin') };
+  } else if (action === 'email') body = { action: 'email', host: value('host'), security: value('security'), port: value('port'), user: value('user'), pass: $('#esc-pass').value, from: value('from'), to: value('to') };
+  else if (action.startsWith('test-')) body = { action: 'test', channel: action.slice(5) };
+  else if (action.startsWith('remove-')) {
+    const channel = action.slice(7);
+    if (!(await confirmDialog(t('Remove'), channel === 'telegram' ? t('Chiefmate forgets the token and the linked chats.') : t('Chiefmate forgets the e-mail settings and the password.'), t('Remove')))) return;
+    body = { action: 'remove', channel };
+  } else return;
+  button.disabled = true;
+  try {
+    const r = await api('/api/escalation', body);
+    state.escalation = r.escalation;
+    if (r.link) escalationLink = r.link;
+    toast(action.startsWith('test-') ? t('Test sent: check that it arrived.') : t('Saved.'));
+    fillEscalationDialog();
+    drawEscalation();
+  } catch (error) {
+    toast(error.message);
+    button.disabled = false;
+  }
+});
 
 function drawPromptBuilder() {
   const p = state.prompts ?? {};
@@ -2152,7 +3379,7 @@ async function refreshDetail(force = false) {
   const canCancel = ['running', 'queued', 'waiting', 'paused'].includes(r.status);
   const reports = steps.map((s, i) => {
     const chosen = s.status === 'pending' && !s.review && !['manager', 'lead'].includes(s.agent) ? s.toolAsked ?? r.tool : null;
-    const facts = [s.tool && s.tool !== 'claude' ? TOOL_LABELS[s.tool] ?? s.tool : chosen && chosen !== 'claude' ? t('to run on {tool}', { tool: TOOL_LABELS[chosen] ?? chosen }) : '', s.model ? shortModel(s.model) : '', s.durationMs ? t('{minutes} min', { minutes: Math.round(s.durationMs / 60000) }) : '', s.turns ? t('{count} turns', { count: s.turns }) : '', s.subagents ? t('{count} subagent(s)', { count: s.subagents }) : ''].filter(Boolean);
+    const facts = [s.tool && s.tool !== 'claude' ? TOOL_LABELS[s.tool] ?? s.tool : chosen && chosen !== 'claude' ? t('to run on {tool}', { tool: TOOL_LABELS[chosen] ?? chosen }) : '', s.model ? shortModel(s.model) : '', s.status !== 'pending' && 'effort' in s ? effortName(s.effort) : '', s.durationMs ? t('{minutes} min', { minutes: Math.round(s.durationMs / 60000) }) : '', s.turns ? t('{count} turns', { count: s.turns }) : '', s.subagents ? t('{count} subagent(s)', { count: s.subagents }) : ''].filter(Boolean);
     let body = s.report || s.error;
     if (!body) body = s.status === 'pending' ? t('Not started yet.') : s.status === 'running' ? t('Working…') : t('No report.');
     return `
@@ -2169,8 +3396,16 @@ async function refreshDetail(force = false) {
     ? `<div class="report"><div class="report-top"><strong>${esc(t('Asked of you'))}</strong></div>${r.requests.map(q => {
       const status = q.status === 'closed' ? [t('No longer needed'), 'neutral']
         : q.status === 'open' ? [t('Waiting for your action'), 'warn'] : [t('Done'), 'ok'];
-      return `<div>${stateHtml(status)} ${esc(q.what)}${q.url ? ` · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${q.status === 'open' ? `${requestWhy(q)} ${requestButtons(r.id, q, ' small')}${requestReply(r.id, q, ' small')}` : q.answer || q.note ? ` · ${esc(t('Your answer: {answer}', { answer: [q.answer, q.note].filter(Boolean).join(' — ') }))}` : ''}</div>`;
+      // Parked while it waited, or marked done by the manager on the owner's words in the conversation.
+      const parked = q.status === 'open' && r.parked?.request === q.id ? ` · ${esc(t('Parked: it resumes first once you answer'))}` : '';
+      const done = q.ownerSaid ? ` · ${esc(t('Marked done by the manager on your words: "{words}"', { words: q.ownerSaid }))}`
+        : q.answer || q.note ? ` · ${esc(t('Your answer: {answer}', { answer: [q.answer, q.note].filter(Boolean).join(' — ') }))}` : '';
+      return `<div>${stateHtml(status)} ${esc(q.what)}${q.url ? ` · <a href="${esc(q.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : ''}${parked}${q.status === 'open' ? `${requestWhy(q)} ${requestButtons(r.id, q, ' small')}${requestReply(r.id, q, ' small')}` : done}</div>`;
     }).join('')}</div>`
+    : '';
+  // The effort changes made while the run went on (they count from the step after them).
+  const efforts = (r.efforts ?? []).length
+    ? `<div class="report"><div class="report-top"><strong>${esc(t('Effort changed during the run'))}</strong></div>${r.efforts.map(effortChangeHtml).join('')}</div>`
     : '';
   const checks = r.checks?.length
     ? `<div class="report"><div class="report-top"><strong>${esc(t('Checks'))}</strong></div>${r.checks.map(c => `<div>${stateHtml(c.ok ? [t('Passed'), 'ok'] : [t('Failed'), 'error'])} <code>${esc(c.command)}</code></div>`).join('')}</div>`
@@ -2192,7 +3427,7 @@ async function refreshDetail(force = false) {
       ${r.status === 'paused' ? `<button type="button" class="button secondary" data-resume="${esc(r.id)}" data-ignore>${esc(t('Resume past the limit'))}</button>` : ''}
       ${canCancel ? `<button type="button" class="button danger" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button>` : ''}
     </div>
-    ${runFilesHtml(r)}${requests}${reports.join('')}${checks}`;
+    ${runFilesHtml(r)}${requests}${efforts}${reports.join('')}${checks}`;
   $('#log-detail').dataset.filesRun = r.id; // the paths in its reports are looked for in the run's files first
   draw('#log-detail', JSON.stringify([r.id, r.updated, r.status, runFilesCache.get(r.id)?.at]), html);
 }
@@ -2214,18 +3449,118 @@ function drawUsage() {
     </div>
     <div class="panel">
       <div class="label">${esc(t('How Chiefmate looks after your plan'))}</div>
-      <p class="hint">${esc(t("Before every step, Chiefmate checks your account. If the 5-hour window is above {window} or the plan's week above {week}, the run waits for the reset and then carries on by itself.", { window: percent(l.pause_at_5h_window), week: percent(l.pause_at_plan_week) }))}</p>
+      <p class="hint">${esc(t("Before every step, Chiefmate checks the current limits: {window} of the session (its mode, below) and {week} of the plan's week. A run paused by these limits returns to the queue after the reset or when you raise the limit enough for the current usage.", { window: percent(state.spending?.session?.limit ?? 0.85), week: l.pause_at_plan_week ? percent(l.pause_at_plan_week) : t('none') }))}</p>
       <p class="hint">${esc(t('If the account runs out in the middle of a step, that step starts over after the reset. Each step also has a time limit, in case an agent gets stuck.'))}</p>
     </div>
   </div>`;
   draw('#usage', html, html);
   const form = $('#limits-form');
   if (!form.contains(document.activeElement) && !form.dataset.filled) {
-    form.window.value = Math.round((l.pause_at_5h_window ?? 0.85) * 100);
     form.week.value = Math.round((l.pause_at_plan_week ?? 0.9) * 100);
     form.dataset.filled = '1';
   }
 }
+
+// ---------- Spending: the session and the week ----------
+
+// The session's modes (src/spending.mjs, SESSION_MODES): each one's sentence says what it does.
+const SESSION_MODES = () => [
+  ['save', t('Save usage'), t('One run at a time, with no early pause: the crew stops only at the {safety} safety margin, which leaves you room to work live.', { safety: percent(state.spending?.safety ?? 0.85) })],
+  ['normal', t('Normal'), t("The settings' defaults: {count} runs at a time, pausing at {pause} of the session.", { count: state.spending?.modes?.normal?.parallel ?? 3, pause: percent(state.spending?.modes?.normal?.pause ?? 0.85) })],
+  ['all', t('Spend all'), t('{count} runs at a time, pausing at {pause}: the session is spent almost to the end.', { count: state.spending?.modes?.all?.parallel ?? 4, pause: percent(state.spending?.modes?.all?.pause ?? 0.97) })],
+];
+const SESSION_PAUSES = [0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.97, 1];
+
+/** What holds in the session now, in one sentence (a boost, a mode, or the custom pair). */
+function sessionSentence(sp) {
+  const s = sp.session;
+  const pause = p => (p == null ? t('no early pause (only the {safety} safety margin)', { safety: percent(sp.safety) }) : t('pausing at {pause}', { pause: percent(p) }));
+  const mode = name => (name === 'custom' ? t('Custom') : SESSION_MODES().find(m => m[0] === name)?.[1] ?? name);
+  if (s.boost) {
+    return t('Spend all until {time} ({who}): {count} runs at a time, pausing at {pause}. Then back to {mode} by itself.', {
+      time: clockTime(s.boost.until), who: s.boost.by === 'away' ? t('Chiefmate, while you were away') : t('your choice'),
+      count: s.parallel, pause: percent(s.limit), mode: mode(s.configured.mode),
+    });
+  }
+  const own = SESSION_MODES().find(m => m[0] === s.mode);
+  return own ? own[2] : t('Custom: {count} run(s) at a time, {pause}.', { count: s.parallel, pause: pause(s.pause) });
+}
+
+/** What will be left of the session when it renews, roughly (src/spending.mjs, forecast). */
+function sessionEstimate(f, week) {
+  if (!f) return t('The estimate of what will be left comes once the session is measured (every run reports it).');
+  const at = { left: percent(f.left), time: clockTime(f.resets), all: percent(f.all.left) };
+  // the plan's week at its pause holds the crew: nothing more to spend
+  if (week) return t("At this pace, about {left} of the session will go unused when it renews at {time}. The plan's week is at its pause, so spending all would change nothing.", at);
+  return f.all.runs
+    ? t('At this pace, about {left} of the session will go unused when it renews at {time}; spending all, about {all}.', at)
+    : t('At this pace, about {left} of the session will go unused when it renews at {time}. With no work queued, spending all would change nothing.', at);
+}
+
+function drawSpending() {
+  const sp = state.spending;
+  const a = state.autopilot;
+  if (!sp || !a) return;
+  const s = sp.session;
+  const c = s.configured;
+  // the session: its shortcuts (and "Custom" when the pair is none of them), its two settings and what holds now
+  const tabs = (list, active, attr) => list.map(([key, label, about]) =>
+    `<button type="button" class="tab${key === active ? ' active' : ''}" aria-pressed="${key === active}" ${attr}="${key}" title="${esc(about)}">${esc(label)}</button>`).join('');
+  const custom = c.mode === 'custom' ? `<span class="tab active" aria-current="true">${esc(t('Custom'))}</span>` : '';
+  const counts = [...new Set([1, 2, 3, 4, c.parallel])].sort((x, y) => x - y);
+  const pauses = [...new Set([...SESSION_PAUSES, ...(c.pause == null ? [] : [c.pause])])].sort((x, y) => x - y);
+  const pauseValue = p => (p == null ? 'off' : String(p));
+  const session = `<div>
+      <div class="label">${esc(t('Session (5 hours)'))}</div>
+      <div class="tabs autopilot-modes" role="group" aria-label="${esc(t('Session mode'))}">${tabs(SESSION_MODES(), c.mode, 'data-session-mode')}${custom}</div>
+      <div class="fields">
+        <label><span>${esc(t('Runs at a time'))}</span><select data-session-parallel>${counts.map(n => `<option value="${n}"${n === c.parallel ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
+        <label><span>${esc(t('Pause the crew at'))}</span><select data-session-pause>
+          <option value="off"${c.pause == null ? ' selected' : ''}>${esc(t('Off (only the {safety} safety margin)', { safety: percent(sp.safety) }))}</option>
+          ${pauses.map(p => `<option value="${p}"${pauseValue(c.pause) === String(p) ? ' selected' : ''}>${esc(percent(p))}</option>`).join('')}
+        </select></label>
+      </div>
+      <p class="autopilot-now">${esc(sessionSentence(sp))}${s.boost ? ` <button type="button" class="button secondary small" data-session-boost="off">${esc(t('End now'))}</button>` : ''}</p>
+      <p class="hint">${esc(sessionEstimate(sp.forecast, sp.week_holds))}</p>
+      ${sp.offer ? `<p class="hint state-warn">${esc(t('Little time is left and much of the session would go unused.'))}</p>
+      <div class="actions left"><button type="button" class="button small" data-session-boost="on">${esc(t('Spend all until {time}', { time: clockTime(sp.offer.until) }))}</button><button type="button" class="button secondary small" data-spending-dismiss>${esc(t('Not now'))}</button></div>` : ''}
+    </div>`;
+  // the week: the autopilot's pace (src/autopilot.mjs, MODES)
+  const modes = AUTOPILOT_MODES();
+  const mode = modes.find(m => m[0] === a.mode);
+  const week = `<div>
+      <div class="label">${esc(t('Week'))}</div>
+      <div class="tabs autopilot-modes" role="group" aria-label="${esc(t('Spending mode'))}">${tabs(modes, a.mode, 'data-autopilot-mode')}${mode ? '' : `<span class="tab active" aria-current="true">${esc(t('Custom'))}</span>`}</div>
+      <p class="autopilot-now">${esc(mode ? mode[2] : t('Custom pace: it ends the week at {target} (set on the command line or in the settings).', { target: percent(a.week_pace) }))}</p>
+      <p class="hint">${esc(a.enabled ? t("The week's pace guides the autopilot: above it, nothing new goes on the queue by itself.") : t("The week's pace guides the autopilot, which is off: it holds once you turn it on."))}</p>
+      ${a.reset && a.mode !== 'all' ? `<p class="hint state-warn">${esc(a.reset.expires
+        ? t('You have a free reset of the plan until {when}: "Spend all" uses the whole week before it.', { when: shortDate(a.reset.expires) })
+        : t('You have a free reset of the plan: "Spend all" uses the whole week before it.'))}
+        <button type="button" class="button small" data-autopilot-mode="all">${esc(t('Use "Spend all"'))}</button></p>` : ''}
+    </div>`;
+  const html = `<div class="label">${esc(t('Spending'))}</div>
+    <p class="hint">${esc(t('Saving means going slower, not stopping. Each part has its shortcuts; change a value by hand and the mode shows as Custom.'))}</p>
+    <div class="usage-grid spending-grid">${session}${week}</div>`;
+  // not redrawn while one of its lists is open
+  if (!$('#spending').contains(document.activeElement) || document.activeElement.tagName !== 'SELECT') draw('#spending', html, html);
+}
+
+async function setSession(body, message) {
+  try {
+    await api('/api/spending', body);
+    toast(message);
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+$('#spending').addEventListener('change', event => {
+  const select = event.target.closest('select');
+  select?.blur(); // the panel is not redrawn under an open list
+  if (select?.hasAttribute('data-session-parallel')) setSession({ parallel: Number(select.value) }, t('Runs at a time: {count}.', { count: select.value }));
+  else if (select?.hasAttribute('data-session-pause')) setSession({ pause: select.value === 'off' ? 'off' : Number(select.value) }, select.value === 'off' ? t('No early pause: only the safety margin.') : t('The crew pauses at {pause} of the session.', { pause: percent(Number(select.value)) }));
+});
 
 // ---------- The autopilot ----------
 
@@ -2264,12 +3599,18 @@ const AUTOPILOT_MODES = () => [
   ['all', t('Spend all'), t("No week's pace: only the 5-hour window and a used-up week stop it.")],
 ];
 
+async function setAutopilotMode(mode) {
+  await api('/api/autopilot', { mode });
+  toast(t('Spending mode: {mode}.', { mode: AUTOPILOT_MODES().find(m => m[0] === mode)?.[1] ?? mode }));
+}
+
 /** Who changed the autopilot ("by" in src/autopilot.mjs, recordChange). */
 function autopilotWho(by) {
   if (by === 'app') return t('you, in the app');
   if (by?.startsWith('remote:')) return t('you, through the remote access ({login})', { login: by.slice(7) });
   if (by === 'cli') return t('the command line');
   if (by === 'manager') return t('the manager');
+  if (by === 'away') return t('Chiefmate, while you were away');
   if (by?.startsWith('step:')) return t('a step of run {run}', { run: by.slice(5) });
   return by ?? '';
 }
@@ -2284,7 +3625,17 @@ const autopilotValue = (key, v) => {
   if (key === 'stop_at_5h_window') return percent(Number(v));
   return String(v);
 };
-const AUTOPILOT_KEYS = () => ({ enabled: t('switch'), week_pace: t('mode'), stop_at_5h_window: t('5-hour window'), quiet_hours: t('quiet hours'), daily_report: t('daily report') });
+// the session's changes (src/spending.mjs, changeSession) share the list
+const sessionValue = (key, v) => {
+  if (key === 'pause_at_5h_window') return v == null ? t('off') : percent(Number(v));
+  if (key === 'session_boost') return v == null ? t('off') : t('until {time}', { time: clockTime(v) });
+  return String(v ?? '');
+};
+const changeValue = (key, v) => (['max_parallel', 'pause_at_5h_window', 'session_boost'].includes(key) ? sessionValue(key, v) : autopilotValue(key, v));
+const AUTOPILOT_KEYS = () => ({
+  enabled: t('switch'), week_pace: t('mode'), stop_at_5h_window: t('5-hour window'), quiet_hours: t('quiet hours'), daily_report: t('daily report'),
+  max_parallel: t('runs at a time'), pause_at_5h_window: t('session pause'), session_boost: t('spend all until the renewal'),
+});
 
 function autopilotItemState(status) {
   if (status === 'archived') return [t('Archived item'), 'neutral'];
@@ -2299,20 +3650,13 @@ function drawAutopilot() {
   const line = !a.enabled
     ? t('Nothing goes on the queue without you. Approved items still start by themselves, one per project at a time.')
     : t('When the queue of a project empties, the manager puts its next item triaged "do now" on the queue.');
-  const modes = AUTOPILOT_MODES();
-  const mode = modes.find(m => m[0] === a.mode);
-  const modeHtml = `<div class="label autopilot-today-label">${esc(t('Spending mode'))}</div>
-    <div class="tabs autopilot-modes" role="group" aria-label="${esc(t('Spending mode'))}">${modes.map(([key, label]) =>
-      `<button type="button" class="tab${key === a.mode ? ' active' : ''}" aria-pressed="${key === a.mode}" data-autopilot-mode="${key}">${esc(label)}</button>`).join('')}</div>
-    <p class="hint">${esc(mode ? mode[2] : t('Custom pace: it ends the week at {target} (set on the command line or in the settings).', { target: percent(a.week_pace) }))}</p>
-    ${a.reset && a.mode !== 'all' ? `<p class="hint state-warn">${esc(a.reset.expires
-      ? t('You have a free reset of the plan until {when}: "Spend all" uses the whole week before it.', { when: shortDate(a.reset.expires) })
-      : t('You have a free reset of the plan: "Spend all" uses the whole week before it.'))}
-      <button type="button" class="button small" data-autopilot-mode="all">${esc(t('Use "Spend all"'))}</button></p>` : ''}`;
+  // its pace for the week and the 5-hour stop are set in Spending, above (drawSpending)
+  const mode = AUTOPILOT_MODES().find(m => m[0] === a.mode);
+  const modeHtml = `<p class="hint">${esc(t('Its pace for the week: {mode} (Spending, above).', { mode: mode ? mode[1] : t('Custom') }))}${a.window_stop > a.stop_at_5h_window ? ` ${esc(t('With the session spending all, it stops at {limit} of the 5-hour window, not {own}.', { limit: percent(a.window_stop), own: percent(a.stop_at_5h_window) }))}` : ''}</p>`;
   const keys = AUTOPILOT_KEYS();
   const changes = (a.changes ?? []).map(c => `<li>
       <span>${clockTime(c.at)}</span>
-      <span><span class="primary">${esc(Object.entries(c.changes ?? {}).map(([k, [from, to]]) => `${keys[k] ?? k}: ${autopilotValue(k, from)} → ${autopilotValue(k, to)}`).join('; '))}</span><span class="secondary">${esc(autopilotWho(c.by))} · ${esc(shortDate(c.at))}</span></span>
+      <span><span class="primary">${esc(Object.entries(c.changes ?? {}).map(([k, [from, to]]) => `${keys[k] ?? k}: ${changeValue(k, from)} → ${changeValue(k, to)}`).join('; '))}</span><span class="secondary">${esc(autopilotWho(c.by))} · ${esc(shortDate(c.at))}</span></span>
       <span></span>
     </li>`);
   const items = a.queued.map(e => `<li>
@@ -2410,13 +3754,13 @@ function browsersHtml() {
       <td>${esc(b.task ?? t('Opened before the projects had browsers of their own'))}</td>
       <td class="num">${elapsed(b.since)}</td>
       <td>${stateHtml(BROWSER_STATES[b.state]?.() ?? BROWSER_STATES.unknown())}</td>
-      <td class="row-actions"><button type="button" class="button small" data-browser-focus="${b.pid}">${esc(t('Bring to front'))}</button> <button type="button" class="button ${b.state === 'running' ? 'danger ' : ''}small" data-browser-close="${b.pid}">${esc(t('Close'))}</button></td>
+      <td class="row-actions">${offered('browser-focus') ? `<button type="button" class="button small" data-browser-focus="${b.pid}">${esc(t('Bring to front'))}</button> ` : ''}<button type="button" class="button ${b.state === 'running' ? 'danger ' : ''}small" data-browser-close="${b.pid}">${esc(t('Close'))}</button></td>
     </tr>`);
   const table = list.length
     ? `<table class="table"><thead><tr><th>${esc(t('Project'))}</th><th>${esc(t('Task'))}</th><th>${esc(t('For how long'))}</th><th>${esc(t('Status'))}</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`
     : `<div class="empty">${esc(t('No browser of the crew open.'))}</div>`;
   return `<h2 class="section-title">${esc(t('Open browsers'))}</h2>
-    <p class="hint">${esc(t("Each project's browser has its own profile, its color on the frame and its name in the window's title. Chiefmate closes it when its task ends, unless a request waits for you, such as a sign-in."))}</p>
+    <p class="hint">${esc(t("Each project's browser has its own profile, its color on the frame and its name in the window's title. Chiefmate closes it when its task ends, unless a request waits for you, such as a sign-in."))}${offered('browser-focus') ? '' : ` ${esc(t('Bringing one to the front is done on the computer where Chiefmate runs.'))}`}</p>
     ${table}`;
 }
 
@@ -2479,13 +3823,32 @@ async function refreshProjectPage() {
   if (pageProject() === id && state) drawProjectPage();
 }
 
-const PAGE_PARTS = ['#project-title', '#project-more', '#project-status', '#project-actions', '#project-needs', '#project-tabs', '#project-summary', '#project-facts', '#project-team', '#project-runs', '#project-history', '#project-planning', '#project-computer', '#project-sessions', '#project-live-list', '#project-charge-top'];
+const PAGE_PARTS = ['#project-title', '#project-system', '#project-more', '#project-status', '#project-actions', '#project-needs', '#project-tabs', '#project-summary', '#project-open', '#project-facts', '#project-team', '#project-runs', '#project-history', '#project-planning', '#project-computer', '#project-sessions', '#project-live-list', '#project-charge-top'];
 // Each tab and the part of the page it shows.
-const TAB_PARTS = { overview: '#project-overview', charge: '#project-charge', live: '#project-live', crew: '#project-crew', tasks: '#project-tasks', planning: '#project-planning', files: '#project-files', context: '#project-context', builder: '#project-builder' };
+const TAB_PARTS = { overview: '#project-overview', charge: '#project-charge', live: '#project-live', manager: '#project-manager', crew: '#project-crew', tasks: '#project-tasks', planning: '#project-planning', files: '#project-files', context: '#project-context', builder: '#project-builder' };
 
 const projectHash = (id, tab = 'overview') => `#project/${encodeURIComponent(id)}${tab === 'overview' ? '' : `/${tab}`}`;
 const projectOpenItems = (id, p) => planItemsNow().filter(i => openItem(i) && (i.project === id || i.project === p?.name));
 const noCloneAttr = info => (info && !info.clone ? ` disabled title="${esc(t('No clone of yours on this computer: set "local_clone" in its settings.'))}"` : '');
+
+/**
+ * The button to the development environment's system, or ''. From another device, "localhost" is this computer's name
+ * in the tailnet: it opens there when the system listens beyond this computer (such as with --host).
+ */
+function openSystem(address) {
+  let url;
+  try {
+    url = new URL(address);
+  } catch {
+    return '';
+  }
+  if (!['http:', 'https:'].includes(url.protocol)) return '';
+  const afar = !onThisComputer() && ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(url.hostname);
+  if (afar) url.hostname = location.hostname;
+  else if (url.hostname === '0.0.0.0') url.hostname = 'localhost'; // "every address" doesn't open on Windows
+  const hint = afar ? ` title="${esc(t('Opens from here when the system accepts connections from other devices (such as with --host).'))}"` : '';
+  return `<a class="button secondary small" href="${esc(url.href)}" target="_blank" rel="noopener"${hint}>${esc(t('Open the system'))}</a>`;
+}
 
 function drawProjectPage() {
   const id = pageProject();
@@ -2501,6 +3864,8 @@ function drawProjectPage() {
   const info = projectPage.data?.id === id ? projectPage.data : null;
   const title = `<h1>${esc(p.name ?? id)}</h1><p>${esc(info?.error ?? (info ? info.about || t('No sentence about this project in its settings ("about").') : t('Loading…')))}</p>`;
   draw('#project-title', title, title);
+  const system = openSystem(info ? info.dev?.url : p.devUrl);
+  draw('#project-system', system, system);
   drawProjectStatus(id, info);
   drawProjectActions(id, info);
   drawProjectMore(id, info);
@@ -2511,11 +3876,12 @@ function drawProjectPage() {
   const working = going().filter(a => a.project === id).length + (online ? queueOrder().filter(r => r.project === id).length : 0);
   const live = liveSessionsOf(id).filter(x => x.status !== 'ended');
   const tabs = [
-    ['overview', t('At a glance')], ...(state.charge?.[id] ? [['charge', t('In charge'), chargeOpen(id).length]] : []), ['live', t('Live'), live.length], ['crew', t('Crew')], ['tasks', t('Tasks and history'), working], ['planning', t('Planning'), projectOpenItems(id, p).length],
+    ['overview', t('At a glance')], ['live', t('Live'), live.length], ['manager', t('Manager')], ...(state.charge?.[id] ? [['charge', state.charge[id].lead ? t('Team lead') : t('In charge'), chargeOpen(id).length]] : []), ['crew', t('Crew')], ['tasks', t('Tasks and history'), working], ['planning', t('Planning'), projectOpenItems(id, p).length],
     ['files', t('Files')], ['context', t('Context')], ...(builderOn ? [['builder', t('Builder')]] : []),
   ].map(([key, label, n]) => `<a href="${projectHash(id, key)}" class="tab${key === tab ? ' active' : ''}"${key === tab ? ' aria-current="page"' : ''}>${esc(label)}${count(n)}</a>`).join('');
   draw('#project-tabs', tabs, tabs);
   for (const [key, part] of Object.entries(TAB_PARTS)) $(part).hidden = key !== tab;
+  if (tab !== 'manager') placeChat();
   $('#view-project').dataset.filesProject = id; // the paths on its page are looked for in its folders
   if (tab === 'files') drawProjectFiles(id);
   else if (tab === 'context') {
@@ -2527,6 +3893,9 @@ function drawProjectPage() {
     else drawBuilderTop();
   } else if (tab === 'charge') {
     drawProjectCharge(id);
+  } else if (tab === 'manager') {
+    placeChat($('#project-manager'));
+    drawChat();
   } else if (tab === 'live') {
     drawProjectLive(id);
   } else if (tab === 'crew') {
@@ -2539,6 +3908,7 @@ function drawProjectPage() {
   } else if (tab === 'planning') drawProjectPlanning(id, p);
   else {
     drawProjectSummary(id, p, info);
+    drawProjectOpen(id, info);
     drawProjectFacts(info);
     drawProjectComputer(id, info);
   }
@@ -2553,7 +3923,9 @@ function drawProjectStatus(id, info) {
     : queued ? stateHtml([t('In the queue ({count})', { count: queued }), 'info'])
     : stateHtml([t('Stopped'), 'neutral']);
   const branch = info?.branch ? (info.branch === 'HEAD' ? t('no branch (detached)') : info.branch) : null;
+  const work = workSession(id);
   const html = [
+    ...(work ? [`<a class="project-status-run" href="${esc(sessionHash(work))}">${work.phase === 'working' ? liveDot() : ''} ${stateHtml([t('You: working now with {name}', { name: t(work.memberName ?? '') }), 'accent'])}</a>`] : []),
     `<span class="project-status-run">${status}</span>`,
     `<span>${esc(t('Memory'))} <span class="num">${c?.ram ? bytes(c.ram) : '—'}</span></span>`,
     `<span>${esc(t('Branch'))} ${branch ? `<code>${esc(branch)}</code>` : '—'}</span>`,
@@ -2561,23 +3933,30 @@ function drawProjectStatus(id, info) {
   draw('#project-status', html, html);
 }
 
-/** The three main actions: work live (the prompt builder with the usual blocks), a task for the crew, the environment. */
+/** The project's "Work now" session open, as the state lists it, or null. */
+const workSession = id => {
+  const sid = state.charge?.[id]?.work?.session;
+  return sid ? allSessions().find(x => x.id === sid) ?? null : null;
+};
+
+/**
+ * The main actions: work now (a live session with the agent in charge that acts, in your clone), talk to the manager
+ * and to the team lead (or the agent in charge) without leaving the page, and ask the crew (the queue's way).
+ */
 function drawProjectActions(id, info) {
   const noClone = noCloneAttr(info);
   const big = (attrs, title, hint, kind = '') => `<button type="button" class="action-big${kind}" ${attrs}><span class="action-title">${esc(title)}</span><span class="action-hint">${esc(hint)}</span></button>`;
-  const claude = (state.sessions?.profiles ?? []).find(x => x.project === id && x.tool === 'claude');
-  const live = state.prompts?.configured
-    ? big('data-project-live', t('Work live'), t('The prompt builder with the usual blocks, then a live session'), ' primary')
-    : claude ? big(`data-session-open="${esc(claude.id)}"${noClone}`, t('Work live'), t('Claude Code in your clone of the project'), ' primary') : '';
-  const dev = info?.dev;
-  const devAction = !info?.devStart
-    ? big(`disabled title="${esc(t('None: set "dev_start" in its settings to start it from here.'))}"`, t('Start environment'), t('No command set'))
-    : dev?.status === 'running' ? big('data-project-dev="stop"', t('Stop environment'), t('Running · {size}', { size: bytes(dev.ram) }), ' danger')
-    : dev?.status === 'starting' ? big('disabled', t('Starting…'), info.devStart)
-    : big(`data-project-dev="start"${noClone}`, t('Start environment'), info.devStart);
   const c = state.charge?.[id];
-  const charge = c ? big(`data-charge-open="${esc(id)}"`, t('Talk to the agent in charge'), t('{name} plans with you; the manager authorizes', { name: t(c.name) }), ' accent') : '';
-  const html = [charge, live, big('data-project-task', t('New task for the crew'), t('Someone of the crew does it, you approve')), devAction].join('');
+  const agent = c ? t(c.name) : t('The agent in charge');
+  const work = workSession(id);
+  const workNow = !c ? ''
+    : work ? big(`data-work-open="${esc(work.id)}"`, t('Back to your session'), `${agent} · ${sessionState(work)[0]}`, ' primary')
+      : big(`data-work-now="claude"${noClone}`, t('Work now'), t('{name} acts with you in your clone; the manager is told', { name: agent }), ' primary');
+  const manager = t(member('manager').name ?? 'Manager');
+  const talk = big('data-project-manager', t('Talk to {name} (manager)', { name: manager }), t('Here, without leaving the project'));
+  const lead = c ? big(`data-charge-open="${esc(id)}"`, c.lead ? t('Talk to the team lead') : t('Talk to the agent in charge'), t('{name} plans with you; the manager authorizes', { name: agent })) : '';
+  const crew = big('data-project-task', t('Ask the crew to do it'), t('It goes to the queue; you approve the result'));
+  const html = [workNow, talk, lead, crew].join('');
   draw('#project-actions', html, html);
 }
 
@@ -2588,21 +3967,39 @@ function requestState(r) {
   if (r.status === 'approved') return r.merged ? [t('Done'), 'ok'] : [t('Authorized'), 'ok'];
   return {
     pending: [t('With the manager'), 'info'], waiting: [t('Waiting'), 'warn'], owner: [t('With you'), 'accent'], rejected: [t('Refused'), 'neutral'],
+    forwarded: [t('Forwarded'), 'info'], 'in-progress': [t('Already in progress'), 'ok'],
   }[r.status] ?? [r.status, 'neutral'];
+}
+
+function requestTarget(r) {
+  if (r.run) return `<a href="#log/${encodeURIComponent(r.run)}">${esc(t('Run: {title}', { title: r.runTitle ?? r.run }))}</a>`;
+  if (r.targetProject) return `<a href="${esc(projectHash(r.targetProject))}">${esc(t('Project: {name}', { name: projectName(r.targetProject) }))}</a>`;
+  return '';
+}
+
+function requestAnswerHtml(entry, project) {
+  const outcome = requestState(entry);
+  const saved = state.charge?.[project]?.requests.find(r => r.id === entry.request && r.status === entry.status);
+  const target = requestTarget(entry.run || entry.targetProject ? entry : saved ?? entry);
+  const who = entry.by === 'owner' ? t('You') : entry.by === 'manager' ? t('Manager') : '';
+  return `<div class="msg request-answer state-${outcome[1]}">
+    <div class="msg-head">${who ? `<span class="msg-author">${esc(who)}</span>` : ''}${stateHtml(outcome)}<time class="msg-meta">${esc(clockTime(entry.at))}</time></div>
+    <div class="msg-body">${esc(entry.text)}${target ? `<div>${target}</div>` : ''}</div>
+  </div>`;
 }
 
 /** The requests still open (with the manager, waiting, or with you): the tab's counter. */
 const chargeOpen = id => (state.charge?.[id]?.requests ?? []).filter(r => ['pending', 'waiting', 'owner'].includes(r.status));
 
-function requestRow(id, r) {
+function requestRow(r) {
   const size = { S: t('Size S'), M: t('Size M'), L: t('Size L') }[r.size] ?? r.size;
   const risk = { low: t('Low risk'), medium: t('Medium risk'), high: t('High risk') }[r.risk] ?? r.risk;
   const who = r.by === 'owner' ? t('You') : t('Manager');
-  const run = r.run ? `<a href="${esc(projectHash(id, 'tasks'))}">${esc(t('Run: {title}', { title: r.runTitle ?? r.run }))}</a>${r.runStatus ? ` · ${esc(runState(r.runStatus)[0])}` : ''}` : '';
+  const target = requestTarget(r);
   return `<div class="charge-request">
       <div class="charge-request-main"><span class="primary">${esc(r.plan)}</span>
         <span class="hint">${esc([`#${r.id}`, size, risk, r.urgency ? t('you said: can be done now') : '', relative(r.at)].filter(Boolean).join(' · '))}</span>
-        ${r.note ? `<span class="hint">${esc(`${who}: ${r.note}`)}</span>` : ''}${run ? `<span class="hint">${run}</span>` : ''}</div>
+        ${r.note ? `<span class="hint">${esc(`${who}: ${r.note}`)}</span>` : ''}${target ? `<span class="hint">${target}${r.runStatus ? ` · ${esc(runState(r.runStatus)[0])}` : ''}</span>` : ''}</div>
       <div class="charge-request-state">${stateHtml(requestState(r))}${r.status === 'owner' ? ` <a class="button small" href="#decisions">${esc(t('Decide'))}</a>` : ''}</div>
     </div>`;
 }
@@ -2618,8 +4015,8 @@ function drawProjectCharge(id) {
       ${c.session ? '' : `<button type="button" class="button" data-charge-open="${esc(id)}">${esc(t('Start the conversation'))}</button>`}
     </div>
     ${open.length || closed.length ? `<div class="label">${esc(t('Requests to the manager'))}</div>` : ''}
-    ${open.length ? `<div class="charge-requests">${open.map(r => requestRow(id, r)).join('')}</div>` : ''}
-    ${closed.length ? `<details class="charge-earlier"${open.length ? '' : ' open'}><summary>${esc(t('Answered ({count})', { count: closed.length }))}</summary><div class="charge-requests">${closed.map(r => requestRow(id, r)).join('')}</div></details>` : ''}`;
+    ${open.length ? `<div class="charge-requests">${open.map(requestRow).join('')}</div>` : ''}
+    ${closed.length ? `<details class="charge-earlier"${open.length ? '' : ' open'}><summary>${esc(t('Answered ({count})', { count: closed.length }))}</summary><div class="charge-requests">${closed.map(requestRow).join('')}</div></details>` : ''}`;
   draw('#project-charge-top', JSON.stringify([id, c, language()]), html);
   if (!c?.session) {
     stopLive();
@@ -2638,26 +4035,41 @@ function drawProjectMore(id, info) {
   const item = (attrs, label) => `<button type="button" class="menu-item" ${attrs}>${esc(label)}</button>`;
   const session = (tool, window = false) => {
     const profile = profiles.find(x => x.tool === tool);
-    if (!profile) return '';
+    // From another device, a window would open in the app anyway: the live session already does that.
+    if (!profile || (window && !onThisComputer())) return '';
     return window
       ? item(`data-session-open="${esc(profile.id)}" data-window="1"${noClone}`, t('Open in an external window: {tool}', { tool: toolName(tool) }))
       : item(`data-session-open="${esc(profile.id)}"${noClone}`, t('Live session: {tool}', { tool: toolName(tool) }));
   };
+  const dev = info?.dev;
+  const devItem = !info?.devStart ? ''
+    : dev?.status === 'running' ? item('data-project-dev="stop"', t('Stop environment ({size})', { size: bytes(dev.ram) }))
+      : ['starting', 'failed'].includes(dev?.status) ? item('data-project-dev="stop"', t('Stop environment'))
+        : item(`data-project-dev="start"${noClone}`, t('Start environment'));
   const items = [
-    item(`data-project-open="folder"${noClone}`, t('Open folder')),
-    info?.vscode ? item(`data-project-open="vscode"${noClone}`, t('Open in VS Code')) : '',
+    state.charge?.[id] && !workSession(id) ? item(`data-work-now="codex"${noClone}`, t('Work now with Codex')) : '',
+    state.prompts?.configured ? item('data-project-live', t('Prompt builder, then a live session')) : '',
+    devItem,
+    offered('project-open') ? item(`data-project-open="folder"${noClone}`, t('Open folder')) : '',
+    info?.vscode && offered('project-vscode') ? item(`data-project-open="vscode"${noClone}`, t('Open in VS Code')) : '',
+    // From another device, the project's files open in the app instead.
+    offered('project-open') ? '' : `<a class="menu-item" href="${esc(projectHash(id, 'files'))}">${esc(t('Browse the files'))}</a>`,
     session('claude'),
     session('codex'),
     session('claude', true),
     session('codex', true),
+    onThisComputer() ? '' : `<p class="menu-note">${esc(t('Opening the folder, VS Code or a window is done on the computer where Chiefmate runs.'))}</p>`,
   ].join('');
   const html = `<details class="menu"><summary class="button secondary">${esc(t('More'))}</summary><div class="menu-list">${items}</div></details>`;
   draw('#project-more', html, html);
 }
 
-/** What waits for you in this project, at the top: its notices (requests, failures, pull requests, the board's items). */
+/**
+ * What waits for you in this project, above the tabs: its notices (requests, failures, pull requests, the board's
+ * items), folded into one line so the tabs and the conversation stay where they are.
+ */
 function drawProjectNeeds(id, p) {
-  const html = attnList(attnItems().filter(ofProject(id, p.name)), t('Waiting for you'));
+  const html = attnFold(attnItems().filter(ofProject(id, p.name)), t('Waiting for you'), `needs-${id}`);
   draw('#project-needs', html, html);
 }
 
@@ -2677,8 +4089,54 @@ function drawProjectSummary(id, p, info) {
   const board = items.length
     ? `<span class="primary">${esc(t('{count} open item(s)', { count: items.length }))}</span><span class="hint">#${items[0].id} ${esc(items[0].title)}</span>`
     : `<span class="primary">${esc(t('Nothing open'))}</span>`;
-  const html = `<div class="project-summary">${card('tasks', t('Crew now'), crewNow)}${card('tasks', t('Last run'), result)}${card('planning', t('Planning'), board)}</div>`;
+  const note = state.charge?.[id]?.work?.notes?.[0];
+  const cut = (s, n) => (String(s ?? '').length > n ? `${String(s).slice(0, n - 1)}…` : String(s ?? ''));
+  const lastWork = note ? card('live', t('Your last session'), `<span class="primary">${esc(cut(note.done, 140))}</span><span class="hint">${esc(note.open ? t('Left open: {open}', { open: cut(note.open, 140) }) : relative(note.at))}</span>`) : '';
+  const html = `<div class="project-summary">${card('tasks', t('Crew now'), crewNow)}${card('tasks', t('Last run'), result)}${card('planning', t('Planning'), board)}${lastWork}</div>`;
   draw('#project-summary', html, html);
+}
+
+// An open item's next step, by its status (the same the agent in charge reads, NEXT_STEP in src/charge.mjs).
+const nextStep = status => ({
+  proposed: t('Next: the manager triages it'), triaged: t('Next: you decide'), approved: t('Next: the crew takes it in its turn'), future: t('Next: nothing for now'),
+  todo: t('Next: not started yet'), queued: t('Next: its run starts'), in_progress: t('Next: its run ends with a delivery'), waiting_owner: t('Next: you approve or act'),
+})[status] ?? '';
+
+/**
+ * The project's open matters, the same the agent in charge reads: a summary line first, the detail folded (the board's
+ * open items, the deliveries waiting for you, the runs of the week and the live sessions).
+ */
+function drawProjectOpen(id, info) {
+  const m = info && !info.error ? info.open : null;
+  if (!m) return draw('#project-open', '', '');
+  const stale = m.deliveries.filter(d => d.stale).length;
+  // The summary line names only what there is.
+  const parts = [
+    m.deliveries.length ? t('{count} delivery(ies) waiting for you', { count: m.deliveries.length }) + (stale ? ` (${t('{count} stalled', { count: stale })})` : '') : '',
+    m.plan.length ? t('{count} open item(s)', { count: m.plan.length }) : '',
+    m.recent.length ? t('{count} run(s) in the last 7 days', { count: m.recent.length }) : '',
+    m.sessions.length ? t('{count} live session(s)', { count: m.sessions.length }) : '',
+  ].filter(Boolean);
+  const row = (main, hints, side = '') => `<div class="charge-request"><div class="charge-request-main"><span class="primary">${main}</span>${hints.filter(Boolean).map(h => `<span class="hint">${h}</span>`).join('')}</div><div class="charge-request-state">${side}</div></div>`;
+  const runLink = (run, label) => `<a href="#log" data-select="${esc(run)}">${esc(label)}</a>`;
+  const group = (title, rows) => (rows.length ? `<div class="label">${esc(title)}</div><div class="charge-requests">${rows.join('')}</div>` : '');
+  const deliveries = m.deliveries.map(d => row(esc(d.title), [
+    esc(d.summary), `${d.pullRequest ? prLink(d.pullRequest) : `<code>${esc(d.branch ?? '')}</code>`} · ${esc(t('waiting for {time}', { time: elapsed(d.ended) }))} · ${runLink(d.run, t('Reports'))}`,
+  ], d.stale ? stateHtml([t('Stalled'), 'warn']) : stateHtml([t('Waiting for you'), 'accent'])));
+  const plan = m.plan.map(i => row(esc(`#${i.id} ${i.title}`), [esc(nextStep(i.status)), esc(i.note)], stateHtml(planState(i.status))));
+  const recent = m.recent.map(r => row(esc(r.title), [esc(r.outcome), `${esc(relative(r.ended))} · ${runLink(r.run, t('Reports'))}`],
+    stateHtml(r.merged ? [t('Merged'), 'ok'] : r.discarded ? [t('Discarded'), 'neutral'] : runState(r.status))));
+  const sessions = m.sessions.map(s => row(esc(s.name), [esc(`${toolName(s.tool)} · ${s.mode === 'app' ? t('in the app') : t('in a window')} · ${relative(s.started)}`)]));
+  const empty = !deliveries.length && !plan.length && !recent.length && !sessions.length;
+  const html = `<div class="open-matters">
+      <div class="label">${esc(t('Open matters'))}</div>
+      <p class="open-matters-line">${esc(empty ? t('Nothing open: no delivery waiting, no open item, no recent run, no live session.') : parts.join(' · '))}</p>
+      ${empty ? '' : `<details class="charge-earlier" data-keep-open="open-matters-${esc(id)}"><summary>${esc(t('Details'))}</summary>
+        ${group(t('Deliveries waiting for you'), deliveries)}${group(t('Open items on the board'), plan)}${group(t('Runs of the last 7 days'), recent)}${group(t('Live sessions'), sessions)}
+        <p class="hint">${esc(t('The agent in charge reads the same summary at every message.'))}</p></details>`}
+    </div>`;
+  // Drawn again only when what it shows changes; opened, it stays open.
+  draw('#project-open', html, html);
 }
 
 function drawProjectFacts(info) {
@@ -2701,9 +4159,9 @@ function drawProjectFacts(info) {
 function drawProjectTeam(id) {
   const team = state.teams?.find(x => x.project === id);
   const html = team
-    ? `<div class="team"><div class="team-top"><h3>${esc(t('Crew'))}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>${teamBody(team)}</div>`
+    ? `<div class="team"><div class="team-top"><h3>${esc(t('Crew'))}</h3><span class="hint">${esc(team.own ? t('Own crew') : t('General crew'))}</span></div>${teamBody(team, true)}</div>`
     : '';
-  draw('#project-team', html, html);
+  if (!pickingEffort('#project-team')) draw('#project-team', html, html);
 }
 
 /** The project's runs going on (a click opens the agent's panel) and its runs in the queue. */
@@ -2712,19 +4170,23 @@ function drawProjectRuns(id) {
   const queue = online ? queueOrder().filter(r => r.project === id) : [];
   const live = runs.map(a => `<div class="project-run"${a.agent ? opensPanel(a.id) : ''}>
       ${face(a.agent ? member(a.agent, a.project) : member('manager'), a.agent ? faceState(member(a.agent, a.project)) : 'working', 30)}
-      <div style="min-width:0"><div class="name">${liveDot()} ${esc(a.title)}</div><div class="hint">${esc(stepLine(a))} · ${ticking(a.started)}</div>${a.doing ? `<div class="hint">${esc(t('Now: {what}', { what: a.doing }))}</div>` : ''}</div>
+      <div style="min-width:0"><div class="name">${liveDot()} ${esc(a.title)}</div><div class="hint">${esc(stepLine(a))} · ${ticking(a.started)}</div>${a.agent && a.speech?.now ? speechBubble({ run: a, line: a.speech.now, quiet: false }) : a.doing ? `<div class="hint">${esc(t('Now: {what}', { what: a.doing }))}</div>` : ''}</div>
       <button type="button" class="button danger small" data-cancel="${esc(a.id)}">${esc(t('Cancel run'))}</button>
     </div>`);
-  const waiting = queue.map(r => `<div class="project-run">
-      <span></span>
-      <div style="min-width:0"><div class="name" title="${esc(r.summary ?? '')}">${esc(r.title)}</div><div class="hint">${stateHtml(runLabel(r))}${r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? ` · ${esc(t('not before {when}', { when: shortDate(r.notBefore) }))}` : ''}</div></div>
-      <button type="button" class="button danger small" data-cancel="${esc(r.id)}">${esc(t('Cancel'))}</button>
+  // Each with its place in the whole queue, what holds it and why, and the controls (▲ ▼ within the project's runs).
+  const all = online ? queueOrder() : [];
+  const waiting = queue.map((r, i) => `<div class="project-run queued-run"${r.hold ? ` data-held="${r.hold.doNow ? 'do-now' : r.hold.by}"` : ''}>
+      <span class="num queue-place" title="${esc(t('Place in the queue'))}">${all.indexOf(r) + 1}</span>
+      <div style="min-width:0"><div class="name" title="${esc(r.summary ?? '')}">${queueTags(r)}${esc(r.title)}</div><div class="hint">${stateHtml(runLabel(r))}${r.notBefore && new Date(r.notBefore).getTime() > Date.now() + skew ? ` · ${esc(t('not before {when}', { when: shortDate(r.notBefore) }))}` : ''}</div>${r.hold ? `<div class="queue-why">${esc(holdWhy(r.hold))}</div>` : ''}</div>
+      <div class="queue-actions">${queueControls(r, { prev: queue[i - 1], next: queue[i + 1], list: all, key: 'project' })}</div>
     </div>`);
   const html = `<div class="panel">
       <div class="label">${esc(t('Running now'))}</div>${live.join('') || `<div class="hint">${esc(t('Nothing running for this project.'))}</div>`}
       <div class="label" style="margin-top:16px">${esc(t('Queue'))}</div>${waiting.join('') || `<div class="hint">${esc(t('Nothing in the queue for this project.'))}</div>`}
     </div>`;
-  draw('#project-runs', JSON.stringify([online, runs.map(a => [a.id, a.title, a.step, a.agent, a.status, a.doing, member(a.agent ?? 'manager', a.project).status]), queue.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.needsYou])]), html);
+  const signature = [online, runs.map(a => [a.id, a.title, a.step, a.agent, a.status, a.doing, a.speech?.now, member(a.agent ?? 'manager', a.project).status]),
+    queue.map(r => [r.id, r.title, r.summary, r.status, r.notBefore, r.needsYou, all.indexOf(r), r.hold, r.first, r.keepsCopy, r.doNow])];
+  if (draw('#project-runs', JSON.stringify(signature), html)) restoreQueueFocus();
 }
 
 /** The project's latest runs, each with its result and a link to its reports in the Log. */
@@ -2769,7 +4231,7 @@ function drawProjectComputer(id, info) {
   const canStop = c.processes.some(x => !x.crew && !x.guarded);
   const dev = info?.dev;
   const devLine = !info?.devStart ? ''
-    : `<div class="dev-line"><span class="label">${esc(t('Development environment'))}</span>${stateHtml(dev?.status === 'running' ? [t('Running'), 'ok'] : dev?.status === 'starting' ? [t('Starting…'), 'info'] : [t('Stopped'), 'neutral'])}${dev?.status === 'running' ? `<span class="num">${bytes(dev.ram)}</span><button type="button" class="button danger small" data-project-dev="stop">${esc(t('Stop'))}</button>` : dev?.status === 'starting' ? '' : `<button type="button" class="button secondary small" data-project-dev="start"${info.clone ? '' : ' disabled'}>${esc(t('Start'))}</button>`}</div>`;
+    : `<div class="dev-line"><span class="label">${esc(t('Development environment'))}</span>${stateHtml(dev?.status === 'running' ? [t('Running'), 'ok'] : dev?.status === 'starting' ? [t('Starting…'), 'info'] : dev?.status === 'failed' ? [t('Failed'), 'error'] : [t('Stopped'), 'neutral'])}${dev?.status === 'running' ? `<span class="num">${bytes(dev.ram)}</span>` : ''}${dev && dev.status !== 'stopped' ? `<button type="button" class="button danger small" data-project-dev="stop">${esc(t('Stop'))}</button>` : `<button type="button" class="button secondary small" data-project-dev="start"${info.clone ? '' : ' disabled'}>${esc(t('Start'))}</button>`}</div>`;
   const notes = [state.computer.supported ? '' : t("The projects' processes are read on Windows only."), state.computer.error ? t("Couldn't read the processes: {error}", { error: state.computer.error }) : ''].filter(Boolean);
   const html = `<h2 class="section-title">${esc(t('On this computer'))}</h2>
     <div class="panel">
@@ -2830,6 +4292,7 @@ function contextPartTitle(key) {
     case 'lead-role': return t("The team lead's role");
     case 'lead-notes': return t('Notes for the team lead');
     case 'header': return t('The run and the task');
+    case 'additions': return t('Added by the manager');
     case 'memory': return t('Project memory');
     case 'lead': return t('How the team lead reviews');
     case 'playbook': return t("The mission's playbook");
@@ -3025,6 +4488,10 @@ function contextFormHtml(d) {
       ${blocks}
       <label><span>${esc(t('Notes for the project'))} <code>projects.${esc(d.project.id)}.notes</code></span><textarea name="notes" rows="4">${esc(d.settings.notes)}</textarea></label>
       ${b.used ? `<p class="hint">${esc(t("The prompt builder is used for this project, so these notes don't go to the crew; each member's notes below do."))}</p>` : ''}
+      <fieldset><legend>${esc(t('Main branch to GitHub'))}</legend>
+        <label class="option"><input type="checkbox" name="mainPush"${d.settings.mainPush ? ' checked' : ''}> ${esc(t('Through a card: the manager or a "Work now" session sends it once you allow it in Decisions'))} <code>projects.${esc(d.project.id)}.main_push</code></label>
+        <p class="hint">${esc(t('For a project without pull requests. A plain push of the main branch becomes a card with what goes (commits, files, migrations); your click lets that push go once, within 30 minutes. Off, they never send it. A forced push or a deleted branch is always refused.'))}</p>
+      </fieldset>
       <div class="label" style="margin-top:12px">${esc(t('Each member'))}</div>
       ${members}
       <div class="actions left"><button type="button" class="button secondary" data-context-preview>${esc(t('Preview'))}</button><button type="button" class="button" data-context-save hidden>${esc(t('Save'))}</button></div>
@@ -3117,6 +4584,7 @@ function contextChanges() {
     if (!same([...off, ...keptOff], d.builder.exclude)) changes.exclude = [...keptOff, ...off];
   }
   if (form.notes.value.trim() !== d.settings.notes.trim()) changes.notes = form.notes.value;
+  if (form.mainPush.checked !== !!d.settings.mainPush) changes.mainPush = form.mainPush.checked;
   for (const area of form.querySelectorAll('textarea[data-extra]')) {
     const id = area.dataset.extra;
     if (area.value.trim() !== (d.settings.extra[id]?.text ?? '').trim()) (changes.extra ??= {})[id] = area.value;
@@ -3229,7 +4697,7 @@ async function openBuilder(project, { reload = false } = {}) {
     const data = await api(`/api/prompt-builder?project=${encodeURIComponent(project)}`);
     if (builderTarget() !== project) return;
     const keep = reload && builder.project === project;
-    // "Work live" on the project's page asks for its usual blocks, not the last choice.
+    // "Prompt builder, then a live session" on the project's page asks for its usual blocks, not the last choice.
     const usual = builder.usual === project;
     builder.usual = null;
     Object.assign(builder, { project, data, result: null, edited: false, editing: false });
@@ -3263,7 +4731,40 @@ function placeBuilder(inProject) {
   if (body.parentElement !== home) home.append(body);
 }
 
-/** "Work live": the project's prompt builder with its usual blocks (its block, the environment and its modules). */
+/**
+ * "Work now": opens (or brings back) the project's session with its agent in charge at once, in your clone. When the
+ * crew is working on the project, "work_now_mode" decides: its task pauses (the default) or you work in a separate
+ * copy; only with "ask" do you choose first.
+ */
+async function workNow(id, tool, button) {
+  button.disabled = true;
+  try {
+    let r = await api('/api/work-now', { project: id, tool });
+    if (r.conflict) {
+      const choice = await workChoice(r.conflict);
+      if (!choice) return;
+      r = await api('/api/work-now', { project: id, tool, choice });
+    }
+    const held = r.work?.held?.length ? ` ${t("The crew's task is paused and resumes when you end.")}` : '';
+    toast(r.existing ? t('Your session was already open: here it is.') : r.status === 'login' ? t('Codex is not signed in: see the request at the top.') : `${t('Session open: the agent reads the project and answers in a moment.')}${held}`);
+    await refresh();
+    location.hash = sessionHash(r);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/** The owner's choice when the crew is working on the project: "pause", "copy" or '' (cancel). */
+function workChoice(runs) {
+  const dialog = $('#work-dialog');
+  $('#work-dialog-text').textContent = t('A task of the crew is going on in this project. Pause it while you work (it resumes by itself when you end), or work in a separate copy of your clone while it goes on.');
+  $('#work-dialog-runs').innerHTML = runs.map(r => `<li>${esc(r.title)}${r.agent ? ` <span class="hint">· ${esc(agentName(r.agent, pageProject()))}</span>` : ''}</li>`).join('');
+  dialog.returnValue = '';
+  dialog.showModal();
+  return new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue), { once: true }));
+}
+
+/** "Prompt builder, then a live session" (the project's More): its prompt builder with its usual blocks (its block, the environment and its modules). */
 async function workLive(id) {
   const hash = `#project/${encodeURIComponent(id)}/builder`;
   if (builder.project === id && builder.data?.document) {
@@ -3606,7 +5107,9 @@ function paceText(p) {
 function readerPanel(reader) {
   const status = reader.status ?? {};
   let line = reader.enabled ? t('On, every {hours} h.', { hours: reader.everyHours }) : t('Off.');
-  if (!reader.signedIn) line += ` ${t('Not signed in yet: run node src/cli.mjs claude-login.')}`;
+  const login = reader.login ?? {};
+  if (login.pid && !login.closed) line += ` ${t('The sign-in window is open: it closes by itself in a few minutes.')}`;
+  else if (!reader.signedIn) line += ` ${t('Not signed in yet: open the sign-in window.')}`;
   if (reader.reading) line += ` ${t('Reading now…')}`;
   const read = [];
   if (status.read_at) read.push(t('Last read {when}: session {session}, week {week}.', { when: shortDate(status.read_at), session: percent(status.five_hour), week: percent(status.seven_day) }));
@@ -3621,6 +5124,7 @@ function readerPanel(reader) {
       <div class="actions left">
         <button type="button" class="button secondary small" data-reader="${reader.enabled ? 'off' : 'on'}">${esc(reader.enabled ? t('Turn off') : t('Turn on'))}</button>
         ${reader.signedIn ? `<button type="button" class="button secondary small" data-reader="now"${reader.reading ? ' disabled' : ''}>${esc(t('Read now'))}</button>` : ''}
+        ${reader.signIn || !reader.signedIn ? `<button type="button" class="button secondary small" data-reader="login">${esc(t('Open the sign-in window'))}</button>` : ''}
       </div>
     </div>`;
 }
@@ -4180,9 +5684,11 @@ function drawAgentTalk(f) {
   const open = new Map(f.requests.map(r => [r.id, r]));
   const entries = f.talk.map(m => {
     const meta = [clockTime(m.at), t('step {n}', { n: m.step })];
-    if (m.who === 'owner') {
+    if (m.who === 'owner' || m.who === 'manager') {
       const status = { pending: t('waiting for a safe point'), delivered: m.via === 'request' ? t('delivered as the answer to the request') : t('delivered'), undelivered: t('not delivered') }[m.status];
-      return `<div class="talk owner"><div class="talk-head"><span class="talk-who">${esc(t('You'))}</span> · ${esc([...meta, status].filter(Boolean).join(' · '))}</div><div class="talk-text">${esc(m.text)}</div></div>`;
+      // The manager's guidance (cli.mjs guide) shows on your side, with its name.
+      const who = m.who === 'manager' ? t('Manager') : t('You');
+      return `<div class="talk owner"><div class="talk-head"><span class="talk-who">${esc(who)}</span> · ${esc([...meta, status].filter(Boolean).join(' · '))}</div><div class="talk-text">${esc(m.text)}</div></div>`;
     }
     const asking = m.kind === 'request';
     const request = asking ? open.get(m.request) : null;
@@ -4255,6 +5761,24 @@ $('#agent-close').addEventListener('click', closeAgentPanel);
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape' && agentPanel.run && !document.querySelector('dialog[open]')) closeAgentPanel();
 });
+// An effort picker (the crew, the crews by project, a project's page): the change counts from the next step.
+document.addEventListener('change', async event => {
+  const select = event.target.closest('select[data-effort-member]');
+  if (!select || !select.value) return;
+  const { effortMember: member, effortProject: project, effortChat: chat } = select.dataset;
+  select.blur(); // the places are drawn again with the new level
+  try {
+    const e = await api('/api/effort', { member, level: select.value, project: project || null, chat: !!chat });
+    toast(e.changed
+      ? t('{agent}: {from} → {to}. Counts from the next step.', { agent: agentName(member, project), from: e.from ?? t('default'), to: e.to ?? t('default') })
+      : t('{agent} is already at {level}.', { agent: agentName(member, project), level: e.to ?? t('default') }));
+    refresh();
+  } catch (error) {
+    select.value = select.querySelector('option[selected]')?.value ?? 'default';
+    toast(error.message);
+  }
+});
+
 // A click on an agent at work (in Operations, the crew, the teams or the focus) opens its panel; the buttons inside
 // those places keep their own action.
 document.addEventListener('click', event => {
@@ -4264,6 +5788,13 @@ document.addEventListener('click', event => {
   if (control && control !== target) return;
   openAgentPanel(target.dataset.agentRun);
 });
+
+// A click on a speech bubble opens what was said in its run (the card around it keeps its own click).
+document.addEventListener('click', event => {
+  const bubble = event.target.closest('[data-speech-run]');
+  if (bubble) openSpeech(bubble.dataset.speechRun);
+});
+$('#speech-dialog').addEventListener('close', () => (speechRun = null));
 
 // ---------- Cycle ----------
 
@@ -4305,7 +5836,9 @@ async function fetchState() {
   const r = await fetch('/api/state', { cache: 'no-store', headers: stateTag && state ? { 'if-none-match': stateTag } : {} });
   if (r.status === 304) return state;
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || t('Error {code}', { code: r.status }));
+  // Through the remote access, the lockdown refuses the state but says why (423).
+  if (r.status === 423 && data.lockdown) throw Object.assign(new Error(data.error), { lockdown: data.lockdown, language: data.language, status: r.status });
+  if (!r.ok) throw Object.assign(new Error(data.error || t('Error {code}', { code: r.status })), { status: r.status });
   stateTag = r.headers.get('etag');
   return data;
 }
@@ -4314,10 +5847,19 @@ async function refresh() {
   let next;
   try {
     next = await fetchState();
-  } catch {
+  } catch (error) {
+    lockedAfar = error.lockdown ?? null;
+    if (lockedAfar && error.language && !started && error.language !== language()) {
+      await setLanguage(error.language);
+      translatePage();
+    }
+    // Through the remote access, an emergency lockdown answers 423: the phone gets the lockdown's own screen.
+    if (error.status === 423 && await drawLockdownScreen()) return;
     drawOffline();
     return;
   }
+  lockedAfar = null;
+  $('#lockdown-screen')?.remove();
   const fresh = next !== state;
   if (!started) {
     await setLanguage(next.language);
@@ -4352,6 +5894,7 @@ async function refresh() {
   drawFocus();
   drawMics();
   drawAlerts();
+  announceCalls();
   drawNavAttention();
   drawCounters();
   drawTitle();
@@ -4363,8 +5906,10 @@ async function refresh() {
   drawOperations();
   drawMissions();
   drawCrew();
+  drawSpeechDialog();
   drawLog();
   drawUsage();
+  drawSpending();
   drawAutopilot();
   drawComputer();
   drawPlan();
@@ -4388,8 +5933,12 @@ async function refresh() {
 // ---------- Actions ----------
 
 async function sendMessage(text) {
-  const message = text.trim();
-  if (!message) return;
+  const typed = text.trim();
+  if (!typed) return;
+  // From a project's Manager tab, the message says which project it is about.
+  const about = $('#project-manager').contains($('#message')) ? pageProject() : null;
+  const message = about ? `${t('About the project {project}:', { project: projectName(about) })}
+${typed}` : typed;
   stopDictation($('#message'));
   try {
     const sent = await api('/api/manager', { message });
@@ -4518,6 +6067,14 @@ $('#live-interrupt').addEventListener('click', async () => {
   }
 });
 $('#live-body').addEventListener('click', async event => {
+  // The band of asks: the group or an ask's details fold and unfold; the focus stays on the toggle drawn again.
+  const fold = event.target.closest('[data-ask-fold]')?.dataset.askFold;
+  if (fold) {
+    askFolds = toggleFold(askFolds, fold);
+    drawLive();
+    [...$('#live-asks').querySelectorAll('[data-ask-fold]')].find(b => b.dataset.askFold === fold)?.focus();
+    return;
+  }
   const target = event.target.closest('[data-live-resume],[data-live-allow],[data-live-refuse],[data-live-unqueue]');
   if (!target || !liveChat.id) return;
   target.disabled = true;
@@ -4596,10 +6153,8 @@ $('#limits-form').addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.target;
   try {
-    await api('/api/limits', {
-      pause_at_5h_window: Number(form.window.value) / 100,
-      pause_at_plan_week: Number(form.week.value) / 100,
-    });
+    // only the week's: the session's pause is set in Spending (drawSpending)
+    await api('/api/limits', { pause_at_plan_week: Number(form.week.value) / 100 });
     toast(t('Limits saved.'));
     refresh();
   } catch (error) {
@@ -4612,7 +6167,7 @@ document.addEventListener('click', event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-autopilot-mode],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-browser-focus],[data-browser-close]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-autopilot-mode],[data-session-mode],[data-session-boost],[data-spending-dismiss],[data-needs-done],[data-needs-session],[data-call-open],[data-call-answer],[data-call-later],[data-calls-more],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-work-now],[data-work-open],[data-work-release],[data-project-manager],[data-browser-focus],[data-browser-close]');
   if (!target) return;
   // A project's name inside a row that opens on a click (Projects) goes to its page, and nothing else.
   if (event.target.closest('a.project-link') && !target.matches('a')) return;
@@ -4627,6 +6182,25 @@ document.addEventListener('click', async event => {
     } else if (target.hasAttribute('data-project-live')) {
       await workLive(pageProject());
       return;
+    } else if (target.dataset.workNow) {
+      await workNow(pageProject(), target.dataset.workNow, target);
+      return;
+    } else if (target.dataset.workRelease) {
+      target.disabled = true;
+      await api('/api/work-now/release', { id: target.dataset.workRelease });
+      toast(t("The crew's task goes on now in its own working copy."));
+      await refresh();
+      if (liveChat.id === target.dataset.workRelease) pollLive();
+      return;
+    } else if (target.dataset.workOpen) {
+      const x = allSessions().find(s => s.id === target.dataset.workOpen);
+      if (x) location.hash = sessionHash(x);
+      return;
+    } else if (target.hasAttribute('data-project-manager')) {
+      const hash = projectHash(pageProject(), 'manager');
+      if (location.hash !== hash) location.hash = hash;
+      else showChargeChat();
+      return;
     } else if (target.dataset.chargeOpen) {
       // The conversation with the project's agent in charge: the one open (or the latest) carries on; else a new one.
       const id = target.dataset.chargeOpen;
@@ -4635,8 +6209,12 @@ document.addEventListener('click', async event => {
         await api('/api/session', { profile: state.charge[id].profile });
         await refresh();
       }
-      location.hash = projectHash(id, 'charge');
-      $('#live-text').focus();
+      // A new hash brings the conversation into view (showView); already on the tab, it is brought here.
+      if (location.hash !== projectHash(id, 'charge')) location.hash = projectHash(id, 'charge');
+      else {
+        drawProjectPage();
+        showChargeChat();
+      }
       return;
     } else if (target.dataset.projectPlanning) {
       planFilter.project = target.dataset.projectPlanning;
@@ -4651,14 +6229,14 @@ document.addEventListener('click', async event => {
     } else if (target.dataset.projectDev) {
       const project = pageProject();
       if (target.dataset.projectDev === 'stop') {
-        const ok = await confirmDialog(t('Stop the development environment'), t('The window of the development environment of {project} closes, with everything it started.', { project: projectName(project) }), t('Stop'));
+        const ok = await confirmDialog(t('Stop the development environment'), t('The development environment of {project} stops, with everything it started.', { project: projectName(project) }), t('Stop'));
         if (!ok) return;
         const r = await api('/api/project/dev', { project, action: 'stop' });
         toast(r.stopped ? t('Development environment stopped.') : t('It was no longer running.'));
       } else {
         target.disabled = true;
-        await api('/api/project/dev', { project, action: 'start' });
-        toast(t('Development environment starting in a window of its own.'));
+        const r = await api('/api/project/dev', { project, action: 'start' });
+        toast(r.background ? t('Development environment starting in the background: its address shows on this page when it is up.') : t('Development environment starting in a window of its own.'));
       }
       await refreshProjectPage();
     } else if (target.dataset.run) {
@@ -4683,6 +6261,7 @@ document.addEventListener('click', async event => {
       $('#task-form').instruction.focus();
     } else if (target.dataset.select) {
       selectedRun = target.dataset.select;
+      if (pageRun()) history.replaceState(null, '', `#log/${encodeURIComponent(selectedRun)}`);
       drawLog();
       await refreshDetail(true);
     } else if (target.dataset.cancel) {
@@ -4753,6 +6332,25 @@ document.addEventListener('click', async event => {
       $('#archive-list').innerHTML = archiveHtml(items ?? []);
       $('#archive-dialog').showModal();
       return;
+    } else if (target.dataset.callOpen) {
+      openAgentPanel(target.dataset.callOpen);
+      return;
+    } else if (target.dataset.callAnswer) {
+      callAnswer = callAnswer === target.dataset.callAnswer ? null : target.dataset.callAnswer;
+      drawAlerts();
+      // A request to act is answered in words: its field, ready to write (a question's options come first).
+      const call = callsNow().find(c => callKey(c) === callAnswer);
+      if (call && !call.options?.length) $('#alerts .call-answer textarea')?.focus();
+      return;
+    } else if (target.dataset.callLater) {
+      const r = await api('/api/needs-you/later', { run: target.dataset.callLater, id: target.dataset.request });
+      // "Not now" can be taken back from the band: the call is back in the bar (src/needs.mjs, reopenRequest).
+      if (r?.logged) showUndo(r.logged, decisionWord('later'), firstLine(r.what ?? ''));
+      else toast(t('Left for later: it stays in Operations, and the agent goes on with what it can.'));
+    } else if (target.hasAttribute('data-calls-more')) {
+      callsOpen = !callsOpen;
+      drawAlerts();
+      return;
     } else if (target.hasAttribute('data-attn-more')) {
       attnOpen = !attnOpen;
       drawAlerts();
@@ -4765,7 +6363,9 @@ document.addEventListener('click', async event => {
       if (!window) location.hash = sessionHash(session);
     } else if (target.dataset.sessionEnd) {
       const x = allSessions().find(o => o.id === target.dataset.sessionEnd);
-      const text = x?.mode === 'app'
+      const text = x?.work
+        ? t('"{name}" ends, and anything the agent is doing stops. A summary of what was done and what is left open is kept for the next conversation, the manager is told, and a crew task you paused goes back to the queue.', { name: x?.name ?? '' })
+        : x?.mode === 'app'
         ? t('"{name}" ends, and anything the agent is doing stops. Its history stays here, and Resume carries on in the same conversation.', { name: x?.name ?? '' })
         : t('The window of "{name}" closes, and anything the agent is doing stops. The conversation itself stays in the history of the tool.', { name: x?.name ?? '' });
       const ok = await confirmDialog(t('End session'), text, t('End'));
@@ -4789,13 +6389,22 @@ document.addEventListener('click', async event => {
       await api('/api/autopilot', { enabled: on });
       toast(on ? t('Autopilot turned on.') : t('Autopilot turned off.'));
     } else if (target.dataset.autopilotMode) {
-      const mode = target.dataset.autopilotMode;
-      await api('/api/autopilot', { mode });
-      toast(t('Spending mode: {mode}.', { mode: AUTOPILOT_MODES().find(m => m[0] === mode)?.[1] ?? mode }));
+      await setAutopilotMode(target.dataset.autopilotMode);
+    } else if (target.dataset.sessionMode) {
+      // the session's shortcuts fill both settings (src/spending.mjs)
+      await api('/api/spending', { mode: target.dataset.sessionMode });
+      toast(t('Session mode: {mode}.', { mode: SESSION_MODES().find(m => m[0] === target.dataset.sessionMode)?.[1] ?? target.dataset.sessionMode }));
+    } else if (target.dataset.sessionBoost) {
+      const on = target.dataset.sessionBoost === 'on';
+      await api('/api/spending', { boost: on });
+      toast(on ? t('Spending all until the session renews; then your mode holds again.') : t('Back to your mode now.'));
+    } else if (target.hasAttribute('data-spending-dismiss')) {
+      await api('/api/spending', { dismiss: true });
+      toast(t('Not now: no more offers until the session renews.'));
     } else if (target.dataset.reader) {
       const action = target.dataset.reader;
-      await api('/api/usage-reader', action === 'now' ? { read: true } : { enabled: action === 'on' });
-      toast(action === 'now' ? t('Reading claude.ai…') : action === 'on' ? t('Reading of claude.ai turned on.') : t('Reading of claude.ai turned off.'));
+      await api('/api/usage-reader', action === 'now' ? { read: true } : action === 'login' ? { login: true } : { enabled: action === 'on' });
+      toast(action === 'now' ? t('Reading claude.ai…') : action === 'login' ? t('A window opened on this computer for you to sign in to claude.ai.') : action === 'on' ? t('Reading of claude.ai turned on.') : t('Reading of claude.ai turned off.'));
     }
     refresh();
   } catch (error) {
@@ -4830,6 +6439,8 @@ async function openFile(ref, { gallery = null } = {}) {
   try {
     info = await api(fileUrl('info', ref));
   } catch (error) {
+    // Outside the viewer's folders, or in none of the project's copies: perhaps a file of your user folder.
+    if (ref.path && !ref.file && (error.status === 404 || error.data?.reason === 'outside')) return openOnComputer(ref.path, error);
     toast(error.message);
     return;
   }
@@ -4840,6 +6451,42 @@ async function openFile(ref, { gallery = null } = {}) {
   if (!$('#viewer').open) $('#viewer').showModal();
   drawViewer(token);
 }
+
+/**
+ * A file of your user folder (src/files.mjs, openOnComputer): on this computer, opened with its own app; elsewhere (the
+ * phone), its path to copy, as it opens only on the computer. Not found: the path tried, with what the viewer said.
+ */
+async function openOnComputer(file, viewerError = null) {
+  const here = offered('file-open');
+  try {
+    const r = await api('/api/files/open', { path: file, dryRun: !here });
+    if (!here) pathDialog(t('Opens on the computer'), r.path, t('This file opens on the computer where Chiefmate runs, not here: copy its path to find it there.'));
+    else toast(r.how === 'reveal' ? t('Shown in its folder on the computer: {name}', { name: baseName(r.path) }) : t('Opened on the computer: {name}', { name: baseName(r.path) }));
+  } catch (error) {
+    if (error.status !== 404) return toast(error.message);
+    pathDialog(t('File not found'), error.data?.tried ?? file, [viewerError?.status === 404 ? viewerError.message : '', error.message].filter(Boolean).join('\n'));
+  }
+}
+
+/** A path to copy, with a line on it (#path-dialog). */
+function pathDialog(title, file, text) {
+  $('#path-dialog-title').textContent = title;
+  $('#path-dialog-text').textContent = text;
+  $('#path-dialog-path').textContent = file;
+  if (!$('#path-dialog').open) $('#path-dialog').showModal();
+}
+
+$('#path-dialog-copy').addEventListener('click', async () => {
+  const file = $('#path-dialog-path').textContent;
+  try {
+    await navigator.clipboard.writeText(file);
+  } catch {
+    // Without a secure context (http on the phone), the browser's own copy of the selected path.
+    getSelection().selectAllChildren($('#path-dialog-path'));
+    document.execCommand('copy');
+  }
+  toast(t('Path copied.'));
+});
 
 function stepGallery(by) {
   const { gallery, index } = viewer;
@@ -4859,6 +6506,8 @@ function drawViewer(token = viewer.token) {
   $('#viewer-tools').innerHTML = [
     info.kind === 'image' ? `<button type="button" class="button secondary small" data-viewer="zoom" aria-pressed="${viewer.zoom}">${esc(viewer.zoom ? t('Fit to screen') : t('Actual size'))}</button>` : '',
     info.dir ? '' : `<a class="button secondary small" href="${esc(raw)}" target="_blank" rel="noopener"${downloads(info) ? ' download' : ''}>${esc(downloads(info) ? t('Download') : t('Open in a tab'))}</a>`,
+    // With its own app (an HTML page shown as a page, not as its code), on this computer only.
+    info.ref.path && offered('file-open') ? `<button type="button" class="button secondary small" data-viewer="computer">${esc(t('Open on the computer'))}</button>` : '',
   ].join('');
   const body = $('#viewer-body');
   body.dataset.kind = info.kind;
@@ -5009,6 +6658,7 @@ document.addEventListener('click', event => {
   event.preventDefault();
   const inViewer = !!el.closest('#viewer');
   if (el.dataset.viewer === 'prev' || el.dataset.viewer === 'next') stepGallery(el.dataset.viewer === 'next' ? 1 : -1);
+  else if (el.dataset.viewer === 'computer') openOnComputer(viewer.info.ref.path);
   else if (el.dataset.viewer === 'zoom') {
     // Without drawing again: the image is not read a second time.
     viewer.zoom = !viewer.zoom;
@@ -5253,6 +6903,7 @@ document.addEventListener('keydown', event => {
 // Another page: the dictation stops there
 window.addEventListener('hashchange', () => dictations.forEach((d, field) => stopDictation(field)));
 
+pairOwner();
 showView();
 drawClock();
 setInterval(drawClock, 15_000);

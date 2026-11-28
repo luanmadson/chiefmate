@@ -4,7 +4,7 @@ import { closeSync, createWriteStream, existsSync, fstatSync, openSync, readSync
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { userClaudeExcludes } from './access.mjs';
-import { t } from './i18n.mjs';
+import { formatDateTime, t } from './i18n.mjs';
 import { recordUsage } from './store.mjs';
 import { clip, now } from './util.mjs';
 
@@ -49,6 +49,87 @@ export function checkClaude() {
   });
 }
 
+// ---------- Claude Code's sign-in on this computer ----------
+
+const DAY = 86400_000;
+// Claude Code itself says a sign-in ends between 3 days before the expiry it reports and that expiry. The owner is
+// warned 3 days before that earliest end, and strongly from the day before it.
+export const LOGIN_EARLY = 3 * DAY;
+export const LOGIN_WARN = 3 * DAY;
+export const LOGIN_URGENT = DAY;
+export const LOGIN_RENEW = 'claude auth login';
+
+/** When the sign-in expires, as Claude Code itself reports it. Checked when Chiefmate starts and once a day. */
+export const loginInfo = { expires: null, checked: null, error: null };
+
+/**
+ * The expiry in the output of `claude auth status --json`, and nothing else: the account's details (e-mail,
+ * organization, plan) are never kept. An expiry missing or unreadable is null.
+ */
+export function parseLoginStatus(text) {
+  let status;
+  try {
+    status = JSON.parse(String(text ?? ''));
+  } catch {
+    return null;
+  }
+  const at = Date.parse(status?.loginExpiresAt ?? '');
+  return Number.isNaN(at) ? null : new Date(at).toISOString();
+}
+
+/**
+ * Whether to ask Claude Code again: never asked or the last read failed, a day since, or hourly within the warning
+ * (a renewal shows soon). Five minutes of slack: the hourly timer may tick just before a full hour since the last read.
+ */
+export function loginDue(info = loginInfo, at = Date.now()) {
+  if (!info.checked || info.error) return true;
+  const since = at - Date.parse(info.checked) + 5 * 60_000;
+  return since >= DAY || (!!loginWarning(info, at) && since >= DAY / 24);
+}
+
+/**
+ * The sign-in's facts after a read. The command ends with an error when signed out, with its JSON still on stdout.
+ * A read that fails or finds no sign-in keeps the last expiry known, so the warning stays until a new sign-in shows its own.
+ */
+export function loginRead(info, error, stdout, at = now()) {
+  const expires = parseLoginStatus(stdout);
+  return { expires: expires ?? (error ? info.expires : null), checked: at, error: expires || !error ? null : error.message };
+}
+
+/** Asks Claude Code when its sign-in expires (`claude auth status --json`; it reads only, nothing changes). */
+export function checkLogin({ force = false } = {}) {
+  if (!force && !loginDue()) return;
+  const [file, first] = command();
+  execFile(file, [...first, 'auth', 'status', '--json'], { timeout: 30_000, windowsHide: true, env: environment() }, (error, stdout) => {
+    Object.assign(loginInfo, loginRead(loginInfo, error, stdout));
+  });
+}
+
+/** The earliest end of a sign-in, LOGIN_EARLY before the expiry Claude Code reports. */
+export const loginFrom = expires => new Date(Date.parse(expires) - LOGIN_EARLY).toISOString();
+
+/**
+ * The warning the sign-in calls for now: null until 3 days before its earliest end (or with no expiry known);
+ * else { expires, left (ms to the expiry), step: "3d" | "1d" (from the day before the earliest end) | "expired" }.
+ */
+export function loginWarning(info = loginInfo, at = Date.now()) {
+  if (!info?.expires) return null;
+  const left = Date.parse(info.expires) - at;
+  if (left - LOGIN_EARLY > LOGIN_WARN) return null;
+  return { expires: info.expires, left, step: left <= 0 ? 'expired' : left - LOGIN_EARLY <= LOGIN_URGENT ? '1d' : '3d' };
+}
+
+/** One line for the manager's situation while the warning lasts, else null. */
+export function loginLine(owner = 'the owner', info = loginInfo, at = Date.now()) {
+  const w = loginWarning(info, at);
+  if (!w) return null;
+  const when = w.step === 'expired' ? `expired ${formatDateTime(w.expires)}` : `may end from ${formatDateTime(loginFrom(w.expires))} on, by ${formatDateTime(w.expires)} at the latest`;
+  return `Claude Code's sign-in on this computer ${when}: without it the crew and you stop. Only ${owner} can renew it, by running "${LOGIN_RENEW}" in a terminal; remind them${w.step === '3d' ? '' : ' now'}.`;
+}
+
+/** The file a file tool writes (Write, Edit, MultiEdit, NotebookEdit), or null. */
+export const writtenFile = (name, input = {}) => (/^(Write|Edit|MultiEdit|NotebookEdit)$/.test(name) ? input?.file_path ?? input?.notebook_path ?? null : null);
+
 /** One line saying what the agent did, for the logbook. */
 export function describeAction(name, input = {}, dir) {
   const file = p => (p ? path.relative(dir, p) || p : '');
@@ -83,7 +164,7 @@ export function describeAction(name, input = {}, dir) {
 const CODE_FILE = /\.(m?[jt]sx?|c[jt]s|py|rb|go|rs|java|kt|cs|php|swift|c|cc|cpp|h|css|scss|html?|vue|svelte|sh|ps1|vbs|sql)$/i;
 const TEST_COMMAND = /\b(test|tests|smoke|check|lint|pytest|jest|vitest|mocha|tsc|eslint|phpunit)\b/i;
 
-/** What the agent is doing now, in plain words and one short line, for the owner (Operations, focus, the manager). */
+/** What the agent is doing now, in plain words and one short line, for the owner (Operations, focus, the manager); null: no change. */
 export function describeDoing(name, input = {}, dir) {
   const file = input.file_path ? path.basename(input.file_path) : '';
   const kind = f => (CODE_FILE.test(f) ? 'code' : /\.(md|txt|rst|adoc)$/i.test(f) ? 'docs' : 'file');
@@ -91,6 +172,8 @@ export function describeDoing(name, input = {}, dir) {
     case 'Bash': {
       const command = String(input.command ?? '').trim();
       if (/needs-you/.test(command)) return t('waiting for you');
+      // A line for its speech bubble (cli.mjs say) leaves what it was doing as it was.
+      if (/cli\.mjs"?\s+say\s/.test(command)) return null;
       if (/^git\s+commit\b/.test(command)) return t('saving the work (commit)');
       if (/^git\s+(diff|log|status|show)\b/.test(command)) return t('reviewing the changes');
       if (/^git\b/.test(command)) return t('working with git');
@@ -252,7 +335,7 @@ export function runClaude(options) {
         if (block.type === 'text' && block.text.trim()) onEvent({ type: 'say', text: block.text });
         if (block.type === 'tool_use') {
           inFlight.add(block.id);
-          onEvent({ type: 'action', tool: block.name, text: describeAction(block.name, block.input, dir), doing: describeDoing(block.name, block.input, dir) });
+          onEvent({ type: 'action', tool: block.name, text: describeAction(block.name, block.input, dir), doing: describeDoing(block.name, block.input, dir), file: writtenFile(block.name, block.input) });
         }
       }
       // A subagent's turns fill its own context, not this one.
@@ -342,6 +425,10 @@ export function readFeed(file, dir, from = null, tail = 1_000_000) {
       try {
         event = JSON.parse(line);
       } catch {
+        continue;
+      }
+      if (event.type === 'chiefmate_action' && typeof event.text === 'string') {
+        items.push({ type: 'action', text: event.text });
         continue;
       }
       if (event.type !== 'assistant' || event.parent_tool_use_id) continue;

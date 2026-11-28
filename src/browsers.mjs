@@ -264,7 +264,8 @@ export function openBrowsers(config = loadConfig(), cache = null) {
 
 /** After a run: its browser closes a few seconds later, once its MCP server had the time to close it itself. */
 export function closeAfterRun() {
-  if (!SUPPORTED) return;
+  // Not from a temporary Chiefmate (the smoke test): its runs open no browser, and its folder may be gone by then.
+  if (!SUPPORTED || process.env.CHIEFMATE_SMOKE) return;
   setTimeout(() => {
     processes(0)
       .then(cache => sweepBrowsers(loadConfig(), cache.list))

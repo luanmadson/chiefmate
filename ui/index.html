@@ -13,10 +13,27 @@
 </head>
 <body>
   <div class="app">
-    <header class="titlebar">
-      <div class="brand"><img src="/icon-32.png" alt="" width="18" height="18"><span>CHIEFMATE</span></div>
-      <div id="focus" class="focus" aria-live="polite"></div>
-      <div class="titlebar-right"><select id="project-jump" class="project-jump" aria-label="Go to a project's page" data-t-label="Go to a project's page"></select><span id="power" class="power" hidden></span><button type="button" id="away" class="away" aria-pressed="false" hidden></button><div id="presence" class="presence"></div><span id="clock" class="clock"></span></div>
+    <header class="app-header">
+      <div class="titlebar">
+        <div class="brand"><img src="/icon-32.png" alt="" width="18" height="18"><span>CHIEFMATE</span></div>
+        <div id="focus" class="focus" aria-live="polite"></div>
+        <div class="titlebar-right">
+          <select id="project-jump" class="project-jump" aria-label="Go to a project's page" data-t-label="Go to a project's page"></select>
+          <span id="power" class="power" hidden></span>
+          <button type="button" id="away" class="away" aria-pressed="false" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 4.6V8l2.3 1.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="away-label" data-t="Away mode">Away mode</span><span id="away-since" aria-hidden="true" hidden></span></button>
+          <div id="presence" class="presence"></div>
+          <span id="clock" class="clock"></span>
+        </div>
+      </div>
+      <div id="away-notice" class="away-notice" hidden>
+        <label id="away-pace-label" for="away-pace"></label>
+        <select id="away-pace">
+          <option value="save" data-t="Save usage">Save usage</option>
+          <option value="normal" data-t="Normal">Normal</option>
+          <option value="all" data-t="Spend all">Spend all</option>
+          <option id="away-custom-pace" value="custom" disabled hidden></option>
+        </select>
+      </div>
     </header>
 
     <nav class="nav" aria-label="Sections" data-t-label="Sections">
@@ -85,6 +102,8 @@
             <p data-t="What the crew is doing right now, step by step, and what is in the queue.">What the crew is doing right now, step by step, and what is in the queue.</p>
           </div>
         </div>
+        <!-- The owner's focus (src/steer.mjs): which projects may work, each project's state and control -->
+        <section id="steer" class="panel steer" aria-live="polite"></section>
         <div class="operations-layout">
           <div id="operations"></div>
           <aside class="side">
@@ -154,6 +173,8 @@
         <div id="crew"></div>
         <h2 class="section-title" data-t="Crews by project">Crews by project</h2>
         <div id="teams"></div>
+        <div id="calls-settings"></div>
+        <div id="escalation"></div>
         <div id="prompt-builder"></div>
         <form id="task-form" class="panel form">
           <div class="label" data-t="Assign a task">Assign a task</div>
@@ -181,7 +202,7 @@
         <div class="project-head">
           <div class="project-head-top">
             <div id="project-title"></div>
-            <div id="project-more"></div>
+            <div class="compose-buttons"><div id="project-system"></div><div id="project-more"></div></div>
           </div>
           <div id="project-status" class="project-status"></div>
           <div id="project-actions" class="project-main-actions"></div>
@@ -190,6 +211,7 @@
         <div id="project-tabs" class="tabs"></div>
         <div id="project-overview" class="project-tab">
           <div id="project-summary"></div>
+          <div id="project-open"></div>
           <div id="project-facts"></div>
           <div id="project-computer"></div>
         </div>
@@ -218,6 +240,10 @@
         <div id="project-builder" class="project-tab" hidden></div>
         <div id="project-charge" class="project-tab" hidden>
           <div id="project-charge-top"></div>
+        </div>
+        <!-- The conversation with the manager, brought here from the Conversation (placeChat in app.js) -->
+        <div id="project-manager" class="project-tab" hidden>
+          <p class="hint" data-t="Your conversation with the manager, without leaving the project. What you send from here says which project it is about.">Your conversation with the manager, without leaving the project. What you send from here says which project it is about.</p>
         </div>
         <div id="project-live" class="project-tab" hidden>
           <div id="project-live-list"></div>
@@ -306,10 +332,10 @@
           </div>
         </div>
         <div id="usage"></div>
+        <div id="spending" class="panel form"></div>
         <form id="limits-form" class="panel form">
-          <div class="label" data-t="Limits">Limits</div>
+          <div class="label" data-t="The week's limit">The week's limit</div>
           <div class="fields">
-            <label><span data-t="Pause at this share of the 5-hour window (%)">Pause at this share of the 5-hour window (%)</span><input name="window" type="number" min="5" max="100" step="5"></label>
             <label><span data-t="Pause at this share of the plan's week (%)">Pause at this share of the plan's week (%)</span><input name="week" type="number" min="5" max="100" step="5"></label>
           </div>
           <div class="actions"><button type="submit" class="button" data-t="Save limits">Save limits</button></div>
@@ -371,13 +397,65 @@
       </div>
     </form>
   </dialog>
+  <dialog id="steer-dialog" class="confirm">
+    <form method="dialog">
+      <div class="label" data-t="Work going on">Work going on</div>
+      <p id="steer-dialog-text"></p>
+      <p class="hint" data-t="Finish: the run goes to the end, then the project waits. Pause: it stops at a safe point and resumes by itself when the project is free.">Finish: the run goes to the end, then the project waits. Pause: it stops at a safe point and resumes by itself when the project is free.</p>
+      <div class="actions">
+        <button value="no" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="pause" class="button secondary" data-t="Pause it now">Pause it now</button>
+        <button value="finish" class="button" data-t="Let it finish">Let it finish</button>
+      </div>
+    </form>
+  </dialog>
+  <!-- The queue's controls (drawQueue in ui/app.js): "Do now" and holding a run, with its reason -->
+  <dialog id="do-now-dialog" class="confirm" aria-labelledby="do-now-title">
+    <form method="dialog">
+      <div class="label" id="do-now-title" data-t="Do now">Do now</div>
+      <p id="do-now-text"></p>
+      <p class="hint" id="do-now-note" hidden></p>
+      <div class="actions wrap">
+        <button value="" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="all" class="button secondary" data-t="All the others">All the others</button>
+        <button value="project" class="button" id="do-now-project"></button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="hold-dialog" class="confirm" aria-labelledby="hold-title">
+    <form method="dialog">
+      <div class="label" id="hold-title" data-t="Hold this run">Hold this run</div>
+      <p id="hold-text"></p>
+      <label class="hold-reason"><span data-t="Why (optional, shown in the queue)">Why (optional, shown in the queue)</span>
+        <input id="hold-reason" type="text" maxlength="200" autocomplete="off" placeholder="For example: waiting for the client's answer" data-t-placeholder="For example: waiting for the client's answer"></label>
+      <div class="actions">
+        <button value="" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="hold" class="button" data-t="Hold">Hold</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="work-dialog" class="confirm">
+    <form method="dialog">
+      <div class="label" data-t="The crew is working on this project">The crew is working on this project</div>
+      <p id="work-dialog-text"></p>
+      <ul id="work-dialog-runs" class="work-runs"></ul>
+      <div class="actions">
+        <button value="" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="copy" class="button secondary" data-t="Work in a separate copy">Work in a separate copy</button>
+        <button value="pause" class="button" data-t="Pause the crew's task">Pause the crew's task</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="lockdown-dialog" class="confirm lockdown-dialog">
     <form method="dialog">
       <div class="label" data-t="Release the emergency lockdown">Release the emergency lockdown</div>
       <div id="lockdown-summary"></div>
+      <label class="label" for="lockdown-note" data-t="Your note (it goes to the manager and stays in the alarm record)">Your note (it goes to the manager and stays in the alarm record)</label>
+      <textarea id="lockdown-note" rows="3"></textarea>
       <label class="lockdown-check"><input type="checkbox" id="lockdown-reviewed"> <span data-t="I reviewed what triggered it and want everything to go on.">I reviewed what triggered it and want everything to go on.</span></label>
       <div class="actions">
         <button value="no" class="button secondary" data-t="Keep it locked">Keep it locked</button>
+        <button value="note" class="button secondary" data-t="Send note only">Send note only</button>
         <button value="yes" class="button lockdown-release" id="lockdown-release" disabled data-t="Release">Release</button>
       </div>
     </form>
@@ -392,6 +470,15 @@
       <div class="actions">
         <button value="no" class="button secondary" data-t="Cancel" autofocus>Cancel</button>
         <button value="yes" class="button danger" id="strong-yes" disabled></button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="escalation-dialog" class="confirm escalation-dialog">
+    <form method="dialog">
+      <div class="label" data-t="Calling you outside the app">Calling you outside the app</div>
+      <div id="escalation-steps"></div>
+      <div class="actions">
+        <button value="close" class="button secondary" data-t="Close">Close</button>
       </div>
     </form>
   </dialog>
@@ -432,6 +519,16 @@
       </div>
     </form>
   </dialog>
+  <dialog id="speech-dialog" class="confirm speech-dialog" aria-labelledby="speech-title">
+    <form method="dialog">
+      <div class="label" id="speech-title" data-t="What the crew said">What the crew said</div>
+      <div class="hint" id="speech-run"></div>
+      <ol id="speech-list" class="speech-list"></ol>
+      <div class="actions">
+        <button value="close" class="button secondary" data-t="Close">Close</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="archive-dialog" class="confirm archive-dialog">
     <form method="dialog">
       <div class="label" data-t="Archived notices">Archived notices</div>
@@ -448,6 +545,17 @@
       <button type="button" id="viewer-close" class="viewer-close" aria-label="Close" data-t-label="Close">&times;</button>
     </div>
     <div id="viewer-body" class="viewer-body"></div>
+  </dialog>
+  <dialog id="path-dialog" class="confirm" aria-labelledby="path-dialog-title">
+    <form method="dialog">
+      <div class="label" id="path-dialog-title"></div>
+      <p id="path-dialog-text"></p>
+      <code id="path-dialog-path" class="path-dialog-path"></code>
+      <div class="actions">
+        <button type="button" class="button secondary" id="path-dialog-copy" data-t="Copy the path">Copy the path</button>
+        <button value="close" class="button" data-t="Close">Close</button>
+      </div>
+    </form>
   </dialog>
   <div id="undo-bar" class="undo-bar" role="status" aria-live="polite" hidden></div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

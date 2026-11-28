@@ -15,7 +15,7 @@ import { LEAD, leadReviewStep, memoryFile } from './leads.mjs';
 import { projectOf } from './projects.mjs';
 import { builderSettings, builderStatus, projectInstructions, readBuilder } from './prompts.mjs';
 import { libraryIds, promptParts, stepTool, stepTools } from './runs.mjs';
-import { planSession, sessionProfiles } from './sessions.mjs';
+import { managerAddress, planSession, sessionProfiles, withManager } from './sessions.mjs';
 import { listRuns, stepsOf } from './store.mjs';
 import { toolModel } from './tools.mjs';
 import { ensureDir, now, RUNS, WORKSPACES } from './util.mjs';
@@ -147,8 +147,12 @@ function sessionsContext(config, id) {
     try {
       const { folder, prompt } = planSession(config, profile.id);
       const repository = profile.tool === 'claude' ? repositoryFiles(folder.dir) : { dir: folder.dir, exists: true, files: [] };
+      // As openSession writes it: the manager's address at its end, or alone when the profile names no blocks (it then
+      // goes with the owner's first message); the agent in charge gets none.
+      const text = profile.charge ? (prompt.blocksGiven ? prompt.text : null)
+        : prompt.blocksGiven ? withManager(prompt.text, config, '<session id>') : managerAddress(config, '<session id>');
       return {
-        ...base, cwd: folder.dir, text: prompt.blocksGiven ? prompt.text : null, tokens: prompt.blocksGiven ? tokens(prompt.text) : 0,
+        ...base, cwd: folder.dir, text, tokens: text == null ? 0 : tokens(text),
         blocks: (prompt.details ?? []).map(d => ({ ...d, tokens: tokens(d.text) })), missing: prompt.missing, unresolved: prompt.unresolved, repository,
       };
     } catch (error) {
@@ -349,7 +353,7 @@ export function projectContext(config, id, { member = null, diffs = true, sent =
   return {
     project: { id, name: project.name ?? id }, generated: now(), tokensNote: 'about 4 characters per token',
     builder: builderInfo,
-    settings: { notes: project.notes ?? '', agentNotes: project.agent_notes ?? {}, extra: extraOf(config, id, team) },
+    settings: { notes: project.notes ?? '', agentNotes: project.agent_notes ?? {}, extra: extraOf(config, id, team), mainPush: project.main_push === 'card' },
     members, sessions: member ? [] : sessionsContext(config, id), history: member ? [] : readHistory(id),
   };
 }
@@ -431,7 +435,9 @@ const shown = v => (Array.isArray(v) ? v.join(', ') : v ?? '');
 
 /**
  * Applies the app's changes to a copy of the settings. changes: { modules: [...], exclude: [...], notes: "...",
- * agentNotes: { member: "..." }, extra: { member: "..." } } (only what is given changes). Returns { config, changed },
+ * agentNotes: { member: "..." }, extra: { member: "..." }, mainPush: true | false } (only what is given changes).
+ * mainPush is "main_push": "card", the project's main branch going to GitHub through the owner's card (src/guard.mjs):
+ * only the owner turns it on, since only the app and the owner's terminal reach this. Returns { config, changed },
  * "changed" listing each setting that really changes, with its value before and after.
  */
 export function applyChanges(config, id, changes = {}) {
@@ -462,6 +468,12 @@ export function applyChanges(config, id, changes = {}) {
     record(`projects.${id}.notes`, project.notes ?? '', v);
     if (v) project.notes = v;
     else delete project.notes;
+  }
+  if (changes.mainPush !== undefined) {
+    const on = changes.mainPush === true || changes.mainPush === 'card';
+    record(`projects.${id}.main_push`, project.main_push ?? '', on ? 'card' : '');
+    if (on) project.main_push = 'card';
+    else delete project.main_push;
   }
   for (const [memberId, value] of Object.entries(changes.agentNotes ?? {})) {
     if (!team[memberId]) throw new Error(t('{agent} is not in the crew of {project}.', { agent: memberId, project: id }));
@@ -533,7 +545,7 @@ export function readHistory(id, limit = 40) {
 
 const PART_TITLES = {
   agent: "The agent's instructions", installation: 'Notes for this installation', 'project-member': "Notes for this project's crew",
-  'lead-role': 'The team lead\'s role', 'lead-notes': 'Notes for the team lead', header: 'The run and the task', memory: 'Project memory',
+  'lead-role': 'The team lead\'s role', 'lead-notes': 'Notes for the team lead', header: 'The run and the task', additions: 'Added by the manager', memory: 'Project memory',
   lead: 'How the team lead reviews', playbook: "The mission's playbook", builder: 'Project instructions (prompt builder)', notes: "The project's notes",
   'agent-notes': "The project's notes for this member", libraries: 'Libraries and personal documentation', review: 'The final review',
   'lead-review': "The team lead's plan and opinion", reports: 'The reports of the steps before', rules: "Chiefmate's rules for the crew",

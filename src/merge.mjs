@@ -6,6 +6,9 @@
 // After a merge, the copies the owner reads are brought up to date (refreshCopies): the project's reference library,
 // and the owner's clone only by a fast forward, never touching their changes.
 // A pull request replaced by a newer run's is closed with "cli.mjs close-pr <run> --replaced-by <run>" (closeReplaced).
+// A local merge into a clone with changes not committed is refused, unless the merge asks to save them first
+// ("savePending", "cli.mjs merge <run> --yes --save-pending"): only the tracked files changed, in one commit with a
+// neutral message, and only when neither they nor the branch conflict (savePendingFirst). Nothing leaves the computer.
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.mjs';
@@ -72,17 +75,60 @@ async function resolveLocal(run, config) {
   return { run: run.id, kind: 'local', branch: run.branch, merged: run.merged, discarded: run.discarded };
 }
 
-/** Merges the run's branch into the base branch checked out in the owner's clone, refusing anything unclear. */
-async function mergeLocal({ dir, branch, base }) {
+// The message of the commit that saves the clone's changes before a merge: neutral, as the owner would write it.
+export const SAVE_MESSAGE = 'Save local changes before merge';
+
+/**
+ * Saves the clone's changes to tracked files in one commit before a merge (never the untracked files), after making
+ * sure nothing conflicts: no merge or rebase under way, no file left unmerged, and the changes merge cleanly with the
+ * branch (checked on a snapshot, "git stash create", which touches neither the files nor the branches). Returns
+ * { commit, files }, or throws with nothing changed.
+ */
+export async function savePendingFirst({ dir, branch }) {
+  const status = await git(dir, 'status', '--porcelain', '--untracked-files=no');
+  if (status.code !== 0) throw new Error(t("Couldn't read the state of {path}: {output}", { path: dir, output: clip(status.output, 300) }));
+  // git's output comes with its warnings (line endings, say): only the lines that are what was asked count.
+  const lines = status.output.split(/\r?\n/).filter(l => /^[ MADRCTU]{2} /.test(l));
+  const object = output => output.match(/^[0-9a-f]{40,64}$/m)?.[0] ?? '';
+  const gitDir = (await git(dir, 'rev-parse', '--absolute-git-dir')).output.trim();
+  const busy = ['MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD', 'REVERT_HEAD'].some(marker => existsSync(path.join(gitDir, marker)));
+  if (busy || lines.some(l => /^(?:U.|.U|AA|DD)\s/.test(l))) {
+    throw Object.assign(new Error(t('{path} has a merge or another operation under way, or files in conflict: nothing was saved or merged.', { path: dir })), { conflict: true });
+  }
+  const files = lines.map(l => l.slice(3).replace(/^.* -> /, '').replace(/^"|"$/g, ''));
+  const snapshot = object((await git(dir, 'stash', 'create')).output);
+  if (!snapshot) return { commit: null, files: [] };
+  const check = await git(dir, 'merge-tree', '--write-tree', '--name-only', snapshot, `refs/heads/${branch}`);
+  if (check.code !== 0) {
+    const said = check.output.split(/\r?\n/).filter(l => l.trim() && !/^warning:/.test(l) && !/^[0-9a-f]{40,64}$/.test(l));
+    const detail = clip(said.join(' ').trim() || check.output, 400);
+    throw Object.assign(new Error(t('Your changes in {path} conflict with the branch {branch}: nothing was saved or merged. {output}', { path: dir, branch, output: detail })), { conflict: true, detail });
+  }
+  const saved = await git(dir, 'commit', '-a', '-q', '-m', SAVE_MESSAGE);
+  if (saved.code !== 0) throw new Error(t("Couldn't save the changes of {path}: {output}", { path: dir, output: clip(saved.output, 300) }));
+  return { commit: object((await git(dir, 'rev-parse', 'HEAD')).output), files };
+}
+
+/**
+ * Merges the run's branch into the base branch checked out in the owner's clone, refusing anything unclear. With
+ * savePending, the clone's changes to tracked files are saved in a commit first (savePendingFirst). Returns { saved }.
+ */
+async function mergeLocal({ dir, branch, base }, { savePending = false } = {}) {
   const current = (await git(dir, 'branch', '--show-current')).output.trim();
   if (current !== base) throw new Error(t('Check out {base} in {path} first: it has {current} checked out now.', { base, path: dir, current: current || '-' }));
   const status = await git(dir, 'status', '--porcelain', '--untracked-files=no');
-  if (status.code !== 0 || status.output.trim()) throw new Error(t('{path} has changes not committed: commit them or put them aside first.', { path: dir }));
+  let saved = null;
+  if (status.code !== 0 || status.output.trim()) {
+    if (!savePending || status.code !== 0) throw Object.assign(new Error(t('{path} has changes not committed: commit them or put them aside first.', { path: dir })), { pending: true });
+    saved = await savePendingFirst({ dir, branch });
+  }
   const r = await git(dir, 'merge', '--no-ff', '--no-edit', `refs/heads/${branch}`);
   if (r.code !== 0) {
     await git(dir, 'merge', '--abort');
-    throw Object.assign(new Error(t("The branch {branch} doesn't merge cleanly into {base}: nothing was changed. {output}", { branch, base, output: clip(r.output, 400) })), { conflict: true, detail: clip(r.output, 400) });
+    const kept = saved?.commit ? ` ${t('Your changes stay saved in the commit {commit}.', { commit: saved.commit.slice(0, 7) })}` : '';
+    throw Object.assign(new Error(t("The branch {branch} doesn't merge cleanly into {base}: nothing was changed. {output}", { branch, base, output: clip(r.output, 400) }) + kept), { conflict: true, detail: clip(r.output, 400) });
   }
+  return { saved };
 }
 
 // gh's words for a pull request that conflicts with its base branch.
@@ -140,12 +186,13 @@ export async function refreshCopies(run, where, config = loadConfig(), { library
  * owner's explicit yes). A merged pull request of Chiefmate itself is installed at once (checkNow). When the owner's
  * merge fails, the manager hears of it at once and the error says so.
  */
-export async function mergeRun(id, { by = 'owner' } = {}, config = loadConfig()) {
+export async function mergeRun(id, { by = 'owner', savePending = false } = {}, config = loadConfig()) {
   refuseWhileLocked(t('merge'));
   const run = readRun(String(id ?? ''));
   const settled = await resolveLocal(run, config);
   if (settled) return settled;
   const where = await target(run, config);
+  let saved = null;
   try {
     if (where.kind === 'pr') {
       const dir = existsSync(projectDir(run.project)) ? projectDir(run.project) : ROOT;
@@ -154,7 +201,7 @@ export async function mergeRun(id, { by = 'owner' } = {}, config = loadConfig())
         throw Object.assign(new Error(t("GitHub didn't merge the pull request: {output}", { output: clip(r.output, 500) })), { conflict: CONFLICT.test(r.output), detail: clip(r.output, 500) });
       }
     } else {
-      await mergeLocal(where);
+      ({ saved } = await mergeLocal(where, { savePending }));
     }
   } catch (error) {
     if (where.kind === 'local') {
@@ -167,17 +214,22 @@ export async function mergeRun(id, { by = 'owner' } = {}, config = loadConfig())
     }
     throw error;
   }
-  run.merged = { at: now(), by: by === 'manager' ? 'manager' : 'owner', how: where.kind };
+  run.merged = { at: now(), by: by === 'manager' ? 'manager' : 'owner', how: where.kind, ...(saved?.commit ? { saved } : {}) };
   saveRun(run);
   if (where.kind === 'pr') checkNow().catch(error => console.error('Update check:', error.message));
   const copies = await refreshCopies(run, where, config);
   // The manager knows what it merged itself: only a merge from the app is news to it.
   if (run.merged.by === 'owner') {
     const what = where.kind === 'pr' ? `pull request ${where.url}` : `branch ${where.branch} into ${where.base} in ${where.dir} (nothing sent to GitHub)`;
-    reportEvent('merged', `The owner merged run ${run.id} "${run.title}" (project ${run.project}) from the app: ${what}.${copies.skipped.length ? ` Not updated after it: ${copies.skipped.join(' ')}` : ''}`);
+    reportEvent('merged', `The owner merged run ${run.id} "${run.title}" (project ${run.project}) from the app: ${what}.${saved?.commit ? ` ${savedLine(saved, where.dir)}` : ''}${copies.skipped.length ? ` Not updated after it: ${copies.skipped.join(' ')}` : ''}`);
   }
-  return { run: run.id, ...where, merged: run.merged, copies, copiesNote: copies.skipped.join(' ') };
+  return { run: run.id, ...where, merged: run.merged, saved, savedNote: saved?.commit ? savedLine(saved, where.dir) : '', copies, copiesNote: copies.skipped.join(' ') };
 }
+
+/** The line of the merge's answer and report about the changes saved before it. */
+export const savedLine = (saved, dir) => t('Before the merge, your changes to {count} tracked file(s) in {path} were saved in the commit {commit} ("{message}"): {files}. Files not tracked were left as they were; nothing was sent anywhere.', {
+  count: saved.files.length, path: dir, commit: saved.commit.slice(0, 7), message: SAVE_MESSAGE, files: clip(saved.files.join(', '), 300),
+});
 
 /**
  * Discards a finished run's work on the owner's click: its pull request is closed on GitHub (it can be reopened there,
