@@ -349,7 +349,7 @@ export function newsMessage(owner, events, alongside = false, away = awayInfo())
   const lines = events.map(e => `- [${formatDateTime(e.at)}] ${e.kind}: ${e.text}`);
   const ask = alongside
     ? `Answer ${owner}'s message(s) and, in the same reply, tell ${owner} about these events in a few lines.`
-    : `Write ${owner} a short, clear notice in the conversation: what happened and, when something needs ${owner}, what to do. A few lines, no headings, no greeting. Check the records when the situation is not enough, but don't queue or change anything because of this notice alone.`;
+    : `Write ${owner} a short, clear notice in the conversation: what happened and, when something needs ${owner}, what to do. A few lines, no headings, no greeting, beginning with the mark of its kind ([report], [alarm], [failure], [needs-you], [done] or [info], as your instructions say). Check the records when the situation is not enough, but don't queue or change anything because of this notice alone.`;
   // The changes a notice asks for: the triage of new proposals, which is the manager's job (the decision stays the
   // owner's), and, with the autopilot on, the next item of a project whose queue emptied.
   const triage = events.some(e => e.kind === 'plan_proposed')

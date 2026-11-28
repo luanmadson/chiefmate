@@ -210,6 +210,10 @@ try {
     const asks = await (await fetch(`${base}/asks.js`)).text();
     expect(asks.includes('export function asksHtml') && appJs.includes("from './asks.js'") && /#live-asks \{[^}]*max-height: 40%/.test(styles),
       "the band of what a live session asks lacks its module, or may cover the conversation");
+    // The kinds of message in the conversation: their module, and a color for each one.
+    const tones = await (await fetch(`${base}/tones.js`)).text();
+    expect(tones.includes('export function toneOf') && appJs.includes("from './tones.js'") && ['done', 'info', 'needs', 'failure', 'alarm', 'report', 'system'].every(k => styles.includes(`[data-tone="${k}"]`)),
+      "the conversation's kinds of message lack their module or a color");
     // The autopilot's panel in the Usage section: its state, and limits refused before anything is saved.
     const ap = state.autopilot;
     expect(ap && typeof ap.enabled === 'boolean' && ap.stop_at_5h_window > 0 && (ap.week_pace === null || ap.week_pace > 0) && typeof ap.mode === 'string' && ap.now?.state && Array.isArray(ap.changes) && Array.isArray(ap.queued) && Array.isArray(ap.wakes) && (ap.enabled || ap.blocked?.reason === 'off'),
