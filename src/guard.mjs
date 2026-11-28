@@ -95,37 +95,195 @@ const CLI_TEXT = new Set(['chat', 'defect', 'task', 'ask', 'mission', 'plan', 'r
 // git's commands whose quoted words are only text (a message): with no option before them but -C <folder>, as a -c
 // could set an alias or an editor that runs a command.
 const GIT_TEXT = new Set(['commit', 'tag', 'notes', 'stash', 'merge']);
+// git's commands that only look or stage, which may go with them (git add -A && git commit -m "...").
+const GIT_LOOK = new Set(['status', 'log', 'diff', 'show', 'add', 'grep', 'rev-parse', 'ls-files', 'blame', 'branch']);
 // gh's commands whose quoted words are only text (a title, a body, a search, a query): not alias, config, extension or
 // codespace, which may keep or run a command.
 const GH_TEXT = new Set(['issue', 'pr', 'repo', 'api', 'search', 'run', 'workflow', 'release', 'label', 'status']);
-
-// A command that bash, PowerShell (Codex's shell on Windows) and tokens() all read as the same words, with nothing run
-// but its program: plain characters and spaces, or quoted text with nothing inside that one of them expands or reads
-// as the quote's end ($, a backquote, an escaped quote, curly quotes). No separator, comment or line break outside
-// quotes, no $'...'.
-const PLAIN_WORDS = /^(?:[\w./:=@,+ \t-]|'[^'\u2018-\u201f]*'|"(?:[^"\\$`\u2018-\u201f]|\\[^"\\$`\s\u2018-\u201f])*")*\s*$/;
+// Programs that run nothing they are given, nor any file: they print, search, count, wait, write what they get or move
+// to a folder (rg without --pre and --hostname-bin, which run a program).
+const TEXT_PROGRAMS = new Set(['echo', 'printf', 'write-output', 'write-host', 'grep', 'egrep', 'fgrep', 'rg', 'findstr', 'select-string', 'sls',
+  'cat', 'head', 'tail', 'wc', 'uniq', 'cut', 'tr', 'tee', 'ls', 'pwd', 'cd', 'pushd', 'popd', 'mkdir', 'touch', 'true', 'false', ':', 'sleep', 'out-null']);
+// Inline code (node -e) may name only these: enough to write, append or read a file with node:fs and to print, as notes
+// are written. No other module, no computed name ([...]) and no template: nothing in it can run a command.
+const NOTE_WORDS = new Set(['require', 'fs', 'const', 'let', 'var', 'if', 'appendFileSync', 'writeFileSync', 'mkdirSync', 'existsSync', 'readFileSync',
+  'console', 'log', 'JSON', 'stringify', 'recursive', 'encoding', 'flag', 'true', 'false', 'null']);
+// Where a redirection sends what is no file: the other stream, or nowhere.
+const STREAM = /^(&[12]?|\/dev\/(null|stdout|stderr)|nul)$/i;
 
 /**
- * Whether the quoted words of the whole command are only text for its program, never run: one command in plain words
- * (PLAIN_WORDS), with nothing before its program, of Chiefmate's command line (CLI_TEXT: node .../cli.mjs task ...
- * "<instruction>"), of git (GIT_TEXT: git commit -m "...") or of gh (GH_TEXT: gh issue create --body "...").
+ * The command as bash, PowerShell (Codex's shell on Windows) and tokens() all read it, with nothing run but its programs.
+ * Outside quotes: plain characters, separators and redirections (">" only at a word's start); no variable, pattern,
+ * brace, parenthesis, escape, comment, comma (PowerShell's array: "x",--check,"y" is three words for it) or "@" before a
+ * word or a quote (PowerShell's splatting and here-strings). Inside quotes: nothing that one of them expands or reads as
+ * the quote's end ($, a backquote, an escaped quote, curly quotes). An escaped backquote (\`) in double quotes is text for
+ * bash, and for PowerShell an escape of the character after it: never one that ends the quote, but at its very last
+ * quote (PowerShell then reads an unclosed quote and runs nothing). A message written by "$(cat <<'EOF' ... EOF\n)", its
+ * delimiter quoted so its text is as written, is taken as 'text' (PowerShell can't read "<<": it runs nothing).
+ * Returns { text, joined }, or null. joined: a quote right after the end of one of the same kind ('a''b'), which
+ * PowerShell reads as a quote inside it: the same words, another text.
  */
-function onlyText(command) {
-  const words = tokens(command);
-  if (words.includes('|') || !PLAIN_WORDS.test(String(command))) return false;
-  const { program, args, at } = programOf(words);
-  if (at !== 0) return false;
-  if (program === 'node') return programName(args[0] ?? '') === 'cli.mjs' && CLI_TEXT.has(args[1]) && !args.includes('--check');
+function plainText(command) {
+  const s = String(command ?? '');
+  let out = '';
+  let joined = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if ((c === "'" || c === '"') && out.endsWith('@')) return null;
+    if (c === "'") {
+      const end = s.indexOf("'", i + 1);
+      if (end < 0 || /[\u2018-\u201f]/.test(s.slice(i + 1, end))) return null;
+      joined ||= s[end + 1] === "'";
+      out += s.slice(i, end + 1);
+      i = end;
+    } else if (c === '"') {
+      const message = heredocMessage(s, i);
+      if (message) {
+        if (s[message] === '"') return null;
+        out += "'text'";
+        i = message - 1;
+        continue;
+      }
+      let j = i + 1;
+      for (; j < s.length && s[j] !== '"'; j++) {
+        if (/[$`\u2018-\u201f]/.test(s[j])) return null;
+        if (s[j] !== '\\') continue;
+        const next = s[j + 1] ?? '';
+        const after = s[j + 2] ?? '';
+        if (next === '`' ? (after === '"' ? /["'\u2018-\u201f]/.test(s.slice(j + 3)) : /^$|["\\$`\u2018-\u201f]/.test(after)) : /^$|["\\$`\s\u2018-\u201f]/.test(next)) return null;
+        j++;
+      }
+      if (j >= s.length) return null;
+      joined ||= s[j + 1] === '"';
+      out += s.slice(i, j + 1);
+      i = j;
+    } else if (!/[\w./:=@+ \t\n;&|>-]/.test(c) || (c === '>' && !/(^|[\s;&|])(\d+|&)?>?$/.test(out)) || (c === '@' && /(^|[\s;&|>])$/.test(out))) {
+      return null;
+    } else {
+      out += c;
+    }
+  }
+  return { text: out, joined };
+}
+
+/**
+ * Where a message written by "$(cat <<'EOF' ... EOF\n)" ends (after its closing quote), when one starts at i, or 0: its
+ * delimiter quoted, its text up to the first line that is the delimiter alone (as bash reads it, the first line too),
+ * and nothing after that line but the substitution's end and the quote's.
+ */
+function heredocMessage(s, i) {
+  const head = /^"\$\(cat[ \t]+<<[ \t]*(['"])([\w.-]+)\1[ \t]*\n/.exec(s.slice(i, i + 200));
+  if (!head) return 0;
+  for (let p = i + head[0].length; ;) {
+    const e = s.indexOf('\n', p);
+    if (e < 0) return 0;
+    if (s.slice(p, e) === head[2]) {
+      const end = /^[ \t\n]*\)"/.exec(s.slice(e + 1));
+      return end ? e + 1 + end[0].length : 0;
+    }
+    p = e + 1;
+  }
+}
+
+/** Whether inline code (node -e) only writes, appends or reads files with node:fs and prints: strings, NOTE_WORDS, plain punctuation, require('fs') alone. */
+function notesCode(code) {
+  const s = String(code);
+  const parts = [];
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (/\s/.test(c)) continue;
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < s.length && s[j] !== c && s[j] !== '\n') j += s[j] === '\\' ? 2 : 1;
+      if (s[j] !== c) return false;
+      parts.push({ text: s.slice(i + 1, j) });
+      i = j;
+      continue;
+    }
+    const word = /^[A-Za-z_]\w*/.exec(s.slice(i))?.[0];
+    if (word) {
+      if (!NOTE_WORDS.has(word)) return false;
+      parts.push({ word });
+      i += word.length - 1;
+    } else if (/[\d(){}.,;:=+!]/.test(c)) {
+      parts.push({ mark: c });
+    } else {
+      return false;
+    }
+  }
+  return parts.every((p, k) => p.word !== 'require' || (parts[k + 1]?.mark === '(' && /^(node:)?fs$/.test(parts[k + 2]?.text ?? '') && parts[k + 3]?.mark === ')'));
+}
+
+/**
+ * What one command of a command in plain words does with its words: { runs, writes }, or null when it may run them or
+ * is not known (a variable or a wrapper before it too). runs: it runs a file of its own (Chiefmate's command line, git
+ * and its hooks, gh, which runs git, or any program named by its path, which may be a file written beside it); writes:
+ * it writes a file (a redirection, tee, uniq's second word, notes by node -e). joined: the command has quotes that bash
+ * and PowerShell read as other texts (plainText), so inline code would be other code for each of them.
+ */
+function textUse(segment, joined) {
+  let writes = false;
+  const words = [];
+  for (let i = 0; i < segment.length; i++) {
+    const m = /^(\d+|&)?>>?(.*)$/.exec(segment[i]);
+    if (!m) {
+      words.push(segment[i]);
+      continue;
+    }
+    const target = m[2] || segment[++i] || '';
+    if (!STREAM.test(target)) writes = true;
+  }
+  if (!words.length) return { runs: false, writes };
+  const program = programName(words[0]);
+  const args = words.slice(1);
+  const use = runs => ({ runs: runs || /[\\/]/.test(words[0]), writes });
+  if (program === 'node') {
+    if (programName(args[0] ?? '') === 'cli.mjs') return CLI_TEXT.has(args[1]) && !args.includes('--check') ? use(true) : null;
+    // Its code read the same by both shells and by node: no joined quotes, no backquote (\` is PowerShell's escape), no
+    // double quote (PowerShell before 7.3 passes it to node unescaped, and node takes it off).
+    if (!(args.length === 2 && /^(-e|--eval|-p|--print)$/.test(args[0]) && !joined && !/[`"]/.test(args[1]) && notesCode(args[1]))) return null;
+    writes = true;
+    return use(false);
+  }
   let i = 0;
   if (program === 'git') {
     while (args[i] === '-C' && i + 1 < args.length) i += 2;
-    return GIT_TEXT.has(args[i]);
+    // --output writes a file; git grep's -O (--open-files-in-pager, or a prefix of it) runs a pager.
+    if (!GIT_TEXT.has(args[i]) && !GIT_LOOK.has(args[i])) return null;
+    return args.slice(i + 1).some(a => /^(--output|--op|-[a-zA-Z]*O)/.test(a)) ? null : use(true);
   }
   if (program === 'gh') {
     while ((args[i] === '-R' || args[i] === '--repo') && i + 1 < args.length) i += 2;
-    return GH_TEXT.has(args[i]);
+    return GH_TEXT.has(args[i]) ? use(true) : null;
   }
-  return false;
+  // printf -v sets a variable that the next command may read (GIT_EDITOR, which git runs).
+  if (!TEXT_PROGRAMS.has(program) || (program === 'rg' && args.some(a => /^--(pre|hostname)/.test(a))) || (program === 'printf' && /^-./.test(args[0] ?? '') && args[0] !== '--')) return null;
+  const files = args.filter(a => a === '-' || !a.startsWith('-'));
+  if ((program === 'tee' && files.some(a => a !== '-' && !STREAM.test(a))) || (program === 'uniq' && files.length > 1)) writes = true;
+  return use(false);
+}
+
+/**
+ * The command as its programs get it (plainText), when none of its quoted words can be run, or null: in plain words, each
+ * of its commands one that keeps, prints, searches or writes them as text (textUse), and no file written beside a
+ * command that runs one (a hook or a script written there would run). Then a message, an instruction, a commit message,
+ * a search's pattern or a note that names a command (git push, gh pr create...) is text, not that command.
+ */
+function textView(command) {
+  const plain = plainText(command);
+  if (!plain) return null;
+  const all = tokens(plain.text);
+  const uses = [];
+  for (let i = 0, start = 0; i <= all.length; i++) {
+    if (i < all.length && all[i] !== '|') continue;
+    if (i > start) {
+      const use = textUse(all.slice(start, i), plain.joined);
+      if (!use) return null;
+      uses.push(use);
+    }
+    start = i + 1;
+  }
+  return uses.some(u => u.writes) && uses.some(u => u.runs) ? null : plain.text;
 }
 
 /** Where a simple command writes its standard output: the last file it is redirected to, or null (a stream, none). */
@@ -296,16 +454,17 @@ function withoutWrittenText(command) {
 /**
  * What a shell command would publish: [{ rule, part, dir }], one per finding. part: the command found, written plainly
  * ("git push origin main", with git's options before "push" taken out); dir: the folder it would run in, when the
- * command says (git -C, or a cd before it), relative to the folder of the session. The quoted text of a command that
- * only reads it as text (onlyText: a message or an instruction for Chiefmate's command line, a commit message, an
- * issue's body), when that is the whole command, in plain words, is not run, so it is not looked at as a command, nor
- * are the texts of heredocs written into files by a command that does nothing else (withoutWrittenText), judged on the
- * whole command only: inside "bash -c" the rest of the line could run the file.
+ * command says (git -C, or a cd before it), relative to the folder of the session. The quoted words of a command made
+ * only of commands that take them as text (textView: a message or an instruction for Chiefmate's command line, a commit
+ * message, an issue's body, a search's pattern, notes written by node -e), in plain words, are not run, so they are not
+ * looked at as commands, nor are the texts of heredocs written into files by a command that does nothing else
+ * (withoutWrittenText); both judged on the whole command only: inside "bash -c" the rest of the line could run them.
  */
 export function publishing(command, depth = 0) {
   const found = [];
   if (depth > 4) return found;
-  const all = tokens(depth === 0 ? withoutWrittenText(command) : command);
+  const view = depth === 0 ? textView(command) : null;
+  const all = tokens(view ?? (depth === 0 ? withoutWrittenText(command) : command));
   const commands = [];
   for (let i = 0, start = 0; i <= all.length; i++) {
     if (i === all.length || all[i] === '|') {
@@ -313,12 +472,11 @@ export function publishing(command, depth = 0) {
       start = i + 1;
     }
   }
-  const text = depth === 0 && onlyText(command);
   let cd = null;
   const at = f => (cd ? { ...f, dir: within(cd, f.dir ?? '.') } : f);
   for (const words of commands) {
     // A quoted word with a command in it (bash -c "...", cmd /c "...", eval "..."): looked at as a command too.
-    if (!text) for (const w of words) if (/\s/.test(w)) found.push(...publishing(w, depth + 1).map(at));
+    if (view === null) for (const w of words) if (/\s/.test(w)) found.push(...publishing(w, depth + 1).map(at));
     if (CD.has(programName(words[0]))) {
       const to = words.slice(1).find(w => !w.startsWith('-'));
       if (to) cd = within(cd, to);
@@ -330,12 +488,17 @@ export function publishing(command, depth = 0) {
   return found.filter(f => !seen.has(`${f.rule} ${f.part}`) && seen.add(`${f.rule} ${f.part}`));
 }
 
-/** A command's program and its arguments: { program, args, at }, with variables (A=1) and wrappers (env, sudo...) taken off; at: where the program is. */
+/** A command's program and its arguments: { program, args, at }, with variables (A=1), redirections and wrappers (env, sudo...) taken off; at: where the program is. */
 function programOf(words) {
   let i = 0;
-  // Variables set for the command (A=1 git push) and wrappers (env, sudo, xargs...), with their options.
+  // Variables set for the command (A=1 git push), redirections before it (2>&1 git push, > f git push: its target in
+  // the same word or the next one) and wrappers (env, sudo, xargs...), with their options.
   for (;;) {
-    while (i < words.length && /^[A-Za-z_][\w]*=/.test(words[i])) i++;
+    const redirection = /^(\d+|&)?[<>][<>&|]*(.*)$/.exec(words[i] ?? '');
+    if (redirection || /^[A-Za-z_][\w]*=/.test(words[i] ?? '')) {
+      i += redirection && !redirection[2] ? 2 : 1;
+      continue;
+    }
     if (i < words.length && WRAPPERS.has(programName(words[i]))) {
       i++;
       // Their options, and a number (timeout 10, nice -n 5).
@@ -457,7 +620,7 @@ function asPath(word, cwd, home) {
  * that is a path inside a protected folder), 'wide_delete' (a recursive deletion of a drive, the home folder or one of
  * its folders, a folder above cwd, Chiefmate's own folder or a protected one: grave) or 'mass_delete' (a recursive
  * deletion outside cwd, or of all of it; the system's temporary folder aside). Only real paths count: a folder's name
- * in a search or a text is not one.
+ * in a search or a text is not one, and a command whose quoted words are only text (textView) deletes nothing.
  */
 export function riskyCommand(command, { cwd = process.cwd(), protect = [], home = os.homedir(), root = null, temp = os.tmpdir() } = {}, depth = 0) {
   const found = [];
@@ -482,11 +645,8 @@ export function riskyCommand(command, { cwd = process.cwd(), protect = [], home 
       const p = asPath(w, cwd, home);
       if (p && protect.some(dir => inside(p, dir))) add('protected_access', words.join(' '));
     }
-    let i = 0;
-    while (i < words.length && (/^[A-Za-z_][\w]*=/.test(words[i]) || WRAPPERS.has(programName(words[i])))) i++;
-    const program = programName(words[i] ?? '');
+    const { program, args } = programOf(words);
     if (!DELETERS.has(program)) continue;
-    const args = words.slice(i + 1);
     // rm -rf / -Rf / -r, --recursive; Remove-Item -Recurse (or its short forms); rd, rmdir and del /s; rimraf.
     const recursive = program === 'rimraf'
       || args.some(a => /^-[a-z]{1,3}$/i.test(a) && /r/i.test(a))
@@ -507,10 +667,12 @@ export function riskyCommand(command, { cwd = process.cwd(), protect = [], home 
       else if ((samePath(p, cwd) || !inside(p, cwd)) && !inside(p, temp)) add('mass_delete', words.join(' '), p);
     }
   }
-  // One finding per deletion, and one for the protected folders however many times they are named.
+  // One finding per deletion, and one for the protected folders however many times they are named. A deletion in a
+  // message, a search or a note is text: none of the commands that take them as text deletes.
+  const onlyText = depth === 0 && textView(command) !== null;
   const seen = new Set();
   const key = f => (f.kind === 'protected_access' ? f.kind : `${f.kind} ${f.detail} ${f.target ?? ''}`);
-  return found.filter(f => !seen.has(key(f)) && seen.add(key(f)));
+  return found.filter(f => (!onlyText || f.kind === 'protected_access') && !seen.has(key(f)) && seen.add(key(f)));
 }
 
 const MAKERS = new Set(['mkdir', 'md', 'new-item', 'ni']);
