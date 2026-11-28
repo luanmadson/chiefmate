@@ -129,6 +129,23 @@ export function managerContext() {
   return { ...c, renewing: chat.renewing, renewed: m.renewed ?? null, renewAt: RENEW_AT };
 }
 
+/** The calendar week's project costs (src/costs.mjs); a failed reading never keeps the manager from answering. */
+function costsLine(config, runs, sessions) {
+  try {
+    const costs = projectCosts({ projects: config.projects, weeks: 1, runs, sessions });
+    const costsThisWeek = costs.projects.flatMap(row => {
+      const w = row.weeks[0];
+      if (!(w.runs || w.sessions || Object.keys(w.expenses).length)) return [];
+      const estimate = (kind, source) => w.usage[kind]?.[source] == null ? 'unknown' : `${w.usage[kind][source].toFixed(1)} pp`;
+      const money = Object.entries(w.expenses).map(([currency, minor]) => `${currency} ${(minor / 100).toFixed(2)}`).join(', ') || 'none';
+      return [`${row.project}: ${w.runs} runs, ${w.agentHours.toFixed(1)} agent h (estimated 5h / plan week: ${estimate('five_hour', 'agents')} / ${estimate('seven_day', 'agents')}); ${w.sessions} live sessions, ${w.liveHours.toFixed(1)} turn h, ${w.windowHours.toFixed(1)} window-open h (estimated: ${estimate('five_hour', 'live')} / ${estimate('seven_day', 'live')}); scheduled expenses ${money}`];
+    });
+    return `Project costs this calendar week: ${costsThisWeek.join(' | ') || 'no recorded work or scheduled expenses'}.`;
+  } catch (error) {
+    return `Project costs this calendar week: not available (${error.message}).`;
+  }
+}
+
 /** A snapshot of the moment, sent along with each of your messages. */
 export function situation(libraries = []) {
   const config = loadConfig();
@@ -170,15 +187,7 @@ export function situation(libraries = []) {
   if (login) lines.push(login);
   lines.push(sessionsLine(config));
   const sessions = listSessions();
-  const costs = projectCosts({ projects: config.projects, weeks: 1, runs, sessions });
-  const costsThisWeek = costs.projects.flatMap(row => {
-    const w = row.weeks[0];
-    if (!(w.runs || w.sessions || Object.keys(w.expenses).length)) return [];
-    const estimate = (kind, source) => w.usage[kind]?.[source] == null ? 'unknown' : `${w.usage[kind][source].toFixed(1)} pp`;
-    const money = Object.entries(w.expenses).map(([currency, minor]) => `${currency} ${(minor / 100).toFixed(2)}`).join(', ') || 'none';
-    return [`${row.project}: ${w.runs} runs, ${w.agentHours.toFixed(1)} agent h (estimated 5h / plan week: ${estimate('five_hour', 'agents')} / ${estimate('seven_day', 'agents')}); ${w.sessions} live sessions, ${w.liveHours.toFixed(1)} turn h, ${w.windowHours.toFixed(1)} window-open h (estimated: ${estimate('five_hour', 'live')} / ${estimate('seven_day', 'live')}); scheduled expenses ${money}`];
-  });
-  lines.push(`Project costs this calendar week: ${costsThisWeek.join(' | ') || 'no recorded work or scheduled expenses'}.`);
+  lines.push(costsLine(config, runs, sessions));
   const working = workLine(sessions, config);
   if (working) lines.push(working);
   lines.push(planningLine(config.owner || 'the owner'));

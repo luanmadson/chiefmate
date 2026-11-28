@@ -5663,11 +5663,21 @@ function costUsage(usage) {
   }));
 }
 
+// The weeks' agent and app turn hours on the common scale, oldest first; the current week in full brass.
+function costChart(weeks, max) {
+  const bars = weeks.map((w, i) => {
+    const hours = w.agentHours + w.liveHours;
+    return `<span class="${i ? '' : 'current'}" style="height:${Math.round(Math.min(1, hours / max) * 100)}%" title="${esc(`${costDate(w.from)}: ${costNumber(hours)} h`)}"></span>`;
+  });
+  return `<div class="cost-chart" role="img" aria-label="${esc(t('Agent and app turn hours'))}">${bars.reverse().join('')}</div>`;
+}
+
 function costProject(row, max) {
   const [current] = row.weeks;
   const frequencies = { once: t('Once'), weekly: t('Weekly'), monthly: t('Monthly'), yearly: t('Yearly') };
   return `<article class="cost-project">
     <h3>${esc(row.name)}</h3>
+    ${costChart(row.weeks, max)}
     <p>${costWeek(current)}</p>
     <p>${esc(t('Estimated usage in current windows'))} · ${costUsage(row.currentUsage)}</p>
     <p>${esc(t('Scheduled this week: {total}', { total: costMoneyTotals(current.expenses) }))}</p>
@@ -5676,7 +5686,6 @@ function costProject(row, max) {
       <ul class="cost-weeks">
         ${row.weeks.map(w => `<li>
           <strong>${esc(costDate(w.from))}</strong>
-          <progress max="${max}" value="${w.agentHours + w.liveHours}" aria-label="${esc(t('Agent and app turn hours'))}"></progress>
           <span>${costWeek(w)}</span>
           <span>${costUsage(w.usage)}</span>
           <span>${esc(t('Scheduled expenses: {total}', { total: costMoneyTotals(w.expenses) }))}</span>
@@ -5717,7 +5726,7 @@ async function drawProjectCosts(force = false) {
       costsSignature = signature;
     }
     status.textContent = projects.length
-      ? t('Current calendar week first. Usage is estimated in percentage points from recorded Claude tokens. The bars show agent and app turn hours.')
+      ? t('Bars: agent and app turn hours per week, oldest to newest; the current week is filled. Usage is an estimate in percentage points, from recorded Claude tokens.')
       : t('No project costs yet.');
   } catch (error) {
     status.textContent = error.message;

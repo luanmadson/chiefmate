@@ -2460,7 +2460,7 @@
   "First due: {date}": "Primeiro vencimento: {date}",
   "Next due: {date}": "Próximo vencimento: {date}",
   "Loading project costs…": "Carregando o custo por projeto…",
-  "Current calendar week first. Usage is estimated in percentage points from recorded Claude tokens. The bars show agent and app turn hours.": "A semana atual aparece primeiro. A estimativa de uso em pontos percentuais usa os tokens registrados do Claude. As barras mostram as horas dos agentes e dos turnos no app.",
+  "Bars: agent and app turn hours per week, oldest to newest; the current week is filled. Usage is an estimate in percentage points, from recorded Claude tokens.": "Barras: horas dos agentes e dos turnos no app por semana, da mais antiga à atual (a preenchida). O uso é uma estimativa em pontos percentuais, pelos tokens do Claude registrados.",
   "No project costs yet.": "Ainda não há custos por projeto.",
   "Remove this expense and its scheduled occurrences?": "Remover este gasto e todos os seus vencimentos?",
   "Project costs": "Custo por projeto",

@@ -597,7 +597,7 @@ Chiefmate measures what really counts on a subscription plan: your account's usa
 
 ### Project costs
 
-Under **Usage → Project costs**, each project shows its current calendar week first, with eight weeks of details folded underneath. The bars compare agent and app turn hours on a common scale. Weeks start on Monday in the computer's time zone. A run or live session can count in more than one week if it has recorded work in those weeks.
+Under **Usage → Project costs**, each project shows a bar for each of the last eight weeks (agent and app turn hours, on a scale common to all projects, oldest to newest, the current week filled), then the current calendar week's figures, with the weekly details and the expenses folded underneath. Weeks start on Monday in the computer's time zone. A run or live session can count in more than one week if it has recorded work in those weeks.
 
 Agent work comes from recorded steps and reviews, including retries recorded by this version. Live app turns are measured separately. A terminal's open time is shown separately from active work and can include idle time. Older live app turns without timing records and terminal token usage cannot be recovered.
 

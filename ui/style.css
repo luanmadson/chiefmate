@@ -1562,10 +1562,15 @@ html.chat-focus #view-manager .chat-column { width: min(100%, 1000px); margin: 0
   border-bottom: 1px solid var(--line);
 }
 .cost-expenses button { justify-self: start; }
-.cost-weeks progress {
-  width: min(100%, 32rem);
-  height: 0.5rem;
-  border: 0;
-  accent-color: var(--accent);
+.cost-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  width: min(100%, 16rem);
+  height: 2.5rem;
+  margin: 0.2rem 0 0.5rem;
+  border-bottom: 1px solid var(--line);
 }
+.cost-chart span { flex: 1; min-height: 1px; background: var(--accent-bg); border-top: 1px solid var(--accent); }
+.cost-chart span.current { background: var(--accent); }
 #costs-form { margin-top: 0.6rem; }
