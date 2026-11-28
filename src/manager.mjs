@@ -11,7 +11,7 @@ import { LEAD, leadSituation } from './leads.mjs';
 import { processes } from './machine.mjs';
 import { autopilotLine, weekLine } from './autopilot.mjs';
 import { awayInfo, awayLine } from './news.mjs';
-import { computerLine, planLine } from './plan.mjs';
+import { backupLine, computerLine, planLine } from './plan.mjs';
 import { pushesFile, pushesLine, pushRequestsFrom, questionsLine, reposLine } from './decisions.mjs';
 import { gapsLine } from './gaps.mjs';
 import { mainPushTargets, PR, PUSH, readPushes, REPO } from './guard.mjs';
@@ -167,6 +167,8 @@ export function situation(libraries = []) {
   lines.push(computerLine(config));
   const login = loginLine(config.owner || 'the owner');
   if (login) lines.push(login);
+  const backup = backupLine(config.owner || 'the owner');
+  if (backup) lines.push(backup);
   lines.push(sessionsLine(config));
   const working = workLine(listSessions(), config);
   if (working) lines.push(working);

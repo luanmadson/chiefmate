@@ -2,8 +2,8 @@
 // its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation;
 // the band of what a live session asks; the emergency lockdown, its detection, its emergency watch and the call to the
 // owner outside the app; the warning before Claude Code's sign-in expires; each agent's effort; the redacted backup of
-// the settings; the usage resets' countdowns; the session's spending modes, the queue's fair turn and the session's spare;
-// the manager's answer cut off by the plan's usage limit.
+// the settings, and its copies that fail, told once per cause; the usage resets' countdowns; the session's spending
+// modes, the queue's fair turn and the session's spare; the manager's answer cut off by the plan's usage limit.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -17,8 +17,8 @@ import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE
 import { describeDoing, limitWarning, LOGIN_RENEW, loginDue, loginLine, loginRead, loginWarning, parseLoginStatus, readFeed } from '../src/claude.mjs';
 import { formatDateTime, locale } from '../src/i18n.mjs';
 import { composeMessage, cutDue, cutNotice, limitCut, limitWait, outOfUsage } from '../src/manager.mjs';
-import { loginText } from '../src/plan.mjs';
-import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
+import { backupAlerts, backupLine, backupText, loginText } from '../src/plan.mjs';
+import { backupCause, backupConfig, backupProblems, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, opening, openOnComputer, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
 import { createdPaths, guardHooks, mainPushTarget, mainPushTargets, plainPush, publishing, riskyCommand } from '../src/guard.mjs';
@@ -1826,39 +1826,96 @@ test("the settings' backup: a redacted copy in backup_dir, the full one only on 
   assert.deepEqual([red.owner, red.port, red.backup_dir], ['Someone', 4747, config.backup_dir]);
   assert.match(red.backup_note, /Redacted copy/);
 
+  // What fails is kept apart (made up here), by place and cause.
+  const problems = path.join(temp, 'backup', 'problems.json');
+  const backup = (settings, fullDir) => backupConfig(settings, { fullDir, problems });
   const fullDir = path.join(temp, 'backup', 'local');
-  backupConfig(config, { fullDir });
+  backup(config, fullDir);
   assert.deepEqual(JSON.parse(readFileSync(path.join(config.backup_dir, 'chiefmate.json'), 'utf8')), red);
   assert.deepEqual(JSON.parse(readFileSync(path.join(fullDir, 'chiefmate.json'), 'utf8')), config, 'the full copy, on this computer');
   const other = path.join(temp, 'backup', 'none');
-  backupConfig({ owner: 'x' }, { fullDir: other });
+  backup({ owner: 'x' }, other);
   assert.ok(!existsSync(other), 'no backup without backup_dir');
+  assert.ok(!existsSync(problems), 'nothing failing, nothing kept');
 
   // full_backup_dir: the full copy also off this computer, on its own too, but never inside git nor in backup_dir.
   const cloud = path.join(temp, 'backup', 'cloud');
-  backupConfig({ ...config, full_backup_dir: cloud }, { fullDir });
+  backup({ ...config, full_backup_dir: cloud }, fullDir);
   assert.equal(JSON.parse(readFileSync(path.join(cloud, 'chiefmate.json'), 'utf8')).projects.demo.notes, config.projects.demo.notes);
   const alone = { owner: 'y', full_backup_dir: path.join(temp, 'backup', 'alone') };
-  backupConfig(alone, { fullDir: other });
+  backup(alone, other);
   for (const dir of [alone.full_backup_dir, other]) assert.deepEqual(JSON.parse(readFileSync(path.join(dir, 'chiefmate.json'), 'utf8')), alone);
   const repo = path.join(temp, 'backup', 'git');
   mkdirSync(path.join(repo, '.git'), { recursive: true });
   const logged = console.error;
   const said = [];
+  const kept = [];
   console.error = (...words) => said.push(words.join(' '));
   try {
-    backupConfig({ owner: 'z', full_backup_dir: path.join(repo, 'private') }, { fullDir: path.join(temp, 'backup', 'z') });
-    backupConfig({ ...config, full_backup_dir: config.backup_dir }, { fullDir });
+    const inGit = { owner: 'z', full_backup_dir: path.join(repo, 'private') };
+    backup(inGit, path.join(temp, 'backup', 'z'));
+    kept.push(backupProblems(problems));
+    // the same cause again (a save, a retry): the same problem, not in the log again
+    backup(inGit, path.join(temp, 'backup', 'z'));
+    kept.push(backupProblems(problems));
+    backup({ ...config, full_backup_dir: config.backup_dir }, fullDir);
     // the same folder spelled in other letters, on Windows
-    if (windows) backupConfig({ ...config, full_backup_dir: `${config.backup_dir.toUpperCase()}\\` }, { fullDir });
+    if (windows) backup({ ...config, full_backup_dir: `${config.backup_dir.toUpperCase()}\\` }, fullDir);
+    kept.push(backupProblems(problems));
     // a value that is not a path neither breaks the save nor Chiefmate's start
-    backupConfig({ owner: 'w', full_backup_dir: true }, { fullDir: path.join(temp, 'backup', 'w') });
+    backup({ owner: 'w', full_backup_dir: true }, path.join(temp, 'backup', 'w'));
+    kept.push(backupProblems(problems));
   } finally {
     console.error = logged;
   }
   assert.ok(!existsSync(path.join(repo, 'private')), 'no full copy inside a git repository');
   assert.equal(JSON.parse(readFileSync(path.join(config.backup_dir, 'chiefmate.json'), 'utf8')).projects.demo.notes, '[removed from this copy]', 'backup_dir keeps the redacted copy');
-  assert.deepEqual(said.map(line => line.match(/full_backup_dir (.+?)(?: \(|, so )/)?.[1] ?? line),['is inside a git repository', 'is the same folder as backup_dir', ...(windows ? ['is the same folder as backup_dir'] : []), 'is not a folder path'], 'the log says why');
+  assert.deepEqual(said.map(line => line.match(/full_backup_dir (.+?)(?: \(|, so )/)?.[1] ?? line), ['is inside a git repository', 'is the same folder as backup_dir', 'is not a folder path'], 'the log says why, once per cause');
+  const causes = list => list.map(p => `${p.target}:${p.cause}`);
+  assert.deepEqual(kept.map(causes), [['full_backup_dir:in_git'], ['full_backup_dir:in_git'], ['full_backup_dir:same_folder'], ['full_backup_dir:invalid']]);
+  assert.ok(kept[0][0].since && kept[1][0].since === kept[0][0].since && kept[0][0].told === null, 'the same cause keeps its first time');
+  assert.ok(!/chiefmate-unit-|Someone/.test(JSON.stringify(kept)), 'what is kept has no folder nor value of the settings');
+
+  // A copy that can't be written (a file where backup_dir's folder should be) and one refused: the local copy goes on.
+  const blocker = path.join(temp, 'backup', 'a-file');
+  writeFileSync(blocker, 'not a folder');
+  const failing = { owner: 'v', backup_dir: blocker, full_backup_dir: path.join(repo, 'private') };
+  const quietly = fn => {
+    console.error = () => {};
+    try {
+      fn();
+    } finally {
+      console.error = logged;
+    }
+  };
+  quietly(() => backup(failing, path.join(temp, 'backup', 'v')));
+  assert.deepEqual(causes(backupProblems(problems)), ['backup_dir:invalid', 'full_backup_dir:in_git']);
+  assert.ok(existsSync(path.join(temp, 'backup', 'v', 'chiefmate.json')), 'the local copy is still written');
+  assert.deepEqual(['EACCES', 'EPERM', 'ENOENT', 'EEXIST', 'ENOSPC', 'EBUSY', undefined].map(code => backupCause({ code })), ['no_access', 'no_access', 'invalid', 'invalid', 'disk_full', 'failed', 'failed']);
+
+  // The owner is told once per cause (the watch, src/plan.mjs), still told after another failed save; its retry, when
+  // due, writes in this test's folders only.
+  const alerts = settings => backupAlerts(settings, { problems, fullDir: path.join(temp, 'backup', 'v') });
+  assert.deepEqual(causes(alerts(failing)), ['backup_dir:invalid', 'full_backup_dir:in_git']);
+  assert.deepEqual(alerts(failing), [], 'a cause already told is not told again');
+  quietly(() => backup(failing, path.join(temp, 'backup', 'v')));
+  assert.ok(backupProblems(problems).every(p => p.told) && !alerts(failing).length, 'a cause that lasts is told once');
+  // The notice and the manager's line name the setting and the cause, never the folder.
+  const notices = backupProblems(problems).map(backupText);
+  assert.ok(notices.every(n => n.title && n.text && !n.text.includes(blocker) && !n.text.includes(repo)), 'a notice names a folder');
+  assert.ok(notices[0].text.includes('backup_dir') && notices[1].text.includes('full_backup_dir') && backupText({ target: 'local', cause: 'failed', code: 'EBUSY' }).text.includes('EBUSY'));
+  const line = backupLine('Someone', backupProblems(problems));
+  assert.match(line, /redacted copy in backup_dir: the folder is not valid or cannot be reached, since /);
+  assert.match(line, /full copy in full_backup_dir: refused, the folder is inside a git repository, since /);
+  assert.ok(!line.includes(blocker) && !line.includes(repo) && backupLine('Someone', []) === '', "the manager's line names a folder, or speaks with nothing failing");
+
+  // Fixed: the problems leave; failing again is a new cause to tell; no copy asked for, nothing failing.
+  backup({ ...failing, backup_dir: path.join(temp, 'backup', 'fixed'), full_backup_dir: cloud }, path.join(temp, 'backup', 'v'));
+  assert.deepEqual(backupProblems(problems), [], 'a copy that works again leaves no problem');
+  quietly(() => backup(failing, path.join(temp, 'backup', 'v')));
+  assert.ok(backupProblems(problems).every(p => p.told === null), 'a cause back after a fix is told again');
+  backup({ owner: 'u' }, other);
+  assert.deepEqual(backupProblems(problems), [], 'no copy asked for, no problem');
 });
 
 test('npm run check says why a script was not checked, with no pipe a sandbox could refuse', () => {
