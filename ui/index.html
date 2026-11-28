@@ -168,12 +168,14 @@
         <div class="view-header">
           <div>
             <h1 data-t="Crew">Crew</h1>
-            <p data-t="Who is on board, what each one is doing and the model behind them. Give any of them a one-off task.">Who is on board, what each one is doing and the model behind them. Give any of them a one-off task.</p>
+            <p data-t="Who is on board, by project: the manager, the team leads and the agents, each with its rank, record and memory. Give any of them a one-off task.">Who is on board, by project: the manager, the team leads and the agents, each with its rank, record and memory. Give any of them a one-off task.</p>
           </div>
         </div>
-        <div id="crew"></div>
-        <h2 class="section-title" data-t="Crews by project">Crews by project</h2>
+        <div id="team-summary"></div>
+        <h2 class="section-title" data-t="Org chart by project">Org chart by project</h2>
         <div id="teams"></div>
+        <h2 class="section-title" data-t="The manager and the base agents">The manager and the base agents</h2>
+        <div id="crew"></div>
         <div id="escalation"></div>
         <div id="prompt-builder"></div>
         <form id="task-form" class="panel form">
@@ -430,6 +432,17 @@
       <div class="actions">
         <button value="" class="button secondary" data-t="Cancel">Cancel</button>
         <button value="hold" class="button" data-t="Hold">Hold</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="agent-dialog" class="confirm agent-dialog" aria-labelledby="agent-dialog-title">
+    <form method="dialog">
+      <div class="label" id="agent-dialog-title"></div>
+      <p class="hint" id="agent-dialog-text"></p>
+      <div class="agent-fields" id="agent-fields"></div>
+      <div class="actions">
+        <button value="" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="save" class="button" id="agent-save" data-t="Save">Save</button>
       </div>
     </form>
   </dialog>

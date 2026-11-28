@@ -2713,14 +2713,16 @@ function drawMissions() {
 
 function drawCrew() {
   const cards = state.crew.map(a => {
-    const status = agentStatus(a);
+    // A base agent deactivated (src/agents.mjs) takes no new work in the projects of the general crew.
+    const status = a.inactive ? [t('Deactivated'), 'neutral'] : agentStatus(a);
     const busy = online && a.status !== 'idle';
     let last = t('No work yet');
     if (a.last) last = a.last.chat ? t('Answered you {when}', { when: relative(a.last.at) }) : t('{when}: {title}', { when: relative(a.last.at), title: a.last.title });
-    return `<article class="crew-card" style="--agent:${esc(a.color ?? '#8a93a0')}"${online ? opensPanel(a.runs?.[0]) : ''}>
+    const rank = a.id === 'manager' ? '' : rankMark(agentByKey(a.id)?.rank ?? a.rank);
+    return `<article class="crew-card${a.inactive ? ' inactive' : ''}" style="--agent:${esc(a.color ?? '#8a93a0')}"${online ? opensPanel(a.runs?.[0]) : ''}>
       ${face(a, faceState(a), 72, `${t(a.name)}: ${status[0]}`)}
       <div>
-        <div class="crew-top"><div><h2>${esc(t(a.name))}</h2><div class="hint">${esc(t(a.title ?? ''))}</div></div><span class="marks">${toolBadge(a)}<span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></span></div>
+        <div class="crew-top"><div><h2>${esc(t(a.name))} ${rank}</h2><div class="hint">${esc(t(a.title ?? ''))}</div></div><span class="marks">${toolBadge(a)}<span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></span></div>
         ${stateHtml(status)}
         ${busy ? `<div class="crew-now">${esc(agentDetail(a))}</div>` : ''}
         ${speechBubble(speechFor(a.id))}
@@ -2732,7 +2734,7 @@ function drawCrew() {
           <dt>${esc(a.id === 'manager' ? t('Effort (reviews)') : t('Effort'))}</dt><dd>${effortPick(a)}</dd>
           ${a.id === 'manager' ? `<dt>${esc(t('Effort (conversation)'))}</dt><dd>${effortPick(a, { chat: true })}</dd>` : ''}
         </dl>
-        <div class="actions left">${a.id === 'manager' ? `<a href="#manager" class="button secondary small">${esc(t('Talk'))}</a>` : `<button type="button" class="button secondary small" data-assign="${esc(a.id)}">${esc(t('Assign a task'))}</button>`}</div>
+        <div class="actions left">${a.id === 'manager' ? `<a href="#manager" class="button secondary small">${esc(t('Talk'))}</a>` : a.inactive ? `<button type="button" class="button secondary small" data-agent-status="${esc(a.id)}" data-to="active">${esc(t('Reactivate'))}</button>` : `<button type="button" class="button secondary small" data-assign="${esc(a.id)}">${esc(t('Assign a task'))}</button>`}</div>
       </div>
     </article>`;
   });
@@ -2740,6 +2742,7 @@ function drawCrew() {
   const html = `<div class="crew-grid">${cards.join('')}</div>
     <details class="effort-history" data-keep-open="effort-history"><summary>${esc(t('Effort changes ({count})', { count: changes.length }))}</summary>${changes.map(effortChangeHtml).join('') || `<div class="hint">${esc(t('No effort change recorded.'))}</div>`}<p class="hint">${esc(t('A change counts from the next step and shows in the report of the runs going on. Guide: docs/effort.md.'))}</p></details>`;
   if (!pickingEffort('#crew')) draw('#crew', html, html);
+  drawTeamSummary();
   drawTeams();
   drawEscalation();
   drawPromptBuilder();
@@ -2770,11 +2773,308 @@ function teamLead(a, project, bubbles = false) {
   return `<div class="team-member team-lead"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 34)}<div><div class="name">${esc(t(a.name))} <span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></div><div class="hint">${esc(facts.filter(Boolean).join(' · '))}</div>${bubbles ? speechBubble(speechFor(a.id, project)) : ''}</div><div class="team-side">${effortPick(a, { project })}${stateHtml(agentStatus(a))}</div></div>`;
 }
 
-/** A project's crew: its lead, then its members, each with what it is doing (with bubbles: its speech bubble too). */
-function teamBody(team, bubbles = false) {
-  const members = team.members.map(a => `<div class="team-member"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 30)}<div><div class="name">${esc(t(a.name))} <span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></div><div class="hint">${esc([a.base && a.base !== a.id ? t('Based on {agent}', { agent: agentName(a.base) }) : t(a.title ?? ''), a.extra ? t('with instructions for this project') : '', (a.mcp ?? []).length ? t('tools: {list}', { list: a.mcp.join(', ') }) : ''].filter(Boolean).join(' · '))}</div>${bubbles ? speechBubble(speechFor(a.id, team.project)) : ''}</div><div class="team-side">${effortPick(a, { project: team.project })}${stateHtml(agentStatus(a))}</div></div>`);
-  return `${team.lead ? teamLead(team.lead, team.project, bubbles) : ''}${members.join('') || `<div class="hint">${esc(t('No members.'))}</div>`}`;
+/** A member's row as it was before the agents had cards: for one the state does not list among the agents. */
+const plainRow = (a, project, bubbles) => `<div class="team-member"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 30)}<div><div class="name">${esc(t(a.name))} <span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></div><div class="hint">${esc([a.base && a.base !== a.id ? t('Based on {agent}', { agent: agentName(a.base) }) : t(a.title ?? ''), a.extra ? t('with instructions for this project') : '', (a.mcp ?? []).length ? t('tools: {list}', { list: a.mcp.join(', ') }) : ''].filter(Boolean).join(' · '))}</div>${bubbles ? speechBubble(speechFor(a.id, project)) : ''}</div><div class="team-side">${effortPick(a, { project })}${stateHtml(agentStatus(a))}</div></div>`;
+
+// ---------- The agents (src/agents.mjs, docs/agents.md): the org chart by project and each agent's card ----------
+
+/** An agent the state lists (state.agents), by its key ("ana", "writer", "generalist@site"). */
+const agentByKey = key => (state?.agents?.list ?? []).find(a => a.key === key) ?? null;
+const rankLabel = rank => ({ junior: t('Junior'), mid: t('Mid-level'), senior: t('Senior'), lead: t('Team lead') })[rank] ?? rank ?? '';
+const rankMark = rank => (rank ? `<span class="rank-mark" data-rank="${esc(rank)}" title="${esc(t('Rank'))}">${esc(rankLabel(rank))}</span>` : '');
+const share = (part, whole) => (whole ? `${Math.round((part / whole) * 100)}%` : '—');
+const dayLabel = day => (day ? new Date(`${day}T12:00:00`).toLocaleDateString(locale()) : '—');
+
+/** A record in one short line: its tasks and the share approved with no correction. */
+const recordShort = s => (s?.count ? t('{count} task(s) · {rate} with no correction', { count: s.count, rate: share(s.clean, s.count) }) : t('No task recorded yet'));
+
+/** The whole record in words: tasks, approved with no correction, corrected by the review, failed and the mean time. */
+function recordLong(s) {
+  if (!s?.count) return t('No task recorded yet');
+  const mean = s.meanMs ? t('{minutes} min', { minutes: Math.max(1, Math.round(s.meanMs / 60000)) }) : '—';
+  return t('{count} task(s): {clean} approved with no correction ({rate}), {corrected} corrected by the review, {failed} failed; mean time {mean}', {
+    count: s.count, clean: s.clean, rate: share(s.clean, s.count), corrected: s.corrected, failed: s.failed, mean,
+  });
 }
+
+/** What the record suggests for the rank: only a suggestion, the manager proposes and you decide. */
+function adviceText(x) {
+  if (!x) return '';
+  const values = { rank: rankLabel(x.to), clean: x.clean, count: x.count, failed: x.failed };
+  return x.move === 'promote'
+    ? t('The record meets the criteria to promote it to {rank} ({clean} of the latest {count} with no correction, {failed} failed).', values)
+    : t("The record is under its rank's floor: it suggests {rank} ({clean} of the latest {count} with no correction, {failed} failed).", values);
+}
+
+/** Where an agent comes from, in words. */
+function agentOrigin(a) {
+  if (a.kind === 'agent') return a.hired_at ? t('your own agent, hired on {date}', { date: dayLabel(a.hired_at) }) : t('your own agent');
+  if (a.kind === 'member') return t("a member of this project's own crew");
+  return t('the general crew (agents/{id}.md)', { id: a.id });
+}
+
+/** The manager's proposal of a rank, waiting for the owner: what changes, why, and the two answers. */
+function proposalHtml(a) {
+  const p = a.proposal;
+  if (!p) return '';
+  const ranks = state.agents?.ranks ?? [];
+  const values = { name: t(a.name), from: rankLabel(p.from), to: rankLabel(p.to) };
+  return `<div class="agent-proposal">
+      <div class="label">${esc(t("The manager's proposal"))}</div>
+      <p>${esc(ranks.indexOf(p.to) > ranks.indexOf(p.from) ? t('Promote {name} from {from} to {to}.', values) : t('Move {name} down from {from} to {to}.', values))} <span class="hint">${esc(p.why)}</span></p>
+      <div class="actions left">
+        <button type="button" class="button small" data-agent-decide="${esc(p.card)}" data-option="${esc(p.options?.[0] ?? '')}">${esc(t('Approve'))}</button>
+        <button type="button" class="button secondary small" data-agent-decide="${esc(p.card)}" data-option="${esc(p.options?.[1] ?? '')}">${esc(t('Keep as is'))}</button>
+      </div>
+    </div>`;
+}
+
+// An agent's memory, read when the owner opens it: "<key>|<project>": { text, updated }.
+const memoryTexts = {};
+
+/** An agent's memory in a project, folded: its size and date, and the text once opened. */
+function memoryHtml(a, project) {
+  const info = a.memory?.[project] ?? null;
+  const id = `${a.key}|${project}`;
+  const known = memoryTexts[id];
+  const label = info ? t('Memory in this project: {lines} line(s), updated {when}', { lines: info.lines, when: relative(info.updated) }) : t('Memory in this project: none yet');
+  const empty = state.agents?.memoryOn === false
+    ? t('The memory is off in this installation ("agent_memory": false).')
+    : t('It starts at the end of its next task here: short lessons for the next ones (what worked, your preferences, the pitfalls). It never goes to another project.');
+  return `<details class="agent-memory" data-keep-open="memory:${esc(id)}" data-memory="${esc(a.key)}" data-memory-project="${esc(project)}">
+      <summary>${esc(label)}</summary>
+      ${info ? `<pre class="agent-memory-text">${esc(known && known.updated === info.updated ? known.text : t('Reading…'))}</pre>` : `<p class="hint">${esc(empty)}</p>`}
+    </details>`;
+}
+
+/** An agent's card, folded under its row: facts, record, latest tasks, memory and the actions. */
+function agentCard(a, m, project) {
+  const inactive = a.status === 'inactive';
+  const here = a.projects.length > 1 ? a.record.byProject?.[project] ?? { count: 0 } : null;
+  const facts = [
+    [t('Specialty'), esc(a.specialty ? t(a.specialty) : '—')],
+    [t('Rank'), `${rankMark(a.rank)}${a.advice ? `<div class="hint">${esc(adviceText(a.advice))}</div>` : ''}`],
+    [t('Based on'), `${esc(agentName(a.base))} <span class="hint">· ${esc(agentOrigin(a))}</span>`],
+    [t('Works on'), `${toolBadge(a)} <span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span> ${m && !inactive ? effortPick(m, { project }) : effortBadge(a.effort)}`],
+    [t('Track record'), esc(recordLong(a.record.all))],
+    ...(here ? [[t('In this project'), esc(recordShort(here))]] : []),
+    ...(a.record.defects ? [[t('Defects found'), esc(t('{count} defect(s) of Chiefmate reported', { count: a.record.defects }))]] : []),
+    [t('Last activity'), esc(a.record.all.last ? relative(a.record.all.last) : '—')],
+  ];
+  const latest = a.record.latest ?? [];
+  const mark = x => stateHtml(x.status === 'failed' ? runState('failed') : x.corrected ? [t('Corrected'), 'warn'] : x.clean ? [t('No correction'), 'ok'] : runState(x.status));
+  const actions = [
+    online && m?.runs?.[0] ? `<button type="button" class="button secondary small" data-agent-run="${esc(m.runs[0])}">${esc(t('Watch live'))}</button>` : '',
+    inactive ? '' : `<button type="button" class="button secondary small" data-assign="${esc(a.id)}" data-assign-project="${esc(project)}">${esc(t('Assign a task'))}</button>`,
+    `<button type="button" class="button secondary small" data-agent-adjust="${esc(a.key)}">${esc(t('Adjust'))}</button>`,
+    `<button type="button" class="button secondary small" data-agent-status="${esc(a.key)}" data-to="${inactive ? 'active' : 'inactive'}">${esc(inactive ? t('Reactivate') : t('Deactivate'))}</button>`,
+  ];
+  return `<div class="agent-card">
+      ${proposalHtml(a)}
+      <dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>
+      ${latest.length ? `<details class="agent-latest" data-keep-open="latest:${esc(a.key)}|${esc(project)}"><summary>${esc(t('Latest tasks ({count})', { count: latest.length }))}</summary><ul>${latest.map(x => `<li>${mark(x)} <a href="#log/${encodeURIComponent(x.run)}">${esc(x.task)}</a> <span class="hint">· ${esc([projectName(x.project), x.at ? relative(x.at) : '', x.note].filter(Boolean).join(' · '))}</span></li>`).join('')}</ul></details>` : ''}
+      ${memoryHtml(a, project)}
+      <div class="actions left wrap">${actions.join('')}</div>
+    </div>`;
+}
+
+/** An agent's row in a project's org chart (summary first: name, rank, specialty, record, state), its card folded. */
+function agentRow(a, m, project, bubbles) {
+  const inactive = a.status === 'inactive';
+  const who = m ?? { ...a, status: 'idle' };
+  const status = inactive ? [t('Deactivated'), 'neutral'] : m ? agentStatus(m) : [t('Standing by'), 'ok'];
+  const waiting = a.proposal ? ` <span class="attn-mark" data-level="important" title="${esc(t("The manager's proposal waits for you"))}">!</span>` : '';
+  return `<details class="agent-row${inactive ? ' inactive' : ''}" data-keep-open="agent:${esc(project)}:${esc(a.key)}">
+      <summary class="team-member">${face(who, inactive ? 'still' : faceState(who), 30)}<div><div class="name">${esc(t(a.name))} ${rankMark(a.rank)}${waiting}</div><div class="hint">${esc([a.specialty ? t(a.specialty) : '', recordShort(a.record.all)].filter(Boolean).join(' · '))}</div>${bubbles && m ? speechBubble(speechFor(m.id, project)) : ''}</div><div class="team-side">${stateHtml(status)}</div></summary>
+      ${agentCard(a, m, project)}
+    </details>`;
+}
+
+/**
+ * A project's org chart: the manager, then the team lead (and the agents ranked team lead), then the agents, each row
+ * with its card folded (with bubbles: their speech bubbles too). The deactivated agents of the project come last.
+ */
+function teamBody(team, bubbles = false) {
+  const list = state.agents?.list ?? [];
+  const rows = team.members.map(m => ({ m, a: list.find(a => a.key === (m.key ?? m.id)) ?? null }));
+  const off = list.filter(a => a.status === 'inactive' && a.projects.includes(team.project) && !rows.some(r => r.a?.key === a.key));
+  const row = r => (r.a ? agentRow(r.a, r.m, team.project, bubbles) : plainRow(r.m, team.project, bubbles));
+  const chiefs = rows.filter(r => r.a?.rank === 'lead');
+  const crewRows = rows.filter(r => r.a?.rank !== 'lead');
+  const chief = member('manager');
+  return `<div class="org">
+      <div class="org-top">${face(chief, faceState(chief), 22)}<span>${esc(t(chief.name ?? 'Chiefmate'))}</span><span class="hint">${esc(t('Manager: reviews every run and talks to you'))}</span></div>
+      <div class="org-level org-leads">
+        ${team.lead ? teamLead(team.lead, team.project, bubbles) : ''}${chiefs.map(row).join('')}
+        ${team.lead || chiefs.length ? '' : `<div class="org-none hint">${esc(t('No team lead: the agents answer to the manager.'))}</div>`}
+      </div>
+      <div class="org-level org-members">
+        ${crewRows.map(row).join('')}${off.map(a => agentRow(a, null, team.project, bubbles)).join('')}
+        ${rows.length || off.length ? '' : `<div class="hint">${esc(t('No members.'))}</div>`}
+      </div>
+    </div>`;
+}
+
+/** How the ranks work: what each one does and the criteria the record weighs. */
+function rankRulesHtml(v) {
+  const does = {
+    junior: t("Small, well-bounded tasks, always with the manager's review."),
+    mid: t('The usual tasks of its role.'),
+    senior: t('Larger tasks and work in several parts; later, reviewing colleagues.'),
+    lead: t("Leads a project's team; later, plans and supervises the requests between agents."),
+  };
+  const up = r => (r ? t('Up: at least {tasks} tasks, {clean} or more with no correction, at most {failed} failure(s).', { tasks: r.tasks, clean: share(r.clean, 1), failed: r.failed }) : '');
+  const down = r => (r ? t('Down: under {clean} with no correction, or {failed} failures or more (from {tasks} tasks on).', { tasks: r.tasks, clean: share(r.clean, 1), failed: r.failed }) : '');
+  return `<p class="hint">${esc(t('A higher rank means more autonomy and responsibility. The criteria weigh the latest {window} tasks of each agent; the manager proposes a change and you decide it on its card.', { window: v.window }))}</p>
+    <dl class="facts rank-facts">${(v.ranks ?? []).map(r => `<dt>${rankMark(r)}</dt><dd>${esc(does[r] ?? '')}<div class="hint">${esc([up(v.rules?.[r]?.up), down(v.rules?.[r]?.down)].filter(Boolean).join(' '))}</div></dd>`).join('')}</dl>`;
+}
+
+/** The summary first: how many agents, the manager's proposals waiting for you, what the records suggest, and Hire. */
+function drawTeamSummary() {
+  const v = state.agents;
+  if (!v) return draw('#team-summary', '', '');
+  const active = v.list.filter(a => a.status === 'active');
+  const off = v.list.length - active.length;
+  const waiting = v.list.filter(a => a.proposal);
+  const advised = active.filter(a => a.advice && !a.proposal);
+  const counts = [
+    t('{count} active agent(s) in {projects} project(s)', { count: active.length, projects: new Set(active.flatMap(a => a.projects)).size }),
+    off ? t('{count} deactivated', { count: off }) : '',
+    waiting.length ? t("{count} proposal(s) of the manager waiting for you", { count: waiting.length }) : '',
+  ].filter(Boolean).join(' · ');
+  const html = `<div class="panel team-summary">
+      <div class="team-counts">${esc(counts)}</div>
+      ${waiting.map(a => `<div class="team-proposal"><strong>${esc(t(a.name))}</strong> ${rankMark(a.proposal.from)} → ${rankMark(a.proposal.to)} <span class="hint">${esc(a.proposal.why)}</span>
+        <span class="actions"><button type="button" class="button small" data-agent-decide="${esc(a.proposal.card)}" data-option="${esc(a.proposal.options?.[0] ?? '')}">${esc(t('Approve'))}</button><button type="button" class="button secondary small" data-agent-decide="${esc(a.proposal.card)}" data-option="${esc(a.proposal.options?.[1] ?? '')}">${esc(t('Keep as is'))}</button></span></div>`).join('')}
+      ${advised.length ? `<p class="hint">${esc(t('The records suggest (the manager proposes, you decide): {list}.', { list: advised.map(a => `${t(a.name)} → ${rankLabel(a.advice.to)}`).join('; ') }))}</p>` : ''}
+      <details class="rank-rules" data-keep-open="rank-rules"><summary>${esc(t('How the ranks work'))}</summary>${rankRulesHtml(v)}</details>
+      <div class="actions left"><button type="button" class="button small" data-agent-hire>${esc(t('Hire an agent'))}</button></div>
+    </div>`;
+  draw('#team-summary', html, html);
+}
+
+// The agent the dialog adjusts (null: hiring one) and its own settings as they were read.
+let agentDialog = null;
+
+/** Adjust an agent (its own settings, read from Chiefmate) or hire one (key null). */
+async function openAgentDialog(key = null) {
+  const current = key ? await api(`/api/agents/settings?key=${encodeURIComponent(key)}`) : null;
+  agentDialog = { key, current };
+  const s = current?.settings ?? {};
+  const kind = current?.kind ?? 'agent';
+  const option = (value, label, chosen) => `<option value="${esc(value)}"${chosen ? ' selected' : ''}>${esc(label)}</option>`;
+  const text = (name, label, value, extra = '') => `<label><span>${esc(label)}</span><input name="${name}" type="text" value="${esc(value ?? '')}" autocomplete="off" ${extra}></label>`;
+  const fields = [];
+  if (!key) fields.push(text('id', t('Id: lowercase letters, digits, - or _'), '', 'required pattern="[a-z][a-z0-9_\\-]{1,31}" maxlength="32"'));
+  fields.push(text('name', t('Name'), s.name, 'maxlength="40"'));
+  fields.push(text('specialty', t('Specialty, in one line'), s.specialty, 'maxlength="160"'));
+  if (kind !== 'role') {
+    const base = s.base ?? current?.base ?? 'generalist';
+    fields.push(`<label><span>${esc(t('Based on'))}</span><select name="base">${state.crew.filter(a => a.id !== 'manager').map(a => option(a.id, t(a.name), base === a.id)).join('')}</select></label>`);
+  }
+  fields.push(`<label><span>${esc(t('Rank'))}</span><select name="rank">${(state.agents?.ranks ?? []).map(r => option(r, rankLabel(r), (key ? current.rank : 'junior') === r)).join('')}</select></label>`);
+  fields.push(`<label><span>${esc(t('Tool'))}</span><select name="tool">${option('', t("Its base's (Claude Code by default)"), !s.tool)}${Object.entries(TOOL_LABELS).map(([x, name]) => option(x, name, s.tool === x)).join('')}</select></label>`);
+  fields.push(text('model', t("Model (empty: its base's)"), s.model, 'maxlength="60"'));
+  fields.push(`<label><span>${esc(t('Effort'))}</span><select name="effort">${option('', t('default'), !s.effort)}${EFFORTS.map(e => option(e, e, s.effort === e)).join('')}</select></label>`);
+  fields.push(`<label><span>${esc(t("Minutes per step (empty: its base's)"))}</span><input name="max_minutes" type="number" min="5" max="1440" step="1" value="${esc(s.max_minutes ?? '')}"></label>`);
+  if (kind === 'agent') {
+    fields.push(`<fieldset class="agent-projects"><legend>${esc(t('Projects it works in'))}</legend>${state.projects.map(p => `<label class="option"><input type="checkbox" name="projects" value="${esc(p.id)}"${(s.projects ?? []).includes(p.id) ? ' checked' : ''}> ${esc(p.name)}</label>`).join('')}</fieldset>`);
+  }
+  fields.push(`<label class="wide"><span>${esc(kind === 'agent' ? t('Its own instructions') : t('Instructions for this installation'))}</span><textarea name="instructions" rows="5" maxlength="4000">${esc(s.instructions ?? '')}</textarea></label>`);
+  $('#agent-dialog-title').textContent = key ? t('Adjust {name}', { name: t(current.name) }) : t('Hire an agent');
+  $('#agent-dialog-text').textContent = !key
+    ? t('A new agent, based on one of the base agents, with its own name, specialty, rank, memory and record. It starts as junior unless you choose another rank.')
+    : kind === 'role' ? t('An agent of the general crew: what you change applies to it in every project without a crew of its own.')
+      : kind === 'member' ? t("A member of this project's own crew: what you change applies to it in this project.")
+        : t('Your own agent: what you change applies from its next step.');
+  $('#agent-fields').innerHTML = fields.join('');
+  $('#agent-dialog').returnValue = '';
+  $('#agent-dialog').showModal();
+  $('#agent-fields').querySelector('input')?.focus();
+}
+
+/** Saves what changed in the dialog: only the fields the owner changed ("" clears one, back to its base's). */
+async function saveAgentDialog() {
+  const form = $('#agent-dialog form');
+  const data = new FormData(form);
+  const { key, current } = agentDialog ?? {};
+  const s = current?.settings ?? {};
+  const fields = {};
+  for (const f of ['name', 'specialty', 'base', 'rank', 'tool', 'model', 'effort', 'max_minutes', 'instructions']) {
+    if (!form.elements[f]) continue;
+    const value = String(data.get(f) ?? '').trim();
+    const before = f === 'rank' ? current?.rank ?? '' : f === 'base' ? s.base ?? current?.base ?? '' : String(s[f] ?? '');
+    if (key ? value !== before : value) fields[f] = value;
+  }
+  if (form.querySelector('[name="projects"]')) {
+    const chosen = data.getAll('projects').map(String);
+    if (!key || chosen.join(',') !== (s.projects ?? []).join(',')) fields.projects = chosen;
+  }
+  try {
+    if (!key) {
+      const id = String(data.get('id') ?? '').trim();
+      await api('/api/agents', { action: 'add', key: id, fields });
+      toast(t('{name} was hired: it takes work from now on.', { name: fields.name || id }));
+    } else if (Object.keys(fields).length) {
+      await api('/api/agents', { action: 'set', key, fields });
+      toast(t('{name} was adjusted: it counts from its next step.', { name: t(current.name) }));
+    }
+    await refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+$('#agent-dialog').addEventListener('close', () => {
+  if ($('#agent-dialog').returnValue === 'save') saveAgentDialog();
+});
+
+// Enter in a field of the dialog saves it (its first button is Cancel), once the fields are valid.
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Enter' || !event.target.matches?.('#agent-fields input')) return;
+  event.preventDefault();
+  if ($('#agent-dialog form').reportValidity()) $('#agent-dialog').close('save');
+});
+
+// An agent's memory is read only when the owner opens it (the details' toggle does not bubble: caught on the way down).
+document.addEventListener('toggle', async event => {
+  const box = event.target;
+  if (!box.matches?.('details.agent-memory') || !box.open) return;
+  const pre = box.querySelector('.agent-memory-text');
+  const id = `${box.dataset.memory}|${box.dataset.memoryProject}`;
+  if (!pre || (memoryTexts[id] && pre.textContent === memoryTexts[id].text)) return;
+  try {
+    const m = await api(`/api/agents/memory?key=${encodeURIComponent(box.dataset.memory)}&project=${encodeURIComponent(box.dataset.memoryProject)}`);
+    memoryTexts[id] = { text: m.text || t('(empty)'), updated: m.info?.updated ?? null };
+    pre.textContent = memoryTexts[id].text;
+  } catch (error) {
+    pre.textContent = error.message;
+  }
+}, true);
+
+// The agents' actions: hire, adjust, deactivate or reactivate, and the answer to the manager's proposal of a rank.
+document.addEventListener('click', async event => {
+  const b = event.target.closest('[data-agent-hire],[data-agent-adjust],[data-agent-status],[data-agent-decide]');
+  if (!b || b.disabled) return;
+  try {
+    if (b.dataset.agentHire !== undefined) return await openAgentDialog();
+    if (b.dataset.agentAdjust) return await openAgentDialog(b.dataset.agentAdjust);
+    if (b.dataset.agentDecide) {
+      await api('/api/decide', { card: b.dataset.agentDecide, action: 'answer', option: b.dataset.option });
+      toast(t('Answered: the manager hears of it.'));
+      return await refresh();
+    }
+    const key = b.dataset.agentStatus;
+    const name = t(agentByKey(key)?.name ?? state.crew.find(a => a.id === key)?.name ?? key);
+    const off = b.dataset.to === 'inactive';
+    if (off && !(await confirmDialog(t('Deactivate {name}?', { name }), t('{name} takes no new work: tasks, missions, requests and the board stop offering it. What is already in the queue still runs. Its memory and record stay, and you can bring it back with Reactivate.', { name }), t('Deactivate')))) return;
+    await api('/api/agents', { action: off ? 'deactivate' : 'activate', key });
+    toast(off ? t('{name} takes no new work now.', { name }) : t('{name} is back to work.', { name }));
+    await refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+});
 
 function drawTeams() {
   const teams = state.teams ?? [];
@@ -3895,6 +4195,9 @@ function contextPartTitle(key) {
     case 'agent': return t("The agent's instructions");
     case 'installation': return t('Notes for this installation');
     case 'project-member': return t("Notes for this project's crew");
+    case 'agent-identity': return t('Who the agent is (name, specialty, rank)');
+    case 'agent-own': return t("The agent's own instructions");
+    case 'agent-memory': return t("The agent's memory in this project");
     case 'lead-role': return t("The team lead's role");
     case 'lead-notes': return t('Notes for the team lead');
     case 'header': return t('The run and the task');
@@ -5847,6 +6150,15 @@ document.addEventListener('click', async event => {
       toast(t('Mission queued.'));
       location.hash = '#operations';
     } else if (target.dataset.assign) {
+      // From a project's org chart: that project's member (the task form is in the Crew section).
+      if (target.dataset.assignProject && $('#task-project').value !== target.dataset.assignProject) {
+        $('#task-project').value = target.dataset.assignProject;
+        fillTaskAgents();
+      }
+      if (location.hash !== '#crew') {
+        location.hash = '#crew';
+        await new Promise(resolve => setTimeout(resolve, 60));
+      }
       if (![...$('#task-agent').options].some(o => o.value === target.dataset.assign)) {
         const home = state.teams?.find(x => x.members.some(a => a.id === target.dataset.assign));
         if (home) $('#task-project').value = home.project;

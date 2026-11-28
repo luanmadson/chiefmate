@@ -537,6 +537,41 @@ textarea { resize: vertical; min-height: 64px; }
 .team-member .name { color: var(--strong); }
 /* The project's team lead, above its crew: a brass rule on the left and a stronger line below. */
 .team-lead { grid-template-columns: 34px minmax(0, 1fr) auto; padding: 8px 0 8px 10px; border-left: 2px solid var(--accent); border-bottom: 1px solid var(--line-strong); }
+/* The org chart by project (src/agents.mjs): the manager, then the team lead, then the agents, each level a step in
+   with a thin rule on its left; each agent's row folds its card. */
+.org-top { display: flex; align-items: center; gap: 8px; padding: 2px 0 8px; color: var(--strong); font-size: 12.5px; }
+.org-top .hint { margin-left: auto; text-align: right; }
+.org-level { margin-left: 10px; padding-left: 10px; border-left: 1px solid var(--line-strong); }
+.org-members { margin-left: 22px; }
+.org-none { padding: 6px 0; border-top: 1px solid var(--line); }
+.agent-row > summary { list-style: none; cursor: pointer; }
+.agent-row > summary::-webkit-details-marker { display: none; }
+.agent-row > summary:hover { background: var(--hover); }
+.agent-row[open] > summary { background: var(--raised); }
+.agent-row.inactive > summary, .crew-card.inactive { opacity: 0.6; }
+.agent-card { padding: 2px 0 12px 40px; border-top: 1px dashed var(--line); }
+.agent-card .facts { grid-template-columns: 104px minmax(0, 1fr); font-size: 12.5px; margin-top: 8px; }
+.rank-mark { display: inline-block; font: 11px/1.6 var(--mono); color: var(--muted); border: 1px solid var(--line-strong); padding: 0 6px; white-space: nowrap; text-transform: uppercase; letter-spacing: .04em; vertical-align: 1px; }
+.rank-mark[data-rank="mid"] { color: var(--text); }
+.rank-mark[data-rank="senior"] { color: var(--accent); border-color: var(--accent); }
+.rank-mark[data-rank="lead"] { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
+.agent-proposal, .team-proposal { margin: 8px 0; padding: 8px 10px; border-left: 2px solid var(--important); background: var(--important-bg); }
+.agent-proposal p { margin: 0; }
+.agent-proposal .actions { margin-top: 8px; }
+.team-proposal { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.team-proposal .actions { margin: 0 0 0 auto; }
+.agent-latest, .agent-memory, .rank-rules { margin-top: 8px; font-size: 12.5px; }
+.agent-latest > summary, .agent-memory > summary, .rank-rules > summary { cursor: pointer; color: var(--muted); }
+.agent-latest ul { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.agent-memory-text { max-height: 260px; overflow-y: auto; }
+.team-counts { color: var(--strong); }
+.rank-facts { grid-template-columns: 130px minmax(0, 1fr); }
+.agent-dialog { width: min(640px, 94vw); }
+.agent-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; margin: 12px 0; }
+.agent-fields label > span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.agent-fields .wide, .agent-projects { grid-column: 1 / -1; }
+.agent-projects { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0; padding: 8px 10px; border: 1px solid var(--line); }
+.agent-projects legend { padding: 0 4px; font-size: 12px; color: var(--muted); }
 /* Speech bubbles (src/speech.mjs): what an agent says, in plain words, with a tail toward its name; its state in a
    word and in the color of the left rule (working blue, waiting amber, stuck red, done green). A click opens the run's
    history. Done with its part: quiet, the text in grey. */
@@ -1376,6 +1411,13 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   .crew-card .face { width: 48px; height: 48px; }
   .crew-card .state, .team-member .state { white-space: normal; }
   .crew-card .facts { grid-template-columns: 92px minmax(0, 1fr); }
+  /* The org chart: shallower steps, the card under the row's full width, the dialog's fields in one column */
+  .org-level { margin-left: 4px; padding-left: 8px; }
+  .org-members { margin-left: 8px; }
+  .agent-card { padding-left: 0; }
+  .agent-card .facts, .rank-facts { grid-template-columns: 92px minmax(0, 1fr); }
+  .agent-fields { grid-template-columns: minmax(0, 1fr); }
+  .team-proposal .actions { margin-left: 0; }
 
   /* A project's page: "More" beside the name, the description in two lines */
   .project-head-top { flex-wrap: nowrap; }
