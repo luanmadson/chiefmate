@@ -1614,6 +1614,8 @@ test('Quoted text that only goes as text (a message, a search, a commit message,
     `node -e "require('fs').appendFileSync('.tmp/notes.md', 'Refused: git push origin main; gh pr create\\n')"`,
     "node -e \"const fs = require('node:fs'); fs.mkdirSync('.tmp', { recursive: true }); fs.writeFileSync('.tmp/n.md', 'gh release create; git push --force: never')\"",
     'echo "gh pr create; git push origin main" >> .tmp/notes.md',
+    'printf "%s\\n" "gh pr create; git push origin main" >> .tmp/notes.md',
+    'uniq notes.md && grep -n "gh pr create; git push" notes.md',
   ]) assert.deepEqual(rules(command), [], command);
   // What runs is still looked at: a real command beside the text, a substitution, a backquote bash runs, text piped to a
   // shell or written and run in the same command (a script, a hook), a --check, inline code that can run a command, and
@@ -1634,18 +1636,28 @@ test('Quoted text that only goes as text (a message, a search, a commit message,
     `node -e "require('fs').writeFileSync('t.sh', 'git push origin main')" && bash t.sh`,
     'echo "git push origin main" > .git/hooks/pre-commit && git commit -m "x"',
     'echo "git push origin main">.git/hooks/pre-commit&&git commit -m "x"',
+    // A script written and run by its path, though named as a program that runs nothing; uniq's output file; printf -v
+    // setting the editor git runs.
+    'echo "#!/bin/sh\ngit push origin main" > .tmp/echo && .tmp/echo',
+    'echo "#!/bin/sh\ngit push origin main" | uniq - .git/hooks/pre-commit && git commit -m "x"',
+    `printf -v GIT_EDITOR "sh -c 'git push origin main'" && git commit`,
     'grep -h "git push origin main" notes.md | sh',
     'rg --pre=bash "git push origin main" .',
     'git -c core.editor=x commit -m "a; git push origin main"',
     'git push --force origin x',
+    // A redirection before the program hides nothing.
+    '2>&1 git push origin main',
+    'A=1 > /dev/null git push origin main',
   ]) assert.deepEqual(rules(command), ['Bash(git push:*)'], command);
   assert.deepEqual(rules('gh pr create --title "x" --body "y; git push origin main"'), ['Bash(gh pr:*)']);
+  assert.deepEqual(rules('> out.txt gh pr create --title "x" --body "y"'), ['Bash(gh pr:*)']);
   // A deletion in a message or in notes is text; a real one is still grave.
   const home = path.join(temp, 'text-home');
   const kinds = command => riskyCommand(command, { cwd: path.join(home, 'work'), protect: [], home, root: path.join(home, 'app'), temp: path.join(temp, 'tmp') }).map(f => f.kind);
   assert.deepEqual(kinds(`${cli} chat say "Careful; rm -rf ~ would delete everything"`), []);
   assert.deepEqual(kinds(`node -e "require('fs').appendFileSync('n.md', 'never: rm -rf ~')"`), []);
-  for (const command of [`${cli} chat say "ok" && rm -rf ~`, 'bash -c "rm -rf ~"', 'echo "rm -rf ~" | sh', 'rm -rf ~/Documents']) assert.deepEqual(kinds(command), ['wide_delete'], command);
+  for (const command of [`${cli} chat say "ok" && rm -rf ~`, 'bash -c "rm -rf ~"', 'echo "rm -rf ~" | sh', 'rm -rf ~/Documents', 'echo "#!/bin/sh\nrm -rf ~" > .tmp/grep && .tmp/grep x',
+    '2>/dev/null rm -rf ~', 'nice -n 5 rm -rf ~']) assert.deepEqual(kinds(command), ['wide_delete'], command);
 });
 
 test('effort: each level from its place, the project only, the history and the run report', () => {

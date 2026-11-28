@@ -217,8 +217,9 @@ function notesCode(code) {
 /**
  * What one command of a command in plain words does with its words: { runs, writes }, or null when it may run them or
  * is not known (a variable or a wrapper before it too). runs: it runs a file of its own (Chiefmate's command line, git
- * and its hooks); writes: it writes a file (a redirection, tee, notes by node -e). joined: the command has quotes that
- * bash and PowerShell read as other texts (plainText), so inline code would be other code for each of them.
+ * and its hooks, gh, which runs git, or any program named by its path, which may be a file written beside it); writes:
+ * it writes a file (a redirection, tee, uniq's second word, notes by node -e). joined: the command has quotes that bash
+ * and PowerShell read as other texts (plainText), so inline code would be other code for each of them.
  */
 function textUse(segment, joined) {
   let writes = false;
@@ -235,24 +236,31 @@ function textUse(segment, joined) {
   if (!words.length) return { runs: false, writes };
   const program = programName(words[0]);
   const args = words.slice(1);
+  const use = runs => ({ runs: runs || /[\\/]/.test(words[0]), writes });
   if (program === 'node') {
-    if (programName(args[0] ?? '') === 'cli.mjs') return CLI_TEXT.has(args[1]) && !args.includes('--check') ? { runs: true, writes } : null;
-    // Its code read the same by both shells: no joined quotes, no backquote (\` is PowerShell's escape).
-    return args.length === 2 && /^(-e|--eval|-p|--print)$/.test(args[0]) && !joined && !args[1].includes('`') && notesCode(args[1]) ? { runs: false, writes: true } : null;
+    if (programName(args[0] ?? '') === 'cli.mjs') return CLI_TEXT.has(args[1]) && !args.includes('--check') ? use(true) : null;
+    // Its code read the same by both shells and by node: no joined quotes, no backquote (\` is PowerShell's escape), no
+    // double quote (PowerShell before 7.3 passes it to node unescaped, and node takes it off).
+    if (!(args.length === 2 && /^(-e|--eval|-p|--print)$/.test(args[0]) && !joined && !/[`"]/.test(args[1]) && notesCode(args[1]))) return null;
+    writes = true;
+    return use(false);
   }
   let i = 0;
   if (program === 'git') {
     while (args[i] === '-C' && i + 1 < args.length) i += 2;
     // --output writes a file; git grep's -O (--open-files-in-pager, or a prefix of it) runs a pager.
     if (!GIT_TEXT.has(args[i]) && !GIT_LOOK.has(args[i])) return null;
-    return args.slice(i + 1).some(a => /^(--output|--op|-[a-zA-Z]*O)/.test(a)) ? null : { runs: true, writes };
+    return args.slice(i + 1).some(a => /^(--output|--op|-[a-zA-Z]*O)/.test(a)) ? null : use(true);
   }
   if (program === 'gh') {
     while ((args[i] === '-R' || args[i] === '--repo') && i + 1 < args.length) i += 2;
-    return GH_TEXT.has(args[i]) ? { runs: false, writes } : null;
+    return GH_TEXT.has(args[i]) ? use(true) : null;
   }
-  if (!TEXT_PROGRAMS.has(program) || (program === 'rg' && args.some(a => /^--(pre|hostname)/.test(a)))) return null;
-  return { runs: false, writes: writes || (program === 'tee' && args.some(a => !a.startsWith('-') && !STREAM.test(a))) };
+  // printf -v sets a variable that the next command may read (GIT_EDITOR, which git runs).
+  if (!TEXT_PROGRAMS.has(program) || (program === 'rg' && args.some(a => /^--(pre|hostname)/.test(a))) || (program === 'printf' && /^-./.test(args[0] ?? '') && args[0] !== '--')) return null;
+  const files = args.filter(a => a === '-' || !a.startsWith('-'));
+  if ((program === 'tee' && files.some(a => a !== '-' && !STREAM.test(a))) || (program === 'uniq' && files.length > 1)) writes = true;
+  return use(false);
 }
 
 /**
@@ -480,12 +488,17 @@ export function publishing(command, depth = 0) {
   return found.filter(f => !seen.has(`${f.rule} ${f.part}`) && seen.add(`${f.rule} ${f.part}`));
 }
 
-/** A command's program and its arguments: { program, args, at }, with variables (A=1) and wrappers (env, sudo...) taken off; at: where the program is. */
+/** A command's program and its arguments: { program, args, at }, with variables (A=1), redirections and wrappers (env, sudo...) taken off; at: where the program is. */
 function programOf(words) {
   let i = 0;
-  // Variables set for the command (A=1 git push) and wrappers (env, sudo, xargs...), with their options.
+  // Variables set for the command (A=1 git push), redirections before it (2>&1 git push, > f git push: its target in
+  // the same word or the next one) and wrappers (env, sudo, xargs...), with their options.
   for (;;) {
-    while (i < words.length && /^[A-Za-z_][\w]*=/.test(words[i])) i++;
+    const redirection = /^(\d+|&)?[<>][<>&|]*(.*)$/.exec(words[i] ?? '');
+    if (redirection || /^[A-Za-z_][\w]*=/.test(words[i] ?? '')) {
+      i += redirection && !redirection[2] ? 2 : 1;
+      continue;
+    }
     if (i < words.length && WRAPPERS.has(programName(words[i]))) {
       i++;
       // Their options, and a number (timeout 10, nice -n 5).
@@ -632,11 +645,8 @@ export function riskyCommand(command, { cwd = process.cwd(), protect = [], home 
       const p = asPath(w, cwd, home);
       if (p && protect.some(dir => inside(p, dir))) add('protected_access', words.join(' '));
     }
-    let i = 0;
-    while (i < words.length && (/^[A-Za-z_][\w]*=/.test(words[i]) || WRAPPERS.has(programName(words[i])))) i++;
-    const program = programName(words[i] ?? '');
+    const { program, args } = programOf(words);
     if (!DELETERS.has(program)) continue;
-    const args = words.slice(i + 1);
     // rm -rf / -Rf / -r, --recursive; Remove-Item -Recurse (or its short forms); rd, rmdir and del /s; rimraf.
     const recursive = program === 'rimraf'
       || args.some(a => /^-[a-z]{1,3}$/i.test(a) && /r/i.test(a))
