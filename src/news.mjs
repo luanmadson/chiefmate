@@ -142,7 +142,9 @@ export function awayLine(owner = 'the owner', away = awayInfo()) {
 export function waitingLine(runs = listRuns()) {
   const calls = runs.filter(r => !runEnded(r)).flatMap(r => (r.requests ?? []).filter(q => q.status === 'open').map(q => ({ r, q })));
   if (!calls.length) return '';
-  const list = calls.map(({ r, q }) => `run ${r.id} "${r.title}" (project ${r.project}, ${r.parked?.request === q.id && r.status === 'paused' ? 'parked: it resumes first once answered' : 'still waiting'}): ${q.what}`);
+  const how = (r, q) => (r.parked?.request === q.id && r.status === 'paused' ? 'parked: it resumes first once answered'
+    : q.deferred ? 'left for later by the owner; the step went on' : !q.wait || q.waitEnded ? 'the step went on; the request stays open' : 'still waiting');
+  const list = calls.map(({ r, q }) => `run ${r.id} "${r.title}" (project ${r.project}, ${how(r, q)}): ${q.what}`);
   return ` Still waiting for the owner (${calls.length}): ${list.join('; ')}. List them in the summary.`;
 }
 

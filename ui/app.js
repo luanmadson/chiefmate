@@ -5,6 +5,7 @@ import { language, locale, setLanguage, t, translatePage } from './i18n.js';
 import { resetLabel, spare } from './countdown.js';
 import { Dictation, recognizer } from './voice.js';
 import { asksHtml, keepFolds, newFolds, toggleFold } from './asks.js';
+import { announce, blinkTitle, callsLayout, callsOf, chime, keepChoice, NOTIFY_KEY, notifyCalls, notifyState, SOUND_KEY, soundOn, waitLine } from './calls.js';
 
 const $ = selector => document.querySelector(selector);
 let state = null;
@@ -622,6 +623,8 @@ function showView() {
   for (const a of document.querySelectorAll('.nav a')) a.classList.toggle('active', a.dataset.view === section);
   $('#nav-more').classList.toggle('active', !!document.querySelector('.nav a.nav-extra.active'));
   setNavMore(false);
+  // Another page: the call bar folds back to its first call (an answer being written keeps its draft).
+  [callsOpen, callAnswer] = [false, null];
   if (state) drawAlerts();
   $('#project-jump').value = pageProject() ?? '';
   // Not on a touch screen: the keyboard would cover half of it at every visit.
@@ -1378,6 +1381,22 @@ function drawFavicon(mode) {
   iconMode = mode;
 }
 
+// The title as drawTitle makes it, and the call it blinks with while the app is out of sight (announceCalls).
+let baseTitle = 'Chiefmate';
+let blinkLine = '';
+let blinkOn = false;
+const setTitle = () => {
+  const title = blinkTitle(baseTitle, blinkLine, blinkOn);
+  if (document.title !== title) document.title = title;
+};
+// Every second, the call and the title in turn, until the owner is back on the app.
+setInterval(() => {
+  if (!blinkLine) return;
+  if (!document.hidden && document.hasFocus()) [blinkLine, blinkOn] = ['', false];
+  else blinkOn = !blinkOn;
+  setTitle();
+}, 1000);
+
 function drawTitle() {
   const runs = going();
   const a = runs[0];
@@ -1395,7 +1414,8 @@ function drawTitle() {
     const more = fresh.filter(i => i.level !== 'info').length - 1;
     title = `${level === 'urgent' ? '!!' : '!'} ${first.title}${more > 0 ? ` (+${more})` : ''} · ${title.replace(/^[●○] /, '')}`;
   }
-  if (document.title !== title) document.title = title;
+  baseTitle = title;
+  setTitle();
   drawFavicon(level === 'urgent' || level === 'important' ? level : a ? 'running' : count ? 'queued' : level ?? '');
   // The badge on the app's icon in the taskbar, where the browser supports it: the urgent and important notices.
   const needs = fresh.filter(i => i.level !== 'info').length;
@@ -1428,9 +1448,9 @@ document.addEventListener('input', event => {
   if (key) replyDrafts.set(key, event.target.value);
 });
 
-/** The field to write an answer, with its "Send" button ("send": the button's attributes). */
-const replyField = (key, send, size = '') => `<div class="reply">
-    <textarea data-reply="${esc(key)}" rows="1" maxlength="2000" placeholder="${esc(t('Explain / another answer (optional)'))}" aria-label="${esc(t('Explain / another answer (optional)'))}">${esc(replyDrafts.get(key) ?? '')}</textarea>
+/** The field to write an answer, with its "Send" button ("send": the button's attributes; "label": what it asks for). */
+const replyField = (key, send, size = '', label = t('Explain / another answer (optional)')) => `<div class="reply">
+    <textarea data-reply="${esc(key)}" rows="1" maxlength="2000" placeholder="${esc(label)}" aria-label="${esc(label)}">${esc(replyDrafts.get(key) ?? '')}</textarea>
     <button type="button" class="button secondary${size}" ${send} data-reply-send>${esc(t('Send'))}</button>
   </div>`;
 
@@ -1577,21 +1597,125 @@ function archiveHtml(items) {
   }).join('');
 }
 
+// ---------- Calls: a step of the crew needs you (src/needs.mjs, ui/calls.js) ----------
+// The call bar, at the top of every page (focus mode and phones too), above the notices' band: who calls (the agent's
+// face, name and role), the project and the task, what it needs and where its step stands, with Open (the agent's
+// panel), I did it, Answer here (the answer written in the bar: a question's options or the owner's own words) and Not
+// now (left for later: the step stops waiting and goes on). Several calls stack: the first in full, the others counted,
+// opening into all of them. A new call also blinks the title while the app is out of sight, shows the browser's
+// notification there and, when turned on, plays a short sound.
+
+let callsOpen = false; // every call shown, not only the first
+let callAnswer = null; // "<run>:<id>": the call whose answer is open in the bar
+const callsNow = () => (online ? callsOf(state?.needs) : []);
+const callKey = c => `${c.run}:${c.id}`;
+const callerName = c => (c.agent ? agentName(c.agent, c.project) : t('A step'));
+
+/** A call in the bar: its mark, the agent, the project and task, what it needs, its step's wait and the buttons. */
+function callHtml(c, count) {
+  const key = callKey(c);
+  const answering = callAnswer === key;
+  const question = !!c.options?.length;
+  const where = [c.project ? projectName(c.project) : '', c.title].filter(Boolean).join(' · ');
+  const meta = esc([waitLine(c, { t, clockTime }), t('called at {time}', { time: clockTime(c.at) })].join(' · '));
+  const address = c.url ? ` · <a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(t('Open the address'))}</a>` : '';
+  const answer = !answering ? '' : `<div class="call-answer">
+      ${question ? `${requestWhy(c)}${requestButtons(c.run, c, ' small')}` : `<span class="hint">${esc(t('What you write goes to the agent as your answer, and the call closes.'))}</span>`}
+      ${replyField(`req:${c.id}`, `data-needs-done="${esc(c.run)}" data-request="${esc(c.id)}"`, ' small', question ? undefined : t('Your answer to the agent'))}
+    </div>`;
+  const buttons = [
+    `<button type="button" class="button secondary small" data-call-open="${esc(c.run)}" title="${esc(t("The agent's panel: what it is doing, its request and your conversation with it"))}">${esc(t('Open'))}</button>`,
+    question ? '' : `<button type="button" class="button small" data-needs-done="${esc(c.run)}" data-request="${esc(c.id)}">${esc(t('I did it'))}</button>`,
+    `<button type="button" class="button${question && !answering ? '' : ' secondary'} small" data-call-answer="${esc(key)}" aria-expanded="${answering}">${esc(t('Answer here'))}</button>`,
+    `<button type="button" class="button secondary small" data-call-later="${esc(c.run)}" data-request="${esc(c.id)}" title="${esc(t('It stays in Operations for later; the agent stops waiting and goes on with what it can.'))}">${esc(t('Not now'))}</button>`,
+  ].join('');
+  return `<div class="call">
+      <span class="call-level"><span class="attn-mark" data-level="urgent" aria-hidden="true">${count > 1 ? count : ''}</span>${esc(t('Calling you'))}</span>
+      <span class="call-face" aria-hidden="true">${face(member(c.agent ?? 'manager', c.project), 'queued', 30)}</span>
+      <div class="call-body">
+        <div class="call-head"><span class="call-who">${esc(c.agent ? memberLabel(c.agent, c.project) : t('A step'))}</span>${where ? `<span class="call-where">${esc(where)}</span>` : ''}</div>
+        <div class="call-what">${esc(c.what)}</div>
+        <div class="call-meta">${meta}${address}</div>
+        ${answer}
+      </div>
+      <div class="call-actions">${buttons}</div>
+    </div>`;
+}
+
+/** The call bar, or '' with no call: the first call in full, then how many more (who and where), opening into all. */
+function callsBar() {
+  const calls = callsNow();
+  if (!calls.length) return '';
+  const { shown, more, count } = callsLayout(calls, callsOpen);
+  const others = calls.slice(1).map(c => [callerName(c), c.project ? projectName(c.project) : ''].filter(Boolean).join(', ')).join(' · ');
+  const stack = count > 1
+    ? `<button type="button" class="call-stack" data-calls-more aria-expanded="${callsOpen}">${callsOpen ? '' : `<span class="call-others">${esc(t('+{count} calling you: {who}', { count: more, who: others }))}</span>`}<span class="call-toggle">${esc(callsOpen ? t('Show less') : t('See all {count}', { count }))}</span></button>`
+    : '';
+  const label = count > 1 ? t('Calling you ({count})', { count }) : t('Calling you');
+  return `<section class="call-bar" role="alert" aria-label="${esc(label)}">
+      ${shown.map((c, i) => callHtml(c, i === 0 && !callsOpen ? count : 1)).join('')}
+      ${stack}
+    </section>`;
+}
+
+/** The notices the call bar shows: a crew step's call not left for later. */
+const inCallBar = i => i.kind === 'needs' && !!i.request?.run && !i.request.deferred;
+
+// The calls already announced in this page (null before the first reading, whose calls the bar shows unannounced).
+let knownCalls = null;
+let audio = null; // the sound's AudioContext, made on the owner's first click (browsers keep sound off until then)
+const wakeAudio = () => {
+  if (!soundOn(localStorage) || !('AudioContext' in window)) return;
+  audio ??= new AudioContext();
+  if (audio.state === 'suspended') audio.resume().catch(() => {});
+};
+document.addEventListener('pointerdown', wakeAudio, { capture: true });
+document.addEventListener('keydown', wakeAudio, { capture: true });
+
+/** A new call: the sound when turned on; out of sight, the blinking title and the browser's notification. */
+function announceCalls() {
+  const calls = callsNow();
+  const { fresh, known } = announce(calls, knownCalls);
+  knownCalls = known;
+  if (callAnswer && !calls.some(c => callKey(c) === callAnswer)) callAnswer = null;
+  if (!calls.length) blinkLine = '';
+  if (!fresh.length) return;
+  if (soundOn(localStorage)) {
+    wakeAudio();
+    chime(audio);
+  }
+  if (!document.hidden && document.hasFocus()) return;
+  const newest = fresh.at(-1);
+  if (!calm()) blinkLine = t('Calling you: {who}', { who: callerName(newest) });
+  if (notifyState({ Notification: window.Notification, here: onThisComputer(), storage: localStorage }) !== 'on') return;
+  const text = c => ({ title: t('{who} is calling you', { who: c.agent ? memberLabel(c.agent, c.project) : t('A step') }), body: [c.project ? projectName(c.project) : '', c.what].filter(Boolean).join(': ') });
+  const more = n => ({ title: t('Calling you'), body: t('{count} more calls are waiting in the app.', { count: n }) });
+  swReady().then(registration => notifyCalls(fresh, { Notification: window.Notification, registration, text, more }));
+}
+
+/** The service worker that shows the notifications (ui/sw.js; phones need one), or null where there is none. */
+function swReady() {
+  if (!('serviceWorker' in navigator) || !window.isSecureContext) return Promise.resolve(null);
+  return navigator.serviceWorker.register('/sw.js')
+    .then(() => Promise.race([navigator.serviceWorker.ready, new Promise(resolve => setTimeout(() => resolve(null), 3000))]))
+    .catch(() => null);
+}
+
 let attnOpen = false; // the band shows every notice, not only the most urgent
 /** The band at the top: the most urgent notice and how many others, opening into all of them. Nothing is paused. */
 function drawAlerts() {
-  // The notices with a decision card are left to the Decisions tab, and those a page lists (Operations, Planning, a
-  // project) to that page. The conversation shows only its own notices (the others mark their tabs), and none in focus
-  // mode. A permission asked shows there without its facts, as a way to them. On a phone, the band keeps its room for
-  // what needs the owner: the info notices stay in each section's list.
+  // The notices with a decision card are left to the Decisions tab, those a page lists (Operations, Planning, a
+  // project) to that page, and the crew's calls to the call bar above it. The conversation shows only its own notices
+  // (the others mark their tabs), and none in focus mode. A permission asked shows there without its facts, as a way
+  // to them. On a phone, the band keeps its room for what needs the owner: the info notices stay in each section's list.
   const phone = phoneQuery.matches;
   const carded = cardedIds();
   const view = currentView();
   const listed = { operations: ['operations', 'log'], planning: ['planning'] }[view] ?? [];
   const skip = i => (view === 'manager' ? i.view !== 'manager' : listed.includes(i.view) || (view === 'project' && ofProject(pageProject())(i)));
-  // The lockdown has its own red band, on every page and in focus mode too.
-  const band = lockdownBand();
-  const list = focusMode() ? [] : attnItems().filter(i => !carded.has(i.id) && !(phone && i.level === 'info') && !skip(i) && i.kind !== 'lockdown');
+  // The lockdown has its own red band, on every page and in focus mode too; so does the call bar.
+  const band = `${lockdownBand()}${callsBar()}`;
+  const list = focusMode() ? [] : attnItems().filter(i => !carded.has(i.id) && !inCallBar(i) && !(phone && i.level === 'info') && !skip(i) && i.kind !== 'lockdown');
   const fresh = unseen(list);
   if (!fresh.length && !attnOpen) return draw('#alerts', band, band);
   const others = fresh.length - 1;
@@ -2741,6 +2865,7 @@ function drawCrew() {
     <details class="effort-history" data-keep-open="effort-history"><summary>${esc(t('Effort changes ({count})', { count: changes.length }))}</summary>${changes.map(effortChangeHtml).join('') || `<div class="hint">${esc(t('No effort change recorded.'))}</div>`}<p class="hint">${esc(t('A change counts from the next step and shows in the report of the runs going on. Guide: docs/effort.md.'))}</p></details>`;
   if (!pickingEffort('#crew')) draw('#crew', html, html);
   drawTeams();
+  drawCallsSettings();
   drawEscalation();
   drawPromptBuilder();
   if (!$('#task-project').options.length) {
@@ -2826,6 +2951,76 @@ function drawEscalation() {
   // The setup open: its statuses follow (a chat just linked), without touching what is being typed.
   if ($('#escalation-dialog').open) for (const box of $('#escalation-steps').querySelectorAll('[data-esc-status]')) box.textContent = escalationStatus(e, box.dataset.escStatus);
 }
+
+/** This browser's notification of the calls (ui/calls.js): "on", "off", "ask", "blocked", "windows" or "none". */
+const callsNotify = () => notifyState({ Notification: window.Notification, here: onThisComputer(), storage: localStorage });
+
+/**
+ * The Calls panel (Crew): how long a step waits for you (the settings' needs_you.max_wait_minutes), that away mode
+ * doesn't wait, this browser's notification and sound (kept in the browser) and the on-call outside the app (off).
+ */
+function drawCallsSettings() {
+  const c = state.calls;
+  if (!c) return draw('#calls-settings', '', '');
+  const notify = callsNotify();
+  const sound = soundOn(localStorage);
+  const choices = [...new Set([...c.choices, c.maxWaitMinutes])].sort((a, b) => a - b);
+  const wait = `<select data-call-wait aria-label="${esc(t('Longest wait with you here'))}">${choices.map(m => `<option value="${m}"${m === c.maxWaitMinutes ? ' selected' : ''}>${esc(t('{count} min', { count: m }))}</option>`).join('')}</select>`;
+  const notifyText = {
+    on: t('On in this browser, while the app is open.'), off: t('Off in this browser.'), ask: t('Not allowed yet in this browser.'),
+    blocked: t("Blocked in this browser's settings: allow notifications for this site there."), windows: t('On this computer, Windows already notifies each call.'),
+    none: t('This browser has no notifications.'),
+  }[notify];
+  const notifyButton = { ask: ['allow', t('Allow notifications')], on: ['off', t('Turn off')], off: ['on', t('Turn on')] }[notify];
+  const html = `<div class="panel calls-panel">
+      <div class="label">${esc(t('Calls from the crew'))}</div>
+      <p class="hint">${esc(t("When a step needs you, a bar at the top of every page calls you: the agent and its role, the project and what it needs, with Open, I did it, Answer here and Not now. Out of sight, the window's title blinks and the browser notifies you; the sound is optional."))}</p>
+      <dl class="facts">
+        <dt>${esc(t('Longest wait with you here'))}</dt><dd>${wait} <span class="hint">${esc(t('then the step goes on with what it can, and the call stays open.'))}</span></dd>
+        <dt>${esc(t('In away mode'))}</dt><dd>${esc(t('No wait: the call stays open and the step goes on with what it can.'))}</dd>
+        <dt>${esc(t("This browser's notification"))}</dt><dd>${esc(notifyText)}${notifyButton ? ` <button type="button" class="button secondary small" data-calls-notify="${notifyButton[0]}">${esc(notifyButton[1])}</button>` : ''}</dd>
+        <dt>${esc(t("This browser's sound"))}</dt><dd>${esc(sound ? t('On: a short chime for each new call.') : t('Off: no sound.'))} <button type="button" class="button secondary small" data-calls-sound="${sound ? 'off' : 'on'}" aria-pressed="${sound}">${esc(sound ? t('Turn off') : t('Turn on'))}</button> <button type="button" class="button secondary small" data-calls-sound="test">${esc(t('Test'))}</button></dd>
+        <dt>${esc(t('On-call outside the app (Telegram)'))}</dt><dd>${esc(c.onCall.enabled && c.onCall.channel ? t('On.') : t('Off: nothing is sent. Telegram calls you today only for an emergency lockdown (below).'))}</dd>
+      </dl>
+    </div>`;
+  draw('#calls-settings', JSON.stringify([c, notify, sound, language()]), html);
+}
+
+document.addEventListener('change', async event => {
+  const select = event.target.closest('select[data-call-wait]');
+  if (!select) return;
+  try {
+    const calls = await api('/api/needs-you/settings', { max_wait_minutes: Number(select.value) });
+    toast(t('A step now waits for you at most {count} min.', { count: calls.maxWaitMinutes }));
+    refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+document.addEventListener('click', async event => {
+  const button = event.target.closest('[data-calls-notify],[data-calls-sound]');
+  if (!button) return;
+  const { callsNotify: notify, callsSound: sound } = button.dataset;
+  if (notify === 'allow') {
+    // A promise in today's browsers; nothing in older ones, which then keep the permission as it was.
+    const answer = await Promise.resolve(window.Notification?.requestPermission?.()).catch(() => 'default') ?? window.Notification?.permission;
+    if (answer === 'granted') {
+      keepChoice(localStorage, NOTIFY_KEY, true);
+      swReady();
+      toast(t('Notifications allowed: a new call shows here while the app is out of sight.'));
+    } else toast(t('The browser did not allow notifications.'));
+  } else if (notify) keepChoice(localStorage, NOTIFY_KEY, notify === 'on');
+  else if (sound === 'test') {
+    audio ??= 'AudioContext' in window ? new AudioContext() : null;
+    await audio?.resume?.().catch(() => {});
+    if (!chime(audio)) toast(t('This browser played no sound.'));
+  } else if (sound) {
+    keepChoice(localStorage, SOUND_KEY, sound === 'on');
+    if (sound === 'on') wakeAudio();
+  }
+  drawCallsSettings();
+});
 
 /** The setup, step by step: the bot from BotFather, the chat linked with /start, the PIN, the e-mail and a test. */
 function fillEscalationDialog() {
@@ -5491,6 +5686,7 @@ async function refresh() {
   drawFocus();
   drawMics();
   drawAlerts();
+  announceCalls();
   drawNavAttention();
   drawCounters();
   drawTitle();
@@ -5763,7 +5959,7 @@ document.addEventListener('click', event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-autopilot-mode],[data-session-mode],[data-session-boost],[data-spending-dismiss],[data-needs-done],[data-needs-session],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-work-now],[data-work-open],[data-work-release],[data-project-manager],[data-browser-focus],[data-browser-close]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-autopilot-mode],[data-session-mode],[data-session-boost],[data-spending-dismiss],[data-needs-done],[data-needs-session],[data-call-open],[data-call-answer],[data-call-later],[data-calls-more],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-work-now],[data-work-open],[data-work-release],[data-project-manager],[data-browser-focus],[data-browser-close]');
   if (!target) return;
   // A project's name inside a row that opens on a click (Projects) goes to its page, and nothing else.
   if (event.target.closest('a.project-link') && !target.matches('a')) return;
@@ -5925,6 +6121,23 @@ document.addEventListener('click', async event => {
       const { items } = await api('/api/attention/archived');
       $('#archive-list').innerHTML = archiveHtml(items ?? []);
       $('#archive-dialog').showModal();
+      return;
+    } else if (target.dataset.callOpen) {
+      openAgentPanel(target.dataset.callOpen);
+      return;
+    } else if (target.dataset.callAnswer) {
+      callAnswer = callAnswer === target.dataset.callAnswer ? null : target.dataset.callAnswer;
+      drawAlerts();
+      // A request to act is answered in words: its field, ready to write (a question's options come first).
+      const call = callsNow().find(c => callKey(c) === callAnswer);
+      if (call && !call.options?.length) $('#alerts .call-answer textarea')?.focus();
+      return;
+    } else if (target.dataset.callLater) {
+      await api('/api/needs-you/later', { run: target.dataset.callLater, id: target.dataset.request });
+      toast(t('Left for later: it stays in Operations, and the agent goes on with what it can.'));
+    } else if (target.hasAttribute('data-calls-more')) {
+      callsOpen = !callsOpen;
+      drawAlerts();
       return;
     } else if (target.hasAttribute('data-attn-more')) {
       attnOpen = !attnOpen;

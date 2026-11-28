@@ -28,7 +28,7 @@ import { agentSender, chat, editPending, interruptManager, managerContext, newCo
 import { closeDefect, reportDefect } from './defects.mjs';
 import { closeReplaced, mergeRun, previewClose, previewMerge } from './merge.mjs';
 import { awayInfo, reportEvent, setAway } from './news.mjs';
-import { askOwner, confirmByOwnerWords, finishRequest, openCalls, openRequests, parkRun, pollRequest } from './needs.mjs';
+import { askOwner, callsView, confirmByOwnerWords, deferRequest, finishRequest, openCalls, openRequests, parkRun, pollRequest, setMaxWait } from './needs.mjs';
 import { quarantineList, releaseQuarantine } from './quarantine.mjs';
 import { cancelStop, logPower, powerInfo, powerPreview, rebootRefusal, setStandby, stopSystem } from './power.mjs';
 import { alerts, changeResets, planResets, weekPace } from './plan.mjs';
@@ -419,6 +419,8 @@ function buildState() {
     effortHistory: effortHistory().slice(-12).reverse(),
     teams: teams(config, agents, general, runs, going.map(x => x.run), queue, conversation),
     needs,
+    // The calls' settings (src/needs.mjs): the longest a step waits for the owner, the waits offered, the on-call.
+    calls: callsView(config),
     prompts: { ...builderStatus(config), syncing: isSyncing(), cdp: !!config.browser_cdp },
     focus: focus(config),
     // The owner's focus (src/steer.mjs): the mode, its line, the latest changes and each project's control and hold.
@@ -824,6 +826,12 @@ export function startServer() {
         case '/api/needs-you/done':
           if (body.session) return reply(res, 200, finishSessionRequest(String(body.session), String(body.id ?? '')));
           return reply(res, 200, finishRequest(body.run, body.id, body.by === 'check' ? 'check' : 'owner', body.answer ?? null, body.note ?? null));
+        case '/api/needs-you/later':
+          // "Not now" on a call (the owner's): it stays open, out of the call bar, and its step stops waiting.
+          return reply(res, 200, deferRequest(body.run, String(body.id ?? '')));
+        case '/api/needs-you/settings':
+          // The longest a step waits for the owner (the owner's, from the Crew section's Calls panel).
+          return reply(res, 200, setMaxWait(body.max_wait_minutes));
         case '/api/calls': {
           // The manager's handling of the open calls (cli.mjs calls): list them, mark one done on the owner's words in
           // its conversation (only while it answers, src/needs.mjs), or park a run that waits for the owner.

@@ -72,12 +72,15 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
     ? { level: 'info', title: t('Waiting for a third-party review'), lasting: true }
     : { level: 'important', title });
 
-  // Urgent: a step or a live session waits for the owner (a session's permission asked included).
+  // Urgent: a step or a live session waits for the owner (a session's permission asked included). A step's call the
+  // owner left for later ("Not now", src/needs.mjs) stays, as important: its step went on.
   for (const n of needs) {
+    const later = !!n.deferred;
     add({
-      id: `needs:${n.run ?? n.session}:${n.id}`, level: 'urgent', kind: 'needs', title: n.kind === 'permission' ? t('Asks your permission') : n.options ? t('Asks you') : t('Needs you'),
+      id: `needs:${n.run ?? n.session}:${n.id}`, level: later ? 'important' : 'urgent', kind: 'needs',
+      title: later ? t('Left for later') : n.kind === 'permission' ? t('Asks your permission') : n.options ? t('Asks you') : t('Needs you'),
       text: t('{task}: {what}', { task: n.title, what: n.explain?.summary ?? n.what }), view: 'operations', project: n.project ?? null, run: n.run ?? null, at: n.at, seenable: false,
-      request: { id: n.id, kind: n.kind ?? null, run: n.run ?? null, session: n.session ?? null, url: n.url ?? null, openError: n.openError ?? null, agent: n.agent ?? null, explain: n.explain ?? null, options: n.options ?? null, recommend: n.recommend ?? null, why: n.why ?? null },
+      request: { id: n.id, kind: n.kind ?? null, run: n.run ?? null, session: n.session ?? null, url: n.url ?? null, openError: n.openError ?? null, agent: n.agent ?? null, explain: n.explain ?? null, options: n.options ?? null, recommend: n.recommend ?? null, why: n.why ?? null, deferred: n.deferred ?? null },
     });
   }
   // Urgent: a file of a working copy the antivirus probably took (src/quarantine.mjs): its project's queue waits for it.
