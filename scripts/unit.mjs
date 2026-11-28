@@ -305,6 +305,45 @@ test('app: a file found nowhere shows the path tried', async () => {
   assert.match(ui.nodes['path-dialog-text'].textContent, /Looked in: your clone[\s\S]*File not found: .*nada\.html/);
 });
 
+// The manager's Interrupt, in the conversation and on the update's line, with a stand-in for the server.
+function interruptUi() {
+  const listeners = {};
+  const nodes = { interrupt: { disabled: false }, bridge: {} };
+  for (const [id, node] of Object.entries(nodes)) node.addEventListener = (type, callback) => (listeners[id] = callback);
+  const sent = [];
+  const asked = [];
+  const toasts = [];
+  runInNewContext(between('// Interrupt acts at once, as in the live sessions', '// The queue: edit a message in place'), {
+    $: selector => nodes[selector.slice(1)], state: { manager: { responding: true, pending: [] } }, going: () => [],
+    t: (text, values = {}) => text.replace(/\{(\w+)\}/g, (m, k) => values[k]),
+    confirmDialog: async title => (asked.push(title), true),
+    api: async (route, body) => (sent.push([route, body]), { interrupted: true }),
+    toast: text => toasts.push(text), refresh: () => {},
+  });
+  return { listeners, nodes, sent: () => JSON.parse(JSON.stringify(sent)), asked, toasts };
+}
+
+test("app: Interrupt stops the manager's answer at once, with no confirmation; Update now still asks", async () => {
+  const ui = interruptUi();
+  await ui.listeners.interrupt();
+  assert.deepEqual(ui.sent(), [['/api/manager/interrupt', {}]]);
+  assert.deepEqual(ui.asked, [], 'the interruption asked for a confirmation');
+  assert.ok(ui.nodes.interrupt.disabled, 'the button stayed clickable while the answer stops');
+  const click = updateNow => ({ target: { closest: () => ({ dataset: { updateNow } }) } });
+  await ui.listeners.bridge(click('interrupt'));
+  assert.deepEqual(ui.asked, [], "the update's interruption asked for a confirmation");
+  assert.deepEqual(ui.sent().at(-1), ['/api/update-now', { interruptManager: true }]);
+  assert.equal(ui.toasts.at(-1), "Interrupting the manager's answer…");
+  await ui.listeners.bridge(click('now'));
+  assert.deepEqual(ui.asked, ['Update now'], 'Update now went without its confirmation');
+  assert.deepEqual(ui.sent().at(-1), ['/api/update-now', { interruptManager: false }]);
+  // The queue says Interrupt sends it at once only while that is true: not while an update holds it until the restart.
+  const sendsNow = s => runInNewContext(`${between('/** Whether Interrupt delivers', '// The messages waiting for the manager')} interruptSendsNow();`, { state: s });
+  assert.equal(sendsNow({ manager: { responding: true }, update: {} }), true);
+  assert.equal(sendsNow({ manager: { responding: true }, update: { installing: { stage: 'manager' } } }), false);
+  assert.equal(sendsNow({ manager: { responding: false }, update: {} }), false);
+});
+
 test('kinds and headers: nothing runs in the app', () => {
   assert.deepEqual(['a.PNG', 'b.pdf', 'c.md', 'd.xlsx', 'e.csv', 'f.json', 'LICENSE', 'g.exe'].map(kindOf), ['image', 'pdf', 'markdown', 'table', 'table', 'text', 'text', 'other']);
   assert.equal(rawHeaders('a.png')['content-type'], 'image/png');
