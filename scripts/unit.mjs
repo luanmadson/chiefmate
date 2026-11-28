@@ -2,7 +2,8 @@
 // its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation;
 // the band of what a live session asks; the emergency lockdown, its detection, its emergency watch and the call to the
 // owner outside the app; the warning before Claude Code's sign-in expires; each agent's effort; the redacted backup of
-// the settings; the usage resets' countdowns; the session's spending modes, the queue's fair turn and the session's spare.
+// the settings, and its copies that fail, told once per cause; the usage resets' countdowns; the session's spending
+// modes, the queue's fair turn and the session's spare; the manager's answer cut off by the plan's usage limit.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -13,9 +14,11 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE, projectColor, shouldClose, themeManifest, windowName } from '../src/browsers.mjs';
-import { describeDoing, LOGIN_RENEW, loginDue, loginLine, loginRead, loginWarning, parseLoginStatus, readFeed } from '../src/claude.mjs';
-import { loginText } from '../src/plan.mjs';
-import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
+import { describeDoing, limitWarning, LOGIN_RENEW, loginDue, loginLine, loginRead, loginWarning, parseLoginStatus, readFeed } from '../src/claude.mjs';
+import { formatDateTime, locale } from '../src/i18n.mjs';
+import { composeMessage, cutDue, cutNotice, limitCut, limitWait, outOfUsage } from '../src/manager.mjs';
+import { backupAlerts, backupLine, backupText, loginText } from '../src/plan.mjs';
+import { backupCause, backupConfig, backupProblems, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
 import { changeExpense, costActivity, listExpenses, nextExpenseDate, projectCosts } from '../src/costs.mjs';
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, opening, openOnComputer, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
@@ -39,8 +42,8 @@ import { HELD_WHILE_AWAY, NEWS_EVENTS } from '../src/news.mjs';
 import { askedTool, copyHolder, endLine, holdsCopy, limitWaitCleared, pausedLine, stepTool } from '../src/runs.mjs';
 import { addSpeech, askedBy, SPEECH_KEEP, SPEECH_MAX, SPEECH_SHOWN, speechLine, speechNow, speechRule, speechView } from '../src/speech.mjs';
 import {
-  agentTool, availableTools, chooseTool, codexEnvironment, codexEvents, codexGuard, codexStepArgs, correctionLine, GROK_DENY, grokEvents, grokStepArgs, parseTool,
-  qualityRecords, qualitySummary, runTools, toolAvailable, toolEffort, toolModel,
+  agentTool, availableTools, chooseTool, codexEnvironment, codexEvents, codexGuard, codexPlan, codexStepArgs, correctionLine, GROK_DENY, grokEvents, grokPlan, grokStepArgs,
+  parseTool, qualityRecords, qualitySummary, runTools, stepsByTool, toolAvailable, toolEffort, toolModel,
 } from '../src/tools.mjs';
 import { parseLevel } from '../src/util.mjs';
 import { behindOrigin, checkoutBranch, fastForward, freshenBranch, projectLibraries, restoreShelf, sameRepository, shelfRef, shelveWork } from '../src/workspace.mjs';
@@ -52,6 +55,7 @@ import './away-ui.test.mjs';
 import { AFAR_VERSION, offered, ONLY_ON_PC } from '../ui/afar.js';
 import { asksHtml, asksLayout, GROUP_FROM, keepFolds, newFolds, toggleFold } from '../ui/asks.js';
 import { announce, blinkTitle, callsLayout, callsOf, chime, keepChoice, NOTIFY_KEY, notifyCalls, notifyOn, notifyState, SOUND_KEY, soundOn, waitLine } from '../ui/calls.js';
+import { EVENT_TONES, eventTone, MARKS, RANK, strongest, takeMark, toneBadge, toneIcon, toneOf } from '../ui/tones.js';
 import { devLog, startDev } from '../src/projects.mjs';
 import { connectionOwner, fromAfar, fromServe, isTailscaleService, ownAddresses, ownerOnly, remoteRefusal, tailnetSource } from '../src/server.mjs';
 import { forAgent, isOwner, openAppWindow, OWNER_HEADER, ownerHeaders, ownerKey, pairingCode, redeemCode } from '../src/owner.mjs';
@@ -362,6 +366,46 @@ test('app: a file found nowhere shows the path tried', async () => {
   assert.equal(ui.nodes['path-dialog-title'].textContent, 'File not found');
   assert.equal(ui.nodes['path-dialog-path'].textContent, tried);
   assert.match(ui.nodes['path-dialog-text'].textContent, /Looked in: your clone[\s\S]*File not found: .*nada\.html/);
+});
+
+// The manager's Interrupt, in the conversation and on the update's line, with a stand-in for the server.
+function interruptUi() {
+  const listeners = {};
+  const nodes = { interrupt: { disabled: false }, bridge: {} };
+  for (const [id, node] of Object.entries(nodes)) node.addEventListener = (type, callback) => (listeners[id] = callback);
+  const sent = [];
+  const asked = [];
+  const toasts = [];
+  runInNewContext(between('// Interrupt acts at once, as in the live sessions', '// The queue: edit a message in place'), {
+    $: selector => nodes[selector.slice(1)], state: { manager: { responding: true, pending: [] } }, going: () => [],
+    t: (text, values = {}) => text.replace(/\{(\w+)\}/g, (m, k) => values[k]),
+    confirmDialog: async title => (asked.push(title), true),
+    api: async (route, body) => (sent.push([route, body]), { interrupted: true }),
+    toast: text => toasts.push(text), refresh: () => {},
+  });
+  return { listeners, nodes, sent: () => JSON.parse(JSON.stringify(sent)), asked, toasts };
+}
+
+test("app: Interrupt stops the manager's answer at once, with no confirmation; Update now still asks", async () => {
+  const ui = interruptUi();
+  await ui.listeners.interrupt();
+  assert.deepEqual(ui.sent(), [['/api/manager/interrupt', {}]]);
+  assert.deepEqual(ui.asked, [], 'the interruption asked for a confirmation');
+  assert.ok(ui.nodes.interrupt.disabled, 'the button stayed clickable while the answer stops');
+  const click = updateNow => ({ target: { closest: () => ({ dataset: { updateNow } }) } });
+  await ui.listeners.bridge(click('interrupt'));
+  assert.deepEqual(ui.asked, [], "the update's interruption asked for a confirmation");
+  assert.deepEqual(ui.sent().at(-1), ['/api/update-now', { interruptManager: true }]);
+  assert.equal(ui.toasts.at(-1), "Interrupting the manager's answer…");
+  await ui.listeners.bridge(click('now'));
+  assert.deepEqual(ui.asked, ['Update now'], 'Update now went without its confirmation');
+  assert.deepEqual(ui.sent().at(-1), ['/api/update-now', { interruptManager: false }]);
+  // The queue says Interrupt sends it at once only while that is true: not while an update or a stop holds it.
+  const sendsNow = s => runInNewContext(`${between('/** Whether Interrupt delivers', '// The messages waiting for the manager')} interruptSendsNow();`, { state: s });
+  assert.equal(sendsNow({ manager: { responding: true }, update: {}, power: { mode: 'on' } }), true);
+  assert.equal(sendsNow({ manager: { responding: true }, update: { installing: { stage: 'manager' } } }), false);
+  assert.equal(sendsNow({ manager: { responding: true }, update: {}, power: { mode: 'stopping', stage: 'pausing' } }), false);
+  assert.equal(sendsNow({ manager: { responding: false }, update: {} }), false);
 });
 
 test('kinds and headers: nothing runs in the app', () => {
@@ -998,6 +1042,43 @@ test("the tools' quality: one record per step on Codex or Grok, and the summary 
   assert.ok(!summary.some(x => x.tool === 'claude'));
 });
 
+test("the Usage section: Codex's and Grok's plans from their own files, and the steps of each tool", () => {
+  const codexHome = path.join(temp, 'codex-home');
+  const day = path.join(codexHome, 'sessions', '2026', '11', '25');
+  mkdirSync(day, { recursive: true });
+  const limits = used => ({ primary: { used_percent: used, window_minutes: 300, resets_at: 1795665767 }, secondary: { used_percent: 8, window_minutes: 10080, resets_in_seconds: 60 }, plan_type: 'plus' });
+  const line = (at, used) => JSON.stringify({ timestamp: at, type: 'event_msg', payload: { type: 'token_count', rate_limits: limits(used) } });
+  writeFileSync(path.join(day, 'rollout-2026-11-25T10-00-00-a.jsonl'), `${line('2026-11-25T13:00:00.000Z', 30)}\n`);
+  const nulls = '{"type":"event_msg","payload":{"type":"token_count","rate_limits":null}}';
+  writeFileSync(path.join(day, 'rollout-2026-11-25T09-00-00-b.jsonl'), `${line('2026-11-25T12:00:00.000Z', 5)}\n${line('2026-11-25T14:00:00.000Z', 40)}\n${nulls}\n`);
+  const codex = codexPlan(codexHome);
+  assert.equal(codex.plan, 'plus');
+  assert.equal(codex.updated, '2026-11-25T14:00:00.000Z', 'the newest reading, even in an older session');
+  assert.deepEqual(codex.windows, [
+    { minutes: 300, used: 0.4, resets: new Date(1795665767000).toISOString() },
+    { minutes: 10080, used: 0.08, resets: '2026-11-25T14:01:00.000Z' },
+  ]);
+  assert.equal(codexPlan(path.join(temp, 'no-codex')), null);
+
+  const grokHome = path.join(temp, 'grok-home');
+  mkdirSync(path.join(grokHome, 'logs'), { recursive: true });
+  const log = path.join(grokHome, 'logs', 'unified.jsonl');
+  const billing = { ts: '2026-11-20T19:38:21.002Z', msg: 'billing: fetched credits config', ctx: { config: { creditUsagePercent: 4, currentPeriod: { type: 'USAGE_PERIOD_TYPE_WEEKLY', start: '2026-11-17T21:21:08.974+00:00', end: '2026-11-24T21:21:08.974+00:00' } }, subscriptionTier: 'SuperGrok' } };
+  writeFileSync(log, `${JSON.stringify(billing)}\n{"msg":"other"}\n`);
+  const expected = { plan: 'SuperGrok', updated: '2026-11-20T19:38:21.002Z', windows: [{ minutes: 10080, used: 0.04, resets: '2026-11-24T21:21:08.974Z' }] };
+  assert.deepEqual(grokPlan(grokHome), expected);
+  writeFileSync(log, '{"msg":"only other lines now"}\n');
+  assert.deepEqual(grokPlan(grokHome), expected, 'a reading found once stays until a newer one');
+  assert.equal(grokPlan(path.join(temp, 'no-grok')), null);
+
+  const runs = [
+    { steps: [{ agent: 'generalist', started: '2026-11-25T10:00:00Z' }, { agent: 'writer', tool: 'codex', started: '2026-11-25T11:00:00Z' }, { agent: 'x', status: 'pending' }], review: { agent: 'manager', tool: 'claude', started: '2026-11-25T12:00:00Z' } },
+    { steps: [{ agent: 'writer', tool: 'grok', started: '2026-11-10T10:00:00Z' }] },
+  ];
+  assert.deepEqual(stepsByTool(runs, Date.parse('2026-11-20T00:00:00Z')), { claude: 2, codex: 1, grok: 0 });
+  assert.deepEqual(stepsByTool(runs, 0), { claude: 2, codex: 1, grok: 1 });
+});
+
 test('Codex: its sandbox, no own configuration, never asking, and the guard as its hook', () => {
   const args = codexStepArgs({ dir: 'C:\\work\\demo', model: 'claude-opus-5-5', effort: 'high', session: { id: 'x' }, guardLog: 'C:\\data\\01-generalist.guard.jsonl' });
   const value = flag => args[args.indexOf(flag) + 1];
@@ -1125,6 +1206,62 @@ test("A process's start, as Windows PowerShell writes it", () => {
   assert.equal(startedAt({ value: '/Date(0)/' }), new Date(0).toISOString());
   assert.equal(startedAt(null), null);
   assert.equal(startedAt('nonsense'), null);
+});
+
+// ---------- The kinds of message in the conversation (ui/tones.js): the events' kinds, the manager's marks, the badges ----------
+
+test("every news event has a kind in the conversation, and a notice takes the one that matters most", () => {
+  for (const kind of [...NEWS_EVENTS, 'agent_message']) assert.ok(RANK.includes(EVENT_TONES[kind]), `the event ${kind} has no kind in ui/tones.js`);
+  assert.deepEqual(Object.keys(EVENT_TONES).filter(k => k !== 'agent_message' && !NEWS_EVENTS.includes(k)), [], 'a kind for an event that does not exist');
+  const notice = news => toneOf({ who: 'manager', text: 'A notice.', news });
+  assert.equal(notice(['run_finished']), 'done');
+  assert.equal(notice(['merged', 'update_installed']), 'done', 'merged and installed: done');
+  assert.equal(notice(['run_finished', 'pr_ready']), 'needs', 'a pull request waiting for approval needs the owner');
+  assert.equal(notice(['needs_you']), 'needs');
+  assert.equal(notice(['needs_you', 'run_failed']), 'failure', 'a failure beats a call');
+  assert.equal(notice(['run_failed', 'lockdown']), 'alarm', 'the emergency lockdown beats a failure');
+  assert.equal(notice(['plan_proposed', 'owner_request', 'agent_message']), 'info', 'what only informs');
+  assert.equal(notice(['run_failed', 'pr_ready', 'back']), 'report', 'the summary of the time away tells the rest, so it stays a summary');
+  assert.equal(notice(['autopilot_report']), 'report');
+  assert.equal(notice(['something_new']), 'info', 'an event with no kind yet only informs');
+  assert.equal(eventTone('constructor'), 'info', "an object's own names are no events");
+  assert.equal(strongest([]), null);
+});
+
+test("the manager's mark: its kind wins over the events, and it is not shown", () => {
+  assert.deepEqual(takeMark('[needs-you] Sign in to GitHub.'), { tone: 'needs', text: 'Sign in to GitHub.' });
+  assert.deepEqual(takeMark('  [Done]\n\nMerged.'), { tone: 'done', text: 'Merged.' }, 'on a line of its own, in any case');
+  assert.equal(takeMark('[needs you] Choose.').tone, 'needs', 'a space for the hyphen');
+  assert.deepEqual(takeMark('[PR #34] is ready'), { tone: null, text: '[PR #34] is ready' }, 'any other bracket stays text');
+  assert.deepEqual(takeMark('[constructor] x'), { tone: null, text: '[constructor] x' });
+  assert.deepEqual(takeMark('Merged [done]'), { tone: null, text: 'Merged [done]' }, 'only at the start');
+  assert.deepEqual(takeMark(null), { tone: null, text: '' });
+  for (const [mark, tone] of Object.entries(MARKS)) assert.equal(takeMark(`[${mark}] x`).tone, tone);
+  assert.equal(toneOf({ who: 'manager', text: '[done] The lockdown was released.', news: ['lockdown'] }), 'done', 'the mark wins over the events');
+  assert.equal(toneOf({ who: 'manager', text: '[report] While you were away…', news: ['back', 'run_failed'] }), 'report');
+  assert.equal(toneOf({ who: 'manager', text: 'Here is the plan.' }), null, 'a plain answer has no kind');
+  assert.equal(toneOf({ who: 'manager', text: '[needs-you] Choose one.' }), 'needs', 'an answer with a mark');
+  assert.equal(toneOf({ who: 'manager', text: "I couldn't answer: timeout", error: 'timeout' }), 'failure', 'an answer that failed');
+  assert.equal(toneOf({ who: 'manager', text: '[done] Half an answer', error: 'timeout' }), 'failure', 'a failure is never shown as done');
+  assert.equal(toneOf({ who: 'system', text: 'New conversation. The manager keeps only its notes.' }), 'system');
+  assert.equal(toneOf({ who: 'you', text: '[done] mine' }), null, "the owner's messages keep their words");
+  assert.equal(toneOf({ who: 'agent', text: '[failure] x', sender: { agent: 'Designer' } }), null, "an agent's message is not the manager's");
+  // The manager's instructions name every mark the app reads.
+  const instructions = readFileSync(path.join(import.meta.dirname, '..', 'agents', 'manager.md'), 'utf8');
+  for (const mark of Object.keys(MARKS)) assert.ok(instructions.includes(`\`[${mark}]\``), `agents/manager.md does not name the mark [${mark}]`);
+});
+
+test('a badge says its kind with a word and an icon of its own, so it reads without color', () => {
+  const t = text => `«${text}»`;
+  const esc = s => String(s).replace(/</g, '&lt;');
+  const words = Object.fromEntries(RANK.map(tone => [tone, toneBadge(tone, { t, esc }).match(/«([^»]+)»/)?.[1]]));
+  assert.deepEqual(words, { report: 'Summary', alarm: 'Alarm', failure: 'Failure', needs: 'Action needed', done: 'Completed', info: 'Info', system: 'System' });
+  for (const tone of RANK) assert.match(toneBadge(tone, { t, esc }), /^<span class="tone-badge"><svg class="tone-icon" viewBox="0 0 16 16" aria-hidden="true">/);
+  assert.equal(new Set(RANK.map(toneIcon)).size, RANK.length, 'two kinds share an icon');
+  assert.equal(toneBadge(null, { t, esc }), '');
+  assert.equal(toneBadge('constructor', { t, esc }), '');
+  assert.equal(toneIcon('nonsense'), '');
+  assert.equal(toneIcon('constructor'), '');
 });
 
 // ---------- The crew's calls (ui/calls.js): the call bar's order and words, the announcements, sound and notification ----------
@@ -1872,39 +2009,96 @@ test("the settings' backup: a redacted copy in backup_dir, the full one only on 
   assert.deepEqual([red.owner, red.port, red.backup_dir], ['Someone', 4747, config.backup_dir]);
   assert.match(red.backup_note, /Redacted copy/);
 
+  // What fails is kept apart (made up here), by place and cause.
+  const problems = path.join(temp, 'backup', 'problems.json');
+  const backup = (settings, fullDir) => backupConfig(settings, { fullDir, problems });
   const fullDir = path.join(temp, 'backup', 'local');
-  backupConfig(config, { fullDir });
+  backup(config, fullDir);
   assert.deepEqual(JSON.parse(readFileSync(path.join(config.backup_dir, 'chiefmate.json'), 'utf8')), red);
   assert.deepEqual(JSON.parse(readFileSync(path.join(fullDir, 'chiefmate.json'), 'utf8')), config, 'the full copy, on this computer');
   const other = path.join(temp, 'backup', 'none');
-  backupConfig({ owner: 'x' }, { fullDir: other });
+  backup({ owner: 'x' }, other);
   assert.ok(!existsSync(other), 'no backup without backup_dir');
+  assert.ok(!existsSync(problems), 'nothing failing, nothing kept');
 
   // full_backup_dir: the full copy also off this computer, on its own too, but never inside git nor in backup_dir.
   const cloud = path.join(temp, 'backup', 'cloud');
-  backupConfig({ ...config, full_backup_dir: cloud }, { fullDir });
+  backup({ ...config, full_backup_dir: cloud }, fullDir);
   assert.equal(JSON.parse(readFileSync(path.join(cloud, 'chiefmate.json'), 'utf8')).projects.demo.notes, config.projects.demo.notes);
   const alone = { owner: 'y', full_backup_dir: path.join(temp, 'backup', 'alone') };
-  backupConfig(alone, { fullDir: other });
+  backup(alone, other);
   for (const dir of [alone.full_backup_dir, other]) assert.deepEqual(JSON.parse(readFileSync(path.join(dir, 'chiefmate.json'), 'utf8')), alone);
   const repo = path.join(temp, 'backup', 'git');
   mkdirSync(path.join(repo, '.git'), { recursive: true });
   const logged = console.error;
   const said = [];
+  const kept = [];
   console.error = (...words) => said.push(words.join(' '));
   try {
-    backupConfig({ owner: 'z', full_backup_dir: path.join(repo, 'private') }, { fullDir: path.join(temp, 'backup', 'z') });
-    backupConfig({ ...config, full_backup_dir: config.backup_dir }, { fullDir });
+    const inGit = { owner: 'z', full_backup_dir: path.join(repo, 'private') };
+    backup(inGit, path.join(temp, 'backup', 'z'));
+    kept.push(backupProblems(problems));
+    // the same cause again (a save, a retry): the same problem, not in the log again
+    backup(inGit, path.join(temp, 'backup', 'z'));
+    kept.push(backupProblems(problems));
+    backup({ ...config, full_backup_dir: config.backup_dir }, fullDir);
     // the same folder spelled in other letters, on Windows
-    if (windows) backupConfig({ ...config, full_backup_dir: `${config.backup_dir.toUpperCase()}\\` }, { fullDir });
+    if (windows) backup({ ...config, full_backup_dir: `${config.backup_dir.toUpperCase()}\\` }, fullDir);
+    kept.push(backupProblems(problems));
     // a value that is not a path neither breaks the save nor Chiefmate's start
-    backupConfig({ owner: 'w', full_backup_dir: true }, { fullDir: path.join(temp, 'backup', 'w') });
+    backup({ owner: 'w', full_backup_dir: true }, path.join(temp, 'backup', 'w'));
+    kept.push(backupProblems(problems));
   } finally {
     console.error = logged;
   }
   assert.ok(!existsSync(path.join(repo, 'private')), 'no full copy inside a git repository');
   assert.equal(JSON.parse(readFileSync(path.join(config.backup_dir, 'chiefmate.json'), 'utf8')).projects.demo.notes, '[removed from this copy]', 'backup_dir keeps the redacted copy');
-  assert.deepEqual(said.map(line => line.match(/full_backup_dir (.+?)(?: \(|, so )/)?.[1] ?? line),['is inside a git repository', 'is the same folder as backup_dir', ...(windows ? ['is the same folder as backup_dir'] : []), 'is not a folder path'], 'the log says why');
+  assert.deepEqual(said.map(line => line.match(/full_backup_dir (.+?)(?: \(|, so )/)?.[1] ?? line), ['is inside a git repository', 'is the same folder as backup_dir', 'is not a folder path'], 'the log says why, once per cause');
+  const causes = list => list.map(p => `${p.target}:${p.cause}`);
+  assert.deepEqual(kept.map(causes), [['full_backup_dir:in_git'], ['full_backup_dir:in_git'], ['full_backup_dir:same_folder'], ['full_backup_dir:invalid']]);
+  assert.ok(kept[0][0].since && kept[1][0].since === kept[0][0].since && kept[0][0].told === null, 'the same cause keeps its first time');
+  assert.ok(!/chiefmate-unit-|Someone/.test(JSON.stringify(kept)), 'what is kept has no folder nor value of the settings');
+
+  // A copy that can't be written (a file where backup_dir's folder should be) and one refused: the local copy goes on.
+  const blocker = path.join(temp, 'backup', 'a-file');
+  writeFileSync(blocker, 'not a folder');
+  const failing = { owner: 'v', backup_dir: blocker, full_backup_dir: path.join(repo, 'private') };
+  const quietly = fn => {
+    console.error = () => {};
+    try {
+      fn();
+    } finally {
+      console.error = logged;
+    }
+  };
+  quietly(() => backup(failing, path.join(temp, 'backup', 'v')));
+  assert.deepEqual(causes(backupProblems(problems)), ['backup_dir:invalid', 'full_backup_dir:in_git']);
+  assert.ok(existsSync(path.join(temp, 'backup', 'v', 'chiefmate.json')), 'the local copy is still written');
+  assert.deepEqual(['EACCES', 'EPERM', 'ENOENT', 'EEXIST', 'ENOSPC', 'EBUSY', undefined].map(code => backupCause({ code })), ['no_access', 'no_access', 'invalid', 'invalid', 'disk_full', 'failed', 'failed']);
+
+  // The owner is told once per cause (the watch, src/plan.mjs), still told after another failed save; its retry, when
+  // due, writes in this test's folders only.
+  const alerts = settings => backupAlerts(settings, { problems, fullDir: path.join(temp, 'backup', 'v') });
+  assert.deepEqual(causes(alerts(failing)), ['backup_dir:invalid', 'full_backup_dir:in_git']);
+  assert.deepEqual(alerts(failing), [], 'a cause already told is not told again');
+  quietly(() => backup(failing, path.join(temp, 'backup', 'v')));
+  assert.ok(backupProblems(problems).every(p => p.told) && !alerts(failing).length, 'a cause that lasts is told once');
+  // The notice and the manager's line name the setting and the cause, never the folder.
+  const notices = backupProblems(problems).map(backupText);
+  assert.ok(notices.every(n => n.title && n.text && !n.text.includes(blocker) && !n.text.includes(repo)), 'a notice names a folder');
+  assert.ok(notices[0].text.includes('backup_dir') && notices[1].text.includes('full_backup_dir') && backupText({ target: 'local', cause: 'failed', code: 'EBUSY' }).text.includes('EBUSY'));
+  const line = backupLine('Someone', backupProblems(problems));
+  assert.match(line, /redacted copy in backup_dir: the folder is not valid or cannot be reached, since /);
+  assert.match(line, /full copy in full_backup_dir: refused, the folder is inside a git repository, since /);
+  assert.ok(!line.includes(blocker) && !line.includes(repo) && backupLine('Someone', []) === '', "the manager's line names a folder, or speaks with nothing failing");
+
+  // Fixed: the problems leave; failing again is a new cause to tell; no copy asked for, nothing failing.
+  backup({ ...failing, backup_dir: path.join(temp, 'backup', 'fixed'), full_backup_dir: cloud }, path.join(temp, 'backup', 'v'));
+  assert.deepEqual(backupProblems(problems), [], 'a copy that works again leaves no problem');
+  quietly(() => backup(failing, path.join(temp, 'backup', 'v')));
+  assert.ok(backupProblems(problems).every(p => p.told === null), 'a cause back after a fix is told again');
+  backup({ owner: 'u' }, other);
+  assert.deepEqual(backupProblems(problems), [], 'no copy asked for, no problem');
 });
 
 test('npm run check says why a script was not checked, with no pipe a sandbox could refuse', () => {
@@ -2854,4 +3048,89 @@ test("the session's spare near its renewal: spent alone while the owner is away,
   const end = checkSpending({ config, usage: renewed, at: later, runs, capacity: 3, file: away, report, note, away: true });
   assert.equal(end.ended?.until, resets);
   assert.deepEqual([sessionNow(config, readSpending(away), later).mode, effectiveLimits(config, readSpending(away), later).pause_at_5h_window], ['save', SAFETY]);
+});
+
+// ---------- The manager's answer cut off by the plan's usage limit ----------
+
+const cutAt = Date.parse('2026-11-27T14:15:00Z');
+const cutIso = minutes => new Date(cutAt + minutes * 60_000).toISOString();
+const usageOut = { updated: cutIso(-1), status: 'rejected', five_hour: { used: 1, resets: cutIso(5), status: 'rejected' }, seven_day: { used: 0.4, resets: cutIso(3000), status: 'allowed' } };
+const usageLeft = { updated: cutIso(-1), status: 'allowed', five_hour: { used: 0.5, resets: cutIso(5), status: 'allowed' }, seven_day: { used: 0.4, resets: cutIso(3000), status: 'allowed' } };
+
+test("the manager's answer cut off: Claude Code's warning, or no final text after actions with the usage out", () => {
+  // Claude Code's own words, never an answer that only talks about a limit.
+  for (const text of ["You've hit your session limit · resets 11:20am (America/Sao_Paulo)", "You've hit your weekly limit · resets Mon 8am", 'Claude AI usage limit reached|1764243600', '5-hour limit reached ∙ resets 3pm', "You're out of extra usage · resets 3pm"]) {
+    assert.ok(limitWarning(text), `not taken for the warning: ${text}`);
+  }
+  for (const text of ['', 'A fila está vazia.', 'The run paused: the 5-hour window reached its limit at 85%.', `${'x'.repeat(300)} usage limit reached`, 'API Error: Request rejected (429) · this may be a temporary capacity issue']) {
+    assert.ok(!limitWarning(text), `taken for the warning: ${text}`);
+  }
+
+  // The usage reader says when it renews: the window out, the later reset when both are.
+  const warning = { ok: false, text: "You've hit your session limit · resets 11:20am", error: 'Ended with an error (success).', limit: { text: "You've hit your session limit · resets 11:20am", rejected: true } };
+  assert.deepEqual(limitCut(warning, { usage: usageOut, at: cutAt }), { until: cutIso(5), window: 'five_hour' });
+  const weekOut = { ...usageOut, seven_day: { used: 1, resets: cutIso(3000), status: 'rejected' } };
+  assert.deepEqual(limitCut(warning, { usage: weekOut, at: cutAt }), { until: cutIso(3000), window: 'seven_day' });
+  const unmarked = { status: 'rejected', five_hour: { used: 0.7, resets: cutIso(5) }, seven_day: { used: 0.4, resets: cutIso(3000) } };
+  assert.deepEqual(outOfUsage(unmarked, cutAt), { until: cutIso(5), window: 'five_hour' }, 'a refusal with no window marked was not the 5-hour window');
+  assert.equal(outOfUsage({ ...usageOut, five_hour: { ...usageOut.five_hour, resets: cutIso(-1) } }, cutAt), null, 'a window already renewed was still out');
+  assert.equal(outOfUsage({ ...usageLeft, status: 'rejected' }, cutAt), null, "a refusal was put on a window whose own state says it isn't out");
+
+  // No final text after actions (or after a refused call): the limit only when the usage reader shows a window out.
+  const silent = { ok: true, text: '', turns: 3 };
+  assert.deepEqual(limitCut(silent, { actions: 2, usage: usageOut, at: cutAt }), { until: cutIso(5), window: 'five_hour' });
+  assert.deepEqual(limitCut({ ok: false, text: '', limit: { text: null, rejected: true } }, { usage: usageOut, at: cutAt }), { until: cutIso(5), window: 'five_hour' });
+  assert.equal(limitCut(silent, { actions: 2, usage: usageLeft, at: cutAt }), null, 'an answer with no final text was taken for the limit with usage left');
+  assert.equal(limitCut(silent, { actions: 0, usage: usageOut, at: cutAt }), null, 'an answer with no action and no warning was taken for the limit');
+
+  // An answer that ended as usual, or stopped on purpose, never; nor a refusal that is not the plan's limit.
+  assert.equal(limitCut({ ok: true, text: 'Tudo certo: a fila está vazia.', limit: { text: null, rejected: true } }, { actions: 3, usage: usageOut, at: cutAt }), null);
+  assert.equal(limitCut({ ...warning, canceled: true }, { usage: usageOut, at: cutAt }), null, 'an interrupted answer was taken for the limit');
+  assert.equal(limitCut({ ok: false, text: 'API Error: Request rejected (429) · this may be a temporary capacity issue' }, { usage: usageLeft, at: cutAt }), null);
+
+  // The warning with no reading to go by: its own time, else the fullest window's reset, else in an hour.
+  const warned = text => ({ ok: false, text, limit: { text, rejected: false } });
+  assert.equal(limitCut(warned(`Claude AI usage limit reached|${Math.floor((cutAt + 600_000) / 1000)}`), { usage: {}, at: cutAt }).until, cutIso(10));
+  assert.deepEqual(limitCut(warned("You've hit your session limit"), { usage: usageLeft, at: cutAt }), { until: cutIso(5), window: 'five_hour' });
+  assert.deepEqual(limitCut(warned("You've hit your session limit"), { usage: {}, at: cutAt }), { until: cutIso(60), window: null });
+  assert.ok(limitWarning('You’ve hit your session limit · resets 3pm'), 'the warning with a typographic apostrophe was missed');
+
+  // The manager's own answer that quotes the warning (runClaude gives it no "limit") is an answer, never a cut.
+  for (const ok of [true, false]) {
+    assert.equal(limitCut({ ok, text: "O aviso foi: You've hit your session limit · resets 3pm", limit: null }, { actions: 2, usage: usageOut, at: cutAt }), null);
+  }
+});
+
+test("the manager's answer cut off: it waits for the renewal, says when it comes back and is told it was cut off", () => {
+  const cut = { at: cutIso(0), until: cutIso(5), window: 'five_hour', items: [{ id: 'a', text: 'How is the queue?', at: cutIso(-2), queued: false, cut: true }] };
+  // At the renewal (with a moment's slack), or sooner when a reading since the cut shows the usage back.
+  assert.equal(cutDue(cut, usageOut, cutAt), false);
+  assert.equal(cutDue(cut, usageOut, cutAt + 5 * 60_000), false, 'it went on before the slack after the renewal');
+  assert.equal(cutDue(cut, usageOut, cutAt + 6 * 60_000), true);
+  assert.equal(cutDue({ ...cut, until: 'never' }, usageOut, cutAt), true, 'a cut with no time to go by waited for good');
+  assert.equal(cutDue(cut, { ...usageLeft, updated: cutIso(1) }, cutAt + 2 * 60_000), true, 'a reading that shows the usage back did not end the wait');
+  assert.equal(cutDue(cut, { ...usageLeft, updated: cutIso(-1) }, cutAt + 2 * 60_000), false, 'a reading from before the cut ended the wait');
+  assert.equal(cutDue(cut, { ...usageOut, updated: cutIso(1) }, cutAt + 2 * 60_000), false);
+  // Cut off again as it went on: only the renewal ends the wait, so readings that seem back can't loop it.
+  assert.equal(cutDue({ ...cut, again: true }, { ...usageLeft, updated: cutIso(1) }, cutAt + 2 * 60_000), false, 'an answer cut off again went on before the renewal');
+  assert.equal(cutDue({ ...cut, again: true }, usageOut, cutAt + 6 * 60_000), true);
+
+  // For the app, while it lasts.
+  assert.deepEqual(limitWait({ manager: { cut } }, usageOut, cutAt), { at: cutIso(0), until: cutIso(5), window: 'five_hour', items: 1 });
+  assert.equal(limitWait({ manager: { cut } }, usageOut, cutAt + 6 * 60_000), null);
+  assert.equal(limitWait({ manager: {} }, usageOut, cutAt), null);
+
+  // The conversation's notice: the time alone today, the date too on another day; an answer to the owner or a notice.
+  const time = new Intl.DateTimeFormat(locale(), { timeStyle: 'short' }).format(new Date(cutIso(5)));
+  const mine = cutNotice(cut.items, cutIso(5), cutAt);
+  const notice = cutNotice([{ id: 'n', from: 'chiefmate', events: [] }], cutIso(5), cutAt);
+  assert.ok(mine.includes(time) && notice.includes(time) && mine !== notice, `${mine} / ${notice}`);
+  assert.ok(cutNotice(cut.items, cutIso(3000), cutAt).includes(formatDateTime(cutIso(3000))), 'a renewal on another day came without its date');
+
+  // Going on: told it was cut off, with what it answered and what came meanwhile (the news too), not as the owner's words.
+  const items = [...cut.items, { id: 'b', text: 'And the board?', at: cutIso(2), queued: true }, { id: 'n', from: 'chiefmate', events: [{ kind: 'run_finished', text: 'Run x finished', at: cutIso(1) }], cut: true }];
+  const told = composeMessage('Owner', items, null, cut);
+  assert.ok(told.startsWith('[System message from Chiefmate, not from Owner] Your previous answer was cut off') && told.includes('the 5-hour window') && told.includes('Owner did not write again'));
+  assert.ok(told.includes('How is the queue?') && told.includes('And the board?') && told.includes('run_finished: Run x finished') && told.includes("Answer Owner's message(s)"));
+  assert.ok(!composeMessage('Owner', [{ text: 'Hi', at: cutIso(0) }]).includes('cut off'), 'a message with nothing cut off said it was');
 });

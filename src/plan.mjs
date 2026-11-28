@@ -1,7 +1,7 @@
-// The plan's free resets, the week's pace, and the alerts about your account and this computer.
+// The plan's free resets, the week's pace, and the alerts about your account, this computer and the settings' backup.
 // Alerts only warn (a band in the app and a Windows notification, once each): they never pause anything.
 import { LOGIN_RENEW, loginFrom, loginWarning } from './claude.mjs';
-import { loadConfig, saveConfig } from './config.mjs';
+import { BACKUP_PROBLEMS, backupConfig, backupProblems, FULL_BACKUP_DIR, loadConfig, markBackupTold, saveConfig } from './config.mjs';
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
 import { computer, formatBytes, freeShare, processes } from './machine.mjs';
 import { reportEvent } from './news.mjs';
@@ -104,6 +104,25 @@ export function loginText(w = loginWarning()) {
   };
 }
 
+// While a copy of the settings fails, it is tried again this often (besides every save and start).
+export const BACKUP_RETRY_MINUTES = 10;
+
+/**
+ * A copy of the settings that fails (backupProblems in src/config.mjs), for the owner: { title, text }. It names the
+ * setting, never its value nor the folder, and says the cause.
+ */
+export function backupText(p) {
+  const setting = p.target === 'local' ? 'data/config-backup' : p.target;
+  const why = {
+    invalid: () => t('The copy of the settings in {setting} was not written: the folder is not valid or cannot be reached (a missing drive, a name not allowed, or a file in its place).', { setting }),
+    no_access: () => t('The copy of the settings in {setting} was not written: Chiefmate has no permission to write in that folder.', { setting }),
+    disk_full: () => t('The copy of the settings in {setting} was not written: the disk is full.', { setting }),
+    in_git: () => t('The full copy of the settings is not written in {setting}: the folder is inside a git repository, and that copy carries your notes and secrets.', { setting }),
+    same_folder: () => t('The full copy of the settings is not written in {setting}: it is the same folder as backup_dir, which keeps the redacted copy.', { setting }),
+  }[p.cause] ?? (() => t('The copy of the settings in {setting} was not written (error {code}).', { setting, code: p.code ?? '?' }));
+  return { title: t('Settings backup failed'), text: `${why()} ${t('Fix the folder or the setting: Chiefmate tries again every {minutes} minutes, and the last copy written stays as it was.', { minutes: BACKUP_RETRY_MINUTES })}` };
+}
+
 /** What the band at the top of the app shows now: { level: "warn" | "critical", text, view }. */
 export function alerts(config, usage, c) {
   const list = [];
@@ -170,6 +189,14 @@ async function watch() {
   if (JSON.stringify(a) !== before) saveState(state);
   readWhenDue(config);
 
+  // A copy of the settings failing: the manager has it in its situation (backupLine), so it isn't news. Its trouble
+  // never holds back the alerts above, already marked as sent.
+  try {
+    for (const p of backupAlerts(config)) send.push({ ...backupText(p), target: 'chiefmate:operations' });
+  } catch (error) {
+    console.error('Settings backup:', error.message);
+  }
+
   if (lowMemory) {
     await processes(60_000).catch(() => {});
     send.unshift({ title: t('Low memory on this computer'), text: ramText(computer(config)), target: 'chiefmate:projects', event: 'memory_alert', urgent: true });
@@ -177,8 +204,25 @@ async function watch() {
   for (const n of send) {
     notify(n.title, n.text, n.target, { urgent: !!n.urgent });
     // The manager gets the alert as the owner does (in the owner's language): it only warns, nothing pauses.
-    reportEvent(n.event, `Alert sent to the owner: ${n.title}. ${n.text}`, { config });
+    if (n.event) reportEvent(n.event, `Alert sent to the owner: ${n.title}. ${n.text}`, { config });
   }
+}
+
+let backupTried = Date.now(); // the start has just made the copies
+
+/**
+ * The settings' backup, for the watch: while a copy fails, tries again every BACKUP_RETRY_MINUTES (the notice leaves
+ * once it works), then returns the problems the owner was not told of yet, marked as told: each cause once while it lasts.
+ */
+export function backupAlerts(config, { problems = BACKUP_PROBLEMS, fullDir = FULL_BACKUP_DIR } = {}) {
+  if (!backupProblems(problems).length) return [];
+  if (Date.now() - backupTried >= BACKUP_RETRY_MINUTES * 60_000) {
+    backupTried = Date.now();
+    backupConfig(config, { fullDir, problems });
+  }
+  const fresh = backupProblems(problems).filter(p => !p.told);
+  if (fresh.length) markBackupTold(fresh, problems);
+  return fresh;
 }
 
 export function startWatch() {
@@ -195,6 +239,15 @@ export function computerLine(config) {
   if (!c.supported) return `This computer: ${memory}; the projects' processes are read on Windows only.`;
   const running = c.projects.filter(p => p.ram > 0).map(p => `${p.id} ${formatBytes(p.ram)}${[p.agent ? 'crew at work' : '', p.session ? 'live session' : ''].filter(Boolean).map(x => ` (${x})`).join('')}`);
   return `This computer: ${memory}; projects running here: ${running.join(', ') || 'none'}; Chiefmate itself ${formatBytes(c.chiefmate.ram)}.`;
+}
+
+/** The copies of the settings failing now (src/config.mjs), or '' when none: the place and cause, never a value. */
+export function backupLine(owner = 'the owner', problems = backupProblems()) {
+  if (!problems.length) return '';
+  const place = { backup_dir: 'the redacted copy in backup_dir', local: 'the full copy on this computer (data/config-backup)', full_backup_dir: 'the full copy in full_backup_dir' };
+  const why = { invalid: 'the folder is not valid or cannot be reached', no_access: 'no permission to write in the folder', disk_full: 'the disk is full', in_git: 'refused, the folder is inside a git repository', same_folder: 'refused, the same folder as backup_dir' };
+  const list = problems.map(p => `${place[p.target] ?? p.target}: ${why[p.cause] ?? `error ${p.code ?? '?'}`}, since ${formatDateTime(p.since)}`);
+  return `Settings backup failing (${owner} has a notice in the app and a Windows notification, once per cause; the last copy written stays; Chiefmate tries again every ${BACKUP_RETRY_MINUTES} minutes and on every save of the settings): ${list.join('; ')}. If ${owner} asks, explain the cause and that the fix is the folder or the setting in config/chiefmate.json.`;
 }
 
 export function planLine(config, usage) {

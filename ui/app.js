@@ -6,6 +6,7 @@ import { resetLabel, spare } from './countdown.js';
 import { Dictation, recognizer } from './voice.js';
 import { asksHtml, keepFolds, newFolds, toggleFold } from './asks.js';
 import { announce, blinkTitle, callsLayout, callsOf, chime, keepChoice, NOTIFY_KEY, notifyCalls, notifyState, SOUND_KEY, soundOn, waitLine } from './calls.js';
+import { eventTone, strongest, takeMark, toneBadge, toneIcon, toneOf } from './tones.js';
 
 const $ = selector => document.querySelector(selector);
 let state = null;
@@ -2247,8 +2248,12 @@ function drawChat() {
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
   let html = g.messages.length ? '' : `<div class="msg system">${esc(t('No messages yet. Ask the manager how things are going, or ask for a job.'))}</div>`;
   for (const m of g.messages) {
+    // Each message's kind (ui/tones.js): its color, icon and badge; Chiefmate's own lines are gray.
+    const tone = toneOf(m);
+    const badge = tone ? toneBadge(tone, { t, esc }) : '';
     if (m.who === 'system') {
-      html += `<div class="msg system">${esc(m.text)}</div>`;
+      // An answer cut off by the usage limit stands out: when it comes back.
+      html += `<div class="msg system${m.cut ? ' cut' : ''}" data-tone="system">${badge}${esc(m.text)}</div>`;
       continue;
     }
     // An agent's message (chat say from a session or a step): never shown as yours.
@@ -2264,16 +2269,18 @@ function drawChat() {
       m.edited ? t('edited') : '',
       m.model ? shortModel(m.model) : '',
     ].filter(Boolean).join(' · ');
-    const tag = m.interrupted ? `<span class="tag">${esc(t('interrupted'))}</span>` : '';
+    const tag = m.interrupted ? `<span class="tag">${esc(t('interrupted'))}</span>` : m.cut ? `<span class="tag">${esc(t('cut off'))}</span>` : '';
     // A notice: the manager's own news to you, after something happened (it was not an answer to a message of yours).
     const news = !you && m.news ? `<span class="tag news">${esc(t('notice'))}</span><span class="msg-events">${esc(m.news.map(newsEvent).join(' · '))}</span>` : '';
-    html += `<div class="msg ${you ? 'you' : 'manager'}${news ? ' news' : ''}${m.error ? ' error' : ''}"><div class="msg-head">${you ? '' : face(manager, m.error ? 'failed' : 'still', 20)}<span class="msg-author">${esc(you ? t('You') : t(manager.name))}</span><span class="msg-meta">${esc(meta)}</span>${news}${tag}</div><div class="msg-body">${md(m.text)}</div></div>`;
+    // The manager's mark is not shown: its kind is.
+    const text = you ? m.text : takeMark(m.text).text;
+    html += `<div class="msg ${you ? 'you' : 'manager'}${news ? ' news' : ''}${m.error ? ' error' : ''}"${tone ? ` data-tone="${tone}"` : ''}><div class="msg-head">${you ? '' : face(manager, m.error ? 'failed' : 'still', 20)}<span class="msg-author">${esc(you ? t('You') : t(manager.name))}</span><span class="msg-meta">${esc(meta)}</span>${badge}${news}${tag}</div><div class="msg-body">${md(text)}</div></div>`;
   }
   const renewing = !!g.context?.renewing;
   if (g.responding) {
     const waiting = renewing ? t('Writing a short summary to renew the conversation…') : t('Looking at the situation…');
     const doing = g.interrupting ? t('interrupting…') : renewing ? t('renewing the conversation…') : t('answering…');
-    html += `<div class="msg manager typing"><div class="msg-head">${face(manager, 'thinking', 20)}<span class="msg-author">${esc(t(manager.name))}</span><span class="msg-meta">${esc(doing)}${g.since ? ` · ${ticking(g.since)}` : ''}</span></div><div class="msg-body">${g.partial && !renewing ? md(g.partial) : `<span class="hint">${esc(waiting)}</span>`}</div><div class="live-last" id="manager-last"></div></div>`;
+    html += `<div class="msg manager typing"><div class="msg-head">${face(manager, 'thinking', 20)}<span class="msg-author">${esc(t(manager.name))}</span><span class="msg-meta">${esc(doing)}${g.since ? ` · ${ticking(g.since)}` : ''}</span></div><div class="msg-body">${g.partial && !renewing ? md(takeMark(g.partial).text) : `<span class="hint">${esc(waiting)}</span>`}</div><div class="live-last" id="manager-last"></div></div>`;
   }
   const signature = JSON.stringify([g.messages.length, g.messages.at(-1)?.at, g.responding, renewing, g.interrupting, g.since, g.partial]);
   const drawn = draw('#chat', signature, html);
@@ -2281,9 +2288,12 @@ function drawChat() {
   // What the manager is doing now, redrawn alone, like the last action of the crew at work.
   if (g.responding) draw('#manager-last', JSON.stringify([g.lastAction?.at, g.lastAction?.text]), managerLastAction(g));
   $('#send').disabled = !online;
-  $('#send').textContent = g.responding || g.pending?.length ? t('Add to the queue') : t('Send');
+  $('#send').textContent = g.responding || g.pending?.length || g.cut ? t('Add to the queue') : t('Send');
   $('#interrupt').hidden = !online || !g.responding;
   $('#interrupt').disabled = !!g.interrupting;
+  // It acts at once, so what it does is on the button itself.
+  const waiting = g.pending?.length ?? 0;
+  $('#interrupt').title = `${t('The manager stops what it is doing now. The conversation goes on in the same session, and your next message tells it the answer was interrupted.')}${waiting ? ` ${t('The {count} message(s) in the queue go right after.', { count: waiting })}` : ''}`;
   // The last action, the queue and Interrupt beside the field change the height: the end comes into view after them.
   const queued = drawChatQueue();
   if ((drawn || queued) && (atBottom || !chatScrolled)) {
@@ -2298,6 +2308,9 @@ function managerLastAction(g) {
   return `<span class="label">${esc(t('Last action'))}</span><time>${p ? clockTime(p.at) : ''}</time><span class="text" title="${esc(text)}">${esc(text)}</span>`;
 }
 
+/** Whether Interrupt delivers the queue at once: the manager answers and no update or stop holds it (held() in src/manager.mjs). */
+const interruptSendsNow = () => !!state?.manager?.responding && !state.update?.installing && state.power?.mode !== 'stopping';
+
 // The messages waiting for the manager. While you edit one, the list is not redrawn under you. True when it was drawn.
 let editingPending = null;
 function drawChatQueue() {
@@ -2309,18 +2322,29 @@ function drawChatQueue() {
     toast(t('The message you were editing is no longer in the queue: it was delivered or removed.'));
   }
   $('#chat-queue').hidden = !list.length;
+  // After an answer cut off by the usage limit, the queue (the news included) waits for the renewal. The time comes
+  // first: on a phone the head is one line, and its end may not fit.
+  const cutUntil = g.cut?.until;
+  const today = cutUntil && new Date(cutUntil).toDateString() === new Date().toDateString();
+  const waiting = cutUntil && (today
+    ? t('They go at {time}, when the usage renews, after the answer that was cut off.', { time: clockTime(cutUntil) })
+    : t('They go on {time}, when the usage renews, after the answer that was cut off.', { time: `${new Date(cutUntil).toLocaleDateString(locale(), { weekday: 'short' }).replace(/\.$/, '')} ${clockTime(cutUntil)}` }));
+  const when = !g.responding ? t('Being delivered…') : interruptSendsNow()
+    ? t('They go together, in order, when the manager finishes this answer, or at once if you click Interrupt.')
+    : t('They go together, in order, when the manager finishes this answer.');
   // On a phone the head is the fold's line: "N in the queue", opening into the messages (html.fold-queue).
   const phone = phoneQuery.matches;
-  const hint = `<span class="hint">${esc(g.responding ? t('They go together, in order, when the manager finishes this answer.') : t('Being delivered…'))}</span>`;
+  const hint = `<span class="hint">${esc(waiting || when)}</span>`;
   const head = phone
     ? `<button type="button" class="chat-queue-head" data-fold="queue" aria-expanded="${!folds.queue}"><span class="label">${esc(t('{count} in the queue', { count: list.length }))}</span>${hint}<span class="attn-toggle"><span class="when-closed">${esc(t('See all'))}</span><span class="when-open">${esc(t('Hide'))}</span></span></button>`
     : `<div class="chat-queue-head"><span class="label">${esc(t('In the queue'))}</span>${hint}</div>`;
   const items = list.map(m => (m.from === 'chiefmate'
-    // Chiefmate's news for the manager: not a message of yours, so it can't be edited (only removed).
-    ? `<div class="queued-msg news" data-pending="${esc(m.id)}">
+    // Chiefmate's news for the manager: not a message of yours, so it can't be edited (only removed). Its rule and each
+    // event's icon in their kind's color (ui/tones.js), as the notice will be.
+    ? `<div class="queued-msg news" data-pending="${esc(m.id)}" data-tone="${strongest((m.events ?? []).map(e => eventTone(e.kind))) ?? 'info'}">
       <div class="msg-head"><span class="tag news">${esc(t('news for the manager'))}</span><span class="msg-meta">${esc(clockTime(m.at))}</span>
         <span class="queued-actions"><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
-      <div class="msg-body">${(m.events ?? []).map(e => `<div class="news-event"><time>${esc(clockTime(e.at))}</time> ${esc(newsEvent(e.kind))}</div>`).join('')}</div>
+      <div class="msg-body">${(m.events ?? []).map(e => `<div class="news-event" data-tone="${eventTone(e.kind)}"><time>${esc(clockTime(e.at))}</time> ${toneIcon(eventTone(e.kind))}${esc(newsEvent(e.kind))}</div>`).join('')}</div>
     </div>`
     : m.from === 'agent'
     // An agent's message: not yours, so it can't be edited (only removed).
@@ -2334,7 +2358,7 @@ function drawChatQueue() {
         <span class="queued-actions"><button type="button" class="button secondary small" data-pending-edit="${esc(m.id)}">${esc(t('Edit'))}</button><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
       <div class="msg-body">${md(m.text)}</div>
     </div>`));
-  return draw('#chat-queue', JSON.stringify([list, g.responding, language(), phone]), list.length ? head + items.join('') : '');
+  return draw('#chat-queue', JSON.stringify([list, g.responding, cutUntil, interruptSendsNow(), language(), phone]), list.length ? head + items.join('') : '');
 }
 
 function drawSuggestions() {
@@ -2379,7 +2403,7 @@ function drawBridge() {
     else updateLine = t('Updating: checking the new version; Chiefmate restarts by itself…') + paused;
   }
   let updateButton = '';
-  if (job?.stage === 'manager' && !job.interruptManager) updateButton = `<button type="button" class="button secondary small" data-update-now="interrupt">${esc(t("Interrupt the manager's answer"))}</button>`;
+  if (job?.stage === 'manager' && !job.interruptManager) updateButton = `<button type="button" class="button secondary small" data-update-now="interrupt" title="${esc(t('The manager stops its answer now, so the update can go in. The conversation goes on in the same session after the restart, and your next message tells it the answer was interrupted.'))}">${esc(t("Interrupt the manager's answer"))}</button>`;
   else if (online && !job && update.waiting && !['changes', 'merge'].includes(update.blocked)) updateButton = `<button type="button" class="button small" data-update-now="now">${esc(t('Update now'))}</button>`;
   const roster = others.map(a => {
     const s = agentStatus(a);
@@ -3511,18 +3535,53 @@ async function refreshDetail(force = false) {
 
 // ---------- Usage ----------
 
+const usageResets = w => (w?.resets ? t('Resets {when} ({relative}).', { when: shortDate(w.resets), relative: relative(w.resets) }) : '');
+
+/** A plan's window by its length: the 5-hour window, the week, or its days or hours. */
+function windowLabel(minutes) {
+  if (!minutes) return t('Usage limit');
+  if (minutes === 300) return t('5-hour window');
+  if (minutes === 10080) return t("Plan's week");
+  if (minutes % 1440 === 0) return t('{count}-day window', { count: minutes / 1440 });
+  return t('{count}-hour window', { count: Math.round(minutes / 60) });
+}
+
+/** A panel with the plan of Codex or Grok, as the tool last read it (src/tools.mjs): a window already reset shows no share. */
+function toolPlanPanel(name, reading, hint) {
+  const plan = reading?.plan ? ` · ${reading.plan.charAt(0).toUpperCase()}${reading.plan.slice(1)}` : '';
+  const meters = (reading?.windows ?? []).map(w => (w.resets && Date.parse(w.resets) <= Date.now()
+    ? meter(windowLabel(w.minutes), 0, '—', esc(t('Reset {when}: not measured since.', { when: shortDate(w.resets) })))
+    : meter(windowLabel(w.minutes), w.used, percent(w.used), esc(usageResets(w)))));
+  return `<div class="panel">
+      <div class="label">${esc(name + plan)}</div>
+      ${meters.join('')}
+      <div class="hint">${esc(hint)}</div>
+    </div>`;
+}
+
 function drawUsage() {
-  const { limits: l, account: u } = state.usage;
-  const resets = w => (w?.resets ? t('Resets {when} ({relative}).', { when: shortDate(w.resets), relative: relative(w.resets) }) : '');
+  const { limits: l, account: u, tools = {} } = state.usage;
   const measured = u.updated
     ? t('Measured {when}, from what Claude Code reports on every run.', { when: shortDate(u.updated) })
     : t('Measured on the next agent run, from what Claude Code reports.');
+  const steps = (tools.steps ?? []).map(s => `<tr><td>${esc(s.name)}</td><td class="num">${s.today}</td><td class="num">${s.week}</td></tr>`);
   const html = `<div class="usage-grid">
     <div class="panel">
       <div class="label">${esc(t('Your Claude account'))}</div>
-      ${meter(t('5-hour window'), u.five_hour?.used, percent(u.five_hour?.used), esc(resets(u.five_hour)))}
-      ${meter(t("Plan's week"), u.seven_day?.used, percent(u.seven_day?.used), esc(resets(u.seven_day)))}
+      ${meter(t('5-hour window'), u.five_hour?.used, percent(u.five_hour?.used), esc(usageResets(u.five_hour)))}
+      ${meter(t("Plan's week"), u.seven_day?.used, percent(u.seven_day?.used), esc(usageResets(u.seven_day)))}
       <div class="hint">${esc(measured)}</div>
+    </div>
+    ${toolPlanPanel(tools.codex?.plan ? 'Codex · ChatGPT' : 'Codex', tools.codex, tools.codex?.updated
+      ? t("Read {when}, from what Codex last reported on this computer, in your sessions or the crew's steps.", { when: shortDate(tools.codex.updated) })
+      : t('Not measured yet: Codex reports its plan once it runs on this computer.'))}
+    ${toolPlanPanel('Grok', tools.grok, tools.grok?.updated
+      ? t('Read {when}, from what Grok last wrote in its log: it checks its plan when you open it in a terminal.', { when: shortDate(tools.grok.updated) })
+      : t('Not measured yet: Grok writes its plan in its log once you open it in a terminal.'))}
+    <div class="panel">
+      <div class="label">${esc(t('Steps by tool'))}</div>
+      <table class="table"><thead><tr><th>${esc(t('Tool'))}</th><th class="num">${esc(t('Today'))}</th><th class="num">${esc(t('Last 7 days'))}</th></tr></thead><tbody>${steps.join('')}</tbody></table>
+      <div class="hint">${esc(t("The crew's steps, final reviews included, by the tool they ran on."))}</div>
     </div>
     <div class="panel">
       <div class="label">${esc(t('How Chiefmate looks after your plan'))}</div>
@@ -6154,17 +6213,18 @@ ${typed}` : typed;
     const sent = await api('/api/manager', { message });
     $('#message').value = '';
     fitField($('#message'));
-    if (sent.queued) toast(t('In the queue: it goes when the manager finishes this answer.'));
+    // After an answer cut off by the usage limit, the queue waits for the renewal (its head says when).
+    if (sent.queued) toast(state?.manager?.cut ? t('In the queue: the usage limit ran out, so it goes at the renewal, after the answer that was cut off.')
+      : interruptSendsNow() ? t('In the queue: it goes when the manager finishes this answer, or at once if you click Interrupt.') : t('In the queue: it goes when the manager finishes this answer.'));
     setTimeout(refresh, 300);
   } catch (error) {
     toast(error.message);
   }
 }
 
+// Interrupt acts at once, as in the live sessions: the answer stops, the conversation goes on and the queue goes next.
 $('#interrupt').addEventListener('click', async () => {
-  const waiting = state?.manager.pending?.length ?? 0;
-  const text = `${t('The manager stops what it is doing now. The conversation goes on in the same session, and your next message tells it the answer was interrupted.')}${waiting ? ` ${t('The {count} message(s) in the queue go right after.', { count: waiting })}` : ''}`;
-  if (!(await confirmDialog(t('Interrupt the answer'), text, t('Interrupt')))) return;
+  $('#interrupt').disabled = true; // the next drawing shows the answer stopping, or the button back
   try {
     const r = await api('/api/manager/interrupt', {});
     if (!r.interrupted) toast(t('The manager had already finished.'));
@@ -6174,24 +6234,21 @@ $('#interrupt').addEventListener('click', async () => {
   refresh();
 });
 
-// "Update now": installs the approved update without waiting for the crew, after a confirmation; while the update
-// waits for the manager, the same place offers to interrupt its answer.
+// "Update now": installs the approved update without waiting for the crew, after a confirmation. While the update
+// waits for the manager, the same place interrupts its answer at once: the update itself was already decided.
 $('#bridge').addEventListener('click', async event => {
   const button = event.target.closest('[data-update-now]');
   if (!button) return;
   const interrupt = button.dataset.updateNow === 'interrupt';
-  const runs = going().length;
-  let text;
-  if (interrupt) text = t("The manager stops its answer now, so the update can go in. The conversation goes on in the same session after the restart, and your next message tells it the answer was interrupted.");
-  else {
-    text = [
+  if (!interrupt) {
+    const runs = going().length;
+    const text = [
       runs ? t('The {count} run(s) going on pause at a safe point: each agent finishes the action under way, and its step resumes the same session after the update, told that Chiefmate was updated.', { count: runs }) : t('No run is going on.'),
       state.manager.responding ? t('The manager is answering: the update waits for the answer to end (you can interrupt it here meanwhile).') : '',
       t('Then Chiefmate installs the new version, checks it and restarts. The paused runs and the messages in the queue resume by themselves. If the checks fail, Chiefmate stays on the current version and resumes the same way.'),
     ].filter(Boolean).join(' ');
+    if (!(await confirmDialog(t('Update now'), text, t('Update now')))) return;
   }
-  const ok = await confirmDialog(interrupt ? t("Interrupt the manager's answer") : t('Update now'), text, interrupt ? t('Interrupt') : t('Update now'));
-  if (!ok) return;
   try {
     await api('/api/update-now', { interruptManager: interrupt });
     toast(interrupt ? t("Interrupting the manager's answer…") : t('Updating: the work going on pauses at a safe point.'));
