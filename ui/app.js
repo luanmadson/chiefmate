@@ -2291,6 +2291,9 @@ function drawChat() {
   $('#send').textContent = g.responding || g.pending?.length || g.cut ? t('Add to the queue') : t('Send');
   $('#interrupt').hidden = !online || !g.responding;
   $('#interrupt').disabled = !!g.interrupting;
+  // It acts at once, so what it does is on the button itself.
+  const waiting = g.pending?.length ?? 0;
+  $('#interrupt').title = `${t('The manager stops what it is doing now. The conversation goes on in the same session, and your next message tells it the answer was interrupted.')}${waiting ? ` ${t('The {count} message(s) in the queue go right after.', { count: waiting })}` : ''}`;
   // The last action, the queue and Interrupt beside the field change the height: the end comes into view after them.
   const queued = drawChatQueue();
   if ((drawn || queued) && (atBottom || !chatScrolled)) {
@@ -2304,6 +2307,9 @@ function managerLastAction(g) {
   const text = p ? p.text : t('No action yet: reading your message and the situation.');
   return `<span class="label">${esc(t('Last action'))}</span><time>${p ? clockTime(p.at) : ''}</time><span class="text" title="${esc(text)}">${esc(text)}</span>`;
 }
+
+/** Whether Interrupt delivers the queue at once: the manager answers and no update or stop holds it (held() in src/manager.mjs). */
+const interruptSendsNow = () => !!state?.manager?.responding && !state.update?.installing && state.power?.mode !== 'stopping';
 
 // The messages waiting for the manager. While you edit one, the list is not redrawn under you. True when it was drawn.
 let editingPending = null;
@@ -2322,9 +2328,12 @@ function drawChatQueue() {
   const waiting = cutUntil && (today
     ? t('The usage limit ran out: they go at {time}, after the answer that was cut off.', { time: clockTime(cutUntil) })
     : t('The usage limit ran out: they go on {time}, after the answer that was cut off.', { time: `${new Date(cutUntil).toLocaleDateString(locale(), { weekday: 'short' }).replace(/\.$/, '')} ${clockTime(cutUntil)}` }));
+  const when = !g.responding ? t('Being delivered…') : interruptSendsNow()
+    ? t('They go together, in order, when the manager finishes this answer, or at once if you click Interrupt.')
+    : t('They go together, in order, when the manager finishes this answer.');
   // On a phone the head is the fold's line: "N in the queue", opening into the messages (html.fold-queue).
   const phone = phoneQuery.matches;
-  const hint = `<span class="hint">${esc(waiting || (g.responding ? t('They go together, in order, when the manager finishes this answer.') : t('Being delivered…')))}</span>`;
+  const hint = `<span class="hint">${esc(waiting || when)}</span>`;
   const head = phone
     ? `<button type="button" class="chat-queue-head" data-fold="queue" aria-expanded="${!folds.queue}"><span class="label">${esc(t('{count} in the queue', { count: list.length }))}</span>${hint}<span class="attn-toggle"><span class="when-closed">${esc(t('See all'))}</span><span class="when-open">${esc(t('Hide'))}</span></span></button>`
     : `<div class="chat-queue-head"><span class="label">${esc(t('In the queue'))}</span>${hint}</div>`;
@@ -2393,7 +2402,7 @@ function drawBridge() {
     else updateLine = t('Updating: checking the new version; Chiefmate restarts by itself…') + paused;
   }
   let updateButton = '';
-  if (job?.stage === 'manager' && !job.interruptManager) updateButton = `<button type="button" class="button secondary small" data-update-now="interrupt">${esc(t("Interrupt the manager's answer"))}</button>`;
+  if (job?.stage === 'manager' && !job.interruptManager) updateButton = `<button type="button" class="button secondary small" data-update-now="interrupt" title="${esc(t('The manager stops its answer now, so the update can go in. The conversation goes on in the same session after the restart, and your next message tells it the answer was interrupted.'))}">${esc(t("Interrupt the manager's answer"))}</button>`;
   else if (online && !job && update.waiting && !['changes', 'merge'].includes(update.blocked)) updateButton = `<button type="button" class="button small" data-update-now="now">${esc(t('Update now'))}</button>`;
   const roster = others.map(a => {
     const s = agentStatus(a);
@@ -6203,17 +6212,16 @@ ${typed}` : typed;
     const sent = await api('/api/manager', { message });
     $('#message').value = '';
     fitField($('#message'));
-    if (sent.queued) toast(t('In the queue: it goes when the manager finishes this answer.'));
+    if (sent.queued) toast(interruptSendsNow() ? t('In the queue: it goes when the manager finishes this answer, or at once if you click Interrupt.') : t('In the queue: it goes when the manager finishes this answer.'));
     setTimeout(refresh, 300);
   } catch (error) {
     toast(error.message);
   }
 }
 
+// Interrupt acts at once, as in the live sessions: the answer stops, the conversation goes on and the queue goes next.
 $('#interrupt').addEventListener('click', async () => {
-  const waiting = state?.manager.pending?.length ?? 0;
-  const text = `${t('The manager stops what it is doing now. The conversation goes on in the same session, and your next message tells it the answer was interrupted.')}${waiting ? ` ${t('The {count} message(s) in the queue go right after.', { count: waiting })}` : ''}`;
-  if (!(await confirmDialog(t('Interrupt the answer'), text, t('Interrupt')))) return;
+  $('#interrupt').disabled = true; // the next drawing shows the answer stopping, or the button back
   try {
     const r = await api('/api/manager/interrupt', {});
     if (!r.interrupted) toast(t('The manager had already finished.'));
@@ -6223,24 +6231,21 @@ $('#interrupt').addEventListener('click', async () => {
   refresh();
 });
 
-// "Update now": installs the approved update without waiting for the crew, after a confirmation; while the update
-// waits for the manager, the same place offers to interrupt its answer.
+// "Update now": installs the approved update without waiting for the crew, after a confirmation. While the update
+// waits for the manager, the same place interrupts its answer at once: the update itself was already decided.
 $('#bridge').addEventListener('click', async event => {
   const button = event.target.closest('[data-update-now]');
   if (!button) return;
   const interrupt = button.dataset.updateNow === 'interrupt';
-  const runs = going().length;
-  let text;
-  if (interrupt) text = t("The manager stops its answer now, so the update can go in. The conversation goes on in the same session after the restart, and your next message tells it the answer was interrupted.");
-  else {
-    text = [
+  if (!interrupt) {
+    const runs = going().length;
+    const text = [
       runs ? t('The {count} run(s) going on pause at a safe point: each agent finishes the action under way, and its step resumes the same session after the update, told that Chiefmate was updated.', { count: runs }) : t('No run is going on.'),
       state.manager.responding ? t('The manager is answering: the update waits for the answer to end (you can interrupt it here meanwhile).') : '',
       t('Then Chiefmate installs the new version, checks it and restarts. The paused runs and the messages in the queue resume by themselves. If the checks fail, Chiefmate stays on the current version and resumes the same way.'),
     ].filter(Boolean).join(' ');
+    if (!(await confirmDialog(t('Update now'), text, t('Update now')))) return;
   }
-  const ok = await confirmDialog(interrupt ? t("Interrupt the manager's answer") : t('Update now'), text, interrupt ? t('Interrupt') : t('Update now'));
-  if (!ok) return;
   try {
     await api('/api/update-now', { interruptManager: interrupt });
     toast(interrupt ? t("Interrupting the manager's answer…") : t('Updating: the work going on pauses at a safe point.'));

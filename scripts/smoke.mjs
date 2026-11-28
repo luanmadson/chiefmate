@@ -932,7 +932,7 @@ try {
     const { CONFIG_FILE, saveConfig } = await load('config');
     const { execute, live } = await load('runs');
     const { recordUsage, readRun, saveRun } = await load('store');
-    const { nudgeQueue, startQueue } = await load('queue');
+    const { doNow, nudgeQueue, startQueue } = await load('queue');
     // This process runs the copy's queue when nudged (only the process that starts the queue runs it), with no timer.
     startQueue({ timer: false });
     const resetsAt = Math.floor(Date.now() / 1000) + 3600;
@@ -996,6 +996,16 @@ try {
     live.delete('busy');
     await execute(requeued);
     expect(requeued.status === 'done' && requeued.steps.every(step => step.status === 'done'), 'the requeued run did not finish its remaining step');
+
+    // With a free worker, "Do now" must register its hold before the queue can take another run.
+    // The other run's project is unconfigured, so a regression cannot start an agent.
+    const other = { ...makeRun('do-now-other'), project: 'unconfigured' };
+    const chosen = { ...makeRun('do-now-chosen'), notBefore: reset };
+    saveRun(other);
+    saveRun(chosen);
+    doNow(chosen.id, 'all');
+    await new Promise(resolve => setImmediate(resolve));
+    expect(readRun(other.id).status === 'queued', 'another run started before "Do now" applied its hold');
   } catch (error) {
     failures.push(`run limits: ${error.message}`);
   } finally {
