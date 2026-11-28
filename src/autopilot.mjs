@@ -11,6 +11,7 @@ import { formatDateTime, formatPercent, t } from './i18n.mjs';
 import { newsSettings, reportEvent } from './news.mjs';
 import { availableResets, current, weekPace } from './plan.mjs';
 import { byRank, CLOSED, decideItem, planItem, planItems, startApproved } from './planning.mjs';
+import { accountLabel, manyAccounts, projectAccount } from './accounts.mjs';
 import { listRuns, readState, readUsage, saveState } from './store.mjs';
 import { isLocked } from './lockdown.mjs';
 import { held } from './power.mjs';
@@ -264,7 +265,7 @@ function usageText(usage) {
  * manager is woken once for the items triaged "now" (again only when they or the project's last run change). Then the
  * daily report, when it is due. Returns what it did, for the tests.
  */
-export async function checkAutopilot({ config = loadConfig(), usage = readUsage(), at = new Date(), runs = listRuns() } = {}) {
+export async function checkAutopilot({ config = loadConfig(), usage = undefined, at = new Date(), runs = listRuns() } = {}) {
   const settings = autopilotSettings(config);
   const done = { started: false, woke: [], report: null };
   const state = readState();
@@ -280,10 +281,13 @@ export async function checkAutopilot({ config = loadConfig(), usage = readUsage(
       await startApproved();
       done.started = true;
     }
-    if (!blockReason(settings, usage, at)) {
+    {
       for (const project of idle) {
         // a project with an approved item waiting gets that one, not the manager
         if (waiting.has(project)) continue;
+        // each project within its own account's usage (src/accounts.mjs): another account running out holds nothing here
+        const own = usage ?? readUsage(projectAccount(config, project));
+        if (blockReason(settings, own, at)) continue;
         const next = candidates(project, items);
         if (!next.length) continue;
         const last = runs.find(r => r.project === project);
@@ -292,7 +296,7 @@ export async function checkAutopilot({ config = loadConfig(), usage = readUsage(
         a.woken[project] = key;
         done.woke.push(project);
         a.wakes = [...(a.wakes ?? []), { at: now(), project, items: next.map(i => i.id) }].slice(-MAX_LOG);
-        reportEvent('idle', `Autopilot: the queue of ${project} is empty${last ? ` (its last run, ${last.id}, ${last.status})` : ''}. Items triaged "now", in ${config.owner || 'the owner'}'s order: ${next.slice(0, 5).map(short).join('; ')}${next.length > 5 ? `; and ${next.length - 5} more` : ''}. Usage: ${usageText(usage)}, within the autopilot's limits.`, { config });
+        reportEvent('idle', `Autopilot: the queue of ${project} is empty${last ? ` (its last run, ${last.id}, ${last.status})` : ''}. Items triaged "now", in ${config.owner || 'the owner'}'s order: ${next.slice(0, 5).map(short).join('; ')}${next.length > 5 ? `; and ${next.length - 5} more` : ''}. Usage${manyAccounts(config) ? ` of its Claude account ${accountLabel(projectAccount(config, project))}` : ''}: ${usageText(own)}, within the autopilot's limits.`, { config });
       }
     }
   }
@@ -340,10 +344,11 @@ function dailyReport(settings, a, at, config) {
  * The manager's approval through the autopilot ("plan approve <n> --autopilot"): only an item triaged "now", of a
  * project whose queue is empty, within the limits. The item is marked as decided by the autopilot.
  */
-export async function autopilotApprove(id, { config = loadConfig(), usage = readUsage() } = {}) {
-  const blocked = blockReason(autopilotSettings(config), usage);
-  if (blocked) throw new Error(`The autopilot can't put an item on the queue now: ${blocked}.`);
+export async function autopilotApprove(id, { config = loadConfig(), usage = undefined } = {}) {
   const item = planItem(id);
+  // within the usage of the item's project's own account (src/accounts.mjs)
+  const blocked = blockReason(autopilotSettings(config), usage ?? readUsage(projectAccount(config, item.project)));
+  if (blocked) throw new Error(`The autopilot can't put an item on the queue now: ${blocked}.`);
   if (item.archived || item.status !== 'triaged' || item.recommend !== 'now') throw new Error(`Item #${item.id} is not triaged "now": the autopilot only starts those, the rest waits for the owner.`);
   if (holdReason(item.project)) throw new Error(`${item.project} is held by the owner's focus (paused, or out of the focus): the autopilot starts nothing there until it is free.`);
   if (!idleProjects(config).has(item.project)) throw new Error(`${item.project} has work queued or going on: the autopilot waits for its queue to empty.`);

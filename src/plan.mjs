@@ -1,6 +1,7 @@
 // The plan's free resets, the week's pace, and the alerts about your account and this computer.
 // Alerts only warn (a band in the app and a Windows notification, once each): they never pause anything.
-import { LOGIN_RENEW, loginFrom, loginWarning } from './claude.mjs';
+import { accountLabel, manyAccounts } from './accounts.mjs';
+import { loginCommand, loginFrom, loginWarning, loginWarnings } from './claude.mjs';
 import { loadConfig, saveConfig } from './config.mjs';
 import { formatDateTime, formatPercent, t } from './i18n.mjs';
 import { computer, formatBytes, freeShare, processes } from './machine.mjs';
@@ -93,15 +94,31 @@ const suggestText = (week, grant) =>
 const expiryText = grant =>
   t('A free reset of your plan expires {when}, still unused.', { when: formatDateTime(grant.expires) }) + (grant.note ? ` (${grant.note})` : '');
 
-/** The warning about Claude Code's sign-in (src/claude.mjs): { title, text } for the owner, or null. */
-export function loginText(w = loginWarning()) {
+/**
+ * The warning about Claude Code's sign-in (src/claude.mjs): { title, text } for the owner, or null. With "account"
+ * (several accounts in the settings, src/accounts.mjs), it names the account and its own command; "signed_out" is an
+ * account no one signed in to yet.
+ */
+export function loginText(w = loginWarning(), account = null) {
   if (!w) return null;
-  const renew = t('To renew it, run in a terminal: {command}', { command: LOGIN_RENEW });
-  if (w.step === 'expired') return { title: t('Claude Code sign-in expired'), text: `${t('The sign-in of Claude Code on this computer expired {when}: the crew and the manager stop until you sign in again.', { when: formatDateTime(w.expires) })} ${renew}` };
-  return {
-    title: w.step === '1d' ? t('Claude Code sign-in about to end') : t('Claude Code sign-in expiring'),
-    text: `${t('The sign-in of Claude Code on this computer may end from {from} on, and by {when} at the latest. Without it, the crew and the manager stop.', { from: formatDateTime(loginFrom(w.expires)), when: formatDateTime(w.expires) })} ${renew}`,
-  };
+  const named = account ? ` (${accountLabel(account)})` : '';
+  if (w.step === 'signed_out') {
+    return { title: t('Sign in to the Claude account {name}', { name: accountLabel(account) }), text: `${t("No one is signed in to this account yet, so its projects can't run. Use its Sign in button in Usage, or run in a terminal: {command}", { command: loginCommand(account) })}` };
+  }
+  const renew = t('To renew it, run in a terminal: {command}', { command: loginCommand(account) });
+  if (w.step === 'expired') {
+    const text = account ? t('The sign-in of Claude Code to this account expired {when}: its work stops until you sign in again.', { when: formatDateTime(w.expires) }) : t('The sign-in of Claude Code on this computer expired {when}: the crew and the manager stop until you sign in again.', { when: formatDateTime(w.expires) });
+    return { title: `${t('Claude Code sign-in expired')}${named}`, text: `${text} ${renew}` };
+  }
+  const facts = { from: formatDateTime(loginFrom(w.expires)), when: formatDateTime(w.expires) };
+  const text = account ? t('The sign-in of Claude Code to this account may end from {from} on, and by {when} at the latest. Without it, its work stops.', facts) : t('The sign-in of Claude Code on this computer may end from {from} on, and by {when} at the latest. Without it, the crew and the manager stop.', facts);
+  return { title: `${w.step === '1d' ? t('Claude Code sign-in about to end') : t('Claude Code sign-in expiring')}${named}`, text: `${text} ${renew}` };
+}
+
+/** The sign-ins that need the owner now, each with its account when the settings list several: [{ warning, account }]. */
+export function loginNotices(config) {
+  const many = manyAccounts(config);
+  return loginWarnings(config).map(({ account, warning }) => ({ warning, account: many || warning.step === 'signed_out' ? account : null }));
 }
 
 /** What the band at the top of the app shows now: { level: "warn" | "critical", text, view }. */
@@ -158,12 +175,13 @@ async function watch() {
     if (keys.map(fresh)[0]) send.push({ title: t('Free reset expiring'), text: expiryText(g), target: 'chiefmate:usage', event: 'usage_alert', urgent: step === '1d' });
   }
 
-  // Claude Code's sign-in: once 3 days before its earliest end, again from the day before it, and once it expired.
-  const login = loginWarning();
-  if (login) {
+  // Claude Code's sign-in, for each account: once 3 days before its earliest end, again from the day before it, and
+  // once it expired; an account no one signed in to yet, once.
+  for (const { warning: login, account } of loginNotices(config)) {
     const steps = ['3d', '1d', 'expired'];
-    const keys = steps.slice(0, steps.indexOf(login.step) + 1).reverse().map(step => `login:${login.expires}:${step}`);
-    if (keys.map(fresh)[0]) send.push({ ...loginText(login), target: 'chiefmate:usage', event: 'usage_alert', urgent: login.step !== '3d' });
+    const tag = account ? `${account.id}:` : '';
+    const keys = login.step === 'signed_out' ? [`login:${tag}signed_out`] : steps.slice(0, steps.indexOf(login.step) + 1).reverse().map(step => `login:${tag}${login.expires}:${step}`);
+    if (keys.map(fresh)[0]) send.push({ ...loginText(login, account), target: 'chiefmate:usage', event: 'usage_alert', urgent: !['3d', 'signed_out'].includes(login.step) });
   }
 
   for (const [key, at] of Object.entries(a.sent)) if (Date.now() - Date.parse(at) > 30 * DAY) delete a.sent[key];

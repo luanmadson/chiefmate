@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { staleLine } from './attention.mjs';
+import { accountLabel, listAccounts, managerAccount, manyAccounts, projectAccount } from './accounts.mjs';
 import { loginLine, runClaude } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectEfforts, projectLead } from './config.mjs';
 import { effortChangeLine, effortHistory } from './effort.mjs';
@@ -146,6 +147,23 @@ function costsLine(config, runs, sessions) {
   }
 }
 
+/**
+ * The Claude accounts (src/accounts.mjs), one line each: its usage, its projects, whether it is the default or the
+ * manager's, and the rule that work never moves to another account by itself.
+ */
+export function accountsLines(config = loadConfig()) {
+  const owner = config.owner || 'the owner';
+  const manager = managerAccount(config);
+  const window = (w, name) => `${name} ${formatPercent(w?.used)}${w?.resets ? ` (resets ${formatDateTime(w.resets)})` : ''}`;
+  const lines = listAccounts(config).map(a => {
+    const usage = readUsage(a);
+    const projects = Object.keys(config.projects ?? {}).filter(id => projectAccount(config, id).id === a.id);
+    const roles = [a.default ? 'the default' : '', manager.id === a.id ? 'your conversation runs on it' : ''].filter(Boolean).join(', ');
+    return `- ${accountLabel(a)}${roles ? ` (${roles})` : ''}: ${window(usage.five_hour, '5-hour window')}; ${window(usage.seven_day, 'plan week')}. Measured ${usage.updated ? formatDateTime(usage.updated) : 'never'}. Projects: ${projects.join(', ') || 'none'}.`;
+  });
+  return [`${owner}'s Claude accounts (each project runs only on its own; a full account holds only its projects, and work never moves to another account by itself: moving a project is ${owner}'s choice, in the settings):`, ...lines];
+}
+
 /** A snapshot of the moment, sent along with each of your messages. */
 export function situation(libraries = []) {
   const config = loadConfig();
@@ -177,13 +195,14 @@ export function situation(libraries = []) {
   const talked = [...going.map(l => activeRun(l.run)).filter(Boolean), ...latest].filter((r, i, all) => all.findIndex(x => x.id === r.id) === i);
   lines.push(talkSituation(talked, config.owner || 'the owner'));
   const window = (w, name) => `${name} ${formatPercent(w?.used)}${w?.resets ? ` (resets ${formatDateTime(w.resets)})` : ''}`;
-  lines.push(`${config.owner}'s account: ${window(usage.five_hour, '5-hour window')}; ${window(usage.seven_day, 'plan week')}. Measured ${usage.updated ? formatDateTime(usage.updated) : 'never'}.`);
+  if (manyAccounts(config)) lines.push(...accountsLines(config));
+  else lines.push(`${config.owner}'s account: ${window(usage.five_hour, '5-hour window')}; ${window(usage.seven_day, 'plan week')}. Measured ${usage.updated ? formatDateTime(usage.updated) : 'never'}.`);
   // the spending modes the owner chose in Usage (src/spending.mjs, src/autopilot.mjs), and what will be left of the session
   lines.push(sessionLine(config, { usage, runs }));
   lines.push(weekLine(config));
   lines.push(planLine(config, usage));
   lines.push(computerLine(config));
-  const login = loginLine(config.owner || 'the owner');
+  const login = loginLine(config.owner || 'the owner', undefined, undefined, { config });
   if (login) lines.push(login);
   lines.push(sessionsLine(config));
   const sessions = listSessions();
@@ -450,6 +469,9 @@ async function answer(items) {
     chat.context = state.manager.context ?? null;
 
     const model = manager.model ?? config.default_model;
+    // The manager's account (src/accounts.mjs): a conversation started on another account can't be carried on here.
+    const account = managerAccount(config);
+    if (state.manager.session && state.manager.account && state.manager.account !== account.id) delete state.manager.session;
     const libraries = await chatLibraries(config);
     await processes(60_000).catch(() => {}); // the projects running on this computer, for the situation
     const prompt = `<situation>\n${situation(libraries)}\n</situation>\n\n${composeMessage(config.owner, items, state.manager.interrupted)}`;
@@ -477,6 +499,7 @@ async function answer(items) {
         addDirs: libraries.map(l => l.dir),
         // The command line refuses to write to this conversation from inside it.
         env: { CHIEFMATE_MANAGER: '1' },
+        account,
         attribution: config.attribution !== false,
         maxMinutes: 15,
         session,
@@ -520,6 +543,7 @@ async function answer(items) {
     if (r.session) {
       if (!resumed && (r.ok || r.text)) delete state.manager.handoff; // the summary went into the new conversation
       state.manager.session = r.session;
+      state.manager.account = account.id;
       compacted = r.context?.compactions ?? 0;
       const before = resumed ? state.manager.context ?? {} : {};
       if (r.context?.used) {
@@ -596,6 +620,7 @@ async function renewIfFull() {
       effort: manager.chat_effort ?? manager.effort,
       tools: ['Read', 'Glob', 'Grep'],
       disallowed: [...CHAT_DISALLOWED, 'Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'],
+      account: managerAccount(config),
       attribution: config.attribution !== false,
       maxMinutes: 10,
       session: { id: session, resume: true },

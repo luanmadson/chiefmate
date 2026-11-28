@@ -10,17 +10,40 @@ import { loadConfig } from './config.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { activeRun, cancelLive, doingNow, editRun, execute, holdsCopy, limitWaitCleared, live, liveRuns } from './runs.mjs';
 import { held } from './power.mjs';
-import { effectiveLimits, sessionNow } from './spending.mjs';
+import { accountsParallel, effectiveLimits } from './spending.mjs';
 import { listRuns, readRun, readState, readUsage, runEnded, saveRun, saveState, stepsOf } from './store.mjs';
 import { isLocked } from './lockdown.mjs';
+import { listAccounts, projectAccount } from './accounts.mjs';
 import { parkWaitingWhileAway } from './needs.mjs';
 import { checkQuarantine, quarantineHold } from './quarantine.mjs';
 import { holdReason, readSteer } from './steer.mjs';
 import { updating } from './update.mjs';
 import { clip, now } from './util.mjs';
 
-/** How many runs (of different projects) may go on at once now: the session's (src/spending.mjs), a boost included. */
-export const maxParallel = (config = loadConfig()) => sessionNow(config).parallel;
+/**
+ * How many runs (of different projects) may go on at once now: the session's (src/spending.mjs), a boost included;
+ * with several Claude accounts (src/accounts.mjs), the sum of each account's own.
+ */
+export const maxParallel = (config = loadConfig()) => accountsParallel(config).total;
+
+/**
+ * The runs to start now, in turn order (picked), each only while its project's account has room: an account's runs at
+ * once never pass its own session's (so an account spending all may run more while another keeps its margin).
+ * going: the projects of the runs going on or starting.
+ */
+export function withinAccounts(picked, going, config = loadConfig(), at = Date.now()) {
+  const room = new Map(accountsParallel(config, at).accounts.map(a => [a.account.id, a.parallel]));
+  for (const project of going.filter(Boolean)) {
+    const id = projectAccount(config, project).id;
+    room.set(id, (room.get(id) ?? 0) - 1);
+  }
+  return picked.filter(run => {
+    const id = projectAccount(config, run.project).id;
+    if ((room.get(id) ?? 0) <= 0) return false;
+    room.set(id, room.get(id) - 1);
+    return true;
+  });
+}
 
 // Runs being started (between the queue's choice and execute() registering them), so a tick never picks one twice.
 const starting = new Set();
@@ -430,11 +453,13 @@ function tick() {
   const queue = queued(runs).filter(r => !live.has(r.id) && !starting.has(r.id));
   const waiting = queue.filter(run => run.status === 'waiting' && !ready(run));
   if (waiting.length) {
-    const usage = readUsage();
-    // the session's pause (src/spending.mjs) in place of the 5-hour limit: a boost or a new mode counts at once
-    const limits = effectiveLimits(config);
+    // the session's pause (src/spending.mjs) in place of the 5-hour limit: a boost or a new mode counts at once; each
+    // run against its own project's account (src/accounts.mjs)
+    // a wait recorded before accounts was made on Claude Code's own configuration
+    const legacy = (listAccounts(config).find(a => !a.configDir) ?? listAccounts(config).find(a => a.default)).id;
     for (const run of waiting) {
-      if (!limitWaitCleared(run, limits, usage)) continue;
+      const account = projectAccount(config, run.project);
+      if (!limitWaitCleared(run, effectiveLimits(config, undefined, undefined, account), readUsage(account), account, legacy)) continue;
       Object.assign(run, { status: 'queued', notBefore: null, note: null });
       delete run.limitWait;
       saveRun(run);
@@ -442,11 +467,14 @@ function tick() {
   }
   const free = maxParallel(config) - live.size - starting.size;
   if (free <= 0) return;
+  const going = busyProjects();
   // The owner's focus (src/steer.mjs): a paused project, or one out of the focus, starts nothing; its runs wait in order.
   // Nor a project waiting for a quarantined file (src/quarantine.mjs): its runs wait instead of failing; nor a run the
   // owner's "Do now" holds (a held run is never ready: see pickNext).
   const steer = readSteer();
-  for (const next of pickNext(queue.filter(r => !holdReason(r.project, steer) && !quarantineHold(r.project) && !heldByDoNow(r, doing)), busyProjects(), free, Date.now(), copyHolders(runs), lastRan(runs))) {
+  // every candidate in turn, then each account's room (withinAccounts) and the total
+  const picked = pickNext(queue.filter(r => !holdReason(r.project, steer) && !quarantineHold(r.project) && !heldByDoNow(r, doing)), going, Infinity, Date.now(), copyHolders(runs), lastRan(runs));
+  for (const next of withinAccounts(picked, going, config).slice(0, free)) {
     starting.add(next.id);
     // Each run goes on by itself; the queue looks again as soon as one ends.
     Promise.resolve()

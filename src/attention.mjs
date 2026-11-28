@@ -6,8 +6,7 @@
 // Nothing is lost: the archive keeps the last ARCHIVE_MAX. In data/state.json: the seen marks ("attention_seen"), the
 // notices shown last time ("attention_shown") and the archive ("attention_archive").
 import { formatDateTime, formatPercent, locale, t } from './i18n.mjs';
-import { loginWarning } from './claude.mjs';
-import { RAM_LOW, availableResets, current, loginText } from './plan.mjs';
+import { RAM_LOW, availableResets, current, loginNotices, loginText } from './plan.mjs';
 import { restoreSteps } from './quarantine.mjs';
 import { readState, saveState, settleRunOutside } from './store.mjs';
 import { LOGIN_MINUTES, readerSettings, readerStatus, signInNeeded } from './usagepage.mjs';
@@ -46,7 +45,7 @@ export const mainPushNotice = (p, config) => ({
  * The notices now, most urgent first: { id, level, kind, title, text, view, project, run, at, seen, seenable }.
  * "view" is the app's place that deals with it; a request of a step carries what its buttons need ("I did it", or a question's options).
  */
-export function attentionItems({ config, runs = [], needs = [], usage = {}, machine, items = [], update = {}, questions = [], pushes = [], repos = [], lockdown = null, login = loginWarning(), quarantine = [], spare = null }) {
+export function attentionItems({ config, runs = [], needs = [], usage = {}, machine, items = [], update = {}, questions = [], pushes = [], repos = [], lockdown = null, login = undefined, logins = undefined, quarantine = [], spare = null }) {
   const list = [];
   const add = item => list.push({ project: null, run: null, at: null, seenable: true, ...item });
   // Urgent: the emergency lockdown (src/lockdown.mjs), until the owner releases it, and the security warnings of the day.
@@ -122,12 +121,14 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
   }
   // Important: the session would renew with much of it unused (src/spending.mjs, the offer standing): its buttons spend
   // all until the renewal or leave it until then ("not now").
-  if (spare) {
-    const time = new Date(spare.until).toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' });
+  // One offer per Claude account with several (src/accounts.mjs): each names its account, and its buttons act on it.
+  for (const offer of [spare].flat().filter(Boolean)) {
+    const time = new Date(offer.until).toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' });
     add({
-      id: `spare:${spare.window}`, level: 'important', kind: 'spare', title: t('The session renews with usage to spare'),
-      text: t('About {left} of the session would go unused when it renews at {time}. Spending all until then uses it, the safety margin included; afterwards your mode holds again by itself.', { left: formatPercent(spare.left), time }),
-      view: 'usage', at: spare.at ?? null, until: spare.until, seenable: false,
+      id: `spare:${offer.account ? `${offer.account}:` : ''}${offer.window}`, level: 'important', kind: 'spare',
+      title: offer.account ? t('The session of {account} renews with usage to spare', { account: offer.accountName ?? offer.account }) : t('The session renews with usage to spare'),
+      text: t('About {left} of the session would go unused when it renews at {time}. Spending all until then uses it, the safety margin included; afterwards your mode holds again by itself.', { left: formatPercent(offer.left), time }),
+      view: 'usage', at: offer.at ?? null, until: offer.until, seenable: false, ...(offer.account ? { account: offer.account } : {}),
     });
   }
   // Urgent: this computer is low on memory.
@@ -141,8 +142,13 @@ export function attentionItems({ config, runs = [], needs = [], usage = {}, mach
   }
   // Claude Code's sign-in on this computer (src/claude.mjs): important from 3 days before its earliest end (3 days
   // before the expiry Claude Code reports); urgent, and until it is renewed, from the day before that and once expired.
-  if (login) {
-    add({ id: `login:${login.expires}:${login.step}`, level: login.step === '3d' ? 'important' : 'urgent', kind: 'login', ...loginText(login), view: 'usage', seenable: login.step === '3d' });
+  // With several accounts (src/accounts.mjs), one notice per account, named; an account no one signed in to yet is important.
+  // "login" (one warning, of the only account) stands in for the real ones in the tests.
+  const signIns = logins ?? (login !== undefined ? (login ? [{ warning: login, account: null }] : []) : loginNotices(config));
+  for (const { warning: w, account } of signIns) {
+    const tag = account ? `${account.id}:` : '';
+    const level = ['3d', 'signed_out'].includes(w.step) ? 'important' : 'urgent';
+    add({ id: `login:${tag}${w.expires ?? ''}:${w.step}`, level, kind: 'login', ...loginText(w, account), view: 'usage', seenable: level === 'important', ...(account ? { account: account.id } : {}) });
   }
   // The plan's free resets: urgent when one expires within a day, important within 3 days or when it's time to use one.
   const resets = availableResets(config);

@@ -11,7 +11,12 @@
 // while the owner is away (told in their summary when back), or offers it once per window (the app's notice with
 // "Spend all until HH:MM" and "Not now", and the manager's news). The boost never changes the settings: once the window
 // renews, the mode before it holds again. The week's pause never changes.
+// Each Claude account (src/accounts.mjs) has its own session: its window, its samples, boost and offer (in its own
+// data folder), and its own settings when its entry in "accounts" has them ("max_parallel", "pause_at_5h_window",
+// "pause_at_plan_week"; else the general ones). So one account may spend all, with more runs at once, while another
+// keeps a margin for the owner; a project waits only for its own account.
 import path from 'node:path';
+import { accountData, accountLabel, defaultAccount, findAccount, listAccounts, manyAccounts, projectAccount } from './accounts.mjs';
 import { loadConfig, saveConfig } from './config.mjs';
 import { formatPercent, locale, t } from './i18n.mjs';
 import { reportEvent } from './news.mjs';
@@ -20,7 +25,7 @@ import { quarantineHold } from './quarantine.mjs';
 import { activeDoNow, heldByDoNow } from './queue.mjs';
 import { holdReason, readSteer } from './steer.mjs';
 import { listRuns, readState, readUsage, saveState } from './store.mjs';
-import { clip, DATA, now, readJson, writeJson } from './util.mjs';
+import { clip, now, readJson, writeJson } from './util.mjs';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -52,9 +57,22 @@ const SPAN_MIN = 10 * MINUTE; // a pace measured over less than this is not trus
 const KEEP = 2 * HOUR; // the samples kept
 const MAX_CHANGES = 50;
 
-const spendingFile = () => path.join(DATA, 'spending.json');
+/** An account's spending file: data/spending.json for Claude Code's own configuration, else in data/accounts/<id>. */
+export const spendingFile = (account = defaultAccount()) => path.join(accountData(account), 'spending.json');
 /** What the spending keeps in data/spending.json: { samples, boost, offer, warned, dismissed, run_pace }. */
 export const readSpending = (file = spendingFile()) => readJson(file, {});
+
+/** An account's own entry in "accounts" (where its own session settings go), or null with no list. */
+export function accountEntry(config, account) {
+  if (!account || !Array.isArray(config?.accounts)) return null;
+  return config.accounts.find(a => String(a?.id ?? '').trim().toLowerCase() === account.id) ?? null;
+}
+const own = (entry, key) => entry && Object.hasOwn(entry, key) && entry[key] !== '' && entry[key] !== undefined;
+/** The account's own value of a session setting, else the general one. */
+const setting = (config, account, key, general) => {
+  const entry = accountEntry(config, account);
+  return own(entry, key) ? entry[key] : general;
+};
 
 const iso = at => new Date(at).toISOString();
 const clock = when => new Date(when).toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' });
@@ -62,12 +80,16 @@ const pct = formatPercent;
 /** A window still running (its value is not from before a reset). */
 const current = (w, at = Date.now()) => typeof w?.used === 'number' && (!w.resets || Date.parse(w.resets) > at);
 
-/** "max_parallel": how many runs (of different projects) may go on at once. 3 by default, at least 1. */
-export const configuredParallel = (config = loadConfig()) => Math.max(1, Math.floor(Number(config.max_parallel) || DEFAULT_AT_ONCE));
+/**
+ * "max_parallel": how many runs (of different projects) may go on at once, on one account: its own, else the general
+ * one. 3 by default, at least 1.
+ */
+export const configuredParallel = (config = loadConfig(), account = defaultAccount(config)) =>
+  Math.max(1, Math.floor(Number(setting(config, account, 'max_parallel', config.max_parallel)) || DEFAULT_AT_ONCE));
 
-/** "limits.pause_at_5h_window": a share from 0.05 to 1, or null (off: only the safety margin). */
-export function configuredPause(config = loadConfig()) {
-  const v = config.limits?.pause_at_5h_window;
+/** "limits.pause_at_5h_window" (or the account's own "pause_at_5h_window"): a share from 0.05 to 1, or null (off: only the safety margin). */
+export function configuredPause(config = loadConfig(), account = defaultAccount(config)) {
+  const v = setting(config, account, 'pause_at_5h_window', config.limits?.pause_at_5h_window);
   const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() ? Number(v) : NaN;
   return Number.isFinite(n) && n > 0 ? Math.min(1, Math.max(0.05, n)) : null;
 }
@@ -83,18 +105,30 @@ export const activeBoost = (data = readSpending(), at = Date.now()) => (data.boo
  * The session now: { parallel, pause (null: off), limit (the share the crew pauses at), mode, configured (the same,
  * from the settings), boost }. A boost is "all" until the renewal, never less than the settings.
  */
-export function sessionNow(config = loadConfig(), data = readSpending(), at = Date.now()) {
-  const parallel = configuredParallel(config);
-  const pause = configuredPause(config);
+export function sessionNow(config = loadConfig(), data = undefined, at = Date.now(), account = defaultAccount(config)) {
+  data ??= readSpending(spendingFile(account));
+  const parallel = configuredParallel(config, account);
+  const pause = configuredPause(config, account);
   const configured = { parallel, pause, limit: pause ?? SAFETY, mode: sessionMode(parallel, pause) };
   const boost = activeBoost(data, at);
   if (!boost) return { ...configured, configured, boost: null };
   return { parallel: Math.max(parallel, MAX_AT_ONCE), pause: Math.max(configured.limit, SPEND_TO), limit: Math.max(configured.limit, SPEND_TO), mode: 'all', configured, boost };
 }
 
-/** The queue's limits now (src/runs.mjs): the settings', with the session's pause in place of the 5-hour one. */
-export const effectiveLimits = (config = loadConfig(), data = readSpending(), at = Date.now()) =>
-  ({ ...(config.limits ?? {}), pause_at_5h_window: sessionNow(config, data, at).limit });
+/**
+ * The queue's limits now on an account (src/runs.mjs): the settings', the account's own week pause when it has one,
+ * with its session's pause in place of the 5-hour one.
+ */
+export function effectiveLimits(config = loadConfig(), data = undefined, at = Date.now(), account = defaultAccount(config)) {
+  const week = setting(config, account, 'pause_at_plan_week', config.limits?.pause_at_plan_week);
+  return { ...(config.limits ?? {}), ...(week !== undefined ? { pause_at_plan_week: week } : {}), pause_at_5h_window: sessionNow(config, data, at, account).limit };
+}
+
+/** Each account's runs at once now (its boost included), and their sum: what the queue may start, account by account. */
+export function accountsParallel(config = loadConfig(), at = Date.now()) {
+  const accounts = listAccounts(config).map(a => ({ account: a, parallel: sessionNow(config, undefined, at, a).parallel }));
+  return { accounts, total: accounts.reduce((sum, a) => sum + a.parallel, 0) };
+}
 
 /**
  * The window's pace over the last hour (a share of it per hour), from the samples of the same window, and the runs
@@ -155,8 +189,9 @@ export function forecast({ usage, samples = [], session, running = 0, capacity =
  * autopilot on, with an item it may start (approved, or triaged "now"); none held by the owner's focus or waiting for a
  * quarantined file, and no queued run on hold or waiting for the owner's "Do now" (doing: the one in force, src/queue.mjs).
  */
-export function projectsWithWork(config = loadConfig(), runs = listRuns(), items = null, steer = readSteer(), doing = activeDoNow(runs)) {
-  const free = id => !holdReason(id, steer) && !quarantineHold(id);
+export function projectsWithWork(config = loadConfig(), runs = listRuns(), items = null, steer = readSteer(), doing = activeDoNow(runs), account = null) {
+  // with an account, only its projects count (its session spends its own window)
+  const free = id => !holdReason(id, steer) && !quarantineHold(id) && (!account || projectAccount(config, id).id === account.id);
   const startable = r => r.status === 'running' || (['queued', 'waiting'].includes(r.status) && !r.onHold && !heldByDoNow(r, doing));
   const projects = new Set(runs.filter(r => startable(r) && free(r.project)).map(r => r.project));
   if (config.autopilot?.enabled === true) {
@@ -172,9 +207,9 @@ export function projectsWithWork(config = loadConfig(), runs = listRuns(), items
  * Whether the plan's week holds the crew now: at its pause (as checkLimits in src/runs.mjs reads it) or used up, with
  * a reset ahead. The session's spare can't be spent then, and the week's pause never changes here.
  */
-export function weekHolds(config = loadConfig(), usage = readUsage(), at = Date.now()) {
-  const w = usage?.seven_day;
-  return current(w, at) && !!w.resets && w.used >= Math.min(1, Number(config.limits?.pause_at_plan_week) || 1);
+export function weekHolds(config = loadConfig(), usage = undefined, at = Date.now(), account = defaultAccount(config)) {
+  const w = (usage ?? readUsage(account))?.seven_day;
+  return current(w, at) && !!w.resets && w.used >= Math.min(1, Number(setting(config, account, 'pause_at_plan_week', config.limits?.pause_at_plan_week)) || 1);
 }
 
 /** The offer still standing: once per window, until "not now", a boost or "all", and while something would be left. */
@@ -201,7 +236,10 @@ const sessionWords = s => `mode "${s.mode}": ${s.parallel} run(s) at a time, ${s
  * (the app's notice and the manager's news). Never after "not now" in the same window. Returns what it did, with the
  * forecast, for the tests (capacity, items, away, file, report and note stand in for the real ones there).
  */
-export function checkSpending({ config = loadConfig(), usage = readUsage(), at = Date.now(), runs = listRuns(), items = null, capacity, away = !!readState().away, file = spendingFile(), report = reportEvent, note = noteChange } = {}) {
+export function checkSpending({ config = loadConfig(), account = defaultAccount(config), usage = readUsage(account), at = Date.now(), runs = listRuns(), items = null, capacity, away = !!readState().away, file = spendingFile(account), report = reportEvent, note = noteChange } = {}) {
+  // with several accounts, only this account's runs and projects count, and the news names it
+  if (manyAccounts(config)) runs = runs.filter(r => projectAccount(config, r.project).id === account.id);
+  const named = manyAccounts(config) ? ` of the Claude account ${accountLabel(account)}` : '';
   const data = readSpending(file);
   const before = JSON.stringify(data);
   const done = { boosted: false, offered: false, ended: null };
@@ -218,10 +256,10 @@ export function checkSpending({ config = loadConfig(), usage = readUsage(), at =
     done.ended = data.boost;
     delete data.boost;
   }
-  const session = sessionNow(config, data, at);
+  const session = sessionNow(config, data, at, account);
   // while the plan's week holds the crew, there is nothing more to spend: no offer, no boost
-  const week = weekHolds(config, usage, at);
-  const f = forecast({ usage, samples: data.samples, session, running, capacity: week ? 0 : (capacity ?? projectsWithWork(config, runs, items)), runPace: data.run_pace ?? null, at });
+  const week = weekHolds(config, usage, at, account);
+  const f = forecast({ usage, samples: data.samples, session, running, capacity: week ? 0 : (capacity ?? projectsWithWork(config, runs, items, undefined, undefined, manyAccounts(config) ? account : null)), runPace: data.run_pace ?? null, at });
   if (f?.runPace != null) data.run_pace = Math.round(f.runPace * 1000) / 1000;
   const window = f?.resets ?? null;
   // a window gone takes its offer and its "not now" with it
@@ -229,13 +267,13 @@ export function checkSpending({ config = loadConfig(), usage = readUsage(), at =
   if (data.dismissed && data.dismissed !== window) delete data.dismissed;
   if (f?.worth && !session.boost && session.configured.mode !== 'all' && data.dismissed !== window) {
     const owner = config.owner || 'the owner';
-    const facts = `The session (the 5-hour window) is at ${pct(f.used)} and renews at ${clock(window)} (in ${f.minutes} min): at this pace about ${pct(f.left)} of it would go unused (the crew pauses at ${pct(f.limit)}). Spending all (up to ${f.all.runs} run(s) at once, pausing at ${pct(SPEND_TO)}) would leave about ${pct(f.all.left)}.`;
+    const facts = `The session (the 5-hour window)${named} is at ${pct(f.used)} and renews at ${clock(window)} (in ${f.minutes} min): at this pace about ${pct(f.left)} of it would go unused (the crew pauses at ${pct(f.limit)}). Spending all (up to ${f.all.runs} run(s) at once, pausing at ${pct(SPEND_TO)}) would leave about ${pct(f.all.left)}.`;
     if (away) {
       data.boost = { until: window, by: 'away', at: iso(at), from: session.configured.mode };
       delete data.offer;
       data.warned = window;
       done.boosted = true;
-      note('away', { session_boost: [null, window] });
+      note('away', { session_boost: [null, window], ...(named ? { account: account.id } : {}) });
       report('session_spare', `${facts} ${owner} is away, so Chiefmate put the session in "Spend all" until ${clock(window)}, the safety margin included; after the renewal it goes back to ${sessionWords(session.configured)} by itself. Tell ${owner} in your summary when they are back.`, { config });
     } else if (data.warned !== window) {
       data.offer = { window, at: iso(at) };
@@ -248,6 +286,11 @@ export function checkSpending({ config = loadConfig(), usage = readUsage(), at =
   return { ...done, forecast: f };
 }
 
+/** Every minute: checkSpending for each account, each with its own usage, samples, boost and offer. */
+export function checkAllSpending({ config = loadConfig(), at = Date.now(), runs = listRuns(), items = null } = {}) {
+  return listAccounts(config).map(account => ({ account: account.id, ...checkSpending({ config, account, at, runs, items }) }));
+}
+
 /**
  * Changes the session (the app's Usage section, "cli.mjs autopilot --session"): any of { mode ("save", "normal",
  * "all"), parallel (1 to 4), pause (a share from 0.05 to 1, or null/"off": only the safety margin) }, saved in
@@ -255,7 +298,10 @@ export function checkSpending({ config = loadConfig(), usage = readUsage(), at =
  * all until the window renews, { boost: false } ends it now; { dismiss: true } is "not now" until the renewal. The
  * owner's own settings end a boost. Each change is kept with who made it ("by"). Returns sessionNow().
  */
-export function changeSession(body = {}, { config = loadConfig(), by = 'owner', save = saveConfig, file = spendingFile(), usage = readUsage(), at = Date.now(), note = noteChange } = {}) {
+export function changeSession(body = {}, { config = loadConfig(), account = findAccount(config, body.account), by = 'owner', save = saveConfig, file = spendingFile(account), usage = readUsage(account), at = Date.now(), note = noteChange } = {}) {
+  if (account.missing) throw new Error(t('Unknown Claude account: {id}', { id: account.id }));
+  // an account listed in "accounts" keeps its own session settings in its entry; with no list, the general ones
+  const entry = accountEntry(config, account);
   const data = readSpending(file);
   const before = JSON.stringify(data);
   const window = current(usage.five_hour, at) ? usage.five_hour.resets ?? null : null;
@@ -276,17 +322,20 @@ export function changeSession(body = {}, { config = loadConfig(), by = 'owner', 
     if (!off && (body.pause === '' || !Number.isFinite(n) || n < 0.05 || n > 1)) throw new Error(t('The session pause is a share from 0.05 to 1, such as 0.85, or off.'));
     pause = off ? null : n;
   }
-  const changes = {};
+  const changes = entry && manyAccounts(config) ? { account: account.id } : {};
   let dirty = false;
-  if (parallel !== undefined && parallel !== configuredParallel(config)) {
-    changes.max_parallel = [configuredParallel(config), parallel];
-    config.max_parallel = parallel;
+  if (parallel !== undefined && parallel !== configuredParallel(config, account)) {
+    changes.max_parallel = [configuredParallel(config, account), parallel];
+    if (entry) entry.max_parallel = parallel;
+    else config.max_parallel = parallel;
     dirty = true;
   }
   // saved as given (off is null), even when it pauses where it did: "save" shows no early pause
-  if (pause !== undefined && config.limits?.pause_at_5h_window !== pause) {
-    if (pause !== configuredPause(config)) changes.pause_at_5h_window = [configuredPause(config), pause];
-    config.limits = { ...config.limits, pause_at_5h_window: pause };
+  const savedPause = entry ? entry.pause_at_5h_window : config.limits?.pause_at_5h_window;
+  if (pause !== undefined && savedPause !== pause) {
+    if (pause !== configuredPause(config, account)) changes.pause_at_5h_window = [configuredPause(config, account), pause];
+    if (entry) entry.pause_at_5h_window = pause;
+    else config.limits = { ...config.limits, pause_at_5h_window: pause };
     dirty = true;
   }
   const ending = () => {
@@ -299,7 +348,7 @@ export function changeSession(body = {}, { config = loadConfig(), by = 'owner', 
   if (body.boost === true) {
     if (!window) throw new Error(t('The session is not measured yet: there is no renewal to spend until.'));
     if (!activeBoost(data, at)) {
-      data.boost = { until: window, by, at: iso(at), from: sessionMode(configuredParallel(config), configuredPause(config)) };
+      data.boost = { until: window, by, at: iso(at), from: sessionMode(configuredParallel(config, account), configuredPause(config, account)) };
       changes.session_boost = [null, window];
     }
     delete data.offer;
@@ -311,28 +360,57 @@ export function changeSession(body = {}, { config = loadConfig(), by = 'owner', 
   }
   if (dirty) save(config);
   if (JSON.stringify(data) !== before) writeJson(file, data);
-  if (Object.keys(changes).length) note(by, changes);
-  return sessionNow(config, data, at);
+  if (Object.keys(changes).some(k => k !== 'account')) note(by, changes);
+  return sessionNow(config, data, at, account);
 }
 
 /** For the app's Usage section: the session now, its modes, the estimate and the offer standing, if any. */
-export function spendingStatus(config = loadConfig(), { usage = readUsage(), runs = listRuns(), items = null, data = readSpending(), at = Date.now() } = {}) {
-  const session = sessionNow(config, data, at);
-  const running = runs.filter(r => r.status === 'running').length;
-  const week = weekHolds(config, usage, at);
-  const f = forecast({ usage, samples: data.samples, session, running, capacity: week ? 0 : projectsWithWork(config, runs, items), runPace: data.run_pace ?? null, at });
+export function spendingStatus(config = loadConfig(), { account = defaultAccount(config), usage = readUsage(account), runs = listRuns(), items = null, data = readSpending(spendingFile(account)), at = Date.now() } = {}) {
+  const many = manyAccounts(config);
+  const mine = many ? runs.filter(r => projectAccount(config, r.project).id === account.id) : runs;
+  const session = sessionNow(config, data, at, account);
+  const running = mine.filter(r => r.status === 'running').length;
+  const week = weekHolds(config, usage, at, account);
+  const f = forecast({ usage, samples: data.samples, session, running, capacity: week ? 0 : projectsWithWork(config, mine, items, undefined, undefined, many ? account : null), runPace: data.run_pace ?? null, at });
   return {
+    account: { id: account.id, name: account.name, default: !!account.default },
     session, modes: SESSION_MODES, safety: SAFETY, spend_to: SPEND_TO, max: MAX_AT_ONCE, week_holds: week,
     forecast: f && { used: f.used, resets: f.resets, minutes: f.minutes, pace: f.pace, left: f.left, all: f.all, near: f.near, worth: f.worth },
-    offer: week ? null : offerNow(data, session, f),
+    offer: week ? null : (o => (o && many ? { ...o, account: account.id, accountName: account.name } : o))(offerNow(data, session, f)),
   };
 }
 
+/**
+ * The accounts' panel in Usage: for each account, its usage (the 5-hour window and the week, with their renewals), its
+ * session (mode, runs at once, pause, boost), the estimate of what will be left, the offer standing, its week pause
+ * and its projects. With one account, a list of one.
+ */
+export function accountsStatus(config = loadConfig(), { runs = listRuns(), items = null, at = Date.now() } = {}) {
+  return listAccounts(config).map(account => {
+    const usage = readUsage(account);
+    const status = spendingStatus(config, { account, usage, runs, items, at });
+    const limits = effectiveLimits(config, undefined, at, account);
+    return {
+      id: account.id, name: account.name, default: !!account.default, own: !!account.configDir,
+      projects: Object.keys(config.projects ?? {}).filter(id => projectAccount(config, id).id === account.id),
+      usage: { five_hour: usage.five_hour ?? null, seven_day: usage.seven_day ?? null, updated: usage.updated ?? null, status: usage.status ?? null },
+      week_pause: limits.pause_at_plan_week ?? null,
+      running: (manyAccounts(config) ? runs.filter(r => projectAccount(config, r.project).id === account.id) : runs).filter(r => r.status === 'running').length,
+      ...status,
+    };
+  });
+}
+
 /** The session's line for the manager's situation and "cli.mjs autopilot": its mode, a boost and the estimate. */
-export function sessionLine(config = loadConfig(), { usage = readUsage(), runs = listRuns(), items = null, data = readSpending(), at = Date.now() } = {}) {
+export function sessionLine(config = loadConfig(), { account, usage, runs = listRuns(), items = null, data, at = Date.now() } = {}) {
+  // several accounts: one line each, named (each account's session is its own)
+  if (!account && manyAccounts(config)) return listAccounts(config).map(a => sessionLine(config, { account: a, runs, items, at })).join('\n');
+  account ??= defaultAccount(config);
+  usage ??= readUsage(account);
+  data ??= readSpending(spendingFile(account));
   const owner = config.owner || 'the owner';
-  const s = sessionNow(config, data, at);
-  const status = spendingStatus(config, { usage, runs, items, data, at });
+  const s = sessionNow(config, data, at, account);
+  const status = spendingStatus(config, { account, usage, runs, items, data, at });
   const f = status.forecast;
   const mode = s.boost
     ? `"all" until it renews at ${clock(s.boost.until)} (${s.boost.by === 'away' ? `set by Chiefmate while ${owner} was away` : `${owner}'s choice`}): ${s.parallel} run(s) at a time, pausing at ${pct(s.limit)}; then back to ${sessionWords(s.configured)}`
@@ -343,7 +421,8 @@ export function sessionLine(config = loadConfig(), { usage = readUsage(), runs =
     ? `Estimated: at ${pct(f.used)}${f.pace != null ? `, spending ${pct(f.pace)} an hour over the last hour,` : ''} with ${f.minutes} min to its renewal at ${clock(f.resets)}, about ${pct(f.left)} of it will be left unused; ${all}.`
     : 'Estimated: not measured yet (the next run reports it).';
   const offer = status.offer ? ` Spending all until ${clock(status.offer.until)} was offered to ${owner} in the app; they haven't answered.` : '';
-  return `Session (the 5-hour window): ${mode}. ${estimate}${offer}`;
+  const whose = manyAccounts(config) ? ` of the Claude account ${accountLabel(account)}` : '';
+  return `Session (the 5-hour window)${whose}: ${mode}. ${estimate}${offer}`;
 }
 
 let checking = false;
@@ -352,7 +431,7 @@ export function startSpending() {
     if (checking) return;
     checking = true;
     try {
-      checkSpending();
+      checkAllSpending();
     } catch (error) {
       console.error('Spending:', error.message);
     } finally {

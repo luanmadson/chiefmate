@@ -1737,7 +1737,9 @@ function attnNotice(i, brief = false) {
     : r ? needsButtons({ ...r, project: i.project }, ' small')
     : decide ? `<a class="button small" href="#decisions">${esc(t('Decide'))}</a>`
     // the session renewing with usage to spare (src/spending.mjs): spend all until then, or not now
-    : i.kind === 'spare' ? `<button type="button" class="button small" data-session-boost="on">${esc(t('Spend all until {time}', { time: clockTime(i.until) }))}</button><button type="button" class="button secondary small" data-spending-dismiss>${esc(t('Not now'))}</button>`
+    : i.kind === 'spare' ? `<button type="button" class="button small" data-session-boost="on"${i.account ? ` data-account="${esc(i.account)}"` : ''}>${esc(t('Spend all until {time}', { time: clockTime(i.until) }))}</button><button type="button" class="button secondary small" data-spending-dismiss${i.account ? ` data-account="${esc(i.account)}"` : ''}>${esc(t('Not now'))}</button>`
+    // an account no one signed in to yet (src/claude.mjs): its sign-in window
+    : i.kind === 'login' && i.account ? `<button type="button" class="button small" data-account-login="${esc(i.account)}">${esc(t('Sign in'))}</button>`
     : `${i.kind === 'reader-login' ? `<button type="button" class="button small" data-reader="login">${esc(t('Open the sign-in window'))}</button>` : ''}${currentView() === i.view ? '' : `<a class="button secondary small" ${open}>${esc(t('Open'))}</a>`}${i.seenable && !i.seen ? `<button type="button" class="button secondary small" data-attn-seen="${esc(i.id)}">${esc(t('Mark as seen'))}</button>` : ''}`;
   return `<div class="attn" data-level="${i.level}"${i.seen ? ' data-seen' : ''}>
       <span class="attn-level"><span class="attn-mark" data-level="${i.level}" aria-hidden="true"></span>${esc(i.seen ? t('Seen') : levelName(i.level))}</span>
@@ -3511,19 +3513,60 @@ async function refreshDetail(force = false) {
 
 // ---------- Usage ----------
 
+/**
+ * The Claude accounts (src/accounts.mjs), side by side, when the settings list more than one: each with its 5-hour
+ * window and week in colored bars, when each renews, what the session will leave unused, its mode (its own buttons),
+ * its runs going on, its projects, its free resets and its sign-in.
+ */
+function accountsPanel() {
+  const list = state.accounts ?? [];
+  const names = new Map((state.projects ?? []).map(p => [p.id, p.name || p.id]));
+  const renews = w => (w?.resets ? t('renews {when} ({relative})', { when: shortDate(w.resets), relative: relative(w.resets) }) : t('not measured yet'));
+  const card = a => {
+    const u = a.usage ?? {};
+    const f = a.forecast;
+    const s = a.session ?? {};
+    const mode = s.boost ? t('Spend all until {time}', { time: clockTime(s.boost.until) }) : s.configured?.mode === 'custom' ? t('Custom') : SESSION_MODES().find(m => m[0] === s.mode)?.[1] ?? s.mode;
+    const spare = f ? t('About {left} of the window left unused at the renewal, at this pace.', { left: percent(f.left) }) : '';
+    const login = a.login ?? {};
+    const signIn = login.signedOut || login.warning
+      ? `<button type="button" class="button small" data-account-login="${esc(a.id)}">${esc(login.signedOut ? t('Sign in') : t('Renew the sign-in'))}</button>`
+      : '';
+    const loginLine = login.signedOut ? t('Not signed in yet') : login.expires ? t('Signed in until {when}', { when: shortDate(login.expires) }) : login.checked ? t('Sign-in not read') : '';
+    const resets = (state.plan?.resets ?? []).filter(g => g.available && (g.account ?? list.find(x => x.default)?.id) === a.id);
+    const tabs = SESSION_MODES().map(([key, label, about]) =>
+      `<button type="button" class="tab${key === s.configured?.mode ? ' active' : ''}" aria-pressed="${key === s.configured?.mode}" data-session-mode="${key}" data-account="${esc(a.id)}" title="${esc(about)}">${esc(label)}</button>`).join('');
+    return `<div class="account-card">
+      <div class="account-head"><strong>${esc(a.name)}</strong>${a.default ? `<span class="tag">${esc(t('default'))}</span>` : ''}<span class="hint">${esc(loginLine)}</span>${signIn}</div>
+      ${meter(t('5-hour window'), u.five_hour?.used, percent(u.five_hour?.used), esc([renews(u.five_hour), spare].filter(Boolean).join(' · ')))}
+      ${meter(t("Plan's week"), u.seven_day?.used, percent(u.seven_day?.used), esc([renews(u.seven_day), a.week_pause ? t('the crew pauses at {pause}', { pause: percent(a.week_pause) }) : ''].filter(Boolean).join(' · ')))}
+      <div class="tabs autopilot-modes" role="group" aria-label="${esc(t('Session mode'))}">${tabs}</div>
+      <div class="hint">${esc(t('{mode}: {count} run(s) at a time, pausing at {pause}. Running now: {running}.', { mode, count: s.parallel ?? '—', pause: percent(s.limit), running: a.running ?? 0 }))}</div>
+      <div class="hint">${esc(t('Projects: {list}', { list: (a.projects ?? []).map(id => names.get(id) ?? id).join(', ') || t('none') }))}</div>
+      ${resets.length ? `<div class="hint">${esc(t('Free resets: {count}, the first until {when}', { count: resets.length, when: resets[0].expires ? shortDate(resets[0].expires) : '—' }))}</div>` : ''}
+    </div>`;
+  };
+  return `<div class="panel accounts-panel">
+      <div class="label">${esc(t('Your Claude accounts'))}</div>
+      <p class="hint">${esc(t('Each project works only on its own account: one account running out holds only its projects. Which account a project uses is set in the settings ("account"), never changed by Chiefmate.'))}</p>
+      <div class="accounts">${list.map(card).join('')}</div>
+    </div>`;
+}
+
 function drawUsage() {
   const { limits: l, account: u } = state.usage;
   const resets = w => (w?.resets ? t('Resets {when} ({relative}).', { when: shortDate(w.resets), relative: relative(w.resets) }) : '');
   const measured = u.updated
     ? t('Measured {when}, from what Claude Code reports on every run.', { when: shortDate(u.updated) })
     : t('Measured on the next agent run, from what Claude Code reports.');
-  const html = `<div class="usage-grid">
-    <div class="panel">
+  const many = (state.accounts ?? []).length > 1;
+  const html = `${many ? accountsPanel() : ''}<div class="usage-grid">
+    ${many ? '' : `<div class="panel">
       <div class="label">${esc(t('Your Claude account'))}</div>
       ${meter(t('5-hour window'), u.five_hour?.used, percent(u.five_hour?.used), esc(resets(u.five_hour)))}
       ${meter(t("Plan's week"), u.seven_day?.used, percent(u.seven_day?.used), esc(resets(u.seven_day)))}
       <div class="hint">${esc(measured)}</div>
-    </div>
+    </div>`}
     <div class="panel">
       <div class="label">${esc(t('How Chiefmate looks after your plan'))}</div>
       <p class="hint">${esc(t("Before every step, Chiefmate checks the current limits: {window} of the session (its mode, below) and {week} of the plan's week. A run paused by these limits returns to the queue after the reset or when you raise the limit enough for the current usage.", { window: percent(state.spending?.session?.limit ?? 0.85), week: l.pause_at_plan_week ? percent(l.pause_at_plan_week) : t('none') }))}</p>
@@ -6377,7 +6420,7 @@ document.addEventListener('click', event => {
 });
 
 document.addEventListener('click', async event => {
-  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-autopilot-mode],[data-session-mode],[data-session-boost],[data-spending-dismiss],[data-needs-done],[data-needs-session],[data-call-open],[data-call-answer],[data-call-later],[data-calls-more],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-work-now],[data-work-open],[data-work-release],[data-project-manager],[data-browser-focus],[data-browser-close]');
+  const target = event.target.closest('[data-run],[data-assign],[data-select],[data-cancel],[data-resume],[data-merge],[data-suggestion],[data-stop],[data-expand],[data-reset-used],[data-reset-remove],[data-reader],[data-autopilot],[data-autopilot-mode],[data-session-mode],[data-session-boost],[data-spending-dismiss],[data-account-login],[data-needs-done],[data-needs-session],[data-call-open],[data-call-answer],[data-call-later],[data-calls-more],[data-attn-seen],[data-attn-more],[data-attn-archived],[data-context],[data-prompts-sync],[data-session-open],[data-session-end],[data-project-open],[data-project-dev],[data-project-planning],[data-project-task],[data-project-live],[data-charge-open],[data-work-now],[data-work-open],[data-work-release],[data-project-manager],[data-browser-focus],[data-browser-close]');
   if (!target) return;
   // A project's name inside a row that opens on a click (Projects) goes to its page, and nothing else.
   if (event.target.closest('a.project-link') && !target.matches('a')) return;
@@ -6600,16 +6643,20 @@ document.addEventListener('click', async event => {
       toast(on ? t('Autopilot turned on.') : t('Autopilot turned off.'));
     } else if (target.dataset.autopilotMode) {
       await setAutopilotMode(target.dataset.autopilotMode);
+    } else if (target.dataset.accountLogin) {
+      // the sign-in window of a Claude account (cli.mjs account-login), on this computer
+      await api('/api/accounts', { login: target.dataset.accountLogin });
+      toast(t('A window opened to sign in to this account: follow it in the browser. The app notices the sign-in in a few minutes.'));
     } else if (target.dataset.sessionMode) {
-      // the session's shortcuts fill both settings (src/spending.mjs)
-      await api('/api/spending', { mode: target.dataset.sessionMode });
+      // the session's shortcuts fill both settings (src/spending.mjs), of one account when the button names it
+      await api('/api/spending', { mode: target.dataset.sessionMode, ...(target.dataset.account ? { account: target.dataset.account } : {}) });
       toast(t('Session mode: {mode}.', { mode: SESSION_MODES().find(m => m[0] === target.dataset.sessionMode)?.[1] ?? target.dataset.sessionMode }));
     } else if (target.dataset.sessionBoost) {
       const on = target.dataset.sessionBoost === 'on';
-      await api('/api/spending', { boost: on });
+      await api('/api/spending', { boost: on, ...(target.dataset.account ? { account: target.dataset.account } : {}) });
       toast(on ? t('Spending all until the session renews; then your mode holds again.') : t('Back to your mode now.'));
     } else if (target.hasAttribute('data-spending-dismiss')) {
-      await api('/api/spending', { dismiss: true });
+      await api('/api/spending', { dismiss: true, ...(target.dataset.account ? { account: target.dataset.account } : {}) });
       toast(t('Not now: no more offers until the session renews.'));
     } else if (target.dataset.reader) {
       const action = target.dataset.reader;
