@@ -166,6 +166,50 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .attn-band .attn { padding-left: 28px; padding-right: 28px; }
 .attn-band > .attn:first-child { padding-top: 9px; padding-bottom: 9px; }
 .attn-more { display: flex; justify-content: flex-end; gap: 8px; padding: 6px 28px; }
+/* The call bar (callsBar in ui/app.js): a step of the crew calls you, on every page, above the band. The urgent red,
+   tinted, with its mark pulsing; the agent's face, who and where, what it needs, its wait and the buttons. */
+.call-bar { background: var(--panel); border-bottom: 1px solid var(--line); }
+.call { display: grid; grid-template-columns: 120px 30px minmax(0, 1fr) auto; align-items: start; gap: 4px 14px; padding: 10px 28px 10px 24px; background: var(--urgent-bg); border-left: 4px solid var(--urgent); border-bottom: 1px solid var(--line); color: var(--strong); }
+.call:last-child { border-bottom: 0; }
+.call-level { display: inline-flex; align-items: center; gap: 7px; padding-top: 6px; color: var(--urgent); font-weight: 700; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; white-space: nowrap; }
+.call-face { display: block; padding-top: 1px; }
+.call-face .face { width: 30px; height: 30px; }
+.call-body { min-width: 0; display: grid; gap: 1px; }
+.call-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; min-width: 0; }
+.call-who { font-weight: 600; }
+.call-where { min-width: 0; color: var(--text); font-size: 12.5px; overflow-wrap: anywhere; }
+.call-what { overflow-wrap: anywhere; }
+.call-meta { color: var(--muted); font-size: 12px; }
+.call-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; max-width: 420px; padding-top: 2px; }
+.call-actions .button[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
+.call-answer { display: grid; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255, 92, 82, 0.25); }
+.call-answer .reply { margin-top: 0; }
+.call-stack { appearance: none; display: flex; align-items: center; gap: 14px; width: 100%; min-height: 34px; padding: 6px 28px 6px 24px; background: transparent; border: 0; border-left: 4px solid var(--urgent); color: var(--text); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer; }
+.call-stack:hover, .call-stack:focus-visible { background: var(--hover); }
+.call-others { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.call-toggle { flex: none; margin-left: auto; color: var(--accent); }
+.call-stack[aria-expanded="true"] .call-toggle::after { content: " ▴"; }
+.call-stack[aria-expanded="false"] .call-toggle::after { content: " ▾"; }
+/* The Calls panel (Crew): the longest wait, this browser's notification and sound, the on-call */
+.calls-panel .facts { grid-template-columns: 220px minmax(0, 1fr); align-items: center; }
+.calls-panel select { width: auto; margin: 0; }
+/* Phones: the mark and "Calling you" on a line of their own, the face beside who and what, the buttons in one row of
+   44 px under them; what it needs in three lines at most until "Answer here" opens */
+@media (max-width: 600px) {
+  .call-bar { max-height: 60dvh; overflow-y: auto; }
+  .call { grid-template-columns: 30px minmax(0, 1fr); gap: 6px 10px; padding: 8px max(12px, env(safe-area-inset-right)) 10px max(10px, env(safe-area-inset-left)); border-left-width: 3px; }
+  .call-level { grid-column: 1 / -1; padding-top: 0; }
+  .call:not(:has(.call-answer)) .call-what { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+  .call-where, .call-meta { font-size: 13px; }
+  .call-actions { grid-column: 1 / -1; max-width: none; justify-content: stretch; gap: 6px; }
+  .call-actions .button { flex: 1 1 auto; min-height: 44px; padding: 0 8px; }
+  .call-answer .request-options .button { min-height: 44px; }
+  .call-stack { min-height: 44px; padding: 6px max(12px, env(safe-area-inset-right)) 6px max(10px, env(safe-area-inset-left)); border-left-width: 3px; font-size: 13px; }
+  /* The Calls panel: each setting's name above its value */
+  .calls-panel .facts { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
+  .calls-panel .facts dd { margin-bottom: 10px; }
+  .calls-panel .facts .button { min-height: 40px; }
+}
 .attn-list { margin-bottom: 18px; border: 1px solid var(--line); background: var(--panel); }
 .attn-list .attn:last-child { border-bottom: 0; }
 .attn-head { display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--line); }
@@ -1231,7 +1275,7 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   /* With the keyboard open, the bottom bar, the status bar (unless the connection is lost) and the notices step aside; in a
      conversation, so do the title bar, the headers and the decisions: its last messages and the field take the whole visible
      area, Send always beside the field */
-  html.typing .nav, html.typing .alerts, html.typing .suggestions, html.typing .statusbar:not(.offline) { display: none; }
+  html.typing .nav, html.typing .alerts:not(:has(.call-bar :focus)), html.typing .suggestions, html.typing .statusbar:not(.offline) { display: none; }
   html.typing-chat .app-header, html.typing-chat .view-header, html.typing-chat .focus-bar, html.typing-chat #session-page,
   html.typing-chat #view-project > :not(#project-live):not(#project-charge):not(#project-manager), html.typing-chat #project-live-list, html.typing-chat .live-head,
   html.typing-chat #project-charge-top, html.typing-chat #project-manager > .hint { display: none; }
@@ -1404,6 +1448,9 @@ html.chat-focus .app { grid-template: "content" minmax(0, 1fr) / minmax(0, 1fr);
 html.chat-focus .app-header, html.chat-focus .nav, html.chat-focus .alerts, html.chat-focus .statusbar, html.chat-focus #view-manager .view-header { display: none; }
 html.chat-focus #view-manager { padding: 0; }
 html.chat-focus .alerts:has(.lockdown-band) { display: block; position: fixed; top: 0; left: 0; right: 0; z-index: 40; }
+/* A call reaches focus mode too: its bar above the conversation's line */
+html.chat-focus .app:has(.call-bar) { grid-template: "alerts" auto "content" minmax(0, 1fr) / minmax(0, 1fr); }
+html.chat-focus .alerts:has(.call-bar):not(:has(.lockdown-band)) { display: block; }
 html.chat-focus .focus-bar {
   display: flex; align-items: center; gap: 14px; flex: none; min-height: 44px; padding: 4px 16px;
   padding-top: max(4px, env(safe-area-inset-top)); background: var(--panel); border-bottom: 1px solid var(--line);

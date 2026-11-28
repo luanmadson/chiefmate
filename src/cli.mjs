@@ -284,7 +284,9 @@ const HELP = `Chiefmate: a command center for AI agents
                                                 changed since each member's last run. --short leaves the texts out
   node src/cli.mjs needs-you "<what to do>" [--url <address>] [--wait] [--check "<command>"] [--id <request>]
                                                 for a step of a run: asks the owner to act and, with --wait, waits
-                                                until they click "I did it" (or the check command succeeds)
+                                                until they click "I did it" (or the check command succeeds), at most
+                                                needs_you.max_wait_minutes (30 by default), not at all in away mode or
+                                                once the owner clicks "Not now"
   node src/cli.mjs needs-you "<question>" --options "A|B" [--recommend A] [--why "<one sentence>"]
                                                 for a step of a run: asks the owner to choose, one button per option
                                                 (the recommended one marked) and a field to write, and waits for the
@@ -361,7 +363,7 @@ async function needsYou() {
     if (s.status === 'done') {
       // The option chosen and/or what the owner wrote (an explanation, or an answer of their own instead of an option).
       if (s.answer && s.note) console.log(`The owner answered you from the app:\n${s.answer}\n\nAnd wrote:\n${s.note}\n\nTake the answer into account and go on.`);
-      else if (s.note) console.log(`The owner answered you from the app in their own words (none of the options):\n${s.note}\n\nTake the answer into account and go on.`);
+      else if (s.note) console.log(`The owner answered you from the app${s.question ? ' in their own words (none of the options)' : ''}:\n${s.note}\n\nTake the answer into account and go on.`);
       else if (s.answer) console.log(`The owner answered you from the app:\n${s.answer}\n\nTake the answer into account and go on.`);
       else if (s.ownerSaid) console.log(`Done: the owner told the manager in their conversation: "${s.ownerSaid}". Take it into account and go on.`);
       else console.log(s.by === 'check' ? 'Done: the check succeeded.' : 'Done: the owner says they did it. Go on.');
@@ -377,8 +379,12 @@ async function needsYou() {
       process.exitCode = 2;
       return;
     }
-    if (s.timedOut) {
-      console.log(`No answer within ${s.maxWaitMinutes} min. The request stays open until the run ends. Finish what you can and say in your report what is left for the owner.`);
+    // The wait ended without an answer (src/needs.mjs): the step goes on with what it can, the request stays open.
+    const goOn = "Your request stays open until the run ends. Go on with what you can without it, don't decide for the owner what you asked them, and say in your report what is left for the owner.";
+    if (s.later || s.away || s.timedOut) {
+      if (s.later) console.log(`The owner can't see to it now ("Not now" in the app): stop waiting. ${goOn}`);
+      else if (s.away) console.log(`The owner is away (away mode): Chiefmate doesn't wait for them. ${goOn}`);
+      else console.log(`No answer within ${s.maxWaitMinutes} min. ${goOn}`);
       process.exitCode = 2;
       return;
     }
@@ -1516,7 +1522,8 @@ async function main() {
       if (action === 'list') {
         const { calls } = await api('/api/calls', { action: 'list' });
         if (!calls.length) console.log('No open call to the owner.');
-        for (const c of calls) console.log(`${c.run} ${c.id}  ${c.at.slice(0, 16).replace('T', ' ')}  ${c.project}: ${c.title}${c.parked ? ' [parked]' : ''}${c.wait ? '' : ' [the step goes on]'}\n    ${c.options ? `${c.what} (options: ${c.options.join(' | ')})` : c.what}`);
+        const mark = c => (c.parked ? ' [parked]' : c.deferred ? ' [left for later by the owner; the step goes on]' : c.waiting ? '' : ' [the step goes on]');
+        for (const c of calls) console.log(`${c.run} ${c.id}  ${c.at.slice(0, 16).replace('T', ' ')}  ${c.project}: ${c.title}${mark(c)}\n    ${c.options ? `${c.what} (options: ${c.options.join(' | ')})` : c.what}`);
         return;
       }
       if (!run) throw new Error('Which run? node src/cli.mjs calls done|park <run> [<request>]');

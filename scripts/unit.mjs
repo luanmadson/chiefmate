@@ -50,6 +50,7 @@ import { compose, Dictation, nextState, recognizer, transcript } from '../ui/voi
 import './away-ui.test.mjs';
 import { AFAR_VERSION, offered, ONLY_ON_PC } from '../ui/afar.js';
 import { asksHtml, asksLayout, GROUP_FROM, keepFolds, newFolds, toggleFold } from '../ui/asks.js';
+import { announce, blinkTitle, callsLayout, callsOf, chime, keepChoice, NOTIFY_KEY, notifyCalls, notifyOn, notifyState, SOUND_KEY, soundOn, waitLine } from '../ui/calls.js';
 import { devLog, startDev } from '../src/projects.mjs';
 import { connectionOwner, fromAfar, fromServe, isTailscaleService, ownAddresses, ownerOnly, remoteRefusal, tailnetSource } from '../src/server.mjs';
 import { forAgent, isOwner, openAppWindow, OWNER_HEADER, ownerHeaders, ownerKey, pairingCode, redeemCode } from '../src/owner.mjs';
@@ -1064,6 +1065,99 @@ test("A process's start, as Windows PowerShell writes it", () => {
   assert.equal(startedAt({ value: '/Date(0)/' }), new Date(0).toISOString());
   assert.equal(startedAt(null), null);
   assert.equal(startedAt('nonsense'), null);
+});
+
+// ---------- The crew's calls (ui/calls.js): the call bar's order and words, the announcements, sound and notification ----------
+
+test('the call bar: the calls that hold their step first, oldest first; those left for later and the sessions out', () => {
+  const needs = [
+    { id: 'a', run: 'r1', at: '2026-11-27T10:05:00Z', waiting: false },
+    { id: 'b', run: 'r2', at: '2026-11-27T10:09:00Z', waiting: true },
+    { id: 'c', run: 'r3', at: '2026-11-27T10:01:00Z', waiting: true },
+    { id: 'd', run: 'r4', at: '2026-11-27T10:00:00Z', deferred: '2026-11-27T10:02:00Z' },
+    { id: 'e', session: 's1', at: '2026-11-27T10:00:00Z', kind: 'permission' },
+  ];
+  assert.deepEqual(callsOf(needs).map(c => c.id), ['c', 'b', 'a']);
+  assert.deepEqual(callsOf(null), []);
+  const calls = callsOf(needs);
+  assert.deepEqual(callsLayout(calls, false), { count: 3, shown: [calls[0]], more: 2 }, 'closed: the first call and how many more');
+  assert.deepEqual(callsLayout(calls, true), { count: 3, shown: calls, more: 0 }, 'open: every call');
+  const t = (text, values = {}) => text.replace(/\{(\w+)\}/g, (_, k) => values[k]);
+  const words = c => waitLine(c, { t, clockTime: iso => iso.slice(11, 16) });
+  assert.equal(words({ waiting: true, until: '2026-11-27T10:31:00Z', wait: true }), 'Waiting for you until 10:31');
+  assert.equal(words({ parked: true, wait: true }), 'Parked: it resumes once you answer');
+  assert.equal(words({ wait: true, waitEnded: { why: 'away' } }), 'You were away: it went on with what it can');
+  assert.equal(words({ wait: true, waitEnded: { why: 'timeout' } }), 'No answer in time: it went on with what it can');
+  assert.equal(words({ wait: false }), 'It went on meanwhile', 'a request that never waited');
+});
+
+test('a new call is announced once; the calls on screen when the app opens are not', () => {
+  const one = { id: 'a', run: 'r1' };
+  const two = { id: 'b', run: 'r2' };
+  const first = announce([one], null);
+  assert.deepEqual(first.fresh, [], 'the first reading only remembers');
+  const second = announce([one, two], first.known);
+  assert.deepEqual(second.fresh, [two]);
+  assert.deepEqual(announce([one, two], second.known).fresh, [], 'never twice');
+  const gone = announce([two], second.known);
+  assert.deepEqual([...gone.known], ['r2:b'], 'a call answered is forgotten');
+  assert.deepEqual(announce([one, two], gone.known).fresh, [one], 'and announced again if it comes back');
+  assert.equal(blinkTitle('!! Needs you · Chiefmate', 'Calling you: Ana', true), '!! Calling you: Ana');
+  assert.equal(blinkTitle('!! Needs you · Chiefmate', 'Calling you: Ana', false), '!! Needs you · Chiefmate');
+  assert.equal(blinkTitle('Chiefmate', '', true), 'Chiefmate', 'nothing to blink');
+});
+
+test("the calls' sound and notification: each browser's own choices, the permission and the service worker", async () => {
+  const kept = new Map();
+  const storage = { getItem: k => kept.get(k) ?? null, setItem: (k, v) => kept.set(k, v) };
+  assert.equal(soundOn(storage), false, 'the sound is off until turned on');
+  assert.ok(keepChoice(storage, SOUND_KEY, true) && soundOn(storage));
+  assert.equal(notifyOn(storage), true, 'the notification is on once allowed');
+  keepChoice(storage, NOTIFY_KEY, false);
+  assert.equal(notifyOn(storage), false);
+  const broken = { getItem: () => { throw new Error('no storage'); }, setItem: () => { throw new Error('no storage'); } };
+  assert.equal(soundOn(broken), false);
+  assert.equal(keepChoice(broken, SOUND_KEY, true), false);
+  const browser = permission => ({ permission });
+  assert.equal(notifyState({ Notification: browser('granted'), here: true, storage }), 'windows', 'on this computer, Windows notifies');
+  assert.equal(notifyState({ Notification: undefined, here: false, storage }), 'none');
+  assert.equal(notifyState({ Notification: browser('denied'), here: false, storage }), 'blocked');
+  assert.equal(notifyState({ Notification: browser('default'), here: false, storage }), 'ask');
+  assert.equal(notifyState({ Notification: browser('granted'), here: false, storage }), 'off', 'turned off in this browser');
+  keepChoice(storage, NOTIFY_KEY, true);
+  assert.equal(notifyState({ Notification: browser('granted'), here: false, storage }), 'on');
+
+  const shown = [];
+  const registration = { showNotification: async (title, options) => shown.push([title, options.tag, options.body]) };
+  const text = c => ({ title: `${c.id} is calling you`, body: c.what });
+  const more = n => ({ title: 'Calling you', body: `${n} more` });
+  const calls = ['a', 'b', 'c', 'd', 'e'].map(id => ({ id, what: `Do ${id}` }));
+  assert.equal(await notifyCalls(calls.slice(0, 2), { Notification: browser('granted'), registration, text, more }), 2);
+  assert.equal(await notifyCalls(calls, { Notification: browser('granted'), registration, text, more }), 3, 'from four calls on, two and one that counts the rest');
+  assert.deepEqual(shown.at(-1), ['Calling you', 'chiefmate-call-more', '3 more']);
+  assert.equal(await notifyCalls(calls, { Notification: browser('default'), registration, text, more }), 0, 'nothing without the permission');
+  // Without a service worker, the page's own notification; one the browser refuses is skipped.
+  const made = [];
+  const Page = Object.assign(function Page(title) { made.push(title); }, { permission: 'granted' });
+  assert.equal(await notifyCalls(calls.slice(0, 1), { Notification: Page, registration: null, text, more }), 1);
+  const Refusing = Object.assign(function Refusing() { throw new TypeError('Illegal constructor'); }, { permission: 'granted' });
+  assert.equal(await notifyCalls(calls.slice(0, 1), { Notification: Refusing, registration: null, text, more }), 0);
+
+  // The chime: two notes on a running context; a suspended one is resumed, and plays only if it resumes at once.
+  const context = state => {
+    const started = [];
+    const node = () => ({ type: '', frequency: { value: 0 }, gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect: x => x, start: at => started.push(at), stop() {} });
+    return { state, currentTime: 1, destination: {}, createOscillator: node, createGain: node, started, resume() { this.state = 'running'; return Promise.resolve(); } };
+  };
+  const running = context('running');
+  assert.equal(chime(running), true);
+  assert.equal(running.started.length, 2, 'two notes');
+  const suspended = context('suspended');
+  assert.equal(chime(suspended), false);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(suspended.started.length, 2, 'it played once the browser let it');
+  assert.equal(chime(null), false);
+  assert.equal(chime({ state: 'closed' }), false);
 });
 
 // ---------- What a live session asks (ui/asks.js): the compact band, its group and its folds ----------
@@ -2411,7 +2505,9 @@ test("the owner's words for a call: found only in their own messages of the last
   assert.equal(ownerWordsFound('I did it myself', conversation, at), null, "an agent's message is not the owner's");
   assert.equal(ownerWordsFound('old yes', conversation, at), null, 'older than a day');
   assert.equal(ownerWordsFound('"', conversation, at), null, 'no words');
-  assert.deepEqual(needsSettings({}), { maxWaitMinutes: 120, parkAfterMinutes: 15 });
+  assert.deepEqual(needsSettings({}), { maxWaitMinutes: 30, parkAfterMinutes: 15, onCall: false }, 'a step waits 30 minutes at most; the on-call is off');
+  assert.equal(needsSettings({ needs_you: { max_wait_minutes: 120 } }).maxWaitMinutes, 120, 'a longer wait of the settings stays');
+  assert.equal(needsSettings({ needs_you: { on_call: 'yes' } }).onCall, false, 'only true turns the on-call on');
   assert.equal(needsSettings({ needs_you: { park_after_minutes: 0 } }).parkAfterMinutes, 0, '0 turns the away parking off');
   assert.equal(needsSettings({ needs_you: { park_after_minutes: 30 } }).parkAfterMinutes, 30);
 });
