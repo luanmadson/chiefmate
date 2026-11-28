@@ -8,7 +8,7 @@ import { appendFileSync, createWriteStream, existsSync, readFileSync, writeFileS
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
-import { describeAction, describeDoing, environment, executable as claudeExecutable, writtenFile } from './claude.mjs';
+import { describeAction, describeDoing, environment, executable as claudeExecutable, shellCommand, writtenFile } from './claude.mjs';
 import { t } from './i18n.mjs';
 import { clip, DATA, ensureDir, now, ROOT } from './util.mjs';
 
@@ -372,7 +372,8 @@ export function codexEvents(event) {
       return [{ kind: 'done', id: item.id, failed, text: failed ? t('Failed: {command} ({output})', { command: clip(command, 100), output: clip(String(item.aggregated_output ?? '').trim() || `exit ${item.exit_code}`, 160) }) : null }];
     }
     case 'file_change':
-      return done ? (item.changes ?? []).map(c => ({ kind: 'action', tool: c.kind === 'add' ? 'Write' : 'Edit', input: { file_path: c.path } })) : [];
+      // A file deleted is no write: gone at the step's end, it is no quarantine.
+      return done ? (item.changes ?? []).map(c => ({ kind: 'action', tool: { add: 'Write', delete: 'Delete' }[c.kind] ?? 'Edit', input: { file_path: c.path } })) : [];
     case 'web_search':
       return started ? [{ kind: 'action', tool: 'WebSearch', input: { query: item.query } }] : [];
     case 'mcp_tool_call':
@@ -533,7 +534,10 @@ export function runTool(tool, options) {
           break;
         }
         write({ type: 'assistant', message: { content: [{ type: 'tool_use', id: e.id ?? `a${Date.now()}`, name: e.tool, input: e.input }] } });
-        onEvent({ type: 'action', tool: e.tool, text: describeAction(e.tool, e.input, dir), doing: describeDoing(e.tool, e.input, dir), file: writtenFile(e.tool, e.input) });
+        onEvent({
+          type: 'action', tool: e.tool, text: describeAction(e.tool, e.input, dir), doing: describeDoing(e.tool, e.input, dir), file: writtenFile(e.tool, e.input),
+          command: shellCommand(e.tool, e.input),
+        });
         break;
       case 'done':
         // Grok's deny rules refused a command: noted as the guard notes its refusals.

@@ -2069,6 +2069,7 @@
   "{project} is not waiting for a quarantined file.": "{project} não está esperando um arquivo em quarentena.",
   "Paused: a file of its working copy was probably quarantined by the antivirus. It resumes by itself once the file can be read again.": "Pausada: um arquivo da cópia de trabalho provavelmente foi posto em quarentena pelo antivírus. Ela retoma sozinha quando o arquivo puder ser lido de novo.",
   "Probable antivirus quarantine: {path} {state} right after it was written. The project waits for it.": "Provável quarentena do antivírus: {path} {state} logo depois de gravado. O projeto espera por ele.",
+  "Not an antivirus quarantine: Microsoft Defender has no record of {path}": "Não é quarentena do antivírus: o Microsoft Defender não tem registro de {path}",
   "vanished": "sumiu",
   "became unreadable": "ficou ilegível",
   "Parking at a safe point while it waits for you: its project's turn goes to the next run in the queue": "Estacionando num ponto seguro enquanto espera por você: a vez do projeto passa para a próxima execução da fila",

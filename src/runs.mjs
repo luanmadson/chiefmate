@@ -487,6 +487,8 @@ export function updatedTurn(messages, config = loadConfig(), why = 'update', git
 const quarantineLine = lost => t('Probable antivirus quarantine: {path} {state} right after it was written. The project waits for it.', {
   path: lost.file, state: lost.state === 'missing' ? t('vanished') : t('became unreadable'),
 });
+/** The step's log line for a file gone or unreadable that Microsoft Defender has no record of: no hold. */
+const clearedLine = file => t('Not an antivirus quarantine: Microsoft Defender has no record of {path}', { path: file });
 
 /** What a resumed step hears of its pause: the owner's answer to the request it was parked on, or the file restored. */
 export function pauseAbout(run, paused) {
@@ -948,7 +950,8 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     return {};
   }
 
-  // The files the step writes, and the other actions after them: one gone or unreadable at the end is probably the antivirus's.
+  // The files the step writes, and the other actions after them (a shell command in full, not the logbook's clipped
+  // line): one gone or unreadable at the end is probably the antivirus's.
   const writes = [];
   const commands = [];
   let seq = 0;
@@ -977,7 +980,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
       if (event.type === 'action') {
         seq++;
         if (event.file) writes.push({ file: path.resolve(dir, event.file), seq });
-        else commands.push({ text: event.text, seq });
+        else commands.push({ text: event.command ?? event.text, seq });
       }
       followContext(l, event);
       logAction(l, event);
@@ -1097,7 +1100,8 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     saveRun(run);
     return { paused: true };
   };
-  const lost = !waitUntil && !l.cancelRequest && !r.canceled ? await lostFile(writtenSuspects(writes, commands, dir)).catch(() => null) : null;
+  const cleared = file => logAction(l, { type: 'action', text: clearedLine(file) });
+  const lost = !waitUntil && !l.cancelRequest && !r.canceled ? await lostFile(writtenSuspects(writes, commands, dir), { cleared }).catch(() => null) : null;
   if (lost) return quarantined(lost);
   // The final summary at the top of the report is kept apart (step.outcome): the app shows it first, the rest folded.
   const reportLang = finalReview ? project.language || config.language || 'en' : config.language || 'en';
@@ -1121,7 +1125,7 @@ async function runStep({ l, run, step, index, dir, project, config, agents, libr
     // A commit refused over a file the antivirus probably took: the step waits for it, as above.
     let blocked = null;
     await commitPending(dir, noTrace(project) ? run.title : `Chiefmate: ${t(agent.name)} (${run.title})`).catch(async e => {
-      blocked = await quarantinedBy(e, dir).catch(() => null);
+      blocked = await quarantinedBy(e, dir, { cleared }).catch(() => null);
       if (!blocked) step.error = `${step.error ?? ''} Commit: ${e.message}`.trim();
     });
     if (blocked && !waitUntil) return quarantined(blocked);
@@ -1520,7 +1524,7 @@ export async function execute(run) {
       return await pauseForUpdate();
     }
     // A git step that met a file the antivirus probably took: the run waits in the queue instead of failing.
-    const lost = !l.cancelRequest && project ? await quarantinedBy(error, projectDir(run.project)).catch(() => null) : null;
+    const lost = !l.cancelRequest && project ? await quarantinedBy(error, projectDir(run.project), { cleared: file => log(clearedLine(file)) }).catch(() => null) : null;
     if (lost) {
       log(quarantineLine(lost));
       for (const step of stepsOf(run)) if (step.status === 'failed' && step.error === error.message) Object.assign(step, { status: 'pending', ended: null, error: null });
