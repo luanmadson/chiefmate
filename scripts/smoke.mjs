@@ -1227,9 +1227,81 @@ try {
     await settle();
     const told = readPending().find(m => m.from === 'chiefmate');
     const event = told?.events.find(e => e.kind === 'merge_failed');
-    expect(failed?.conflict && failed.message.includes('The manager was told') && event?.text.includes('a conflict with main') && event.text.includes('#7') && event.text.includes('cm/conflict')
-      && composeMessage('Owner', [told]).includes('For the merge_failed events'), `a failed merge of the owner's did not reach the manager at once: ${failed?.message} ${JSON.stringify(told)}`);
+    expect(failed?.conflict && failed.message.includes('Chiefmate queued the fix of the conflict') && event?.text.includes('a conflict with main') && event.text.includes('#7') && event.text.includes('cm/conflict')
+      && event.text.includes('Chiefmate queued its fix at once') && composeMessage('Owner', [told]).includes('For the merge_failed events'), `a failed merge of the owner's did not reach the manager at once: ${failed?.message} ${JSON.stringify(told)}`);
     if (told) removePending(told.id);
+    // The failure stays on the run; its fix was queued once, by Chiefmate, with the owner's Approve; its card has the
+    // fix's progress instead of Approve, and a new click there tries nothing (src/merge.mjs, src/decisions.mjs).
+    const { listRuns: allRuns, readRun: runNow } = await import(pathToFileURL(path.join(root, 'src', 'store.mjs')).href);
+    const { decide, decisionCards } = await import(pathToFileURL(path.join(root, 'src', 'decisions.mjs')).href);
+    const { checkDeliveries } = await import(pathToFileURL(path.join(root, 'src', 'merge.mjs')).href);
+    const kept = runNow('smoke-merge-fail');
+    const fixes = () => allRuns().filter(r => r.fixOf === 'smoke-merge-fail');
+    const [fix] = fixes();
+    expect(kept.mergeFailed?.by === 'owner' && kept.mergeFailed.conflict && fixes().length === 1 && fix.status === 'queued' && fix.ownerApproved?.run === 'smoke-merge-fail'
+      && fix.plan === 7 && fix.origin === 'conflict' && fix.instruction.includes('git merge FETCH_HEAD') && fix.instruction.includes('cm/conflict') && fix.review,
+    `a failed Approve was not kept, or its fix was not queued once with the owner's Approve: ${JSON.stringify(kept.mergeFailed)} ${JSON.stringify(fixes())}`);
+    const cardOf = id => decisionCards({ config: mergeConfig, attention: [{ id: `pr:${id}`, kind: 'pr', level: 'important', run: id }], items: [], questions: [], pushes: [], repos: [] })[0];
+    const held = cardOf('smoke-merge-fail');
+    expect(held?.hold?.kind === 'failed' && !held.approve && held.hold.progress === 'queued' && held.hold.fix?.run === fix?.id && /^You approved at .+; the merge into main failed: a conflict\.$/.test(held.hold.text),
+      `the card of a failed Approve still offers Approve, or doesn't show its fix: ${JSON.stringify(held)}`);
+    const again = await decide({ card: held.id, action: 'approve' }, [held]);
+    expect(again.done === 'waiting_fix' && runNow('smoke-merge-fail').mergeFailed.at === kept.mergeFailed.at && fixes().length === 1, `a new click on a failed Approve tried the merge again: ${JSON.stringify(again)}`);
+    // The fix, done: its card says the content was approved, for the manager to merge after its review.
+    keepRun({ ...runNow(fix.id), status: 'done', ended: new Date().toISOString(), branch: 'cm/fix', delivered: clone });
+    const fixCard = cardOf(fix.id);
+    expect(fixCard?.approvedBefore?.run === 'smoke-merge-fail' && /already approved the content/.test(fixCard.approvedBefore.text) && cardOf('smoke-merge-fail').hold.progress === 'ready',
+      `the fix of an approved run doesn't say so, or the old card doesn't show it ready: ${JSON.stringify(fixCard)}`);
+    // A pull request waiting for the owner that no longer merges once its base moved: found in a bare copy of its own,
+    // marked in conflict, its fix queued once (the manager's own fix counts), the manager told; a clean one is left alone.
+    const repo = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-check-'));
+    try {
+      const work = path.join(repo, 'work');
+      const r = (...a) => execFileSync('git', ['-C', work, '-c', 'user.name=smoke', '-c', 'user.email=smoke@example.com', ...a], { stdio: 'pipe' });
+      mkdirSync(work);
+      r('init', '-q', '-b', 'main');
+      writeFileSync(path.join(work, 'a.txt'), 'one\n');
+      r('add', '-A');
+      r('commit', '-qm', 'one');
+      for (const [branch, file, text] of [['cm/pr', 'a.txt', 'branch\n'], ['cm/named', 'a.txt', 'named\n'], ['cm/clean', 'b.txt', 'new\n']]) {
+        r('checkout', '-qb', branch, 'main');
+        writeFileSync(path.join(work, file), text);
+        r('add', '-A');
+        r('commit', '-qm', branch);
+      }
+      r('checkout', '-q', 'main');
+      writeFileSync(path.join(work, 'a.txt'), 'main\n');
+      r('commit', '-qam', 'main moved');
+      const origin = path.join(repo, 'origin.git');
+      execFileSync('git', ['clone', '-q', '--bare', work, origin], { stdio: 'pipe' });
+      const checkConfig = { owner: 'Owner', projects: { cp: { name: 'Checked', repository: origin, main_branch: 'main' } } };
+      const ended = new Date().toISOString();
+      for (const [id, branch, n] of [['smoke-pr-conflict', 'cm/pr', 41], ['smoke-pr-named', 'cm/named', 42], ['smoke-pr-clean', 'cm/clean', 43]]) {
+        keepRun({ id, project: 'cp', title: `Waiting ${n}`, status: 'done', branch, pullRequest: `https://github.com/o/r/pull/${n}`, created: ended, ended, level: 2 });
+      }
+      keepRun({ id: 'smoke-manager-fix', project: 'cp', title: 'PR #42 without conflict', status: 'queued', created: new Date(Date.now() + 1000).toISOString(), instruction: 'Bring cm/named up to date with main (PR #42).' });
+      const workspacesDir = path.join(repo, 'workspaces');
+      mkdirSync(workspacesDir);
+      const found = await checkDeliveries({ config: checkConfig, project: 'cp', workspaces: workspacesDir });
+      const byRun = id => found.find(f => f.run === id);
+      const queued = allRuns().filter(x => x.fixOf === 'smoke-pr-conflict');
+      expect(byRun('smoke-pr-conflict')?.clean === false && byRun('smoke-pr-conflict').queued && byRun('smoke-pr-conflict').files.join() === 'a.txt' && queued.length === 1 && queued[0].level === 2
+        && runNow('smoke-pr-conflict').conflict?.files.join() === 'a.txt' && byRun('smoke-pr-named')?.fix === 'smoke-manager-fix' && !byRun('smoke-pr-named').queued
+        && byRun('smoke-pr-clean')?.clean === true && !runNow('smoke-pr-clean').conflict && existsSync(path.join(workspacesDir, '.merge-check', 'cp', 'HEAD')),
+      `the pull requests that no longer merge were not found, or their fix was queued twice: ${JSON.stringify(found)} ${JSON.stringify(queued)}`);
+      expect((await checkDeliveries({ config: checkConfig, project: 'cp', workspaces: workspacesDir })).length === 0 && allRuns().filter(x => x.fixOf === 'smoke-pr-conflict').length === 1,
+        'a second check with nothing moved checked again, or queued another fix');
+      const toldConflict = await news.flushNews();
+      const conflictEvents = toldConflict?.events.filter(e => e.kind === 'conflict') ?? [];
+      expect(conflictEvents.length === 2 && conflictEvents.some(e => e.text.includes('Chiefmate queued its fix at once')) && conflictEvents.some(e => e.text.includes('smoke-manager-fix'))
+        && composeMessage('Owner', [toldConflict]).includes('For the conflict events'), `the manager was not told of the pull requests in conflict: ${JSON.stringify(toldConflict)}`);
+      if (toldConflict) removePending(toldConflict.id);
+      const conflictCard = decisionCards({ config: checkConfig, attention: [{ id: 'pr:smoke-pr-conflict', kind: 'pr', level: 'important', run: 'smoke-pr-conflict' }], items: [], questions: [], pushes: [], repos: [] })[0];
+      expect(conflictCard?.hold?.kind === 'conflict' && !conflictCard.approve && conflictCard.hold.progress === 'queued' && /^In conflict with main since /.test(conflictCard.hold.text) && conflictCard.detail.includes('a.txt'),
+        `a pull request in conflict still offers Approve: ${JSON.stringify(conflictCard)}`);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
     const own = await mergeRun('smoke-merge-fail', { by: 'manager' }, mergeConfig).then(() => null, error => error);
     await settle();
     expect(own && !own.message.includes('The manager was told') && !readPending().some(m => m.from === 'chiefmate'), "the manager's own failed merge was told to it as news");

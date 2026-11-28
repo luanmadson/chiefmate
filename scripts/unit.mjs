@@ -35,6 +35,7 @@ import {
   changeSession, checkSpending, effectiveLimits, forecast, projectsWithWork, readSpending, SAFETY, sessionMode, sessionNow, SPEND_TO, spendingStatus,
 } from '../src/spending.mjs';
 import { HELD_WHILE_AWAY, NEWS_EVENTS } from '../src/news.mjs';
+import { fixFor, fixState, mergesCleanly } from '../src/merge.mjs';
 import { askedTool, copyHolder, endLine, holdsCopy, limitWaitCleared, pausedLine, stepTool } from '../src/runs.mjs';
 import { addSpeech, askedBy, SPEECH_KEEP, SPEECH_MAX, SPEECH_SHOWN, speechLine, speechNow, speechRule, speechView } from '../src/speech.mjs';
 import {
@@ -2672,4 +2673,45 @@ test("the session's spare near its renewal: spent alone while the owner is away,
   const end = checkSpending({ config, usage: renewed, at: later, runs, capacity: 3, file: away, report, note, away: true });
   assert.equal(end.ended?.until, resets);
   assert.deepEqual([sessionNow(config, readSpending(away), later).mode, effectiveLimits(config, readSpending(away), later).pause_at_5h_window], ['save', SAFETY]);
+});
+
+test('a delivery that no longer merges: git merge-tree tells it, with its files, and touches no files', async () => {
+  const dir = mkdtempSync(path.join(temp, 'merge-check-'));
+  const git = (...args) => gitIn(dir, ...args);
+  const commit = (file, text) => {
+    write(path.join(dir, file), text);
+    git('add', '--', file);
+    git('commit', '-qm', `${file}: ${text.trim()}`);
+  };
+  git('init', '-q', '-b', 'main');
+  commit('a.txt', 'one\n');
+  git('branch', 'pr');
+  git('branch', 'clean');
+  commit('a.txt', 'main\n');
+  git('checkout', '-q', 'pr');
+  commit('a.txt', 'branch\n');
+  git('checkout', '-q', 'clean');
+  commit('b.txt', 'new\n');
+  git('checkout', '-q', 'main');
+  const before = git('status', '--porcelain');
+  assert.deepEqual(await mergesCleanly(dir, 'main', 'pr'), { clean: false, files: ['a.txt'] });
+  assert.deepEqual(await mergesCleanly(dir, 'main', 'clean'), { clean: true, files: [] });
+  assert.equal(await mergesCleanly(dir, 'main', 'no-such-branch'), null);
+  assert.equal(git('status', '--porcelain'), before);
+  assert.equal(git('branch', '--show-current'), 'main');
+});
+
+test("a conflict's fix: found by its mark or by the manager's instruction naming the run, never a canceled one, and where it stands", () => {
+  const old = { id: 'r1', project: 'p', branch: 'chiefmate/r1', pullRequest: 'https://github.com/o/r/pull/41', ended: '2026-11-27T10:00:00.000Z' };
+  const run = (id, fields) => ({ id, project: 'p', status: 'queued', created: '2026-11-27T11:00:00.000Z', instruction: 'Something else', ...fields });
+  assert.equal(fixFor(old, [old, run('a'), run('b', { project: 'q', instruction: 'Fix PR #41' })]), null);
+  assert.equal(fixFor(old, [run('c', { instruction: 'Solve the conflict of PR #41 with main' })])?.id, 'c');
+  assert.equal(fixFor(old, [run('d', { instruction: 'chiefmate/r1 into main', created: '2026-11-27T09:00:00.000Z' })]), null); // queued before the run ended
+  assert.equal(fixFor(old, [run('e', { fixOf: 'r1', status: 'canceled' })]), null);
+  assert.equal(fixFor(old, [run('f', { fixOf: 'r1' }), run('g', { fixOf: 'r1', created: '2026-11-27T12:00:00.000Z' })])?.id, 'g');
+  assert.equal(fixFor(old, [run('h', { fixOf: 'r9', instruction: 'PR #41' })]), null); // the fix of another run
+  assert.deepEqual(
+    [null, { status: 'queued' }, { status: 'waiting' }, { status: 'running' }, { status: 'paused' }, { status: 'done' }, { status: 'done', merged: {} }, { status: 'done', discarded: {} }, { status: 'failed' }].map(fixState),
+    ['manager', 'queued', 'queued', 'running', 'running', 'ready', 'merged', 'stopped', 'stopped'],
+  );
 });

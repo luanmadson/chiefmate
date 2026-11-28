@@ -134,6 +134,7 @@ function workOf(run, config = loadConfig()) {
 export function createRun({
   kind, missionId, projectId, agent, instruction, review = false, origin = 'app', notBefore = null, modules = [], plan = null, prompt = null,
   title: givenTitle = null, summary: givenSummary = null, level = null, request = null, tool: givenTool = null, due = null,
+  fixOf = null, ownerApproved = null,
 }, config = loadConfig()) {
   // The tool chosen for the run's crew steps (--tool); none: each member's own (src/tools.mjs).
   const tool = parseTool(givenTool);
@@ -202,6 +203,9 @@ export function createRun({
     ...(request != null ? { ownerRequest: Number(request) } : {}),
     // A mission missed while Chiefmate was off or on standby: when it was due (src/schedule.mjs). The app marks it late.
     ...(due ? { due } : {}),
+    // The fix of another run's conflict (src/merge.mjs, queueFix), and the owner's Approve of that run's work, when given.
+    ...(fixOf ? { fixOf } : {}),
+    ...(ownerApproved ? { ownerApproved } : {}),
   });
   describeLater(run.id, run);
   return run;
@@ -252,12 +256,14 @@ function applyBrief(id, brief) {
 }
 
 /** The manager's approval level for a run (1, 2, 3, or null to clear it), kept also for a copy already in memory. */
-export function setRunLevel(id, value) {
-  const level = parseLevel(value);
+export const setRunLevel = (id, value) => setRunFields(id, { level: parseLevel(value) });
+
+/** Fields set on a run from outside its work (its level, the owner's Approve it carries), kept also for a copy in memory. */
+export function setRunFields(id, fields) {
   const run = activeRun(String(id ?? '')) ?? readRun(String(id ?? ''));
   if (!run) throw new Error(t('Run not found.'));
-  run.level = level;
-  described.set(run.id, { ...described.get(run.id), level });
+  Object.assign(run, fields);
+  described.set(run.id, { ...described.get(run.id), ...fields });
   saveRun(run);
   return run;
 }
@@ -1211,6 +1217,11 @@ function aboutRun(run) {
   return `Run ${run.id} "${run.title}" (project ${run.project}${run.summary ? `; ${run.summary}` : ''})${outcome}`;
 }
 
+// The fix of a conflict whose work the owner already approved (src/merge.mjs, queueFix): the manager merges it.
+const approvedLine = run => (run.ownerApproved
+  ? ` The owner already approved this work: their Approve of run ${run.ownerApproved.run} failed on a conflict at ${formatDateTime(run.ownerApproved.at)}, and this run is its fix. Unless your review advised against it, merge it yourself now with node src/cli.mjs merge ${run.id} --yes, then tell the owner in one line.`
+  : '');
+
 /** Runs (or resumes) a run until the end, a pause for a limit, or a cancellation. */
 export async function execute(run) {
   const config = loadConfig();
@@ -1481,7 +1492,7 @@ export async function execute(run) {
       });
       saveRun(run);
       notify(t('Ready for your review'), t('{title}: {result}', { title: run.title, result: [outcomeLine(run.outcome), result].filter(Boolean).join(' ') }), 'chiefmate:log');
-      reportEvent('run_finished', `${aboutRun(run)} finished and was delivered locally, waiting for the owner's review: ${result}`);
+      reportEvent('run_finished', `${aboutRun(run)} finished and was delivered locally, waiting for the owner's review: ${result}${approvedLine(run)}`);
       return;
     }
 
@@ -1494,7 +1505,7 @@ export async function execute(run) {
     Object.assign(run, { status: 'done', ended: now(), result });
     saveRun(run);
     notify(t('Ready for your review'), t('{title}: {result}', { title: run.title, result: [outcomeLine(run.outcome), result].filter(Boolean).join(' ') }), run.pullRequest);
-    reportEvent('pr_ready', `${aboutRun(run)} finished: pull request ${run.pullRequest} waits for the owner's approval. ${result}`);
+    reportEvent('pr_ready', `${aboutRun(run)} finished: pull request ${run.pullRequest} waits for the owner's approval. ${result}${approvedLine(run)}`);
   } catch (error) {
     if (error?.name === 'AbortError' && l.pauseRequest && !l.cancelRequest) {
       log(t('Preparation stopped for the update: it starts over when the run resumes'));

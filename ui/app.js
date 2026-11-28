@@ -314,6 +314,7 @@ function originLabel(origin) {
     case 'manager': return t('Asked by the manager');
     case 'schedule': return t('Scheduled');
     case 'schedule-late': return t('Scheduled (late)');
+    case 'conflict': return t('Fix of a conflict, by Chiefmate');
     default: return origin ?? '';
   }
 }
@@ -1617,8 +1618,9 @@ function navSections() {
   return [...document.querySelectorAll('.nav a[data-view]')].map(a => {
     const view = a.dataset.view;
     const name = a.firstElementChild?.textContent ?? '';
-    // Decisions counts what needs you: the cards of level 1 are the manager's to settle.
-    const items = view === 'decisions' ? decisionsNow().filter(c => !c.seen && !managerSettles(c)) : list.filter(i => i.view === view);
+    // Decisions counts what needs you: the cards of level 1 are the manager's to settle, and a card with no Approve now
+    // (a failed Approve, a conflict) waits for its fix.
+    const items = view === 'decisions' ? decisionsNow().filter(c => !c.seen && !managerSettles(c) && !c.hold) : list.filter(i => i.view === view);
     return { a, view, name, items, level: topLevel(items), mark: attnMark(items, name, true) };
   });
 }
@@ -1697,12 +1699,25 @@ function drawClock() {
 
 const decisionsNow = () => (online ? state?.decisions ?? [] : []);
 const decisionKind = c => ({ merge: c.thirdParty ? t('Waiting for a third-party review') : t('Merge'), decision: t('Proposal'), question: t('Question'), push: t('Push'), repo: t('New repository') })[c.kind] ?? '';
-// The approval level the manager gave a card (src/decisions.mjs): 1 is the manager's to settle, 2 and 3 are yours.
-const managerSettles = c => c.approval === 1;
+// The approval level the manager gave a card (src/decisions.mjs): 1 is the manager's to settle, 2 and 3 are yours. The
+// fix of a conflict whose work you already approved is the manager's to merge too.
+const managerSettles = c => c.approval === 1 || !!c.approvedBefore;
 const approvalBadge = c => {
+  if (c.approvedBefore) return `<span class="decision-approval" data-approval="approved">${esc(t('Approved by you'))}</span>`;
   const text = { 1: t('Level 1 · the manager settles it'), 2: t('Level 2 · needs you'), 3: t('Level 3 · only you') }[c.approval] ?? t('Level ?');
   return `<span class="decision-approval" data-approval="${esc(c.approval ?? 'none')}">${esc(text)}</span>`;
 };
+
+// A merge card with no Approve (its "hold": an Approve that failed, or a conflict found first): where the fix of its
+// conflict stands, in the place of the button, with a link to the fix's run.
+function fixProgress(h) {
+  const label = {
+    queued: t('Fix queued'), running: t('Fix in progress'), ready: t('Fix ready'), merged: t('Fix merged'),
+    stopped: t('Fix stopped; waiting for the manager'),
+  }[h.progress] ?? t('Waiting for the manager');
+  const link = h.fix ? `: <a href="#log" data-select="${esc(h.fix.run)}">${esc(h.fix.title)}</a>` : '';
+  return `<span class="decision-progress" data-state="${esc(h.progress)}">${esc(label)}${link}</span>`;
+}
 
 function decisionCardHtml(c) {
   const facts = [
@@ -1720,7 +1735,8 @@ function decisionCardHtml(c) {
   const button = (action, text, kind = '', extra = '') => `<button type="button" class="button${kind}" data-decide="${esc(action)}" data-card="${esc(c.id)}"${extra}>${text}</button>`;
   const choices = c.kind === 'question'
     ? c.options.map(o => button('answer', esc(o), o === c.recommend ? '' : ' secondary', ` data-option="${esc(o)}"${o === c.recommend ? ` title="${esc(t('Recommended by the manager'))}"` : ''}`)).join('')
-    : c.approve ? button('approve', label(c.kind === 'push' ? t('Allow push') : c.kind === 'repo' ? t('Allow creation') : t('Approve'))) : '';
+    : c.hold ? fixProgress(c.hold) + (c.hold.retry ? button('retry', label(t('Try again')), ' secondary') : '')
+      : c.approve ? button('approve', label(c.kind === 'push' ? t('Allow push') : c.kind === 'repo' ? t('Allow creation') : t('Approve'))) : '';
   const buttons = [
     choices,
     // Someone else's review only informs: "Hide" sends it to the archive. A push or a repository the manager asks is
@@ -1740,9 +1756,14 @@ function decisionCardHtml(c) {
     c.detail ? `<div class="decision-detail-body">${md(c.detail)}</div>` : '',
     links.length ? `<div class="hint">${links.join(' · ')}</div>` : '',
   ].join('');
-  return `<article class="decision" data-level="${esc(c.level)}" data-card="${esc(c.id)}"${c.seen ? ' data-seen' : ''}>
-      <div class="decision-head"><span class="attn-mark" data-level="${esc(c.level)}" aria-hidden="true"></span>${approvalBadge(c)}<span class="decision-kind">${esc(decisionKind(c))}</span><span class="decision-about">${about}</span>${c.seen ? `<span class="tag">${esc(t('left for later'))}</span>` : ''}</div>
+  // A card with no Approve now shows it at a glance: the alert color, its mark and what happened, in place of its kind.
+  const mark = c.hold ? '<span class="decision-hold-mark" aria-hidden="true">!</span>' : `<span class="attn-mark" data-level="${esc(c.level)}" aria-hidden="true"></span>`;
+  const kind = c.hold ? (c.hold.kind === 'failed' ? t('Approve failed') : t('In conflict')) : decisionKind(c);
+  return `<article class="decision" data-level="${esc(c.level)}" data-card="${esc(c.id)}"${c.seen ? ' data-seen' : ''}${c.hold ? ` data-hold="${esc(c.hold.kind)}"` : ''}>
+      <div class="decision-head">${mark}${approvalBadge(c)}<span class="decision-kind">${esc(kind)}</span><span class="decision-about">${about}</span>${c.seen ? `<span class="tag">${esc(t('left for later'))}</span>` : ''}</div>
       <div class="decision-title">${esc(c.title)}</div>
+      ${c.hold ? `<p class="decision-hold">${esc(c.hold.text)}</p>` : ''}
+      ${c.approvedBefore ? `<p class="decision-approved">${esc(c.approvedBefore.text)}</p>` : ''}
       ${verdict ? `<div class="decision-verdict">${esc(t('Recommends: {what}', { what: verdict }))}</div>` : ''}
       ${c.thirdParty ? `<p class="decision-third">${esc(t('Someone else reviews and merges the work of this project: nothing for you to approve here.'))}</p>` : ''}
       <div class="decision-buttons">${buttons}</div>
@@ -1759,14 +1780,15 @@ function drawDecisions() {
   const cards = decisionsNow();
   const box = $('#decisions');
   const yours = cards.filter(c => !managerSettles(c));
-  const fresh = yours.filter(c => !c.seen);
+  // What you can decide first; then the cards with no Approve now (a failed Approve, a conflict), which wait for a fix.
+  const fresh = [...yours.filter(c => !c.seen && !c.hold), ...yours.filter(c => !c.seen && c.hold)];
   const later = yours.filter(c => c.seen);
   const managers = cards.filter(managerSettles);
   const fold = (key, title, list) => (list.length ? `<details class="decisions-later" data-detail="${key}"><summary>${esc(title)}</summary>${list.map(decisionCardHtml).join('')}</details>` : '');
   const rest = fold('later', t('Left for later ({count})', { count: later.length }), later)
     + fold('manager', t('The manager will settle it ({count})', { count: managers.length }), managers);
   const html = cards.length
-    ? `${fresh.length ? '' : `<div class="panel empty">${esc(t('Nothing needs your decision now.'))}</div>`}${fresh.map(decisionCardHtml).join('')}${rest}`
+    ? `${fresh.some(c => !c.hold) ? '' : `<div class="panel empty">${esc(t('Nothing needs your decision now.'))}</div>`}${fresh.map(decisionCardHtml).join('')}${rest}`
     : `<div class="panel empty">${esc(t('Nothing waits for your decision. New pull requests, proposals and questions from the manager show up here.'))}</div>`;
   // What you opened stays open when the cards are drawn again.
   const opened = [...box.querySelectorAll('details[open]')].map(d => d.dataset.detail);
@@ -1795,6 +1817,7 @@ $('#decisions').addEventListener('click', async event => {
   // Merging and closing a pull request are confirmed: the click is your authorization (src/merge.mjs).
   const how = c.url ? t('Chiefmate merges the pull request on GitHub.') : t('Chiefmate merges the branch into the branch checked out in your clone; nothing is sent to GitHub.');
   if (c.kind === 'merge' && action === 'approve' && !(await confirmDialog(t('Approve and merge'), `${c.label}: ${c.title}. ${how}`, t('Approve')))) return;
+  if (c.kind === 'merge' && action === 'retry' && !(await confirmDialog(t('Try the merge again'), `${c.label}: ${c.title}. ${c.hold?.text ?? ''} ${how}`, t('Try again')))) return;
   const closes = c.url ? t('The pull request is closed on GitHub; it can be reopened there.') : t('The branch stays in your clone, not merged.');
   if (c.kind === 'merge' && action === 'discard' && !(await confirmDialog(t('Discard this work'), `${c.label}: ${c.title}. ${closes}`, t('Discard')))) return;
   // Allowing a push is confirmed too: it lets the manager send that branch to GitHub once (the main branch, with its risk).
@@ -1812,6 +1835,7 @@ $('#decisions').addEventListener('click', async event => {
     toast({
       merged: [t('Merged.'), r.merge?.copiesNote].filter(Boolean).join(' '), later: c.thirdParty ? t('Hidden: it is in the archive.') : t('Left for later: the card stays at the end, faded.'), discarded: t('Discarded.'),
       already_merged: t('Branch already merged'), branch_deleted: t('Local branch deleted'),
+      waiting_fix: t('Already approved: nothing was merged again. The card shows how its fix goes.'),
       approved: t('Approved: it becomes a task for its agent, in its turn.'),
       allowed: c.session ? t('Allowed: the session is told and may send it once now.') : t('Allowed: the manager may send it once now.'),
       refused: c.session ? t('Refused: the session is told.') : t('Refused: the manager is told.'), answered: t('Answer sent to the manager: {answer}', { answer: [r.answer, r.note].filter(Boolean).join(' — ') }),
@@ -1834,6 +1858,7 @@ const newsEvent = kind => ({
   away: t('away mode on'), back: t('back from away mode'), owner_decided: t('your decision'), push_allowed: t('push allowed'), repo_allowed: t('repository allowed'), owner_request: t('request from an agent in charge'), power: t('power mode'),
   owner_working: t('you working now'), defect: t('defect reported'), agent_message: t('message from an agent'), focus: t('focus changed'),
   run_parked: t('run parked'), quarantine: t('antivirus quarantine'), session_spare: t('session with usage to spare'),
+  conflict: t('pull request in conflict'),
 }[kind] ?? kind);
 
 // Who wrote an agent's message to the manager (a live session or a step of a run, from the command line).
