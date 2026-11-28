@@ -357,6 +357,8 @@ export function retryRun(id, { step, agent, tool } = {}, { by = 'manager', confi
   for (const s of new Set([target, ...steps.slice(n).filter(s => s.status !== 'done'), ...reviewsAfter, ...(run.review ? [run.review] : [])])) {
     s.status = 'pending';
     delete s.paused;
+    // A final review the team lead's had replaced (delegated review, src/leads.mjs) is decided again.
+    delete s.delegated;
   }
   (run.retries ??= []).push({ at: now(), by, step: n, agent: target.agent, ...(target.toolAsked ? { tool: target.toolAsked } : {}) });
   Object.assign(run, { status: 'queued', notBefore: null, note: t('Step {n} runs again ({agent}).', { n, agent: target.agent }), ended: null });
