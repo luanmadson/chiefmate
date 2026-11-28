@@ -6,6 +6,7 @@ import { resetLabel, spare } from './countdown.js';
 import { Dictation, recognizer } from './voice.js';
 import { asksHtml, keepFolds, newFolds, toggleFold } from './asks.js';
 import { announce, blinkTitle, callsLayout, callsOf, chime, keepChoice, NOTIFY_KEY, notifyCalls, notifyState, SOUND_KEY, soundOn, waitLine } from './calls.js';
+import { eventTone, strongest, takeMark, toneBadge, toneIcon, toneOf } from './tones.js';
 
 const $ = selector => document.querySelector(selector);
 let state = null;
@@ -1976,8 +1977,11 @@ function drawChat() {
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
   let html = g.messages.length ? '' : `<div class="msg system">${esc(t('No messages yet. Ask the manager how things are going, or ask for a job.'))}</div>`;
   for (const m of g.messages) {
+    // Each message's kind (ui/tones.js): its color, icon and badge; Chiefmate's own lines are gray.
+    const tone = toneOf(m);
+    const badge = tone ? toneBadge(tone, { t, esc }) : '';
     if (m.who === 'system') {
-      html += `<div class="msg system">${esc(m.text)}</div>`;
+      html += `<div class="msg system" data-tone="system">${badge}${esc(m.text)}</div>`;
       continue;
     }
     // An agent's message (chat say from a session or a step): never shown as yours.
@@ -1996,13 +2000,15 @@ function drawChat() {
     const tag = m.interrupted ? `<span class="tag">${esc(t('interrupted'))}</span>` : '';
     // A notice: the manager's own news to you, after something happened (it was not an answer to a message of yours).
     const news = !you && m.news ? `<span class="tag news">${esc(t('notice'))}</span><span class="msg-events">${esc(m.news.map(newsEvent).join(' · '))}</span>` : '';
-    html += `<div class="msg ${you ? 'you' : 'manager'}${news ? ' news' : ''}${m.error ? ' error' : ''}"><div class="msg-head">${you ? '' : face(manager, m.error ? 'failed' : 'still', 20)}<span class="msg-author">${esc(you ? t('You') : t(manager.name))}</span><span class="msg-meta">${esc(meta)}</span>${news}${tag}</div><div class="msg-body">${md(m.text)}</div></div>`;
+    // The manager's mark is not shown: its kind is.
+    const text = you ? m.text : takeMark(m.text).text;
+    html += `<div class="msg ${you ? 'you' : 'manager'}${news ? ' news' : ''}${m.error ? ' error' : ''}"${tone ? ` data-tone="${tone}"` : ''}><div class="msg-head">${you ? '' : face(manager, m.error ? 'failed' : 'still', 20)}<span class="msg-author">${esc(you ? t('You') : t(manager.name))}</span><span class="msg-meta">${esc(meta)}</span>${badge}${news}${tag}</div><div class="msg-body">${md(text)}</div></div>`;
   }
   const renewing = !!g.context?.renewing;
   if (g.responding) {
     const waiting = renewing ? t('Writing a short summary to renew the conversation…') : t('Looking at the situation…');
     const doing = g.interrupting ? t('interrupting…') : renewing ? t('renewing the conversation…') : t('answering…');
-    html += `<div class="msg manager typing"><div class="msg-head">${face(manager, 'thinking', 20)}<span class="msg-author">${esc(t(manager.name))}</span><span class="msg-meta">${esc(doing)}${g.since ? ` · ${ticking(g.since)}` : ''}</span></div><div class="msg-body">${g.partial && !renewing ? md(g.partial) : `<span class="hint">${esc(waiting)}</span>`}</div><div class="live-last" id="manager-last"></div></div>`;
+    html += `<div class="msg manager typing"><div class="msg-head">${face(manager, 'thinking', 20)}<span class="msg-author">${esc(t(manager.name))}</span><span class="msg-meta">${esc(doing)}${g.since ? ` · ${ticking(g.since)}` : ''}</span></div><div class="msg-body">${g.partial && !renewing ? md(takeMark(g.partial).text) : `<span class="hint">${esc(waiting)}</span>`}</div><div class="live-last" id="manager-last"></div></div>`;
   }
   const signature = JSON.stringify([g.messages.length, g.messages.at(-1)?.at, g.responding, renewing, g.interrupting, g.since, g.partial]);
   if (draw('#chat', signature, html)) {
@@ -2040,11 +2046,12 @@ function drawChatQueue() {
   $('#chat-queue').hidden = !list.length;
   const head = `<div class="chat-queue-head"><span class="label">${esc(t('In the queue'))}</span><span class="hint">${esc(g.responding ? t('They go together, in order, when the manager finishes this answer.') : t('Being delivered…'))}</span></div>`;
   const items = list.map(m => (m.from === 'chiefmate'
-    // Chiefmate's news for the manager: not a message of yours, so it can't be edited (only removed).
-    ? `<div class="queued-msg news" data-pending="${esc(m.id)}">
+    // Chiefmate's news for the manager: not a message of yours, so it can't be edited (only removed). Its rule and each
+    // event's icon in their kind's color (ui/tones.js), as the notice will be.
+    ? `<div class="queued-msg news" data-pending="${esc(m.id)}" data-tone="${strongest((m.events ?? []).map(e => eventTone(e.kind))) ?? 'info'}">
       <div class="msg-head"><span class="tag news">${esc(t('news for the manager'))}</span><span class="msg-meta">${esc(clockTime(m.at))}</span>
         <span class="queued-actions"><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
-      <div class="msg-body">${(m.events ?? []).map(e => `<div class="news-event"><time>${esc(clockTime(e.at))}</time> ${esc(newsEvent(e.kind))}</div>`).join('')}</div>
+      <div class="msg-body">${(m.events ?? []).map(e => `<div class="news-event" data-tone="${eventTone(e.kind)}"><time>${esc(clockTime(e.at))}</time> ${toneIcon(eventTone(e.kind))}${esc(newsEvent(e.kind))}</div>`).join('')}</div>
     </div>`
     : m.from === 'agent'
     // An agent's message: not yours, so it can't be edited (only removed).

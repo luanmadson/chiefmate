@@ -22,6 +22,9 @@
   --urgent-bg: rgba(255, 92, 82, 0.13);
   --important: #e8bd5f;
   --important-bg: rgba(232, 189, 95, 0.1);
+  /* The kinds of message in the conversation (ui/tones.js) with no color above: needs you, a summary. Over 7:1 on the panel. */
+  --needs: #f0883e;
+  --report: #b392f0;
   --mono: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
   --face-tile: #12161c;
   --face-fill: #0e1116;
@@ -357,7 +360,7 @@ textarea { resize: vertical; min-height: 64px; }
 .chat { flex: 1; overflow-y: auto; min-height: 0; }
 .msg { padding: 14px 18px; border-bottom: 1px solid var(--line); }
 .msg.you { background: var(--raised); }
-.msg.system { padding: 8px 18px; color: var(--faint); font-size: 12px; text-align: center; }
+.msg.system { padding: 8px 18px; color: var(--muted); font-size: 12px; text-align: center; }
 .msg-head { display: flex; gap: 10px; align-items: center; margin-bottom: 6px; }
 .msg-author { font-size: 10.5px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
 .msg.manager .msg-author { color: var(--accent); }
@@ -369,13 +372,24 @@ textarea { resize: vertical; min-height: 64px; }
 .msg.error .msg-body { color: var(--error); }
 .msg.typing .live-last { margin-top: 10px; }
 .msg-head .tag { margin: 0; }
-/* The manager's notices (news it gives on its own): a brass rule on the left and a faint brass wash. */
-.msg.news { border-left: 2px solid var(--accent); background: rgba(201, 164, 93, 0.05); }
-.tag.news { color: var(--strong); background: rgba(201, 164, 93, 0.16); border-color: var(--accent); }
+/* A message's kind (ui/tones.js): a rule on the left and a faint wash in its color, and a badge with an icon and a word,
+   so it reads without color too. The manager's notices always have one, from their events; "notice" stays a plain tag. */
+[data-tone="done"] { --tone: var(--ok); }
+[data-tone="info"] { --tone: var(--info); }
+[data-tone="needs"] { --tone: var(--needs); }
+[data-tone="failure"], [data-tone="alarm"] { --tone: var(--urgent); }
+[data-tone="report"] { --tone: var(--report); }
+[data-tone="system"] { --tone: var(--muted); }
+.msg[data-tone]:not(.system) { border-left: 2px solid var(--tone); background: color-mix(in srgb, var(--tone) 5%, transparent); }
+.tone-badge { display: inline-flex; align-items: center; gap: 5px; padding: 0 6px; font: 10.5px/1.7 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap; color: var(--tone); border: 1px solid var(--tone); background: color-mix(in srgb, var(--tone) 12%, transparent); }
+.tone-icon { width: 12px; height: 12px; flex: none; }
+.msg.system .tone-badge { margin-right: 8px; vertical-align: 1px; }
+.tag.news { color: var(--muted); border-color: var(--line-strong); }
 .msg-events { font: 11px var(--mono); color: var(--muted); }
-.queued-msg.news { border-left-color: var(--accent); }
+.queued-msg.news[data-tone] { border-left-color: var(--tone); }
 .news-event { font: 11.5px var(--mono); }
 .news-event time { color: var(--faint); }
+.news-event .tone-icon { margin: 0 5px 0 2px; vertical-align: -1px; color: var(--tone); }
 /* Decisions (src/decisions.mjs), in their own tab: compact cards colored by level (what, where, the recommendation's
    verdict and the buttons); what changes, the risk and the rest folded under Details */
 .decisions { max-width: 980px; border: 1px solid var(--line); border-bottom: 0; background: var(--bg); }
@@ -1405,7 +1419,10 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   /* Long values (addresses, usage lines) wrap instead of widening the page */
   .facts dd, .project-facts dd { overflow-wrap: anywhere; }
   .meter-top .num { white-space: normal; text-align: right; }
-  .msg.news { border-left-width: 3px; }
+  .msg[data-tone]:not(.system) { border-left-width: 3px; }
+  .tone-badge { font-size: 11px; }
+  /* Beside the kind's badge, the events line already says it is a notice: the head keeps to two lines */
+  .msg[data-tone] .msg-head > .tag.news { display: none; }
   /* A message's head wraps between its parts, never inside a word ("MANAGER", the time, "NOTICE") */
   .msg-head { flex-wrap: wrap; row-gap: 2px; }
   .msg-head > * { flex: none; white-space: nowrap; }
