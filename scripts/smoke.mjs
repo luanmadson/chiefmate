@@ -469,6 +469,19 @@ try {
       const same = await (await post('/api/effort', { member: 'manager', level: chief.effort })).json();
       expect(same.changed === false, `the same effort was taken as a change: ${JSON.stringify(same)}`);
     }
+    // The agents (src/agents.mjs): each one with its rank, record and memory; what is the owner's refused without the key,
+    // the rest refused before anything is saved (this Chiefmate's settings are the working copy's: nothing changes them).
+    expect(Array.isArray(state.agents?.list) && state.agents.list.length > 0 && state.agents.list.every(a => a.key && a.kind && a.rank && a.status && a.record?.all && 'memory' in a)
+      && state.agents.ranks?.join() === 'junior,mid,senior,lead' && state.agents.rules?.mid?.up, '/api/state has no agents with their rank, record and memory');
+    expect(state.teams.every(x => x.members.every(m => m.key)), "a crew member has no agent's key");
+    expect((await keyless('/api/agents', { action: 'add', key: 'smokeagent', fields: { base: 'writer' } })).status === 403, "an agent was hired without the owner's key");
+    expect((await keyless('/api/agents', { action: 'set', key: 'writer', fields: { rank: 'senior' }, by: 'manager' })).status === 403, 'the manager changed a rank without the owner');
+    expect((await keyless('/api/agents', { action: 'deactivate', key: 'writer', by: 'manager' })).status === 403, 'the manager deactivated an agent');
+    expect((await keyless('/api/agents', { action: 'set', key: 'nobody', fields: { specialty: 'x' }, by: 'manager' })).status === 400, 'an unknown agent was adjusted');
+    expect((await keyless('/api/agents', { action: 'propose', key: 'writer', rank: 'boss', why: 'x', by: 'manager' })).status === 400, 'an unknown rank was proposed');
+    expect((await fetch(`${base}/api/agents/memory?key=nobody&project=x`)).status === 400, "an unknown agent's memory was read");
+    const roleSettings = await (await fetch(`${base}/api/agents/settings?key=writer`)).json();
+    expect(roleSettings.kind === 'role' && 'instructions' in roleSettings.settings, "an agent's own settings were not read for Adjust");
     // A request for a team lead: refused for a project that does not exist, and with no request.
     expect(state.teams.every(x => 'lead' in x), '/api/state has no team lead (or null) for each project');
     expect((await post('/api/ask', { project: 'none', request: 'Do something' })).status === 400, 'a request for a project that does not exist was not refused');
@@ -953,6 +966,84 @@ try {
     expect(requeued.status === 'done' && requeued.steps.every(step => step.status === 'done'), 'the requeued run did not finish its remaining step');
   } catch (error) {
     failures.push(`run limits: ${error.message}`);
+  } finally {
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    rmSync(fixture, { recursive: true, force: true, maxRetries: 5 });
+  }
+}
+
+// An agent of the settings (src/agents.mjs) at work, in a copy with a stand-in for Claude: its task is queued by its
+// key, its memory is taken out of its report and kept for that project only, and its step goes to its record.
+{
+  const fixture = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-agents-'));
+  const env = { CHIEFMATE_DATA: process.env.CHIEFMATE_DATA, CHIEFMATE_SMOKE: process.env.CHIEFMATE_SMOKE, CHIEFMATE_CLAUDE: process.env.CHIEFMATE_CLAUDE };
+  try {
+    for (const entry of ['src', 'agents', 'ui/locales', 'package.json']) cpSync(path.join(root, entry), path.join(fixture, entry), { recursive: true });
+    const repo = path.join(fixture, 'repo');
+    mkdirSync(repo);
+    const git = (...args) => execFileSync('git', args, { cwd: repo, windowsHide: true, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'Start');
+    const fake = path.join(fixture, 'fake-claude.mjs');
+    const records = path.join(fixture, 'records');
+    Object.assign(process.env, { CHIEFMATE_DATA: records, CHIEFMATE_SMOKE: '1', CHIEFMATE_CLAUDE: fake });
+    const load = name => import(pathToFileURL(path.join(fixture, 'src', `${name}.mjs`)).href);
+    const { saveConfig } = await load('config');
+    const { createRun, execute } = await load('runs');
+    const { recordUsage } = await load('store');
+    const { agentMemoryFile, agentsView } = await load('agents');
+    // The stand-in answers with a report and, at its end, the memory block a crew member returns.
+    writeFileSync(fake, [
+      "process.stdin.resume();",
+      "process.stdin.on('end', () => {",
+      `  console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'Done: nothing to change.\\n\\n~~~agent-memory\\n- keep the changes small in this project\\n~~~', num_turns: 1 }));`,
+      "});",
+    ].join('\n'));
+    saveConfig({
+      quick_model: false, max_parallel: 1, limits: { pause_at_5h_window: 0.99, pause_at_plan_week: 0.99 },
+      projects: { demo: { name: 'Demo', repository: repo, main_branch: 'main' }, other: { name: 'Other', repository: repo, main_branch: 'main', crew: { generalist: { name: 'Other dev' } } } },
+      agents: { ana: { name: 'Ana', base: 'generalist', projects: ['demo', 'other'], specialty: 'Small fixes', rank: 'junior', status: 'active' } },
+    });
+    recordUsage({ unifiedWindows: { five_hour: { utilization: 0.01, resetsAt: Math.floor(Date.now() / 1000) + 3600 }, seven_day: { utilization: 0.01, resetsAt: Math.floor(Date.now() / 1000) + 90000 } } });
+    const first = createRun({ kind: 'task', projectId: 'demo', agent: 'ana', instruction: 'Smoke test.' });
+    await execute(first);
+    const step = first.steps[0];
+    const kept = existsSync(agentMemoryFile('ana', 'demo')) ? readFileSync(agentMemoryFile('ana', 'demo'), 'utf8') : '';
+    expect(first.status === 'done' && step.status === 'done' && /keep the changes small/.test(kept) && !step.report.includes('agent-memory') && step.agentMemory?.chars > 0,
+      `the agent's memory was not taken out of its report and kept: ${first.status} ${first.result ?? ''} ${JSON.stringify(step.report)} ${kept}`);
+    const firstPrompt = readFileSync(path.join(records, 'runs', first.id, '01-ana.context.md'), 'utf8');
+    expect(firstPrompt.includes("## Your memory in this project (Ana's own") && firstPrompt.includes('~~~agent-memory') && firstPrompt.includes('In this crew you are Ana'),
+      "an agent's step did not get its memory and who it is");
+    // The same agent in another project starts with that project's memory only; back in the first one, it reads its own.
+    const other = createRun({ kind: 'task', projectId: 'other', agent: 'ana', instruction: 'Smoke test.' });
+    await execute(other);
+    const otherPrompt = readFileSync(path.join(records, 'runs', other.id, '01-ana.context.md'), 'utf8');
+    const again = createRun({ kind: 'task', projectId: 'demo', agent: 'ana@demo', instruction: 'Smoke test.' });
+    await execute(again);
+    const againPrompt = readFileSync(path.join(records, 'runs', again.id, '01-ana.context.md'), 'utf8');
+    expect(!otherPrompt.includes('keep the changes small') && againPrompt.includes('- keep the changes small in this project'),
+      "an agent's memory went to another project, or did not come back in its own");
+    // A project's own member is an agent of its own, with its own memory, queued by its key.
+    const member = createRun({ kind: 'task', projectId: 'other', agent: 'generalist@other', instruction: 'Smoke test.' });
+    await execute(member);
+    expect(member.steps[0].agent === 'generalist' && existsSync(agentMemoryFile('generalist@other', 'other')) && !existsSync(agentMemoryFile('generalist', 'other')),
+      "a project's own member was not queued by its key, or its memory is not its own");
+    // Every crew step is recorded once, with the agent behind it: the agent's record counts it.
+    const register = readFileSync(path.join(records, 'manager', 'tools-quality.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    const view = agentsView({ questions: [] });
+    const ana = view.list.find(a => a.key === 'ana');
+    expect(register.length === 4 && register.every(r => r.v === 2 && r.tool === 'claude') && register.filter(r => r.who === 'ana').length === 3 && ana?.record.all.count === 3 && ana.record.byProject.other?.count === 1,
+      `the steps were not recorded for each agent's record: ${JSON.stringify(register.map(r => [r.who, r.v]))} ${JSON.stringify(ana?.record.all)}`);
+    expect(first.steps[0].recorded === true, 'a recorded step is not marked: a retry would record it twice');
+    // The command line reads the agents with no Chiefmate running.
+    const listed = execFileSync(process.execPath, [path.join(fixture, 'src', 'cli.mjs'), 'agents', 'show', 'ana'], { env: process.env, stdio: 'pipe', windowsHide: true, encoding: 'utf8' });
+    expect(/^ana +Ana · based on generalist · junior · active · demo, other/m.test(listed) && /record: 3 task\(s\)/.test(listed) && /memory in demo: 1 line\(s\)/.test(listed),
+      `"agents show" does not show the agent's record and memory: ${listed}`);
+  } catch (error) {
+    failures.push(`agents at work: ${error.message}`);
   } finally {
     for (const [name, value] of Object.entries(env)) {
       if (value === undefined) delete process.env[name];
@@ -1584,7 +1675,13 @@ try {
   expect(text({ step: run.steps[0], project: config.projects.p, finalReview: false }).includes('## Working on Codex'), "a task chosen for Codex does not tell its step how it runs");
   expect(process.platform !== 'win32' || text({ step: run.steps[0], project: config.projects.p, finalReview: false }).includes('fails with EPERM'), "a step on Codex is not told that the sandbox refuses Node.js's pipes on Windows");
   expect(!text({ step: run.steps[0], project: { name: 'P', sensitive: true }, finalReview: false }).includes('## Working on'), 'a sensitive project ran a step on Codex');
-  expect(!text({ step: run.review, project: config.projects.p, finalReview: true }).includes('Corrections:'), 'the final review asked for corrections with no step on Codex or Grok');
+  expect(!text({ step: run.review, project: config.projects.p, finalReview: true }).includes('Corrections:'), 'the final review asked for corrections before any crew step ran');
+  // Every crew step goes to its agent's record (src/agents.mjs): the review says what it fixed, member by member.
+  const twoSteps = { ...run, steps: [{ agent: 'generalist', status: 'done', tool: 'claude' }, { agent: 'designer', status: 'done', tool: 'claude' }] };
+  const both = text({ run: twoSteps, step: run.review, project: config.projects.p, finalReview: true, previous: twoSteps.steps });
+  expect(both.includes('"Corrections: generalist: two claims without a source; designer: none"') && !both.includes('ran on Codex'), 'the final review does not ask what it fixed in each member\'s work');
+  expect(text({ step: run.steps[0], project: config.projects.p, finalReview: false }).includes('~~~agent-memory') && !both.includes('~~~agent-memory'),
+    "a crew step does not get its memory, or the final review does");
   Object.assign(run.steps[0], { status: 'done', tool: 'codex', durationMs: 3 * 60000, report: 'Done.' });
   const review = text({ step: run.review, project: config.projects.p, finalReview: true, previous: run.steps });
   expect(review.includes('ran on Codex') && review.includes('"Corrections:"') && !review.includes('## Working on'), 'the final review does not ask what it fixed in the work done on Codex, or left Claude Code');

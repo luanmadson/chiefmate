@@ -1,8 +1,9 @@
 // Unit tests with no dependency (node:test): the file viewer's checks of paths, its choice among a project's copies and
 // its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation;
 // the band of what a live session asks; the emergency lockdown, its detection, its emergency watch and the call to the
-// owner outside the app; the warning before Claude Code's sign-in expires; each agent's effort; the redacted backup of
-// the settings; the usage resets' countdowns; the session's spending modes, the queue's fair turn and the session's spare.
+// owner outside the app; the warning before Claude Code's sign-in expires; each agent's effort; the agents as entities
+// (their crews, memory, record and ranks); the redacted backup of the settings; the usage resets' countdowns; the
+// session's spending modes, the queue's fair turn and the session's spare.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -15,7 +16,11 @@ import { runInNewContext } from 'node:vm';
 import { browserState, findBrowsers, initials, isPlaywright, launchArgs, PALETTE, projectColor, shouldClose, themeManifest, windowName } from '../src/browsers.mjs';
 import { describeDoing, LOGIN_RENEW, loginDue, loginLine, loginRead, loginWarning, parseLoginStatus, readFeed } from '../src/claude.mjs';
 import { loginText } from '../src/plan.mjs';
-import { backupConfig, loadAgents, projectCrew, redactConfig } from '../src/config.mjs';
+import { backupConfig, explicitAgent, loadAgents, memberId, projectCrew, redactConfig } from '../src/config.mjs';
+import {
+  agentHistory, agentKey, agentMemoryFile, agentMemoryLines, agentPerformance, agentRecords, agentSettings, agentsView, changeAgent, findAgent, rankAdvice,
+  rankProposal, roster, settleRank, takeAgentMemory, teamLines, trimMemory,
+} from '../src/agents.mjs';
 import { effortChangeLine, effortHistory, effortSource, parseEffort, runEffortChanges, setEffort } from '../src/effort.mjs';
 import { checkPath, kindOf, listFolder, newestCopy, opening, openOnComputer, projectPlaces, rawHeaders, rootsFor, runFiles, viewerRoots, viewFile } from '../src/files.mjs';
 import { createdPaths, guardHooks, mainPushTarget, mainPushTargets, plainPush, publishing, riskyCommand } from '../src/guard.mjs';
@@ -38,8 +43,8 @@ import { HELD_WHILE_AWAY, NEWS_EVENTS } from '../src/news.mjs';
 import { askedTool, copyHolder, endLine, holdsCopy, limitWaitCleared, pausedLine, stepTool } from '../src/runs.mjs';
 import { addSpeech, askedBy, SPEECH_KEEP, SPEECH_MAX, SPEECH_SHOWN, speechLine, speechNow, speechRule, speechView } from '../src/speech.mjs';
 import {
-  agentTool, availableTools, chooseTool, codexEnvironment, codexEvents, codexGuard, codexStepArgs, correctionLine, GROK_DENY, grokEvents, grokStepArgs, parseTool,
-  qualityRecords, qualitySummary, runTools, toolAvailable, toolEffort, toolModel,
+  agentTool, availableTools, chooseTool, codexEnvironment, codexEvents, codexGuard, codexStepArgs, correctionLine, GROK_DENY, grokEvents, grokStepArgs, namedCorrections,
+  parseTool, qualityRecords, qualitySummary, runTools, stepRecords, toolAvailable, toolEffort, toolModel,
 } from '../src/tools.mjs';
 import { parseLevel } from '../src/util.mjs';
 import { behindOrigin, checkoutBranch, fastForward, freshenBranch, projectLibraries, restoreShelf, sameRepository, shelfRef, shelveWork } from '../src/workspace.mjs';
@@ -1642,6 +1647,158 @@ test('effort: each level from its place, the project only, the history and the r
 
   // A step records the level its tool was given: Codex has no max and runs at its own default.
   assert.deepEqual([toolEffort('claude', 'max'), toolEffort('claude', undefined), toolEffort('codex', 'max'), toolEffort('codex', 'xhigh'), toolEffort('grok', 'max')], ['max', null, null, 'xhigh', 'max']);
+});
+
+// The agents as entities (src/agents.mjs): made-up settings, nothing written outside the temporary folder.
+const agentsConfig = () => ({
+  owner: 'Someone', language: 'en', crew: { promoter: { status: 'inactive' } },
+  projects: { site: { name: 'Site' }, shop: { name: 'Shop', crew: { generalist: { name: 'Shop dev' }, curator: {} } }, blog: { name: 'Blog', crew: ['writer'] } },
+  agents: {
+    ana: { name: 'Ana', base: 'designer', projects: ['site', 'shop'], specialty: 'Accessible front end', instructions: 'Check the contrast.', rank: 'senior', status: 'active', effort: 'xhigh' },
+    old: { name: 'Old', base: 'writer', projects: ['site'], status: 'inactive' },
+    writer: { name: 'Taken', base: 'writer', projects: ['site'] },
+  },
+});
+
+test('agents: the settings\' agents join their projects\' crews, the roles and the projects\' crews are agents too', () => {
+  const config = agentsConfig();
+  const list = roster(config);
+  const kinds = Object.fromEntries(list.map(a => [a.key, a.kind]));
+  assert.deepEqual([kinds.generalist, kinds['generalist@shop'], kinds['writer@blog'], kinds.ana], ['role', 'member', 'member', 'agent']);
+  assert.ok(!kinds.manager && !kinds.lead, 'the manager and the team leads are not among the agents');
+  assert.equal(list.filter(a => a.key === 'writer').length, 1, "an agent of the settings never takes a role's id");
+  assert.deepEqual(list.find(a => a.key === 'generalist').projects, ['site'], 'a role works in the projects without a crew of their own');
+  assert.equal(list.find(a => a.key === 'promoter').status, 'inactive');
+  assert.equal(list.find(a => a.key === 'ana').rank, 'senior');
+  assert.equal(list.find(a => a.key === 'generalist').rank, 'mid', 'the rank by default');
+
+  const site = projectCrew(config, 'site');
+  assert.ok(site.ana && site.generalist && !site.promoter && !site.old, 'an inactive agent takes no new work');
+  assert.ok(projectCrew(config, 'site', undefined, { inactive: true }).old, 'a run already queued still finds it');
+  assert.deepEqual(Object.keys(projectCrew(config, 'shop')).sort(), ['ana', 'curator', 'generalist', 'manager']);
+  assert.match(site.ana.instructions, /In this crew you are Ana \(`ana`\)[\s\S]*Your specialty: Accessible front end\.[\s\S]*Your rank: senior\.[\s\S]*## Your own instructions\n\nCheck the contrast\./);
+  assert.deepEqual([site.ana.base, site.ana.effort, site.ana.role], ['designer', 'xhigh', 'Accessible front end']);
+  assert.equal(effortSource(config, null, explicitAgent(config, 'ana')), 'member');
+
+  assert.deepEqual([agentKey(config, 'shop', 'generalist'), agentKey(config, 'site', 'generalist'), agentKey(config, 'shop', 'ana'), agentKey(config, 'site', 'manager')], ['generalist@shop', 'generalist', 'ana', null]);
+  assert.equal(findAgent(config, 'generalist', 'shop').key, 'generalist@shop');
+  assert.equal(findAgent(config, 'Shop dev').key, 'generalist@shop', 'a name only one agent has');
+  assert.equal(memberId('generalist@shop', 'shop'), 'generalist');
+  assert.equal(memberId('generalist@shop', 'site'), 'generalist@shop', "another project's key is not this project's member");
+});
+
+test('agents: hired, adjusted and deactivated by the owner; the manager adjusts but never hires, deactivates or ranks', () => {
+  let config = agentsConfig();
+  const save = c => { config = c; };
+  const file = path.join(temp, 'agents-history.jsonl');
+  const effortFile = path.join(temp, 'agents-effort.jsonl');
+  const hired = changeAgent({ action: 'add', key: 'leo', fields: { base: 'writer', projects: 'blog,site', specialty: 'Long reads' } }, { config, save, file });
+  assert.equal(hired.agent, 'leo');
+  assert.deepEqual([config.agents.leo.name, config.agents.leo.rank, config.agents.leo.status, config.agents.leo.projects], ['Leo', 'junior', 'active', ['blog', 'site']]);
+  assert.match(config.agents.leo.hired_at, /^\d{4}-\d{2}-\d{2}$/);
+  assert.throws(() => changeAgent({ action: 'add', key: 'leo', fields: { base: 'writer' } }, { config, save, file }), /already an agent/);
+  assert.throws(() => changeAgent({ action: 'add', key: 'designer', fields: { base: 'writer' } }, { config, save, file }), /base agent/);
+  assert.throws(() => changeAgent({ action: 'add', key: 'Bad Id', fields: { base: 'writer' } }, { config, save, file }), /id has 2 to 32/);
+  assert.throws(() => changeAgent({ action: 'add', key: 'zed', fields: {} }, { config, save, file }), /based on/);
+  assert.throws(() => changeAgent({ action: 'add', key: 'zed', fields: { base: 'manager' } }, { config, save, file }), /base must be/);
+  assert.throws(() => changeAgent({ action: 'add', key: 'zed', fields: { base: 'writer', projects: 'nope' } }, { config, save, file }), /Unknown project/);
+
+  const set = changeAgent({ action: 'set', key: 'leo', fields: { specialty: 'Short reads', effort: 'max', model: 'default' }, by: 'manager' }, { config, save, file, effortFile });
+  assert.deepEqual(Object.keys(set.changes).sort(), ['effort', 'specialty']);
+  assert.deepEqual([config.agents.leo.specialty, config.agents.leo.effort], ['Short reads', 'max']);
+  assert.equal(effortHistory({ file: effortFile }).at(-1).member, 'leo', 'the effort goes through its own history');
+  assert.throws(() => changeAgent({ action: 'set', key: 'leo', fields: { rank: 'senior' }, by: 'manager' }, { config, save, file }), /owner's/);
+  assert.throws(() => changeAgent({ action: 'deactivate', key: 'leo', by: 'manager' }, { config, save, file }), /owner's/);
+  assert.throws(() => changeAgent({ action: 'add', key: 'zed', fields: { base: 'writer' }, by: 'manager' }, { config, save, file }), /owner's/);
+  assert.throws(() => changeAgent({ action: 'set', key: 'generalist', fields: { projects: 'site' } }, { config, save, file }), /general crew/);
+
+  // A project's crew written as a list becomes the same crew as an object, so its member keeps settings of its own.
+  changeAgent({ action: 'set', key: 'writer@blog', fields: { name: 'Blog writer', instructions: 'Short paragraphs.' } }, { config, save, file });
+  assert.deepEqual(config.projects.blog.crew, { writer: { name: 'Blog writer', extra_instructions: 'Short paragraphs.' } });
+  changeAgent({ action: 'deactivate', key: 'curator@shop' }, { config, save, file });
+  assert.equal(config.projects.shop.crew.curator.status, 'inactive');
+  assert.ok(!projectCrew(config, 'shop').curator);
+  changeAgent({ action: 'activate', key: 'curator@shop' }, { config, save, file });
+  assert.equal(config.projects.shop.crew.curator.status, undefined, 'active is the default: no setting is left');
+  changeAgent({ action: 'activate', key: 'promoter' }, { config, save, file });
+  assert.equal(config.crew.promoter, undefined, "an empty setting of the general crew's agent is removed");
+
+  const history = agentHistory({ file });
+  assert.ok(history.length >= 5 && history.every(e => e.at && e.by && e.agent && e.action));
+  assert.equal(agentHistory({ agent: 'leo', file }).length, 2);
+  assert.deepEqual(agentSettings(config, 'writer@blog').settings.instructions, 'Short paragraphs.');
+});
+
+test("agents: each one's record from every crew step, the corrections member by member, and what the rank suggests", () => {
+  const config = agentsConfig();
+  const run = (id, steps, report, extra = {}) => ({
+    id, project: 'shop', kind: 'task', title: `Task ${id}`, status: 'done', updated: id, checks: [{ command: 'npm test', ok: true }], steps,
+    review: { agent: 'manager', status: 'done', report }, ...extra,
+  });
+  const two = run('r1', [{ agent: 'generalist', status: 'done', durationMs: 60000, ended: '2026-11-01T10:00:00Z' }, { agent: 'ana', status: 'done', durationMs: 180000, ended: '2026-11-01T11:00:00Z' }, { agent: 'lead', role: 'review', status: 'done' }],
+    '## Verdict\nCorrections: Shop dev: none; ana: two images without alt text\nApprove.');
+  const records = stepRecords(two, [], { who: id => agentKey(config, 'shop', id), names: { generalist: 'Shop dev', ana: 'Ana' } });
+  assert.deepEqual(records.map(r => [r.who, r.corrected, r.note, r.tool, r.v]), [['generalist@shop', false, '', 'claude', 2], ['ana', true, 'two images without alt text', 'claude', 2]], 'the team lead is not recorded');
+  assert.deepEqual(namedCorrections('README: a typo', { generalist: null }), new Map(), 'a word that names no member is about the whole work');
+  assert.deepEqual(stepRecords(two, [], { only: s => s.agent === 'ana' }).map(r => r.agent), ['ana'], 'only the steps not recorded yet');
+  assert.deepEqual(qualityRecords(two), [], 'how each tool does keeps only the steps on Codex or Grok');
+
+  // The register's records cover their run; a run that ended before is read from itself, never twice.
+  const older = run('r0', [{ agent: 'ana', status: 'failed', durationMs: 30000, ended: '2026-10-01T10:00:00Z' }], 'Corrections: none', { status: 'failed' });
+  const all = agentRecords({ config, runs: [two, older], records: records.map(r => ({ ...r })) });
+  assert.equal(all.filter(r => r.run === 'r1').length, 2);
+  assert.deepEqual(all.filter(r => r.run === 'r0').map(r => [r.who, r.status]), [['ana', 'failed']]);
+  const ana = agentPerformance(all.filter(r => r.who === 'ana'), 1);
+  assert.deepEqual([ana.all.count, ana.all.clean, ana.all.corrected, ana.all.failed, ana.defects, ana.all.last], [2, 0, 1, 1, 1, '2026-11-01T11:00:00Z']);
+  assert.equal(ana.latest[0].run, 'r1', 'the latest first');
+
+  assert.deepEqual(rankAdvice('mid', { count: 12, clean: 11, failed: 0 }), { move: 'promote', to: 'senior', count: 12, clean: 11, failed: 0 });
+  assert.equal(rankAdvice('mid', { count: 9, clean: 9, failed: 0 }), null, 'too few tasks to tell');
+  assert.equal(rankAdvice('senior', { count: 6, clean: 2, failed: 0 }).move, 'demote');
+  assert.equal(rankAdvice('senior', { count: 4, clean: 0, failed: 4 }), null, 'never demoted on too few tasks');
+  assert.equal(rankAdvice('lead', { count: 30, clean: 30, failed: 0 }), null, 'no rank above team lead');
+  assert.equal(rankAdvice('junior', { count: 9, clean: 1, failed: 5 }), null, 'no rank below junior');
+
+  const view = agentsView({ config, runs: [two, older], records: [], defects: [], questions: [] });
+  const shopDev = view.list.find(a => a.key === 'generalist@shop');
+  assert.deepEqual([shopDev.record.all.count, shopDev.record.all.clean, shopDev.kind, shopDev.name], [1, 1, 'member', 'Shop dev']);
+  const lines = teamLines(config, view).join('\n');
+  assert.match(lines, /General crew, in site: .*Generalist \[generalist\]/);
+  assert.match(lines, /Project shop \(only these take its tasks\): Shop dev \[generalist@shop\]/);
+  assert.match(lines, /Inactive, taking no new work: .*Promoter \[promoter\]/);
+});
+
+test("agents: the memory stays the agent's in each project, within its ceiling; a rank is the manager's proposal and the owner's answer", () => {
+  assert.deepEqual(takeAgentMemory('Report.\n\n~~~agent-memory\n- the owner likes short PRs\n~~~\n'), { memory: '- the owner likes short PRs', report: 'Report.' });
+  assert.deepEqual(takeAgentMemory('No block here.'), { memory: null, report: 'No block here.' });
+  const long = trimMemory(Array.from({ length: 400 }, (_, i) => `- lesson ${i}`).join('\n'), 1000);
+  assert.ok(long.trimmed && long.text.length <= 1000 && long.text.startsWith('- lesson 0\n') && /cut at 1000 characters/.test(long.text), 'only the start is kept, with a note');
+  assert.deepEqual(trimMemory('- short'), { text: '- short', trimmed: false });
+  assert.notEqual(agentMemoryFile('ana', 'site'), agentMemoryFile('ana', 'shop'), "one file per project: never another project's");
+  assert.ok(agentMemoryFile('generalist@shop', 'shop').includes(path.join('agents', 'generalist@shop', 'memory', 'shop.md')));
+  const lines = agentMemoryLines({ memory: '', name: 'Ana', projectName: 'Site' }).join('\n');
+  assert.match(lines, /~~~agent-memory[\s\S]*Never secrets/);
+
+  let config = agentsConfig();
+  const save = c => { config = c; };
+  const file = path.join(temp, 'agents-rank.jsonl');
+  const ana = findAgent(config, 'ana');
+  const card = rankProposal(ana, 'lead', 'Leads the front end well.', { stats: { count: 20, clean: 19, failed: 0 } });
+  assert.deepEqual([card.rank.from, card.rank.to, card.options.length, card.level, card.project], ['senior', 'lead', 2, 2, null]);
+  assert.match(card.question, /Promote Ana from Senior to Team lead\?/);
+  assert.match(card.context, /19 of the latest 20/);
+  assert.throws(() => rankProposal(ana, 'senior', 'Why not.'), /already/);
+  assert.throws(() => rankProposal(ana, 'boss', 'Why not.'), /Unknown rank/);
+  assert.throws(() => rankProposal(ana, 'lead', ''), /Say why/);
+  assert.throws(() => rankProposal(ana, 'lead', 'Again.', { open: [{ id: 4, status: 'open', rank: { agent: 'ana' } }] }), /question #4/);
+  assert.throws(() => rankProposal(findAgent(config, 'old'), 'mid', 'Back.'), /inactive/);
+  const kept = settleRank({ id: 7, status: 'answered', answer: card.options[1], options: card.options, rank: card.rank }, { config, save, file });
+  assert.equal(kept.applied, false);
+  assert.equal(config.agents.ana.rank, 'senior');
+  const applied = settleRank({ id: 8, status: 'answered', answer: card.options[0], options: card.options, rank: card.rank }, { config, save, file });
+  assert.equal(applied.applied, true);
+  assert.equal(config.agents.ana.rank, 'lead');
+  assert.deepEqual(agentHistory({ agent: 'ana', file }).map(e => [e.action, e.proposal]), [['rank-kept', 7], ['set', 8]]);
 });
 
 test("the settings' backup: a redacted copy in backup_dir, the full one only on this computer", () => {
