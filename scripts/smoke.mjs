@@ -2096,10 +2096,10 @@ try {
     const guarded = JSON.parse(claudeArgs({ model: 'm', hooks: crewGuard(guardLog) }).find((a, i, all) => all[i - 1] === '--settings'));
     const hook = guarded.hooks?.PreToolUse?.[0]?.hooks?.[0]?.command ?? '';
     const refuses = command => /"permissionDecision":"deny"/.test(execFileSync(hook, { shell: true, encoding: 'utf8', input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't', tool_input: { command } }) }));
-    const publish = ['git -C . push origin main', 'gh api repos/a/b/pulls -f title=T -f head=h', 'cd x && git push', 'bash -c "gh pr create --fill"', 'git -c a=b remote add up u', 'gh gist create notes.md --public', 'gh release create v1'];
+    const publish = ['git -C . push origin main', 'gh api repos/a/b/pulls -f title=T -f head=h', 'cd x && git push', 'bash -c "gh pr create --fill"', 'git -c a=b remote add up u', 'gh gist create notes.md --public', 'gh release create v1', 'tailscale funnel --bg 3000'];
     // A heredoc's text that only goes into a file is data, not a command.
     const written = "cat > t.mjs <<'EOF'\ngh pr create\ngit push origin main\nEOF";
-    const wrong = [...publish.filter(c => !refuses(c)), ...['git status', 'gh api repos/a/b/pulls', 'git commit -m "no git push here"', 'gh release list', written].filter(refuses)];
+    const wrong = [...publish.filter(c => !refuses(c)), ...['git status', 'gh api repos/a/b/pulls', 'git commit -m "no git push here"', 'gh release list', 'tailscale serve status', written].filter(refuses)];
     const noted = readFileSync(guardLog, 'utf8').trim().split('\n').length;
     expect(hook.includes('guard.mjs') && !hook.includes('--allow') && !wrong.length && noted === publish.length,
       `the guard of the crew and the manager misjudged what publishes: ${JSON.stringify({ hook, wrong, noted })}`);
@@ -3113,7 +3113,7 @@ try {
     "  if (prompt.includes('through the API')) {",
     "    const hook = JSON.parse(args[args.indexOf('--settings') + 1]).hooks.PreToolUse[0].hooks[0].command;",
     "    const run = command => execSync(hook, { input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't3', tool_input: { command } }), encoding: 'utf8' });",
-    `    appendFileSync(${JSON.stringify(path.join(liveDir, 'guard.txt'))},JSON.stringify([run('cd x && gh api repos/a/b/pulls -f title=T -f head=h'), run('git -C sub push origin main'), run('git status')]));`,
+    `    appendFileSync(${JSON.stringify(path.join(liveDir, 'guard.txt'))},JSON.stringify([run('cd x && gh api repos/a/b/pulls -f title=T -f head=h'), run('git -C sub push origin main'), run('git status'), run('tailscale funnel --bg 3000')]));`,
     "  }",
     "  const wait = prompt.includes('waiting for the environment test') ? 750 : prompt.includes('take long') ? 20000 : 300;",
     "  setTimeout(() => say({ type: 'result', subtype: 'success', result: 'done', session_id: id, num_turns: 1, permission_denials: denials }), wait);",
@@ -3191,6 +3191,8 @@ try {
       // What only reads publishes nothing; what writes, however placed, does.
       'gh pr view 12': '', 'gh pr list --repo a/b --state open': '', 'gh -R a/b pr checks 3': '', 'gh pr diff 3': '', 'gh pr status': '', 'gh repo view a/b --json name': '', 'gh repo list': '',
       'gh pr --repo a/b merge 3': 'gh pr', 'gh repo create x --public': 'gh repo', 'gh pr': 'gh pr', 'gh repo delete a/b': 'gh repo',
+      // A port of this computer shared through Tailscale (Serve on the tailnet, Funnel on the internet); only status looks.
+      'tailscale serve --bg 4748': 'tailscale serve', 'cd x && tailscale.exe Funnel 443': 'tailscale funnel', 'tailscale serve status --json': '', 'tailscale status': '',
       // An instruction for Chiefmate's command line, a commit message or an issue's body that only names a command is
       // text, when the whole command is in plain words; what the command itself does still counts.
       'node src/cli.mjs task p generalist "Fix it.\ngh pr create, then git push (gh repo view)"': '', 'git commit -m "Guard\n\ngit push origin main stays refused"': '',
@@ -3218,12 +3220,17 @@ try {
     sessions.sayToSession(s.id, 'Open it through the API');
     await idle(s.id);
     const hooked = JSON.parse(called().at(-1).args[called().at(-1).args.indexOf('--settings') + 1]).hooks?.PreToolUse?.[0]?.hooks?.[0]?.command ?? '';
-    const [api, sideways, plainGit] = JSON.parse(readFileSync(path.join(liveDir, 'guard.txt'), 'utf8'));
-    expect(hooked.includes('guard.mjs') && hooked.includes('--allow "Bash(git push:*)"') && JSON.parse(api).hookSpecificOutput?.permissionDecision === 'deny' && sideways === '' && plainGit === '',
-      `the guard did not refuse a pull request opened through the API, or refused what was allowed or harmless: ${JSON.stringify([hooked, api, sideways, plainGit])}`);
-    const viaApi = sessions.readSession(s.id).requests.find(r => r.kind === 'permission' && r.status === 'open' && r.rule === 'Bash(gh api:*)');
+    const [api, sideways, plainGit, funnel] = JSON.parse(readFileSync(path.join(liveDir, 'guard.txt'), 'utf8'));
+    expect(hooked.includes('guard.mjs') && hooked.includes('--allow "Bash(git push:*)"') && [api, funnel].every(d => JSON.parse(d).hookSpecificOutput?.permissionDecision === 'deny') && sideways === '' && plainGit === '',
+      `the guard did not refuse a pull request opened through the API or a Tailscale Funnel, or refused what was allowed or harmless: ${JSON.stringify([hooked, api, sideways, plainGit, funnel])}`);
+    const asked = rule => sessions.readSession(s.id).requests.find(r => r.kind === 'permission' && r.status === 'open' && r.rule === rule);
+    const viaApi = asked('Bash(gh api:*)');
     expect(viaApi?.explain?.summary === "Open a pull request on a/b through GitHub's API" && viaApi.explain.command.startsWith('cd x && gh api'), `what the guard refused did not become a request explained in plain words: ${JSON.stringify(viaApi)}`);
+    // A Tailscale Funnel gets the same card as a publication: the port opened to the internet, at high risk.
+    const toInternet = asked('Bash(tailscale funnel:*)');
+    expect(toInternet?.explain?.summary === 'Open a port of this computer to the internet (Tailscale Funnel)' && toInternet.explain.risk === 'high', `a Tailscale Funnel the guard refused did not become a request explained in plain words: ${JSON.stringify(toInternet)}`);
     sessions.answerPermission(s.id, viaApi.id, false);
+    sessions.answerPermission(s.id, toInternet.id, false);
 
     sessions.sayToSession(s.id, 'Please take long');
     for (let i = 0; i < 50 && !sessions.turnOf(s.id)?.last; i++) await new Promise(r => setTimeout(r, 100));
