@@ -2597,8 +2597,8 @@ test("Microsoft Defender, when it can be asked, clears a lost file it has no rec
   assert.equal(await lostFile([gone, other], options(none)), null);
   assert.deepEqual(cleared, [gone, other]);
   assert.equal(none.calls, 1);
-  // Its record names the file (whatever the case, inside an archive too): a quarantine.
-  for (const resource of [`file:_${gone.toUpperCase()}`, `containerfile:_${gone}`, `file:_${gone}->inner.js`, `file:_\\\\?\\${gone}`]) {
+  // Its record names the file (whatever the case, inside an archive too, or downloaded): a quarantine.
+  for (const resource of [`file:_${gone.toUpperCase()}`, `containerfile:_${gone}`, `file:_${gone}->inner.js`, `file:_\\\\?\\${gone}`, `webfile:_${gone}|https://example.com/gone.js|pid:4242,ProcessStart:1`]) {
     assert.deepEqual(await lostFile([gone], options(asking([resource]))), { file: gone, state: 'missing' }, resource);
   }
   // Through a junction, Defender names the file in its real folder.

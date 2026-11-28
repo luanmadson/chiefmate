@@ -67,13 +67,15 @@ export function blockedPaths(text, dir) {
 const settle = () => new Promise(resolve => setTimeout(resolve, SETTLE_MS));
 
 // Microsoft Defender's record of the files it detected, only while it guards this computer by itself (normal mode,
-// real-time protection on, no other antivirus on in Windows Security). Prints JSON.
+// real-time protection on, no other antivirus on in Windows Security). Prints JSON. A record it fails to read is no
+// answer (alone false), never an empty one: the file then holds the queue as before.
 const ASK_DEFENDER = [
   '[Console]::OutputEncoding = [Text.Encoding]::UTF8',
   "$ErrorActionPreference = 'SilentlyContinue'",
   '$s = Get-MpComputerStatus',
   "$alone = [bool]($s -and $s.AMRunningMode -eq 'Normal' -and $s.RealTimeProtectionEnabled -and -not (Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | Where-Object { ($_.productState -band 0x1000) -and $_.displayName -notmatch '^(Windows|Microsoft) Defender' }))",
-  '$found = @(if ($alone) { Get-MpThreatDetection | ForEach-Object { $_.Resources } })',
+  '$found = @()',
+  'if ($alone) { try { $found = @(Get-MpThreatDetection -ErrorAction Stop | ForEach-Object { $_.Resources }) } catch { $alone = $false } }',
   'ConvertTo-Json -Compress -InputObject @{ alone = $alone; found = $found }',
 ].join('; ');
 
@@ -108,9 +110,10 @@ const realPlace = file => {
   }
 };
 
-// A detection's resource names a file: "file:_C:\a\b.js", "containerfile:_C:\a\c.zip" or "file:_C:\a\c.zip->b.js".
+// A detection's resource names a file: "file:_C:\a\b.js", "containerfile:_C:\a\c.zip", "file:_C:\a\c.zip->b.js" or
+// "webfile:_C:\a\b.js|<address>|pid:<n>" (no path holds "|").
 const names = (resource, file) => {
-  const named = resource.replace(/^\w+:_/, '').replace(/^\\\\\?\\/, '').split('->')[0].toLowerCase();
+  const named = resource.replace(/^\w+:_/, '').replace(/^\\\\\?\\/, '').split('->')[0].split('|')[0].toLowerCase();
   return [path.resolve(file), realPlace(file)].some(p => p.toLowerCase() === named);
 };
 
