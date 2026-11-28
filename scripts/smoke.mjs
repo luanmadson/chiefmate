@@ -1947,6 +1947,24 @@ try {
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
+  // The crew writes to its lead first (src/manager.mjs, leadFirst): a member's step goes to the lead; the lead's own
+  // step, the final review, a project without a lead and a live session go to the manager. A defect a member reports
+  // waits with the lead, off the manager's list, until the lead passes it on.
+  const { leadFirst } = await import(src('manager.mjs'));
+  const defectsModule = await import(src('defects.mjs'));
+  writeFileSync(path.join(data, 'runs', 'smoke-lead.json'), JSON.stringify({
+    id: 'smoke-lead', kind: 'task', project: 'gamma', title: 'Gamma: smoke', status: 'done', created: new Date().toISOString(), level: 1,
+    steps: [{ agent: 'front', status: 'done' }, { agent: 'lead', role: 'review', status: 'done' }], review: { agent: 'manager', status: 'pending' },
+  }));
+  const toGamma = leadFirst({ run: 'smoke-lead', step: '1' }, leadConfig);
+  expect(toGamma?.project === 'gamma' && toGamma.agent === 'front' && toGamma.name === 'Gamma lead', `a member's message did not go to its lead: ${JSON.stringify(toGamma)}`);
+  expect(!leadFirst({ run: 'smoke-lead', step: '2' }, leadConfig) && !leadFirst({ run: 'smoke-lead', step: '3' }, leadConfig) && !leadFirst({ run: 'smoke-feed', step: '1' }, leadConfig) && !leadFirst({ session: 'smoke-session' }, leadConfig),
+    "the lead's own step, the final review, a project without a lead or a live session went to a lead");
+  const heldDefect = defectsModule.reportDefect('Gamma: the build command is missing from the docs. Expected: the command to build.', { kind: 'step', id: 'smoke-lead', step: 1 }, { holdFor: 'gamma' });
+  expect(heldDefect.held && heldDefect.defect.held?.project === 'gamma' && !defectsModule.defectsLine().includes('build command is missing'), "a defect waiting with the lead was in the manager's list");
+  defectsModule.releaseDefect(heldDefect.defect.id, { note: 'A real defect of Chiefmate', lead: 'Gamma lead', news: false });
+  expect(defectsModule.defectsLine().includes('build command is missing'), "a defect the lead passed on did not reach the manager's list");
+  defectsModule.closeDefect(heldDefect.defect.id, 'smoke', 'owner');
 
   const mcp = stepMcp(config, config.projects.alpha, alpha.builder);
   expect(mcp.names.join() === 'browser' && mcp.tools.join() === 'mcp__browser', "the project's MCP server was not released");

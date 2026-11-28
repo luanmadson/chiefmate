@@ -2,7 +2,7 @@
 // its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation;
 // the band of what a live session asks; the emergency lockdown, its detection, its emergency watch and the call to the
 // owner outside the app; the warning before Claude Code's sign-in expires; each agent's effort; the redacted backup of
-// the settings; the usage resets' countdowns.
+// the settings; the usage resets' countdowns; the team leads' delegated review and the crew writing to its lead first.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -39,6 +39,11 @@ import {
 } from '../src/tools.mjs';
 import { parseLevel } from '../src/util.mjs';
 import { behindOrigin, checkoutBranch, fastForward, freshenBranch, projectLibraries, restoreShelf, sameRepository, shelfRef, shelveWork } from '../src/workspace.mjs';
+import {
+  answerLines, applyAnswers, applyReview, awaitsDelegation, delegatedReview, finalReviewLines, finalStep, inboxLines, leadLines, leadReviews, leadReviewStep,
+  leadSituation, markReview, MAX_ROUNDS, memberLines, openInbox, readInbox, reviewedBy, settleDelegation, takeAnswers, takeFromLead, takeReview, toLead,
+} from '../src/leads.mjs';
+import { verdictIn } from '../src/digest.mjs';
 import { syntaxProblem } from './check.mjs';
 import { SAMPLE_CSV, sampleXlsx, zip } from './fixtures.mjs';
 import { countdown, resetLabel, spare, SPARE_MIN_FREE, SPARE_WITHIN_MS, timeLeft } from '../ui/countdown.js';
@@ -2446,4 +2451,178 @@ test("a local merge saves the clone's changed tracked files first, only when not
   }
   await assert.rejects(savePendingFirst({ dir: repo, branch: 'work' }), e => e.conflict && /under way/.test(e.message));
   git('merge', '--abort');
+});
+
+// ---------- The team leads: the delegated review and the crew writing to its lead first (src/leads.mjs) ----------
+
+// A project whose lead does the final review of level 1 runs, one whose lead only reviews first, and one with no lead.
+const leadConfig = {
+  owner: 'Someone',
+  projects: {
+    site: { name: 'Site', lead: { name: 'Site lead' }, checks: ['npm test'] },
+    quiet: { name: 'Quiet', lead: { name: 'Quiet lead', delegated_review: false } },
+    plain: { name: 'Plain' },
+  },
+};
+const leadCrew = {
+  manager: { id: 'manager', name: 'Chiefmate' }, lead: { id: 'lead', name: 'Site lead', lead: true },
+  generalist: { id: 'generalist', name: 'Generalist', role: 'Any task' }, designer: { id: 'designer', name: 'Designer', role: 'The look' },
+};
+// A level 1 task of the project, its member's step done, the lead's review next and the manager's review planned.
+const levelOne = (more = {}) => ({
+  id: 'lead-run', kind: 'task', project: 'site', title: 'Fix the header', instruction: 'Fix the header', level: 1,
+  steps: [{ agent: 'generalist', part: 'Fix the header', status: 'done', report: 'Done.', tool: 'codex' }, leadReviewStep()],
+  review: { agent: 'manager', part: 'Review the work', status: 'pending' }, ...more,
+});
+// The lead's next review: marked as it starts, then done with its decision block (or with the report given).
+function leadReview(run, decision, { report = null, status = 'done' } = {}) {
+  const step = run.steps.find(s => s.agent === 'lead' && s.role === 'review' && s.status === 'pending');
+  markReview(run, step, leadConfig);
+  Object.assign(step, { status, report: report ?? `My review.\n\n## Team lead's verdict\nRecommendation: approve.\n\n~~~chiefmate-review\n${JSON.stringify(decision)}\n~~~` });
+  return { step, ...applyReview(run, step, leadCrew) };
+}
+
+test("delegated review: in a level 1 run the lead's approval is final once the checks pass, and the manager gets only its verdict", () => {
+  assert.equal(delegatedReview(levelOne(), leadConfig), true);
+  assert.equal(delegatedReview(levelOne({ level: 2 }), leadConfig), false, "level 2 is the manager's");
+  assert.equal(delegatedReview(levelOne({ level: null }), leadConfig), false, "no level: the manager's");
+  assert.equal(delegatedReview(levelOne({ review: null }), leadConfig), false, 'no final review planned: the lead only reviews first');
+  assert.equal(delegatedReview(levelOne({ project: 'quiet' }), leadConfig), false, '"delegated_review": false turns it off');
+  assert.equal(delegatedReview(levelOne({ project: 'plain' }), leadConfig), false, 'no lead, as before');
+  assert.deepEqual([leadReviews(leadConfig, 'site'), leadReviews(leadConfig, 'quiet'), leadReviews(leadConfig, 'plain'), leadReviews({ projects: { x: { lead: true } } }, 'x')], [true, false, false, true]);
+
+  const run = levelOne();
+  const { step, decision, why } = leadReview(run, { decision: 'approve', note: 'Header fixed and checked' });
+  assert.equal(step.final, true);
+  assert.match(step.part, /Final review/);
+  assert.deepEqual([decision, why], ['approve', null]);
+  assert.doesNotMatch(step.report, /chiefmate-review/, 'the decision block is taken out of the text that goes to the owner');
+  assert.equal(awaitsDelegation(run), true);
+  const prompt = leadLines({ run, step, agents: leadCrew, memory: '', base: 'main', project: leadConfig.projects.site, owner: 'Someone', lang: 'en' }).join('\n');
+  for (const part of ['~~~chiefmate-review', "Team lead's verdict", '`npm test`', 'never merge, push or publish', '`designer` (Designer']) assert.ok(prompt.includes(part), `the lead's final review prompt lacks ${part}`);
+
+  // The checks pass: the manager's review is skipped, and the lead's report is the text of the pull request.
+  assert.equal(settleDelegation(run, { delegated: true, checks: [{ command: 'npm test', ok: true }] }), true);
+  assert.deepEqual([run.review.status, run.review.delegated], ['skipped', true]);
+  assert.deepEqual(reviewedBy(run), { agent: 'lead', delegated: true, rounds: 1, why: null });
+  assert.equal(finalStep(run), step);
+  assert.deepEqual(verdictIn("# Fix\n\nDone.\n\n## Team lead's verdict\nRecommendation: approve.\n\n## Other\nx"), { text: 'Recommendation: approve.', by: 'lead' });
+  assert.deepEqual(verdictIn('### Parecer do chefe de equipe\nAprovar com ressalvas.'), { text: 'Aprovar com ressalvas.', by: 'lead' });
+  assert.deepEqual(verdictIn("## Manager's verdict\nApprove."), { text: 'Approve.', by: 'manager' });
+  // The tools' record: a delegated run the lead approved at once was not corrected.
+  assert.equal(qualityRecords({ ...run, status: 'done' })[0].corrected, false);
+});
+
+test('delegated review: the lead sends the work back with what to fix, the crew fixes it and the lead reviews again, at most twice', () => {
+  const run = levelOne();
+  const first = leadReview(run, { decision: 'return', fixes: [{ agent: 'Designer', task: 'Align the logo' }, { agent: 'nobody', task: 'x' }], note: 'The logo is off' });
+  assert.deepEqual([first.decision, first.why], ['return', null]);
+  assert.deepEqual(run.steps.map(s => `${s.agent}${s.fix ? `/fix${s.fix}` : ''}${s.role ? `/${s.role}${s.round ?? ''}` : ''}`), ['generalist', 'lead/review', 'designer/fix1', 'lead/review2']);
+  assert.deepEqual([run.steps[2].part, run.steps[2].by], ['Align the logo', 'lead']);
+  assert.deepEqual(run.lead.reviews[0].dropped, ['nobody: x (not in the crew)']);
+  assert.equal(awaitsDelegation(run), false, 'nothing approved yet');
+  const lead = leadCrew.lead;
+  const fixPrompt = memberLines({ run, step: run.steps[2], lead, memory: '' }).join('\n');
+  assert.ok(fixPrompt.includes(`fix round 1 of at most ${MAX_ROUNDS}`) && fixPrompt.includes('Your team lead (Site lead)'), 'a fix does not say it comes from the lead');
+  assert.equal(askedBy(run, run.steps[2]).by, 'lead', "a fix's bubble says the lead asked for it");
+
+  run.steps[2].status = 'done';
+  leadReview(run, { decision: 'return', fixes: [{ agent: 'designer', task: 'The logo is still off' }] });
+  assert.equal(run.steps.filter(s => s.fix === 2).length, 1);
+  const last = run.steps.at(-1);
+  assert.deepEqual([last.agent, last.round], ['lead', 3]);
+  markReview(run, last, leadConfig);
+  assert.match(leadLines({ run, step: last, agents: leadCrew, memory: '', base: 'main' }).join('\n'), /may not send it back again/);
+
+  // A third time is too many: the manager reviews it, with the lead's rounds.
+  run.steps.filter(s => s.status === 'pending' && s.fix).forEach(s => (s.status = 'done'));
+  const third = leadReview(run, { decision: 'return', fixes: [{ agent: 'designer', task: 'Again' }] });
+  assert.equal(third.why, 'rounds');
+  assert.equal(run.steps.filter(s => s.fix).length, 2, 'no third round of fixes');
+  assert.deepEqual([run.review.status, run.lead.escalated.why], ['pending', 'rounds']);
+  const manager = finalReviewLines(run, lead).join('\n');
+  assert.ok(manager.includes(`${MAX_ROUNDS} rounds of fixes were not enough`) && manager.includes('- Round 1: return (The logo is off); sent back: designer: Align the logo'), "the manager's review lacks the lead's rounds or why it came");
+  run.review.status = 'done';
+  assert.deepEqual(reviewedBy(run), { agent: 'manager', delegated: false, rounds: 3, why: 'rounds' });
+  // The tools' record: sent back by the lead, so corrected.
+  const fixed = levelOne();
+  leadReview(fixed, { decision: 'return', fixes: [{ agent: 'designer', task: 'Align the logo' }] });
+  fixed.steps[2].status = 'done';
+  leadReview(fixed, { decision: 'approve' });
+  settleDelegation(fixed, { delegated: true, checks: [] });
+  const record = qualityRecords({ ...fixed, status: 'done' })[0];
+  assert.deepEqual([record.corrected, record.note], [true, 'Align the logo']);
+});
+
+test('delegated review: the manager reviews when the lead escalates, the checks fail, the level changes or the review is unclear', () => {
+  const asked = levelOne();
+  assert.equal(leadReview(asked, { decision: 'escalate', note: 'It touches the payments' }).why, 'lead');
+  assert.deepEqual([asked.lead.escalated.note, asked.review.status], ['It touches the payments', 'pending']);
+  assert.match(finalReviewLines(asked, leadCrew.lead).join('\n'), /the team lead escalated it to you \(It touches the payments\)/);
+
+  const failing = levelOne();
+  leadReview(failing, { decision: 'approve' });
+  assert.equal(settleDelegation(failing, { delegated: true, checks: [{ command: 'npm test', ok: false }, { command: 'npm run check', ok: true }] }), false);
+  assert.deepEqual([failing.lead.escalated.why, failing.lead.escalated.note, failing.review.status, !!failing.review.delegated], ['checks', 'npm test', 'pending', false]);
+  assert.equal(reviewedBy({ ...failing, review: { ...failing.review, status: 'done' } }).why, 'checks');
+
+  const raised = levelOne();
+  leadReview(raised, { decision: 'approve' });
+  raised.level = 2;
+  assert.equal(settleDelegation(raised, { delegated: delegatedReview(raised, leadConfig) }), false);
+  assert.equal(raised.lead.escalated.why, 'level');
+
+  assert.equal(leadReview(levelOne(), null, { report: 'I looked at it and it seems fine.' }).why, 'unclear', 'no decision block');
+  const broken = levelOne();
+  assert.equal(leadReview(broken, null, { report: '~~~chiefmate-review\n{decision: approve\n~~~' }).why, 'unclear');
+  assert.match(broken.lead.escalated.note, /not valid JSON/);
+  const strangers = levelOne();
+  assert.equal(leadReview(strangers, { decision: 'return', fixes: [{ agent: 'nobody', task: 'x' }] }).why, 'unclear', 'sent back to nobody of the crew');
+  assert.match(strangers.lead.escalated.note, /no fix a member of the crew can take; left out: nobody/);
+  assert.equal(leadReview(levelOne(), null, { status: 'failed', report: '' }).why, 'failed');
+  assert.equal(takeReview('~~~chiefmate-review\n{"decision": "maybe"}\n~~~', {}).error, 'unknown decision "maybe"');
+
+  // Not delegated (level 2, or the project turned it off): the lead's review stays a first one, an opinion.
+  for (const run of [levelOne({ level: 2 }), levelOne({ project: 'quiet' })]) {
+    const step = run.steps[1];
+    assert.equal(markReview(run, step, leadConfig), false);
+    assert.match(step.part, /First review/);
+    assert.match(leadLines({ run, step, agents: leadCrew, memory: '', base: 'main' }).join('\n'), /You do the first review/);
+  }
+});
+
+test('the crew writes to its lead first: the lead answers or passes it on, and the manager sees one line per lead', () => {
+  const file = path.join(temp, 'lead-inbox.json');
+  const lead = leadCrew.lead;
+  const question = toLead('site', { kind: 'message', text: 'Which logo size do we use?', agent: 'designer', run: 'lead-run', step: 1 }, file);
+  const defect = toLead('site', { kind: 'defect', text: 'needs-you did not open the page. Expected: the page.', agent: 'generalist', run: 'lead-run', step: 2, defect: 7 }, file);
+  assert.deepEqual([question.id, defect.id, defect.defect, openInbox('site', file).length], [1, 2, 7, 2]);
+  assert.throws(() => toLead('site', { text: '  ' }, file), /Write a message/);
+  const shown = inboxLines(openInbox('site', file)).join('\n');
+  assert.ok(shown.includes('~~~crew-answers') && shown.includes('#1 (message') && shown.includes('#2 (defect #7 of Chiefmate'), "the lead's prompt lacks its crew's messages or how to answer");
+  assert.deepEqual(inboxLines([]), []);
+  assert.ok(leadLines({ run: levelOne(), step: leadReviewStep(), agents: leadCrew, memory: '', base: 'main', inbox: openInbox('site', file) }).join('\n').includes('Open messages from your crew'));
+
+  // The lead's answers, taken out of its report: one answered, one passed on to the manager.
+  const taken = takeAnswers('Review.\n\n~~~crew-answers\n[{"id": 1, "answer": "48 px, as in the memory."}, {"id": 2, "forward": "A real defect of needs-you"}, {"id": 9, "answer": "x"}]\n~~~\n');
+  assert.equal(taken.report, 'Review.');
+  const done = applyAnswers('site', taken.answers, { run: 'lead-run-2' }, file);
+  assert.deepEqual([done.answered.map(x => x.id), done.forwarded.map(x => x.id)], [[1], [2]]);
+  assert.deepEqual(readInbox('site', file).map(x => x.status), ['answered', 'forwarded']);
+  assert.deepEqual(applyAnswers('site', taken.answers, {}, file), { answered: [], forwarded: [] }, 'an item is answered once');
+  const answers = answerLines('site', lead, file);
+  assert.ok(answers.join('\n').includes('Which logo size do we use?') && answers.join('\n').includes('48 px, as in the memory.'), "the crew doesn't learn the lead's answers");
+  assert.ok(memberLines({ run: levelOne(), step: { agent: 'designer', part: 'x' }, lead, memory: '', answers }).join('\n').includes("The team lead's answers to the crew's messages"));
+
+  // The manager (or the owner) takes one that can't wait; a handled one can't be taken.
+  const urgent = toLead('site', { text: 'The build server is down.', agent: 'generalist' }, file);
+  assert.throws(() => takeFromLead('site', 1, 'manager', file), /already handled/);
+  assert.equal(takeFromLead('site', urgent.id, 'manager', file).status, 'taken');
+  assert.throws(() => takeFromLead('site', 99, 'manager', file), /No message #99/);
+
+  // One line per lead in the manager's situation, with what is open (not each message).
+  const later = toLead('site', { text: 'May I rename the components folder?', agent: 'designer' }, file);
+  const line = leadSituation('site', { name: 'Site lead', base: 'manager' }, null, null, null, { delegated: true, open: openInbox('site', file) });
+  assert.ok(line.includes('final review of level 1 runs') && line.includes('1 message(s)') && line.includes(`#${later.id} designer: "May I rename`) && line.includes('inbox site take <n>'), `the lead's line is wrong: ${line}`);
+  assert.match(leadSituation('quiet', { name: 'Quiet lead', base: 'manager' }, null, null, null, { delegated: false, open: [] }), /it does the first review, you the final one; nothing open from its crew/);
 });
