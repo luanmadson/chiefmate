@@ -595,6 +595,24 @@ Chiefmate measures what really counts on a subscription plan: your account's usa
 - **The autopilot** (optional; see "Planning"): its switch, its pace for the week (the week's mode, above), its limits (a slider for the 5-hour window, the quiet hours and the daily report's time), a **Now** line with what it does or exactly why it is stopped, a suggestion to spend all when a free reset is available, what it did today and who changed its settings, and when.
 - **The plan's free resets.** Claude Code doesn't report them, so you record them in the Usage section or with `reset-grant`. Chiefmate shows the ones available and the week's pace (the share used against the share of the week gone by, and whether there is slack). It warns you when the week passes 90% with one available, and 3 days and 1 day before one expires unused.
 
+### Project costs
+
+Under **Usage → Project costs**, each project shows its current calendar week first, with eight weeks of details folded underneath. The bars compare agent and app turn hours on a common scale. Weeks start on Monday in the computer's time zone. A run or live session can count in more than one week if it has recorded work in those weeks.
+
+Agent work comes from recorded steps and reviews, including retries recorded by this version. Live app turns are measured separately. A terminal's open time is shown separately from active work and can include idle time. Older live app turns without timing records and terminal token usage cannot be recovered.
+
+For each observed 5-hour or plan-week window, Chiefmate divides the reported utilization among recorded Claude activity by token count, including cache tokens. The result is an estimate in percentage points of the account's limit. Its accuracy depends on how much activity Chiefmate recorded and how well token counts approximate the plan's metering. Other tools do not contribute to the Claude estimate. Weekly details allocate each observed window across the calendar weeks it intersects. Several 5-hour windows may add up to more than 100 points. A dash means there is no estimate for that source. Older account windows have no history before Chiefmate began keeping their readings.
+
+The owner can add an expense from the panel. The owner and manager can also use these commands:
+
+```text
+node src/cli.mjs costs [--project <id>] [--weeks n]
+node src/cli.mjs costs add --project <id> --name "<name>" --amount <value> --currency <code> --frequency once|weekly|monthly|yearly --due YYYY-MM-DD
+node src/cli.mjs costs remove <expense-id>
+```
+
+The report returns JSON for 8 weeks by default (1 to 52). It expresses money amounts as hundredths of the stated currency. The due date is the first charge. Monthly and yearly charges fall on the last day of shorter months. Scheduled amounts are grouped by currency and do not track payment. Removing an entry also removes its occurrences from the report. Entries stay in the installation's `data/project-expenses/`. The manager sees the current calendar week's summary in its situation.
+
 ### Talking while the manager answers
 
 The conversation never makes you wait.

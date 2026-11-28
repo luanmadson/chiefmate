@@ -59,6 +59,8 @@ Chiefmate improves itself: the crew works on a copy of this repository and every
 | `config/example.json` | The settings template. Each installation's `config/chiefmate.json` is private and never in git. |
 | `scripts/` | Installation on Windows, launchers, `check.mjs` and `smoke.mjs`. |
 
+`src/costs.mjs` combines legacy step totals, new step and live app turn measurements, terminal open time, and manually entered expenses. Account window readings are kept by reset time under `data/usage-windows/`; expense entries are independent files under `data/project-expenses/`. The Usage panel uses the owner-authorized `/api/costs` and `/api/costs/expense` commands. The manager's CLI reads and records expenses locally, and its situation includes the calendar week's summary.
+
 ## Rules
 
 1. **English everywhere**: code, comments, documentation and commit messages.

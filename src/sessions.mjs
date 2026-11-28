@@ -18,6 +18,7 @@ import { browserServers } from './browsers.mjs';
 import { addRequest, chargeFolder, chargeProfile, chargeProject, chargeTurn, takeRequest, turnChanges } from './charge.mjs';
 import { describeAction, environment, runClaude } from './claude.mjs';
 import { loadConfig } from './config.mjs';
+import { costActivity } from './costs.mjs';
 import { API, guardHooks, mainPushTarget, mainPushTargets, PUSH, publishing, pushesFile, readPushes } from './guard.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { computer, formatBytes, processes, refreshProcesses } from './machine.mjs';
@@ -801,6 +802,11 @@ function finishTurn(id, turn, r) {
   live.delete(id);
   const session = readSession(id);
   if (!session) return;
+  if (turn.pid || r.durationMs || r.tokens) {
+    const activity = turn.costActivity ??= costActivity(r, session.tool, turn.since, now(), r.durationMs || r.spentMs || Date.now() - Date.parse(turn.since));
+    const recorded = session.costActivity ??= [];
+    if (!recorded.some(entry => entry.started === activity.started && entry.ended === activity.ended)) recorded.push(activity);
+  }
   // A turn that got to start counts: the next one resumes its session (Codex's thread, or Claude Code's own id).
   const started = session.tool === 'codex' ? r.session : turn.started || r.session ? session.toolSession : null;
   Object.assign(session, { working: null, lastTurn: { at: now(), ok: !!r.ok }, ...(started ? { toolSession: started, turns: (session.turns ?? 0) + 1, ...(turn.seen ? { seen: turn.seen } : {}) } : {}) });
@@ -1112,6 +1118,7 @@ function runCodex({ session, prompt, log, onEvent }) {
   let thread = null;
   let failure = null;
   let finished = false;
+  let tokens;
   let canceled = null;
   let stderr = '';
   const timer = setTimeout(() => cancel(t('went over the time limit ({minutes} min)', { minutes: TURN_MINUTES })), TURN_MINUTES * 60_000);
@@ -1133,7 +1140,11 @@ function runCodex({ session, prompt, log, onEvent }) {
       return;
     }
     if (event.type === 'thread.started') thread = event.thread_id;
-    else if (event.type === 'turn.completed') finished = true;
+    else if (event.type === 'turn.completed') {
+      finished = true;
+      const usage = event.usage;
+      if (usage) tokens = { input: usage.input_tokens, output: usage.output_tokens };
+    }
     else if (event.type === 'turn.failed') failure = event.error?.message ?? 'turn failed';
     else if (event.type === 'error') failure = event.message ?? 'error';
     else {
@@ -1151,7 +1162,7 @@ function runCodex({ session, prompt, log, onEvent }) {
       out.end();
       const ok = finished && !failure && !canceled;
       const error = canceled ?? failure ?? (ok ? null : t('{tool} ended without finishing its turn (exit code {code}). {output}', { tool: 'Codex', code, output: clip(stderr.trim(), 600) }));
-      resolve({ ok, canceled: !!canceled, error, session: thread ?? session.toolSession ?? null });
+      resolve({ ok, canceled: !!canceled, error, session: thread ?? session.toolSession ?? null, tokens });
     });
   });
   return { promise, cancel, pid: child.pid };

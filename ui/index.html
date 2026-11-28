@@ -334,6 +334,30 @@
         </div>
         <div id="usage"></div>
         <div id="spending" class="panel form"></div>
+        <section id="project-costs" class="panel form" aria-labelledby="project-costs-title">
+          <h2 id="project-costs-title" data-t="Project costs">Project costs</h2>
+          <p id="costs-status" class="hint" role="status"></p>
+          <div id="costs-summary"></div>
+          <details id="costs-entry" hidden>
+            <summary data-t="Add an expense">Add an expense</summary>
+            <form id="costs-form">
+              <div class="fields">
+                <label><span data-t="Project">Project</span><select name="project" required></select></label>
+                <label><span data-t="Name">Name</span><input name="name" required maxlength="120"></label>
+                <label><span data-t="Amount">Amount</span><input name="amount" type="number" required min="0.01" max="10000000000" step="0.01"></label>
+                <label><span data-t="Currency code">Currency code</span><input name="currency" required pattern="[A-Za-z]{3}" maxlength="3"></label>
+                <label><span data-t="Frequency">Frequency</span><select name="frequency">
+                  <option value="once" data-t="Once">Once</option>
+                  <option value="weekly" data-t="Weekly">Weekly</option>
+                  <option value="monthly" data-t="Monthly">Monthly</option>
+                  <option value="yearly" data-t="Yearly">Yearly</option>
+                </select></label>
+                <label><span data-t="Due date">Due date</span><input name="due" type="date" required></label>
+              </div>
+              <div class="actions"><button type="submit" class="button" data-t="Add expense">Add expense</button></div>
+            </form>
+          </details>
+        </section>
         <form id="limits-form" class="panel form">
           <div class="label" data-t="The week's limit">The week's limit</div>
           <div class="fields">

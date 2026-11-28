@@ -171,6 +171,11 @@ try {
       }
     };
     const post = (route, body) => keyless(route, body, ownerHeader);
+    const protectedCosts = await keyless('/api/costs', { weeks: 1 });
+    expect(protectedCosts.status === 403 && (await protectedCosts.json()).owner, 'project costs answered without the owner key');
+    const costs = await (await post('/api/costs', { project: 'none', weeks: 1 })).json();
+    expect(costs.projects?.length === 1 && costs.projects[0].weeks?.length === 1 && costs.projects[0].weeks[0].runs === 1,
+      'project costs did not report the smoke run for the requested week');
     // Without the key (any other program of this computer), what is the owner's is refused and changes nothing; what an
     // agent may do goes on; a pairing code must be one the server gave; and the app's window opens nothing here.
     for (const [route, body, more] of [['/api/lockdown', { action: 'release', confirm: true }], ['/api/manager', { message: 'As the owner' }],

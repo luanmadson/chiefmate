@@ -31,6 +31,7 @@ import { denyRules } from './access.mjs';
 import { updateInfo, updating } from './update.mjs';
 import { stopping } from './power.mjs';
 import { sessionLine } from './spending.mjs';
+import { projectCosts } from './costs.mjs';
 import { steerManagerLine } from './steer.mjs';
 import { DATA, ensureDir, languageName, now, ROOT, VERSION } from './util.mjs';
 import { noTrace } from './workspace.mjs';
@@ -168,7 +169,17 @@ export function situation(libraries = []) {
   const login = loginLine(config.owner || 'the owner');
   if (login) lines.push(login);
   lines.push(sessionsLine(config));
-  const working = workLine(listSessions(), config);
+  const sessions = listSessions();
+  const costs = projectCosts({ projects: config.projects, weeks: 1, runs, sessions });
+  const costsThisWeek = costs.projects.flatMap(row => {
+    const w = row.weeks[0];
+    if (!(w.runs || w.sessions || Object.keys(w.expenses).length)) return [];
+    const estimate = (kind, source) => w.usage[kind]?.[source] == null ? 'unknown' : `${w.usage[kind][source].toFixed(1)} pp`;
+    const money = Object.entries(w.expenses).map(([currency, minor]) => `${currency} ${(minor / 100).toFixed(2)}`).join(', ') || 'none';
+    return [`${row.project}: ${w.runs} runs, ${w.agentHours.toFixed(1)} agent h (estimated 5h / plan week: ${estimate('five_hour', 'agents')} / ${estimate('seven_day', 'agents')}); ${w.sessions} live sessions, ${w.liveHours.toFixed(1)} turn h, ${w.windowHours.toFixed(1)} window-open h (estimated: ${estimate('five_hour', 'live')} / ${estimate('seven_day', 'live')}); scheduled expenses ${money}`];
+  });
+  lines.push(`Project costs this calendar week: ${costsThisWeek.join(' | ') || 'no recorded work or scheduled expenses'}.`);
+  const working = workLine(sessions, config);
   if (working) lines.push(working);
   lines.push(planningLine(config.owner || 'the owner'));
   const stale = staleLine(runs, config.owner || 'the owner', config);

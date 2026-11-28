@@ -1548,3 +1548,24 @@ html.chat-focus #view-manager .chat-column { width: min(100%, 1000px); margin: 0
   .focus:has(.steer-chip) > :not(.label, .steer-chip) { display: none; }
   .steer-chip { flex: 0 1 auto; max-width: none; }
 }
+.cost-project {
+  padding-block: 0.7rem;
+  border-top: 1px solid var(--line);
+}
+.cost-project h3, .cost-project p { margin: 0 0 0.35rem; }
+.cost-project summary, #costs-entry summary { cursor: pointer; }
+.cost-weeks, .cost-expenses { list-style: none; padding: 0; }
+.cost-weeks li, .cost-expenses li {
+  display: grid;
+  gap: 0.2rem;
+  padding-block: 0.5rem;
+  border-bottom: 1px solid var(--line);
+}
+.cost-expenses button { justify-self: start; }
+.cost-weeks progress {
+  width: min(100%, 32rem);
+  height: 0.5rem;
+  border: 0;
+  accent-color: var(--accent);
+}
+#costs-form { margin-top: 0.6rem; }

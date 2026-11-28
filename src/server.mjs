@@ -40,6 +40,7 @@ import { builderPage, builderStatus, composeFromApp } from './prompts.mjs';
 import { documentCommit, isSyncing, syncPrompts } from './promptsync.mjs';
 import { cancel, cancelQueued, doNow, editQueued, endDoNow, focus, holdRun, maxParallel, moveInQueue, nudgeQueue, queueControl, queueInTurn, queueMarks, resume } from './queue.mjs';
 import { changeSession, spendingStatus } from './spending.mjs';
+import { changeExpense, projectCosts } from './costs.mjs';
 import { activeRun, createRun, describeLater, doingNow, liveRuns, liveSpeech, needsBrief, outcomeLater, pauseLive, retryRun, setRunLevel, stepSays } from './runs.mjs';
 import { speechView } from './speech.mjs';
 import { closeGap, recordGap } from './gaps.mjs';
@@ -1143,6 +1144,12 @@ export function startServer() {
           // The session's mode, runs at once and pause, "Spend all until" the renewal and "Not now" (src/spending.mjs).
           changeSession(body, { by: remote ? `remote:${String(req.headers['tailscale-user-login'] ?? '').trim().toLowerCase()}` : 'app' });
           return reply(res, 200, spendingStatus());
+        case '/api/costs': {
+          const { projects } = loadConfig();
+          return reply(res, 200, projectCosts({ projects, weeks: body.weeks, project: body.project, sessions: listSessions() }));
+        }
+        case '/api/costs/expense':
+          return reply(res, 200, changeExpense(body, { projects: loadConfig().projects, by: 'owner' }));
         case '/api/autopilot':
           // Save the autopilot's settings and record who changed them (src/autopilot.mjs).
           changeAutopilot(body, { by: remote ? `remote:${String(req.headers['tailscale-user-login'] ?? '').trim().toLowerCase()}` : 'app' });
