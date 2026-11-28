@@ -906,7 +906,7 @@ function gitOut(dir, ...args) {
 /** "owner/name" for a GitHub address, the address itself otherwise. */
 const repoLabel = url => /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(url ?? '')?.[1] ?? url ?? '';
 
-/** The command refused (git push, gh pr, gh repo, git remote or any other), explained. */
+/** The command refused (git push, gh pr, gh repo, git remote, tailscale serve or funnel, or any other), explained. */
 function explainCommand(command, dir) {
   const [program, group, ...args] = words(command);
   const origin = () => repoLabel(gitOut(dir, 'remote', 'get-url', 'origin')) || (dir ? path.basename(dir) : '?');
@@ -1004,6 +1004,21 @@ function explainCommand(command, dir) {
       },
     };
     return of[group] || { summary: t('Act on GitHub ({what})', { what: `gh ${group} ${action}`.trim() }), where: group === 'gist' ? account : repo, ...unknownEffect() };
+  }
+  if (program === 'tailscale' && ['serve', 'funnel'].includes(group)) {
+    // Serve shares a port of this computer on the tailnet, Funnel on the internet; reset and off stop sharing.
+    const where = t('This computer');
+    if (plain[0]?.toLowerCase() === 'reset' || plain.some(a => a.toLowerCase() === 'off')) {
+      // Allowed, the rule lets the whole group go for the session: sharing a port too, on the internet with Funnel.
+      const grant = group === 'funnel'
+        ? { risk: 'high', why: t('Allowing it also lets the agent open ports to the internet with Funnel for the rest of this session.') }
+        : { risk: 'medium', why: t('Allowing it also lets the agent share ports on your tailnet with Serve for the rest of this session.') };
+      return { summary: t('Turn off what this computer shares through Tailscale ({what})', { what: `tailscale ${group} ${args.join(' ')}`.trim() }), where, change: t("Your other devices stop reaching it, Chiefmate's remote access included if it goes this way."), undo: t('Yes: it can be shared again.'), ...grant };
+    }
+    // Not "tailscale serve reset" as the way back: it turns off everything shared, the remote access included.
+    return group === 'funnel'
+      ? { summary: t('Open a port of this computer to the internet (Tailscale Funnel)'), where, change: t('Anyone on the internet with the address reaches what answers on that port, with no sign-in.'), undo: t('Partly: it can be turned off, but it may have been reached already.'), risk: 'high', why: t('It is open to the whole internet.') }
+      : { summary: t('Share a port of this computer on your tailnet (Tailscale Serve)'), where, change: t('Your other devices, and whoever you shared the tailnet with, reach what answers on that port.'), undo: t('Yes: it can be turned off.'), risk: 'medium', why: t('What answers on that port stops being for this computer only.') };
   }
   if (program === 'git' && group === 'remote') {
     const [action, name = 'origin', url] = plain;

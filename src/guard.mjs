@@ -1,5 +1,6 @@
 // What a shell command would publish, however it is written: "git -C dir push", "bash -c 'git push'",
-// "gh api ... -X POST", "curl -X POST https://api.github.com/...". Claude Code's permission rules only match a
+// "gh api ... -X POST", "curl -X POST https://api.github.com/...", and "tailscale funnel 3000", which shares a port of
+// this computer (Tailscale Serve on the tailnet, Funnel on the internet). Claude Code's permission rules only match a
 // command's first words, so a live session in the app also runs this file as a PreToolUse hook (see guardHooks): what
 // it finds and the owner has not allowed is refused, and written down for a permission request.
 // The manager is refused the same way, with one exception the owner gives on a card: one plain push (see takeGrant).
@@ -25,6 +26,11 @@ export const GIST = 'Bash(gh gist:*)';
 export const RELEASE = 'Bash(gh release:*)';
 export const WORKFLOW = 'Bash(gh workflow:*)';
 export const SECRET = 'Bash(gh secret:*)';
+// Tailscale Serve or Funnel changed: a port of this computer shared on the tailnet, or opened to the internet.
+export const SERVE = 'Bash(tailscale serve:*)';
+export const FUNNEL = 'Bash(tailscale funnel:*)';
+// Every rule above, the ones the owner may allow.
+const RULES = [PUSH, REMOTE, PR, REPO, API, GIST, RELEASE, WORKFLOW, SECRET, SERVE, FUNNEL];
 
 // git's options before the command that take the next word as their value.
 const GIT_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix', '--exec-path', '--attr-source']);
@@ -357,6 +363,7 @@ function inCommand(words, depth) {
   }
   if (program === 'git') return inGit(args);
   if (program === 'gh') return inGh(args);
+  if (program === 'tailscale') return inTailscale(args);
   if (WEB.has(program)) return inWeb(words[i], args);
   return [];
 }
@@ -416,6 +423,22 @@ function inGh(args) {
   const endpoint = rest.find(a => !a.startsWith('-')) ?? '';
   const writes = method ? !/^(GET|HEAD)$/i.test(method) : endpoint === 'graphql' ? rest.some(a => /\bmutation\b/.test(a)) : sends;
   return writes ? [{ rule: API, part, dir: null }] : [];
+}
+
+// Tailscale's groups that change what this computer shares, with their rule. Only "status" right after one only looks:
+// any other word, an option first included, may be a port shared (tailscale serve --set-path status 3000).
+const TAILSCALE_RULES = { serve: SERVE, funnel: FUNNEL };
+
+function inTailscale(args) {
+  // Tailscale reads its groups whatever the case, after its own options (--socket <path>).
+  let at = 0;
+  for (; at < args.length && !Object.hasOwn(TAILSCALE_RULES, args[at].toLowerCase()); at++) {
+    // Another group ends the search; a word after an option written without "=" is that option's value.
+    if (!args[at].startsWith('-') && !(at > 0 && args[at - 1].startsWith('-') && !args[at - 1].includes('='))) return [];
+  }
+  if (at >= args.length) return [];
+  const [sub, ...rest] = [args[at].toLowerCase(), ...args.slice(at + 1)];
+  return rest[0]?.toLowerCase() === 'status' ? [] : [{ rule: TAILSCALE_RULES[sub], part: ['tailscale', sub, ...rest].join(' '), dir: null }];
 }
 
 function inWeb(program, args) {
@@ -786,7 +809,7 @@ export function guardHooks({ log, allowed = [], grants = null, who = grants ? 'm
   // Only the guard's own rules: any other text would go into a shell command line. So would a folder, a repository
   // or an id, which are passed only when nothing in them is read by a shell inside double quotes.
   const plain = s => !!s && !/["%$`!\r\n]/.test(String(s));
-  const rules = [PUSH, REMOTE, PR, REPO, API, GIST, RELEASE, WORKFLOW, SECRET].filter(r => allowed.includes(r));
+  const rules = RULES.filter(r => allowed.includes(r));
   const by = ['step', 'manager', 'session'].includes(who) ? who : 'step';
   const card = grants ? (mainCard ?? []).flatMap(x => (x.dir && plain(x.dir) ? ['--main-dir', q(x.dir)] : x.repo && plain(x.repo) ? ['--main-repo', q(x.repo)] : [])) : [];
   const command = [q(process.execPath), q(fileURLToPath(import.meta.url)), '--log', q(log), '--who', by, ...rules.flatMap(r => ['--allow', q(r)]),

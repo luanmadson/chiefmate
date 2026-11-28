@@ -978,8 +978,9 @@ test('Grok: deny rules for every publication, its own session, no Claude or Curs
   const glob = rule => new RegExp(`^${rule.slice(5, -1).replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
   const caught = command => GROK_DENY.some(rule => glob(rule).test(command));
   for (const c of ['git push', 'git -C x push origin main', 'bash -c "git push"', 'git remote set-url origin x', 'gh pr create', 'gh repo delete x', 'gh api -X POST repos/a/b/pulls',
-    'curl -X POST https://api.github.com/repos/a/b/pulls', 'gh gist create f --public', 'gh release create v1', 'gh workflow run ci', 'gh secret set T']) assert.ok(caught(c), `not refused: ${c}`);
-  for (const c of ['git status', 'git commit -m "Fix"', 'npm test', 'node src/cli.mjs plan list', 'git log --oneline']) assert.ok(!caught(c), `refused: ${c}`);
+    'curl -X POST https://api.github.com/repos/a/b/pulls', 'gh gist create f --public', 'gh release create v1', 'gh workflow run ci', 'gh secret set T',
+    'tailscale serve --bg 3000', 'tailscale funnel 443', 'C:/Program Files/Tailscale/tailscale.exe serve 3000']) assert.ok(caught(c), `not refused: ${c}`);
+  for (const c of ['git status', 'git commit -m "Fix"', 'npm test', 'node src/cli.mjs plan list', 'git log --oneline', 'tailscale status', 'tailscale ip -4']) assert.ok(!caught(c), `refused: ${c}`);
 });
 
 test("Codex's PATH leaves out Windows' app aliases, which its sandbox can't start", { skip: !windows }, () => {
@@ -1632,6 +1633,32 @@ test("gh's gists, releases, workflows and secrets publish, each under its own ru
   // Allowed on its card, the rule goes to the hook like the others.
   const hook = guardHooks({ log: 'g', allowed: ['Bash(gh release:*)', 'Bash(rm:*)'] }).PreToolUse[0].hooks[0].command;
   assert.ok(hook.includes('--allow "Bash(gh release:*)"') && !hook.includes('rm:'), hook);
+});
+
+test('Tailscale Serve and Funnel publish a port of this computer, each under its own rule; only status looks', () => {
+  const found = command => publishing(command).map(f => [f.rule, f.part]);
+  const serve = 'Bash(tailscale serve:*)';
+  const funnel = 'Bash(tailscale funnel:*)';
+  for (const [command, rule, part] of [
+    ['tailscale serve --bg 4748', serve, 'tailscale serve --bg 4748'], ['tailscale serve 3000', serve, 'tailscale serve 3000'],
+    ['tailscale serve --tcp=2222 22', serve, 'tailscale serve --tcp=2222 22'], ['tailscale funnel --bg 443', funnel, 'tailscale funnel --bg 443'],
+    // Turning it off changes it too (the owner's remote access may go through it), and so does the group alone.
+    ['tailscale serve reset', serve, 'tailscale serve reset'], ['tailscale funnel 443 off', funnel, 'tailscale funnel 443 off'], ['tailscale serve', serve, 'tailscale serve'],
+    // Written any other way: whatever the case, its path, its own options, inside a shell, after cd, behind a wrapper.
+    ['Tailscale SERVE 3000', serve, 'tailscale serve 3000'], [String.raw`& "C:\Program Files\Tailscale\tailscale.exe" funnel 3000`, funnel, 'tailscale funnel 3000'],
+    ['tailscale --socket /run/ts.sock serve 3000', serve, 'tailscale serve 3000'], ['tailscale --socket=/run/ts.sock funnel 80', funnel, 'tailscale funnel 80'],
+    ['bash -c "tailscale serve --bg 5173"', serve, 'tailscale serve --bg 5173'], ['cd x && sudo tailscale funnel 8080', funnel, 'tailscale funnel 8080'],
+    ['pwsh -Command "tailscale serve 5173"', serve, 'tailscale serve 5173'],
+    // "status" counts only right after the group: an option's value named so may be a path shared.
+    ['tailscale serve --set-path status 3000', serve, 'tailscale serve --set-path status 3000'], ['tailscale --socket status serve 3000', serve, 'tailscale serve 3000'],
+  ]) assert.deepEqual(found(command), [[rule, part]], command);
+  for (const command of ['tailscale serve status', 'tailscale serve status --json', 'tailscale funnel STATUS', 'tailscale status', 'tailscale status serve',
+    'tailscale --socket=/run/ts.sock status --json', 'tailscale ip -4', 'tailscale up', 'echo tailscale serve 3000', 'git commit -m "tailscale funnel 443"']) {
+    assert.deepEqual(found(command), [], command);
+  }
+  // Allowed on its card, each rule goes to the hook like the others.
+  const hook = guardHooks({ log: 'g', allowed: [serve, funnel] }).PreToolUse[0].hooks[0].command;
+  assert.ok(hook.includes(`--allow "${serve}"`) && hook.includes(`--allow "${funnel}"`), hook);
 });
 
 test("A heredoc's text written into a file by a command that does nothing else is data; any other is looked at as before", () => {
