@@ -4407,7 +4407,7 @@ try {
 
 // A run whose step writes a file that is gone at its end (a stand-in for Claude that "writes" a file it never creates):
 // the step pauses without committing, the project waits for the file, and once it is back the step resumes in the
-// same session, told why, and the run finishes.
+// same session, told why, and the run finishes. The files it removed itself or kept in .tmp don't count.
 {
   const fixture = mkdtempSync(path.join(os.tmpdir(), 'chiefmate-smoke-quarantine-'));
   const env = { CHIEFMATE_DATA: process.env.CHIEFMATE_DATA, CHIEFMATE_SMOKE: process.env.CHIEFMATE_SMOKE, CHIEFMATE_CLAUDE: process.env.CHIEFMATE_CLAUDE };
@@ -4431,8 +4431,15 @@ try {
       "  if (input.includes('quarantined by the antivirus')) writeFileSync(" + JSON.stringify(told) + ', input);',
       "  else {",
       "    writeFileSync('notes.md', 'Notes');",
-      "    say({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Write', input: { file_path: 'tool.ps1', content: 'x' } }] } });",
-      "    say({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } });",
+      // Not a quarantine: a file removed by a long command (past the logbook's clipped line), and a scratch file in .tmp.
+      "    const tool = (id, name, input) => {",
+      "      say({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });",
+      "      say({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } });",
+      "    };",
+      "    tool('t0', 'Write', { file_path: 'draft.json', content: 'x' });",
+      "    tool('t2', 'Bash', { command: 'cd /c/Users/someone/Documents/GitHub/project/workspaces/project && npm run check && npm run smoke && git add -A && git commit -q -m \"Notes\" && rm -f draft.json' });",
+      "    tool('t3', 'Write', { file_path: '.tmp/pt.json', content: 'x' });",
+      "    tool('t1', 'Write', { file_path: 'tool.ps1', content: 'x' });",
       "  }",
       "  say({ type: 'result', subtype: 'success', result: 'Done', num_turns: 1, session_id: 's-quarantine' });",
       "});",

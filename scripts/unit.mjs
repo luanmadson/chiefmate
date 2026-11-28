@@ -1001,6 +1001,8 @@ test("Codex's and Grok's events become the step's text and actions", () => {
   assert.deepEqual(call, [{ kind: 'call', id: 'i1', tool: 'Bash', input: { command: 'npm test' } }]);
   assert.equal(codexEvents({ type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: 'x', exit_code: 1, aggregated_output: 'boom' } })[0].failed, true);
   assert.deepEqual(codexEvents({ type: 'item.completed', item: { type: 'error', message: '`--dangerously-bypass-hook-trust` is enabled.' } }), []);
+  const changes = [{ kind: 'add', path: 'a.txt' }, { kind: 'delete', path: 'b.txt' }, { kind: 'update', path: 'c.txt' }];
+  assert.deepEqual(codexEvents({ type: 'item.completed', item: { id: 'f1', type: 'file_change', changes } }).map(e => e.tool), ['Write', 'Delete', 'Edit'], 'a deletion is no write');
   assert.equal(codexEvents({ type: 'turn.completed', usage: { input_tokens: 5, cached_input_tokens: 2, output_tokens: 1 } }).at(-1).kind, 'end');
   const grokCall = grokEvents({ type: 'tool_call', toolCallId: 'c1', toolName: 'run_terminal_command', rawInput: { command: 'git status' } });
   assert.equal(grokCall[0].tool, 'Bash');
@@ -2545,7 +2547,7 @@ test('a probable antivirus quarantine: the paths an error names, files gone or u
   assert.equal(fileState(inDir('src', 'ok.txt')), 'ok');
   assert.equal(fileState(inDir('src', 'gone.txt')), 'missing');
   assert.equal(fileState(inDir('src')), 'ok', 'a folder is not a lost file');
-  const noWait = { wait: async () => {} };
+  const noWait = { wait: async () => {}, ask: async () => null };
   assert.deepEqual(await lostFile([inDir('src', 'ok.txt'), inDir('src', 'gone.txt')], noWait), { file: inDir('src', 'gone.txt'), state: 'missing' });
   assert.equal(await lostFile([inDir('src', 'ok.txt')], noWait), null);
   // A file a later command names, or one written before a command that can remove or move files, doesn't count (done
@@ -2557,6 +2559,56 @@ test('a probable antivirus quarantine: the paths an error names, files gone or u
   assert.deepEqual(writtenSuspects(writes, [{ text: 'Ran: npm test', seq: 2 }, { text: 'Ran: type tmp.txt', seq: 4 }], dir), [inDir('src', 'gone.txt'), inDir('again.txt')]);
   assert.deepEqual(writtenSuspects(writes, [{ text: 'Ran: git checkout -- .', seq: 5 }], dir), [inDir('again.txt')]);
   assert.deepEqual(writtenSuspects(writes, [{ text: 'Ran: Remove-Item build -Recurse', seq: 2 }], dir), [inDir('tmp.txt'), inDir('again.txt')]);
+  assert.deepEqual(writtenSuspects(writes, [{ text: `node -e "require('fs').rmSync('build', { recursive: true })"`, seq: 2 }], dir), [inDir('tmp.txt'), inDir('again.txt')]);
+  assert.deepEqual(writtenSuspects(writes, [{ text: 'Deleted src/gone.txt', seq: 2 }], dir), [inDir('tmp.txt'), inDir('again.txt')], "a deletion names its file");
+  // The crew's scratch files (.tmp, at any depth) never count; a name that only starts with ".tmp" does.
+  const scratch = [{ file: inDir('.tmp', 'pt.json'), seq: 1 }, { file: inDir('ui', '.TMP', 'x.js'), seq: 1 }, { file: inDir('.tmpx', 'a.txt'), seq: 1 }];
+  assert.deepEqual(writtenSuspects(scratch, [], dir), [inDir('.tmpx', 'a.txt')]);
+  // The real false alarm: the removal at the end of a long command, past the logbook's clipped line, still counts.
+  const { describeAction, shellCommand } = await import('../src/claude.mjs');
+  const long = `cd ${'/c/Users/someone/Documents/GitHub/project/workspaces/project'} && npm run check && npm run smoke && git add -A && git commit -q -m "A change" && rm -rf build`;
+  const built = [{ file: inDir('build', 'out.json'), seq: 1 }];
+  assert.deepEqual(writtenSuspects(built, [{ text: describeAction('Bash', { command: long }, dir), seq: 2 }], dir), [inDir('build', 'out.json')], "the logbook's clipped line misses it");
+  assert.equal(shellCommand('Bash', { command: long }), long);
+  assert.deepEqual(writtenSuspects(built, [{ text: shellCommand('Bash', { command: long }), seq: 2 }], dir), []);
+  assert.equal(shellCommand('PowerShell', { command: 'Remove-Item build -Recurse' }), 'Remove-Item build -Recurse');
+  assert.equal(shellCommand('Write', { file_path: 'a.txt' }), null);
+});
+
+test("Microsoft Defender, when it can be asked, clears a lost file it has no record of; another antivirus can't be asked", async () => {
+  const { defenderAnswer, lostFile } = await import('../src/quarantine.mjs');
+  const dir = path.join(temp, 'quarantine-defender');
+  mkdirSync(dir, { recursive: true });
+  const gone = path.resolve(dir, 'gone.js');
+  const other = path.resolve(dir, 'other.js');
+  assert.deepEqual(defenderAnswer(JSON.stringify({ alone: true, found: ['file:_C:\\a\\b.js'] })), { found: ['file:_C:\\a\\b.js'] });
+  assert.deepEqual(defenderAnswer(JSON.stringify({ alone: true, found: 'file:_C:\\a\\b.js' })), { found: ['file:_C:\\a\\b.js'] }, 'one detection, not in a list');
+  assert.deepEqual(defenderAnswer(JSON.stringify({ alone: true })), { found: [] });
+  for (const text of [JSON.stringify({ alone: false, found: [] }), '', 'not json', 'null']) assert.equal(defenderAnswer(text), null, text);
+  const asking = found => {
+    const ask = async () => (ask.calls++, found && { found });
+    ask.calls = 0;
+    return ask;
+  };
+  const cleared = [];
+  const options = ask => ({ wait: async () => {}, ask, cleared: file => cleared.push(file) });
+  // Defender guards alone and has no record of either: no quarantine, each told, Defender asked once.
+  const none = asking([`file:_${gone}.bak`]);
+  assert.equal(await lostFile([gone, other], options(none)), null);
+  assert.deepEqual(cleared, [gone, other]);
+  assert.equal(none.calls, 1);
+  // Its record names the file (whatever the case, inside an archive too): a quarantine.
+  for (const resource of [`file:_${gone.toUpperCase()}`, `containerfile:_${gone}`, `file:_${gone}->inner.js`, `file:_\\\\?\\${gone}`]) {
+    assert.deepEqual(await lostFile([gone], options(asking([resource]))), { file: gone, state: 'missing' }, resource);
+  }
+  // Through a junction, Defender names the file in its real folder.
+  linkDir(dir, path.join(temp, 'quarantine-junction'));
+  const linked = path.join(temp, 'quarantine-junction', 'gone.js');
+  assert.deepEqual(await lostFile([linked], options(asking([`file:_${path.join(realpathSync.native(dir), 'gone.js')}`]))), { file: linked, state: 'missing' });
+  // No way to ask (another antivirus, such as Bitdefender, or no answer): the step's own actions decide, as before.
+  assert.deepEqual(await lostFile([gone], options(asking(null))), { file: gone, state: 'missing' });
+  assert.deepEqual(await lostFile([gone], options(async () => { throw new Error('no PowerShell'); })), { file: gone, state: 'missing' });
+  assert.equal(cleared.length, 2);
 });
 
 test("a local merge saves the clone's changed tracked files first, only when nothing conflicts, never the untracked ones", async () => {
