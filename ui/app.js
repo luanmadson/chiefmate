@@ -2322,12 +2322,13 @@ function drawChatQueue() {
     toast(t('The message you were editing is no longer in the queue: it was delivered or removed.'));
   }
   $('#chat-queue').hidden = !list.length;
-  // After an answer cut off by the usage limit, the queue (the news included) waits for the renewal.
+  // After an answer cut off by the usage limit, the queue (the news included) waits for the renewal. The time comes
+  // first: on a phone the head is one line, and its end may not fit.
   const cutUntil = g.cut?.until;
   const today = cutUntil && new Date(cutUntil).toDateString() === new Date().toDateString();
   const waiting = cutUntil && (today
-    ? t('The usage limit ran out: they go at {time}, after the answer that was cut off.', { time: clockTime(cutUntil) })
-    : t('The usage limit ran out: they go on {time}, after the answer that was cut off.', { time: `${new Date(cutUntil).toLocaleDateString(locale(), { weekday: 'short' }).replace(/\.$/, '')} ${clockTime(cutUntil)}` }));
+    ? t('They go at {time}, when the usage renews, after the answer that was cut off.', { time: clockTime(cutUntil) })
+    : t('They go on {time}, when the usage renews, after the answer that was cut off.', { time: `${new Date(cutUntil).toLocaleDateString(locale(), { weekday: 'short' }).replace(/\.$/, '')} ${clockTime(cutUntil)}` }));
   const when = !g.responding ? t('Being delivered…') : interruptSendsNow()
     ? t('They go together, in order, when the manager finishes this answer, or at once if you click Interrupt.')
     : t('They go together, in order, when the manager finishes this answer.');
@@ -2357,7 +2358,7 @@ function drawChatQueue() {
         <span class="queued-actions"><button type="button" class="button secondary small" data-pending-edit="${esc(m.id)}">${esc(t('Edit'))}</button><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
       <div class="msg-body">${md(m.text)}</div>
     </div>`));
-  return draw('#chat-queue', JSON.stringify([list, g.responding, cutUntil, language(), phone]), list.length ? head + items.join('') : '');
+  return draw('#chat-queue', JSON.stringify([list, g.responding, cutUntil, interruptSendsNow(), language(), phone]), list.length ? head + items.join('') : '');
 }
 
 function drawSuggestions() {
@@ -6212,7 +6213,9 @@ ${typed}` : typed;
     const sent = await api('/api/manager', { message });
     $('#message').value = '';
     fitField($('#message'));
-    if (sent.queued) toast(interruptSendsNow() ? t('In the queue: it goes when the manager finishes this answer, or at once if you click Interrupt.') : t('In the queue: it goes when the manager finishes this answer.'));
+    // After an answer cut off by the usage limit, the queue waits for the renewal (its head says when).
+    if (sent.queued) toast(state?.manager?.cut ? t('In the queue: the usage limit ran out, so it goes at the renewal, after the answer that was cut off.')
+      : interruptSendsNow() ? t('In the queue: it goes when the manager finishes this answer, or at once if you click Interrupt.') : t('In the queue: it goes when the manager finishes this answer.'));
     setTimeout(refresh, 300);
   } catch (error) {
     toast(error.message);

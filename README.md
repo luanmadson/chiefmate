@@ -654,7 +654,7 @@ The manager doesn't only answer: when something you should know about happens, i
   | Needs you | orange | ! Action needed | a decision, a sign-in, a choice: `needs_you`, `pr_ready`, `run_parked`, `quarantine` |
   | Done | green | ✓ Completed | `run_finished`, `merged`, `update_installed` |
   | Info | blue | i Info | everything else: information or progress, nothing for you to do |
-  | System | gray | >_ System | Chiefmate's own lines, such as a conversation renewed or compacted |
+  | System | gray | >_ System | Chiefmate's own lines, such as a conversation renewed or compacted, or an answer cut off by the usage limit (its text in brass, so it stands out) |
 
   A notice about several events takes the first of their kinds in this table: a summary tells the rest, then what matters most. The manager may also begin any message with a mark of its own (`[report]`, `[alarm]`, `[failure]`, `[needs-you]`, `[done]` or `[info]`), which wins: it knows the content, such as a lockdown released, which is good news. The mark itself is not shown; a plain answer to you has no badge. The badge's word and icon say the same as the color, for anyone who doesn't tell the colors apart. The news still waiting in the queue under the conversation shows the same icons, and its rule takes the color of its strongest event.
 - **Each notice is a turn of the manager**, so it counts on your account's usage like a message of yours. To have fewer, list only the events you care about in `manager_updates`, or set it to `false`. The Windows notifications don't change.
