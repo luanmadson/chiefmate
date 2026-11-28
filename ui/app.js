@@ -592,15 +592,75 @@ $('#focus-bar').addEventListener('click', event => {
   if (event.target.closest('a[href]')) setFocusMode(false); // a section that needs you: it opens, with everything back
 });
 
-/** The focus mode's line: the manager's state, the sections that need you (each with its mark) and the way out. */
+// Phones: the Conversation's fixed blocks fold with one tap, each choice kept on this device (html.fold-<name>, at the
+// end of ui/style.css). "top": the header (the title bar, the notices and the section's header; in focus mode, its
+// line) becomes one thin line with the manager's state and the marks of what needs you. "queue": the messages waiting
+// for the manager become one line, "N in the queue", until opened. The field to write never folds.
+const FOLDS_KEY = 'chiefmate.folds';
+const FOLD_DEFAULTS = { top: false, queue: true };
+const folds = { ...FOLD_DEFAULTS };
+try {
+  const saved = JSON.parse(localStorage.getItem(FOLDS_KEY) ?? '{}');
+  for (const name of Object.keys(FOLD_DEFAULTS)) if (typeof saved?.[name] === 'boolean') folds[name] = saved[name];
+} catch {
+  // no storage, or a value spoiled by hand: the defaults
+}
+function applyFolds() {
+  for (const name of Object.keys(FOLD_DEFAULTS)) document.documentElement.classList.toggle(`fold-${name}`, folds[name]);
+  for (const toggle of document.querySelectorAll('[data-fold]')) toggle.setAttribute('aria-expanded', String(!folds[toggle.dataset.fold]));
+}
+function setFold(name, on) {
+  folds[name] = on;
+  try {
+    localStorage.setItem(FOLDS_KEY, JSON.stringify(folds));
+  } catch {
+    // no storage (a private window): the choice lasts until the page is reloaded
+  }
+  applyFolds();
+  if (state) drawAlerts();
+}
+applyFolds();
+document.addEventListener('click', event => {
+  const toggle = event.target.closest('[data-fold]');
+  if (!toggle) return;
+  const name = toggle.dataset.fold;
+  setFold(name, !folds[name]);
+  // The control may go with its block: the focus moves to the one that brings it back.
+  if (document.activeElement === toggle && !toggle.offsetParent) [...document.querySelectorAll(`[data-fold="${name}"]`)].find(x => x.offsetParent)?.focus();
+});
+/** The header is folded where the fold applies: on a phone, in the Conversation. */
+const topFolded = () => folds.top && phoneQuery.matches && currentView() === 'manager';
+const FOLD_UP = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3.5 10.5 8 6l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
+const FOLD_DOWN = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3.5 6 8 10.5 12.5 6" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
+
+/** The sections that need you, with their marks: the Conversation's own notices too, since focus mode hides its band. */
+const focusSections = () => navSections().filter(x => x.mark);
+
+/**
+ * The focus mode's line: the manager's state, the sections that need you (each with its mark) and the way out. The
+ * folded header's line is drawn with it, from the same state.
+ */
 function drawFocusBar() {
+  drawChatTop();
   if (!focusMode()) return draw('#focus-bar', '', '');
-  const chips = navSections().filter(x => x.view !== 'manager' && x.mark)
-    .map(x => `<a class="focus-chip" href="#${x.view}">${x.mark}<span>${esc(x.name)}</span></a>`).join('');
+  const chips = focusSections().map(x => `<a class="focus-chip" href="#${x.view}">${x.mark}<span>${esc(x.name)}</span></a>`).join('');
   const html = `<span class="focus-bar-state">${stateHtml(presence().slice(0, 2))}</span>
     <span class="focus-chips">${chips || `<span class="hint">${esc(t('Nothing needs you now.'))}</span>`}</span>
-    <button type="button" class="button secondary small" data-focus-leave title="Esc">${esc(t('Leave focus'))}</button>`;
-  draw('#focus-bar', html, html);
+    <button type="button" class="button secondary small" data-focus-leave title="Esc"><span class="long">${esc(t('Leave focus'))}</span><span class="short">${esc(t('Leave'))}</span></button>
+    <button type="button" class="button secondary small fold-button" data-fold="top" aria-label="${esc(t('Minimize the header'))}" title="${esc(t('Minimize the header'))}">${FOLD_UP}</button>`;
+  // Its aria-expanded is set apart, so a fold alone doesn't redraw the line (and take the focus off its button)
+  if (draw('#focus-bar', html, html)) applyFolds();
+}
+
+/**
+ * The folded header's thin line: the manager's state and the marks of what the header holds that needs you (in focus
+ * mode, the sections of its line; otherwise the notices of the band, which the nav's marks don't cover). Never hidden.
+ */
+function drawChatTop() {
+  const marks = focusMode() ? focusSections().map(x => x.mark).join('') : attnMark(bandItems('manager'), t('Conversation'), true);
+  const html = `<span class="chat-top-state">${stateHtml(presence().slice(0, 2))}</span><span class="chat-top-marks">${marks}</span>
+    <span class="chat-top-toggle">${FOLD_DOWN}</span><span class="visually-hidden">${esc(t('Show the header'))}</span>`;
+  draw('#chat-top', html, html);
 }
 
 function showView() {
@@ -675,7 +735,10 @@ function placeChat(home = $('#view-manager')) {
 window.addEventListener('hashchange', showView);
 phoneQuery.addEventListener('change', () => {
   drawPlaceholders();
-  if (state) drawAlerts();
+  if (state) {
+    drawAlerts();
+    drawChatQueue(); // its head folds only on a phone
+  }
 });
 
 /** A project's name that opens its page; any other name (an old board's project, a library) stays plain text. */
@@ -1704,18 +1767,12 @@ function swReady() {
 let attnOpen = false; // the band shows every notice, not only the most urgent
 /** The band at the top: the most urgent notice and how many others, opening into all of them. Nothing is paused. */
 function drawAlerts() {
-  // The notices with a decision card are left to the Decisions tab, those a page lists (Operations, Planning, a
-  // project) to that page, and the crew's calls to the call bar above it. The conversation shows only its own notices
-  // (the others mark their tabs), and none in focus mode. A permission asked shows there without its facts, as a way
-  // to them. On a phone, the band keeps its room for what needs the owner: the info notices stay in each section's list.
-  const phone = phoneQuery.matches;
-  const carded = cardedIds();
-  const view = currentView();
-  const listed = { operations: ['operations', 'log'], planning: ['planning'] }[view] ?? [];
-  const skip = i => (view === 'manager' ? i.view !== 'manager' : listed.includes(i.view) || (view === 'project' && ofProject(pageProject())(i)));
-  // The lockdown has its own red band, on every page and in focus mode too; so does the call bar.
+  // A permission asked shows there without its facts, as a way to them. The lockdown has its own red band, and the
+  // crew's calls their bar, on every page, in focus mode and under the folded header too; the other notices are then
+  // in their line's marks.
   const band = `${lockdownBand()}${callsBar()}`;
-  const list = focusMode() ? [] : attnItems().filter(i => !carded.has(i.id) && !inCallBar(i) && !(phone && i.level === 'info') && !skip(i) && i.kind !== 'lockdown');
+  if (focusMode() || topFolded()) return draw('#alerts', band, band);
+  const list = bandItems();
   const fresh = unseen(list);
   if (!fresh.length && !attnOpen) return draw('#alerts', band, band);
   const others = fresh.length - 1;
@@ -1729,6 +1786,20 @@ function drawAlerts() {
       ${toggle || (attnOpen && all) ? `<div class="attn-more">${attnOpen ? attnArchivedLink() : ''}${toggle}${attnOpen ? all : ''}</div>` : ''}
     </div>`;
   draw('#alerts', html, html);
+}
+
+/**
+ * The notices of the band on a page (this one by default). Those with a decision card are left to the Decisions tab,
+ * those a page lists (Operations, Planning, a project) to that page, and the crew's calls to the call bar above it. The
+ * conversation shows only its own notices (the others mark their tabs). On a phone, the band keeps its room for what
+ * needs the owner: the info notices stay in each section's list.
+ */
+function bandItems(view = currentView()) {
+  const phone = phoneQuery.matches;
+  const carded = cardedIds();
+  const listed = { operations: ['operations', 'log'], planning: ['planning'] }[view] ?? [];
+  const skip = i => (view === 'manager' ? i.view !== 'manager' : listed.includes(i.view) || (view === 'project' && ofProject(pageProject())(i)));
+  return attnItems().filter(i => !carded.has(i.id) && !inCallBar(i) && !(phone && i.level === 'info') && !skip(i) && i.kind !== 'lockdown');
 }
 
 /** The notices that have a decision card: they count in the Decisions tab, not in their own section's. */
@@ -2005,20 +2076,20 @@ function drawChat() {
     html += `<div class="msg manager typing"><div class="msg-head">${face(manager, 'thinking', 20)}<span class="msg-author">${esc(t(manager.name))}</span><span class="msg-meta">${esc(doing)}${g.since ? ` · ${ticking(g.since)}` : ''}</span></div><div class="msg-body">${g.partial && !renewing ? md(g.partial) : `<span class="hint">${esc(waiting)}</span>`}</div><div class="live-last" id="manager-last"></div></div>`;
   }
   const signature = JSON.stringify([g.messages.length, g.messages.at(-1)?.at, g.responding, renewing, g.interrupting, g.since, g.partial]);
-  if (draw('#chat', signature, html)) {
-    delete signatures['#manager-last'];
-    if (atBottom || !chatScrolled) {
-      box.scrollTop = box.scrollHeight;
-      chatScrolled = true;
-    }
-  }
+  const drawn = draw('#chat', signature, html);
+  if (drawn) delete signatures['#manager-last'];
   // What the manager is doing now, redrawn alone, like the last action of the crew at work.
   if (g.responding) draw('#manager-last', JSON.stringify([g.lastAction?.at, g.lastAction?.text]), managerLastAction(g));
-  drawChatQueue();
   $('#send').disabled = !online;
   $('#send').textContent = g.responding || g.pending?.length ? t('Add to the queue') : t('Send');
   $('#interrupt').hidden = !online || !g.responding;
   $('#interrupt').disabled = !!g.interrupting;
+  // The last action, the queue and Interrupt beside the field change the height: the end comes into view after them.
+  const queued = drawChatQueue();
+  if ((drawn || queued) && (atBottom || !chatScrolled)) {
+    box.scrollTop = box.scrollHeight;
+    chatScrolled = true;
+  }
 }
 
 function managerLastAction(g) {
@@ -2027,7 +2098,7 @@ function managerLastAction(g) {
   return `<span class="label">${esc(t('Last action'))}</span><time>${p ? clockTime(p.at) : ''}</time><span class="text" title="${esc(text)}">${esc(text)}</span>`;
 }
 
-// The messages waiting for the manager. While you edit one, the list is not redrawn under you.
+// The messages waiting for the manager. While you edit one, the list is not redrawn under you. True when it was drawn.
 let editingPending = null;
 function drawChatQueue() {
   const g = state.manager;
@@ -2038,7 +2109,12 @@ function drawChatQueue() {
     toast(t('The message you were editing is no longer in the queue: it was delivered or removed.'));
   }
   $('#chat-queue').hidden = !list.length;
-  const head = `<div class="chat-queue-head"><span class="label">${esc(t('In the queue'))}</span><span class="hint">${esc(g.responding ? t('They go together, in order, when the manager finishes this answer.') : t('Being delivered…'))}</span></div>`;
+  // On a phone the head is the fold's line: "N in the queue", opening into the messages (html.fold-queue).
+  const phone = phoneQuery.matches;
+  const hint = `<span class="hint">${esc(g.responding ? t('They go together, in order, when the manager finishes this answer.') : t('Being delivered…'))}</span>`;
+  const head = phone
+    ? `<button type="button" class="chat-queue-head" data-fold="queue" aria-expanded="${!folds.queue}"><span class="label">${esc(t('{count} in the queue', { count: list.length }))}</span>${hint}<span class="attn-toggle"><span class="when-closed">${esc(t('See all'))}</span><span class="when-open">${esc(t('Hide'))}</span></span></button>`
+    : `<div class="chat-queue-head"><span class="label">${esc(t('In the queue'))}</span>${hint}</div>`;
   const items = list.map(m => (m.from === 'chiefmate'
     // Chiefmate's news for the manager: not a message of yours, so it can't be edited (only removed).
     ? `<div class="queued-msg news" data-pending="${esc(m.id)}">
@@ -2058,7 +2134,7 @@ function drawChatQueue() {
         <span class="queued-actions"><button type="button" class="button secondary small" data-pending-edit="${esc(m.id)}">${esc(t('Edit'))}</button><button type="button" class="button danger small" data-pending-remove="${esc(m.id)}">${esc(t('Remove'))}</button></span></div>
       <div class="msg-body">${md(m.text)}</div>
     </div>`));
-  draw('#chat-queue', JSON.stringify([list, g.responding, language()]), list.length ? head + items.join('') : '');
+  return draw('#chat-queue', JSON.stringify([list, g.responding, language(), phone]), list.length ? head + items.join('') : '');
 }
 
 function drawSuggestions() {
