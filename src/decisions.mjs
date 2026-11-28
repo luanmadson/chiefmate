@@ -28,7 +28,7 @@ import { reopenRequest, requestUndoBlock } from './needs.mjs';
 import { newsPending, reportEvent, withdrawNews } from './news.mjs';
 import { notify } from './notify.mjs';
 import { decideItem, itemUndoBlock, undoItemDecision } from './planning.mjs';
-import { readDecisionLog, readRun, readState, recordDecision, saveDecisionLog } from './store.mjs';
+import { readDecisionLog, readRun, readState, recordDecision, saveDecisionLog, UNDO_GRACE_MS } from './store.mjs';
 import { localDeliveryClone } from './workspace.mjs';
 import { clip, DATA, ensureDir, now, parseLevel, readJson, ROOT, writeJson } from './util.mjs';
 
@@ -380,13 +380,25 @@ function noticeRun(notice, items) {
   return item?.run ? readRun(item.run) : null;
 }
 
-function mergeCard(notice, run, item, config) {
-  const project = run.project;
-  const name = projectName(config, project);
+/** "PR #34 of Chiefmate", "Branch x of Riffdex": a run's delivery, as its card and the record name it. */
+function deliveryLabel(run, config) {
+  const name = projectName(config, run.project);
   const number = prNumber(run.pullRequest);
-  const label = run.pullRequest
+  return run.pullRequest
     ? number ? t('PR #{number} of {project}', { number, project: name }) : t('Pull request of {project}', { project: name })
     : t('Branch {branch} of {project}', { branch: run.branch ?? '-', project: name });
+}
+
+/** A merge on record with the owner's decisions, from a card, the run's page or the manager's: it can't be undone. */
+export function recordMerge(id, { by = 'owner', via = 'app' } = {}, config = loadConfig()) {
+  const run = readRun(String(id ?? ''));
+  if (!run?.merged || run.merged.by === 'outside') return null;
+  return recordDecision({ kind: 'merge', ref: run.id, label: deliveryLabel(run, config), title: run.title ?? run.id, from: 'pending', to: 'merged', by, via });
+}
+
+function mergeCard(notice, run, item, config) {
+  const project = run.project;
+  const label = deliveryLabel(run, config);
   const byOwner = mergedByOwner(config, project);
   // A branch left in the crew's working copy (no local_clone) is merged by hand, not from here (src/merge.mjs).
   const inClone = !!run.pullRequest || !!localDeliveryClone(run, config);
@@ -524,8 +536,12 @@ export async function decide({ card, action, option, note, reason, via = 'app' }
   }
   const about = `${c.label} "${c.title}"`;
   const ref = randomUUID().slice(0, 8);
-  // On record: who, when, from where, from what to what, and what undoing it needs (none: it can't be undone).
-  const log = (fields, news = null) => recordDecision({ kind: c.kind, ref: c.id, label: c.label, title: c.title, from: 'pending', by: 'owner', via, news, ...fields }).id;
+  // On record: who, when, from where, from what to what, and what undoing it needs (none: it can't be undone). The
+  // record's id goes back to the app only when it can be undone, for its Undo band ("logged").
+  const log = (fields, news = null) => {
+    const entry = recordDecision({ kind: c.kind, ref: c.id, label: c.label, title: c.title, from: 'pending', by: 'owner', via, news, ...fields });
+    return entry.final ? null : entry.id;
+  };
   if (action === 'later') {
     markSeen([c.id]);
     const news = tell(`The owner chose "not now" for ${about} from the app: it stays pending; don't ask again today.`, ref);
@@ -536,7 +552,7 @@ export async function decide({ card, action, option, note, reason, via = 'app' }
       if (!c.approve) throw new Error(t('Someone else reviews and merges the work of this project.'));
       const merge = await mergeRun(c.run, { by: 'owner' });
       const done = merge.discarded ? 'branch_deleted' : merge.merged.by === 'outside' ? 'already_merged' : 'merged';
-      if (done === 'merged') log({ to: 'merged' });
+      if (done === 'merged') recordMerge(c.run, { via });
       return { card: c.id, done, merge };
     }
     if (action === 'discard') {
@@ -549,8 +565,9 @@ export async function decide({ card, action, option, note, reason, via = 'app' }
       return { card: c.id, done: 'discarded' };
     }
   } else if (c.kind === 'decision' && ['approve', 'discard'].includes(action)) {
-    // The item's own record (decideItem) is the decision's: it carries this news, to take back with an undo.
-    const item = await decideItem(c.item, action, { reason, by: 'owner', via, news: ref });
+    // The item's own record (decideItem) is the decision's: it carries this news, to take back with an undo. An
+    // approval from the app starts its task after the undo window.
+    const item = await decideItem(c.item, action, { reason, by: 'owner', via, news: ref, grace: action === 'approve' && via !== 'cli' ? UNDO_GRACE_MS : 0 });
     tell(`The owner ${action === 'approve' ? 'approved' : 'discarded'} ${about} (planning item #${c.item}) from the app${action === 'approve' ? ': its task starts in its turn' : ''}.`, ref);
     return { card: c.id, done: action === 'approve' ? 'approved' : 'discarded', logged: item.logged };
   } else if (c.kind === 'push' && ['approve', 'discard'].includes(action)) {

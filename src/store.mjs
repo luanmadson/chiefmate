@@ -96,6 +96,9 @@ export const saveState = state => writeJson(STATE_FILE, state);
 
 const DECISION_LOG_FILE = path.join(DATA, 'manager', 'decision-log.json');
 const DECISION_LOG_MAX = 300;
+// The undo window: the app's "Done: … Undo" band shows for 10 seconds, so an owner's answer to a request reaches the
+// agent, and a task the owner approves starts, only after this, while the band can still take it back.
+export const UNDO_GRACE_MS = 12_000;
 export const readDecisionLog = () => readJson(DECISION_LOG_FILE, []);
 export const saveDecisionLog = list => writeJson(DECISION_LOG_FILE, list.slice(-DECISION_LOG_MAX));
 

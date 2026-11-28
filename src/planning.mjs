@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { loadConfig, projectCrew } from './config.mjs';
 import { reportEvent } from './news.mjs';
-import { onRunSaved, readRun, recordDecision, saveRun, stepsOf } from './store.mjs';
+import { onRunSaved, readRun, recordDecision, saveRun, stepsOf, UNDO_GRACE_MS } from './store.mjs';
 import { parseTool } from './tools.mjs';
 import { clip, DATA, now, parseLevel, readJson, writeJson } from './util.mjs';
 
@@ -437,7 +437,7 @@ export function triageItem(id, { priority, agent, recommend, note, risk, order, 
  * "later" (future) or "discard" (with a reason; "restore" brings it back). by: who decided, the owner, the manager
  * (which discards proposals that make no sense or repeat another) or the autopilot (src/autopilot.mjs).
  */
-export async function decideItem(id, decision, { reason, by = 'owner', tool, via = 'app', news = null, undoable = true } = {}) {
+export async function decideItem(id, decision, { reason, by = 'owner', tool, via = 'app', news = null, undoable = true, grace = 0 } = {}) {
   const board = readBoard();
   const item = findIn(board, id);
   if (item.archived) throw new Error(`Item #${item.id} is archived: restore it first.`);
@@ -450,6 +450,8 @@ export async function decideItem(id, decision, { reason, by = 'owner', tool, via
     checkAgent(item.project, item.agent);
     if (tool !== undefined && tool !== null) item.tool = parseTool(tool);
     Object.assign(item, { status: 'approved', approved_at: stamp, decided_by: by });
+    // The owner's click in the app: its task starts after the undo window ("grace", UNDO_GRACE_MS in src/store.mjs).
+    if (grace > 0) item.starts_at = new Date(Date.now() + grace).toISOString();
     placeAt(board, item, item.rank ?? Number.MAX_SAFE_INTEGER);
   } else if (decision === 'later') {
     if (CLOSED.includes(item.status) || ACTIVE.includes(item.status) || item.status === 'waiting_owner') throw new Error(`Item #${item.id} is ${item.status}: it can't wait for later.`);
@@ -466,12 +468,13 @@ export async function decideItem(id, decision, { reason, by = 'owner', tool, via
     kind: 'plan', ref: item.id, label: `#${item.id} ${item.project}`, title: item.title, from: before.status, to: item.status,
     answer: decision === 'discard' ? item.discard_reason : null, by, via, undo: undoable ? { item: item.id, before } : null, news,
   });
-  if (decision === 'approve') await startApproved();
-  return { ...planItem(item.id), logged: logged.id };
+  if (decision === 'approve' && grace > 0) setTimeout(() => startApproved().catch(error => console.error('Planning:', error.message)), grace + 250).unref?.();
+  else if (decision === 'approve') await startApproved();
+  return { ...planItem(item.id), logged: logged.final ? null : logged.id };
 }
 
 // What a decision changes on an item, put back when it is undone.
-const UNDONE_FIELDS = ['status', 'rank', 'approved_at', 'discarded_at', 'discard_reason', 'decided_by', 'tool'];
+const UNDONE_FIELDS = ['status', 'rank', 'approved_at', 'discarded_at', 'discard_reason', 'decided_by', 'tool', 'starts_at'];
 
 /**
  * Whether a decision on an item can still be undone: null when it can, else why not. An approval can while its task
@@ -556,7 +559,8 @@ async function startNext() {
   const open = readBoard().items.filter(i => !i.archived);
   const busy = new Set(open.filter(i => i.approved_at && ACTIVE.includes(i.status)).map(i => i.project));
   const next = new Map();
-  for (const item of open.filter(i => i.status === 'approved').sort(byRank)) {
+  // An item still in its undo window (starts_at, decideItem) waits: its own timer starts it.
+  for (const item of open.filter(i => i.status === 'approved' && !(Date.parse(i.starts_at ?? '') > Date.now())).sort(byRank)) {
     if (!busy.has(item.project) && !next.has(item.project)) next.set(item.project, item);
   }
   if (!next.size) return [];
@@ -599,7 +603,11 @@ export async function changePlan(body = {}) {
     // falls through
     case 'later':
     case 'discard':
-      return decideItem(body.id, body.action, { reason: body.reason, by: body.by === 'manager' ? 'manager' : 'owner', tool: body.tool, via: body.via });
+      return decideItem(body.id, body.action, {
+        reason: body.reason, by: body.by === 'manager' ? 'manager' : 'owner', tool: body.tool, via: body.via,
+        // The owner's "Do" in the app starts the task after the undo window; the manager's and the command line's at once.
+        grace: body.action === 'approve' && body.by !== 'manager' && ['app', 'remote'].includes(body.via) ? UNDO_GRACE_MS : 0,
+      });
     case 'reorder':
       return reorderItems(body.ids);
     default:

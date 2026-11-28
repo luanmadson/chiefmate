@@ -13,7 +13,7 @@ import { t } from './i18n.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { activeRun, liveOf } from './runs.mjs';
-import { listRuns, readRun, recordDecision, runEnded, saveRun, stepsOf } from './store.mjs';
+import { listRuns, readRun, recordDecision, runEnded, saveRun, stepsOf, UNDO_GRACE_MS } from './store.mjs';
 import { agentSays } from './talk.mjs';
 import { browserPath, PROFILE_DIR } from './usagepage.mjs';
 import { clip, ensureDir, now } from './util.mjs';
@@ -127,13 +127,18 @@ export function pollRequest(runId, id) {
   const waited = Date.now() - Date.parse(request.at);
   const max = needsSettings().maxWaitMinutes * 60_000;
   const going = liveOf(run.id);
-  if (request.status === 'open' && waited < max && going) going.heldUntil = Date.now() + 20_000;
+  // An answer clicked in the app waits out its undo window ("undo_until") before the agent gets it: until then it can
+  // be taken back. A message from the agent's panel that answers the request (src/talk.mjs) goes at once.
+  const settling = request.status === 'done' && Date.parse(request.undo_until ?? '') > Date.now();
+  const status = settling ? 'open' : request.status;
+  if (status === 'open' && waited < max && going) going.heldUntil = Date.now() + 20_000;
   // The agent has the answer now: from here, the owner can no longer take it back (requestUndoBlock).
-  if (request.status === 'done' && !request.read) {
+  if (status === 'done' && !request.read) {
     request.read = now();
     saveRun(run);
   }
-  return { status: request.status, by: request.by ?? null, answer: request.answer ?? null, note: request.note ?? null, waitedMinutes: Math.floor(waited / 60_000), maxWaitMinutes: max / 60_000, timedOut: waited >= max };
+  const given = status === 'done' ? request : {};
+  return { status, by: given.by ?? null, answer: given.answer ?? null, note: given.note ?? null, waitedMinutes: Math.floor(waited / 60_000), maxWaitMinutes: max / 60_000, timedOut: !settling && waited >= max };
 }
 
 /**
@@ -148,6 +153,8 @@ export function finishRequest(runId, id, by = 'owner', answer = null, note = nul
   if (request.status !== 'open') return request;
   const written = request.options && by === 'owner' ? clip(String(note ?? '').trim(), 2000) : '';
   Object.assign(request, { status: 'done', done: now(), by }, choice ? { answer: choice } : {}, written ? { note: written } : {});
+  // The owner's click reaches the agent after the undo window (UNDO_GRACE_MS, pollRequest), while it can be taken back.
+  if (by === 'owner') request.undo_until = new Date(Date.now() + UNDO_GRACE_MS).toISOString();
   // The owner's answer stays in the run's conversation (the agent's panel, the step's report, the manager).
   if (choice || written) {
     const text = [choice, written].filter(Boolean).join(' — ');
@@ -178,7 +185,7 @@ export function reopenRequest(entry) {
   const why = requestUndoBlock(entry);
   if (why) throw new Error(why === 'read' ? t('The agent already read your answer: it can no longer be changed.') : t('This decision can no longer be undone.'));
   const { run, request } = findRequest(entry.undo.run, entry.undo.request);
-  for (const key of ['done', 'by', 'answer', 'note']) delete request[key];
+  for (const key of ['done', 'by', 'answer', 'note', 'undo_until']) delete request[key];
   request.status = 'open';
   run.talk = (run.talk ?? []).filter(m => !(m.via === 'request' && m.request === request.id));
   saveRun(run);

@@ -412,8 +412,8 @@ async function planCommand() {
     if (!args[0]) throw new Error(`Which item? node src/cli.mjs plan ${action} <n>`);
     return Number(args[0].replace(/^#/, ''));
   };
-  // Through the running Chiefmate, else here.
-  const change = async body => (await apiOr('/api/planning', body, async () => ({ item: await planning.changePlan(body) }))).item;
+  // Through the running Chiefmate, else here; on record as decided from the command line.
+  const change = async body => (await apiOr('/api/planning', { ...body, via: 'cli' }, async () => ({ item: await planning.changePlan({ ...body, via: 'cli' }) }))).item;
   // The manager triages and the owner decides: a step of a run only proposes.
   const decided = ['proposed', 'triaged', 'approved', 'discarded'];
   if (process.env.CHIEFMATE_RUN && (['triage', 'approve', 'later', 'discard', 'restore', 'order'].includes(action)
@@ -835,6 +835,8 @@ async function main() {
         lockdown.startLockdownWatch();
         deliverPending(); // messages left in the queue when Chiefmate stopped
         (await import('./news.mjs')).startNews(); // and the news for the manager, such as "update installed"
+        // A task approved within its undo window when Chiefmate stopped (src/planning.mjs) starts now, in its turn.
+        (await import('./planning.mjs')).startApproved().catch(error => console.error('Planning:', error.message));
       }
       console.log(`Chiefmate running at http://localhost:${p} (${new Date().toISOString()})`);
       return;

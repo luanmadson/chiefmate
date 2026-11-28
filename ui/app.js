@@ -32,10 +32,13 @@ function toast(text) {
   toast.timer = setTimeout(() => box.classList.remove('visible'), 4000);
 }
 
-function confirmDialog(title, text, yes) {
+/** A confirmation; "final" says, apart and in red, what can't be undone afterwards (a merge, a push). */
+function confirmDialog(title, text, yes, final = '') {
   const dialog = $('#confirm');
   $('#confirm-title').textContent = title;
   $('#confirm-text').textContent = text;
+  $('#confirm-final').textContent = final;
+  $('#confirm-final').hidden = !final;
   $('#confirm-yes').textContent = yes;
   dialog.returnValue = '';
   dialog.showModal();
@@ -45,7 +48,7 @@ function confirmDialog(title, text, yes) {
 // ---------- Strong confirmation: hold the button for HOLD_MS, or type the word (lockdown, stop, shut down) ----------
 
 const HOLD_MS = 2000;
-const plainWord = s => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+const plainWord = s => String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
 let holdTimer = null;
 
 function strongConfirm(title, text, yes, word) {
@@ -121,29 +124,58 @@ const decisionWord = code => ({
   triaged: t('waiting for you'), proposed: t('proposed'), todo: t('to do'), queued: t('queued'), in_progress: t('in progress'),
 }[code] ?? code);
 
-/** Shows the undo band for a decision on record ("id"), with what was done. */
-function showUndo(id, what) {
+/**
+ * Shows the undo band for a decision on record ("id"): "Done: <action> · <title>" and Undo, in place of the toast.
+ * It waits while the pointer or the focus is on it; Ctrl+Z (outside a text field) clicks its Undo.
+ */
+function showUndo(id, action, title = '') {
   if (!id) return;
   const bar = $('#undo-bar');
-  clearTimeout(showUndo.timer);
-  bar.innerHTML = `<span>${esc(t('Done: {what}', { what }))}</span><button type="button" class="button small" data-undo="${esc(id)}">${esc(t('Undo'))}</button>`;
+  const what = title ? `${action} · ${title}` : action;
+  $('#toast').classList.remove('visible');
+  bar.innerHTML = `<span class="undo-text">${esc(t('Done: {what}', { what }))}</span><button type="button" class="button small" data-undo="${esc(id)}">${esc(t('Undo'))}</button>`;
   bar.hidden = false;
-  showUndo.timer = setTimeout(() => (bar.hidden = true), UNDO_MS);
+  undoLater(UNDO_MS);
+}
+
+function undoLater(ms) {
+  clearTimeout(showUndo.timer);
+  showUndo.timer = setTimeout(() => ($('#undo-bar').hidden = true), ms);
+}
+
+{
+  const bar = $('#undo-bar');
+  const hold = () => clearTimeout(showUndo.timer);
+  const resume = () => !bar.hidden && !bar.matches(':hover, :focus-within') && undoLater(4000);
+  bar.addEventListener('pointerenter', hold);
+  bar.addEventListener('focusin', hold);
+  bar.addEventListener('pointerleave', resume);
+  bar.addEventListener('focusout', () => setTimeout(resume));
+  document.addEventListener('keydown', event => {
+    if (bar.hidden || event.key.toLowerCase() !== 'z' || !(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey) return;
+    if (event.target.closest('input, textarea, select, [contenteditable]')) return;
+    event.preventDefault();
+    bar.querySelector('[data-undo]')?.click();
+  });
 }
 
 document.addEventListener('click', async event => {
   const button = event.target.closest('[data-undo]');
   if (!button) return;
   button.disabled = true;
+  button.blur(); // a list with the focus inside isn't drawn again (the board's Decide block)
+  let back = null;
   try {
-    await api('/api/undo', { id: button.dataset.undo });
-    $('#undo-bar').hidden = true;
-    toast(t('Undone: it is back for your decision.'));
+    back = await api('/api/undo', { id: button.dataset.undo });
+    toast({ request: t('Undone: the request is open again, in Operations.'), plan: t('Undone: the item is back on the board as it was.') }[back.kind] ?? t('Undone: it is back for your decision.'));
   } catch (error) {
     toast(error.message);
-    button.disabled = false;
   }
+  // Undone or no longer possible, the band goes; the history says which.
+  $('#undo-bar').hidden = true;
   await refresh();
+  // From the history, the card back for a new answer is at the top of Decisions.
+  if (back && button.closest('#decisions')) $('#view-decisions')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
 });
 
 // ---------- Text and formats ----------
@@ -650,7 +682,7 @@ function drawLockdownButton() {
   const button = $('#lockdown');
   button.hidden = !online || !!state?.lockdown?.active;
   if (button.hidden) return;
-  const label = t('Lockdown');
+  const label = t('Engage the emergency lockdown…');
   button.title = t('Emergency lockdown: stops every run, the queue, the agents and their browsers at once, and refuses pushes, merges and the remote access until you release it on this computer.');
   button.setAttribute('aria-label', `${label}. ${button.title}`);
   draw('#lockdown', label, esc(label));
@@ -1273,14 +1305,59 @@ function drawDecisions() {
   const fold = (key, title, list) => (list.length ? `<details class="decisions-later" data-detail="${key}"><summary>${esc(title)}</summary>${list.map(decisionCardHtml).join('')}</details>` : '');
   const rest = fold('later', t('Left for later ({count})', { count: later.length }), later)
     + fold('manager', t('The manager will settle it ({count})', { count: managers.length }), managers);
-  const html = cards.length
+  const log = decisionLogNow();
+  const html = (cards.length
     ? `${fresh.length ? '' : `<div class="panel empty">${esc(t('Nothing needs your decision now.'))}</div>`}${fresh.map(decisionCardHtml).join('')}${rest}`
-    : `<div class="panel empty">${esc(t('Nothing waits for your decision. New pull requests, proposals and questions from the manager show up here.'))}</div>`;
+    : `<div class="panel empty">${esc(t('Nothing waits for your decision. New pull requests, proposals and questions from the manager show up here.'))}</div>`)
+    + decisionHistoryHtml(log);
   // What you opened stays open when the cards are drawn again.
   const opened = [...box.querySelectorAll('details[open]')].map(d => d.dataset.detail);
-  if (draw('#decisions', JSON.stringify([cards, language()]), html)) {
+  if (draw('#decisions', JSON.stringify([cards, log, language()]), html)) {
     for (const d of box.querySelectorAll('details')) if (opened.includes(d.dataset.detail)) d.open = true;
   }
+}
+
+// Your recent decisions (src/decisions.mjs, recentDecisions), under the cards: each on record (when, what, from what to
+// what, who and where), with Undo or Change answer while it has had no effect, else why not.
+
+const decisionLogNow = () => (online ? state?.decisionLog ?? [] : []);
+const decisionBy = e => ({ owner: t('you'), manager: t('the manager'), autopilot: t('the autopilot') })[e.by] ?? e.by;
+const decisionVia = e => ({ app: t('in the app'), remote: t('through the remote access'), cli: t('from the command line') })[e.via] ?? e.via;
+const undoBlockWord = block => ({
+  final: t("can't be undone"), undone: t('undone'), read: t('already read'), started: t('its task started'), used: t('permission used'),
+  expired: t('expired'), ended: t('the run ended'), changed: t('changed since'), gone: t('no longer exists'),
+})[block] ?? '';
+
+function historyRowHtml(e) {
+  // An answer (to a question, a request) is answered again; the rest is undone.
+  const answer = ['question', 'request'].includes(e.kind) && e.to === 'answered';
+  const action = e.canUndo
+    ? `<button type="button" class="button secondary small" data-undo="${esc(e.id)}">${esc(answer ? t('Change answer') : t('Undo'))}</button>`
+    : `<span class="history-block">${esc(undoBlockWord(e.block))}</span>`;
+  const change = `${decisionWord(e.from)} → ${decisionWord(e.to)}`;
+  const today = new Date(e.at).toDateString() === new Date().toDateString();
+  const facts = [
+    e.title ? esc(e.label) : '',
+    esc(e.undoes ? t('undo: {change}', { change }) : change),
+    e.answer ? `"${esc(e.answer)}"` : '',
+    esc(`${decisionBy(e)}, ${decisionVia(e)}`),
+  ].filter(Boolean).join(' · ');
+  return `<li class="history-row"${e.undone ? ' data-undone' : ''}>
+      <span class="history-when num" title="${esc(shortDate(e.at))}">${esc(today ? clockTime(e.at) : shortDate(e.at))}</span>
+      <div class="history-text"><span class="primary">${esc(firstLine(e.title) || e.label)}</span><span class="hint">${facts}</span></div>
+      <div class="history-action">${action}</div>
+    </li>`;
+}
+
+function decisionHistoryHtml(log) {
+  if (!log.length) return '';
+  const open = log.filter(e => e.canUndo).length;
+  const title = open
+    ? t('Your recent decisions ({count}) · {open} can still change', { count: log.length, open })
+    : t('Your recent decisions ({count})', { count: log.length });
+  return `<details class="decision-history" data-detail="history"><summary>${esc(title)}</summary>
+      <p class="hint">${esc(t('The last day, newest first. What has had no effect yet (a task not started, an answer the agent has not read) can be undone or answered again; a merge cannot.'))}</p>
+      <ol>${log.map(historyRowHtml).join('')}</ol></details>`;
 }
 
 /** "Talk about this": the conversation with the manager, your message started with the item quoted. */
@@ -1300,15 +1377,16 @@ $('#decisions').addEventListener('click', async event => {
   if (!c) return;
   const action = button.dataset.decide;
   if (action === 'talk') return talkAbout(c);
-  // Merging and closing a pull request are confirmed: the click is your authorization (src/merge.mjs).
+  // Merging and closing a pull request are confirmed, saying they can't be undone: the click is your authorization (src/merge.mjs).
   const how = c.url ? t('Chiefmate merges the pull request on GitHub.') : t('Chiefmate merges the branch into the branch checked out in your clone; nothing is sent to GitHub.');
-  if (c.kind === 'merge' && action === 'approve' && !(await confirmDialog(t('Approve and merge'), `${c.label}: ${c.title}. ${how}`, t('Approve')))) return;
+  if (c.kind === 'merge' && action === 'approve' && !(await confirmDialog(t('Approve and merge'), `${c.label}: ${c.title}. ${how}`, t('Approve'), t("A merge can't be undone from Chiefmate.")))) return;
   const closes = c.url ? t('The pull request is closed on GitHub; it can be reopened there.') : t('The branch stays in your clone, not merged.');
-  if (c.kind === 'merge' && action === 'discard' && !(await confirmDialog(t('Discard this work'), `${c.label}: ${c.title}. ${closes}`, t('Discard')))) return;
+  if (c.kind === 'merge' && action === 'discard' && !(await confirmDialog(t('Discard this work'), `${c.label}: ${c.title}. ${closes}`, t('Discard'), t("This can't be undone from Chiefmate.")))) return;
   // Allowing a push is confirmed too: it lets the manager send that branch to GitHub once.
-  if (c.kind === 'push' && action === 'approve' && !(await confirmDialog(t('Allow this push'), `${c.title}. ${c.what} ${c.change}`, t('Allow push')))) return;
+  const used = t('You can take the permission back until the manager uses it; what is sent to GitHub then stays there.');
+  if (c.kind === 'push' && action === 'approve' && !(await confirmDialog(t('Allow this push'), `${c.title}. ${c.what} ${c.change}`, t('Allow push'), used))) return;
   // And creating a repository: the manager may then create it, private, and send the folder once.
-  if (c.kind === 'repo' && action === 'approve' && !(await confirmDialog(t('Allow this repository'), `${c.what} ${c.change}`, t('Allow creation')))) return;
+  if (c.kind === 'repo' && action === 'approve' && !(await confirmDialog(t('Allow this repository'), `${c.what} ${c.change}`, t('Allow creation'), used))) return;
   // What the owner wrote goes with the answer; "Send" needs something written.
   const note = action === 'answer' ? replyText(`card:${c.id}`) : '';
   if (button.hasAttribute('data-reply-send') && !note) return toast(t('Write your answer first.'));
@@ -1317,11 +1395,16 @@ $('#decisions').addEventListener('click', async event => {
   try {
     const r = await api('/api/decide', { card: c.id, action, option: button.dataset.option, note });
     if (r.done === 'answered') replyDrafts.delete(`card:${c.id}`);
-    toast({
-      merged: [t('Merged.'), r.merge?.copiesNote].filter(Boolean).join(' '), later: c.thirdParty ? t('Hidden: it is in the archive.') : t('Left for later: the card stays at the end, faded.'), discarded: t('Discarded.'),
-      already_merged: t('Branch already merged'), branch_deleted: t('Local branch deleted'),
-      approved: t('Approved: it becomes a task for its agent, in its turn.'), allowed: t('Allowed: the manager may send it once now.'), refused: t('Refused: the manager is told.'), answered: t('Answer sent to the manager: {answer}', { answer: [r.answer, r.note].filter(Boolean).join(' — ') }),
-    }[r.done] ?? '');
+    // What can be undone gets the band ("Done: … Undo"); a merge or a discard only the toast.
+    const answer = [r.answer, r.note].filter(Boolean).join(' — ');
+    const word = r.done === 'answered' ? t('answered "{answer}"', { answer }) : r.done === 'later' && c.thirdParty ? t('hidden') : decisionWord(r.done);
+    if (r.logged) showUndo(r.logged, word, c.title);
+    else {
+      toast({
+        merged: [t('Merged.'), r.merge?.copiesNote].filter(Boolean).join(' '), discarded: t('Discarded.'),
+        already_merged: t('Branch already merged'), branch_deleted: t('Local branch deleted'), answered: t('Answer sent to the manager: {answer}', { answer }),
+      }[r.done] ?? word);
+    }
   } catch (error) {
     toast(error.message);
     for (const b of card.querySelectorAll('button')) b.disabled = false;
@@ -3706,10 +3789,16 @@ function drawPlanning(force = false) {
   const turn = approved.length
     ? `<div class="plan-turn hint">${esc(t('Approved, waiting their turn:'))} ${approved.map(i => `<span class="num">#${i.id}</span> ${esc(i.title)}${i.agent ? ` (${esc(agentName(i.agent, i.project))})` : ''}`).join(' · ')}</div>`
     : '';
+  // Your last decisions here that can still be undone (in the last hour; all of them are in Decisions' history).
+  const hour = Date.now() - 3600_000;
+  const recent = decisionLogNow().filter(e => e.kind === 'plan' && e.canUndo && e.by === 'owner' && Date.parse(e.at) > hour).slice(0, 3);
+  const undo = recent.length
+    ? `<div class="plan-turn plan-undo hint">${esc(t('Decided just now:'))} ${recent.map(e => `<span><span class="num">#${esc(e.ref)}</span> ${esc(e.title)} (${esc(decisionWord(e.to))}) <button type="button" class="button secondary small" data-undo="${esc(e.id)}">${esc(t('Undo'))}</button></span>`).join(' ')}</div>`
+    : '';
   // The other notices of the board (pull requests, items waiting for your action) as attention notices; the
   // proposals to decide are in the Decide block.
   const notices = attnList(attnItems().filter(i => i.view === 'planning' && i.kind !== 'decision'), t('Waiting for you'));
-  const highlight = decisions + turn + notices;
+  const highlight = decisions + turn + undo + notices;
   if (!$('#planning-waiting').contains(document.activeElement) && !dragging) draw('#planning-waiting', highlight, highlight);
 
   // Quick filters: the proposals, what waits for you and what was discarded, each with its count.
@@ -3781,7 +3870,8 @@ $('#planning-waiting').addEventListener('click', async event => {
   discarding = null;
   const done = { approve: t('Approved: it becomes a task for its agent, in its turn.'), later: t('Left for later. It is under "Future".'), discard: t('Discarded. It is under "Discarded", where you can restore it.') }[decision];
   if (document.activeElement) document.activeElement.blur();
-  await changeItem({ action: decision, id, reason }, done);
+  // The band "Done: … Undo" for a decision that can be undone; an approved task starts once it is gone.
+  await changeItem({ action: decision, id, reason }, ({ item }) => (item?.logged ? showUndo(item.logged, decisionWord({ approve: 'approved', later: 'later', discard: 'discarded' }[decision]), `#${item.id} ${item.title}`) : toast(done)));
 });
 $('#planning-waiting').addEventListener('keydown', event => {
   if (event.key === 'Enter' && event.target.matches('[data-discard-reason]')) event.target.closest('[data-item]').querySelector('[data-confirm]').click();
@@ -3810,10 +3900,12 @@ $('#planning-waiting').addEventListener('dragend', async () => {
   else drawPlanning(true);
 });
 
+/** Sends a change of the board; "done" is the toast's text, or a function given the answer. */
 async function changeItem(body, done) {
   try {
-    await api('/api/planning', body);
-    if (done) toast(done);
+    const answer = await api('/api/planning', body);
+    if (typeof done === 'function') done(answer);
+    else if (done) toast(done);
   } catch (error) {
     toast(error.message);
   }
@@ -4603,7 +4695,7 @@ document.addEventListener('click', async event => {
       const m = await api('/api/merge', { run: target.dataset.merge, preview: true });
       const where = m.kind === 'pr' ? t('The pull request {address} is merged on GitHub.', { address: m.url }) : t('The branch {branch} is merged into {base} in {path}. Nothing is sent to GitHub.', { branch: m.branch, base: m.base, path: m.dir });
       const checks = m.failedChecks ? ` ${t('{count} check(s) failed.', { count: m.failedChecks })}` : '';
-      if (!(await confirmDialog(t('Merge'), `${where}${checks}`, t('Merge')))) return;
+      if (!(await confirmDialog(t('Merge'), `${where}${checks}`, t('Merge'), t("A merge can't be undone from Chiefmate.")))) return;
       target.disabled = true;
       const done = await api('/api/merge', { run: target.dataset.merge });
       const message = done.discarded ? t('Local branch deleted') : done.merged.by === 'outside' ? t('Branch already merged') : t('Merged.');
@@ -4642,10 +4734,12 @@ document.addEventListener('click', async event => {
       const key = `req:${target.dataset.request}`;
       const note = replyText(key);
       if (target.hasAttribute('data-reply-send') && !note) return toast(t('Write your answer first.'));
-      await api('/api/needs-you/done', { run: target.dataset.needsDone, id: target.dataset.request, answer, note: note || null });
+      const r = await api('/api/needs-you/done', { run: target.dataset.needsDone, id: target.dataset.request, answer, note: note || null });
       replyDrafts.delete(key);
       const sent = [answer, note].filter(Boolean).join(' — ');
-      toast(sent ? t('Answer sent: {answer}. The crew goes on.', { answer: sent }) : t('Marked as done. The crew goes on.'));
+      // The agent gets the answer once the band "Done: … Undo" is gone (src/needs.mjs, pollRequest).
+      if (r?.logged) showUndo(r.logged, sent ? t('answered "{answer}"', { answer: sent }) : t('marked as done'), firstLine(r.what ?? ''));
+      else toast(sent ? t('Answer sent: {answer}. The crew goes on.', { answer: sent }) : t('Marked as done. The crew goes on.'));
       if (selectedRun === target.dataset.needsDone) await refreshDetail(true);
     } else if (target.dataset.needsSession) {
       const permission = (state.needs ?? []).some(n => n.id === target.dataset.request && n.kind === 'permission');

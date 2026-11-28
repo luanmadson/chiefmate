@@ -364,6 +364,7 @@
     <form method="dialog">
       <div class="label" id="confirm-title"></div>
       <p id="confirm-text"></p>
+      <p id="confirm-final" class="confirm-final" hidden></p>
       <div class="actions">
         <button value="no" class="button secondary" data-t="Cancel">Cancel</button>
         <button value="yes" class="button" id="confirm-yes"></button>
@@ -389,7 +390,7 @@
       <button type="button" class="hold-button" id="strong-hold"><span class="hold-fill" aria-hidden="true"></span><span class="hold-label" id="strong-hold-label"></span></button>
       <label class="strong-type"><span id="strong-type-label"></span><input id="strong-word" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false"></label>
       <div class="actions">
-        <button value="no" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="no" class="button secondary" data-t="Cancel" autofocus>Cancel</button>
         <button value="yes" class="button danger" id="strong-yes" disabled></button>
       </div>
     </form>

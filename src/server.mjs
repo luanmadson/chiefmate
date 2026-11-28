@@ -11,7 +11,7 @@ import { checkClaude, claudeInfo, readFeed } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectLead, saveConfig } from './config.mjs';
 import { agentTool, runTools, toolModel } from './tools.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
-import { addQuestion, decide, decisionCards, openPushes, openQuestions, openRepoRequests, recentDecisions, undoDecision } from './decisions.mjs';
+import { addQuestion, decide, decisionCards, openPushes, openQuestions, openRepoRequests, recentDecisions, recordMerge, undoDecision } from './decisions.mjs';
 import { listFolder, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
 import { LEAD, memoryInfo } from './leads.mjs';
@@ -680,10 +680,15 @@ export function startServer() {
         }
         case '/api/resume':
           return reply(res, 200, { status: resume(body.id, !!body.ignoreLimits) });
-        case '/api/merge':
+        case '/api/merge': {
           // Merges a finished run's work with the owner's authorization (src/merge.mjs): "preview" only shows it.
           if (body.preview) return reply(res, 200, await previewMerge(body.run));
-          return reply(res, 200, await mergeRun(body.run, { by: body.by === 'manager' ? 'manager' : 'owner' }));
+          const by = body.by === 'manager' ? 'manager' : 'owner';
+          const merged = await mergeRun(body.run, { by });
+          // On record with the owner's decisions (src/decisions.mjs): the run's page or the manager's merge command.
+          recordMerge(body.run, { by, via: remote ? 'remote' : by === 'manager' ? 'cli' : 'app' });
+          return reply(res, 200, merged);
+        }
         case '/api/close-pr':
           // Closes a run's pull request replaced by a newer run's (src/merge.mjs): "preview" only shows it.
           if (body.preview) return reply(res, 200, previewClose(body.run, body.replacedBy));
