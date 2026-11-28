@@ -1980,6 +1980,7 @@
   "Couldn't read the state of {path}: {output}": "Não consegui ler o estado de {path}: {output}",
   "Couldn't save the changes of {path}: {output}": "Não consegui salvar as alterações de {path}: {output}",
   "Told the manager in the conversation: \"{words}\"": "Disse ao gerente na conversa: \"{words}\"",
+  "About your request \"{what}\": {answer}": "Sobre o seu pedido \"{what}\": {answer}",
   "The manager marked \"{what}\" done on your word in the conversation: \"{words}\"": "O gerente marcou \"{what}\" como feito pela sua palavra na conversa: \"{words}\"",
   "This call is no longer open.": "Esta chamada não está mais aberta.",
   "Only a run going on can be parked.": "Só uma execução em andamento pode ser estacionada.",

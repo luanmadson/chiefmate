@@ -213,10 +213,19 @@ export function finishRequest(runId, id, by = 'owner', answer = null, note = nul
   if (request.status !== 'open') return request;
   const written = by === 'owner' ? clip(String(note ?? '').trim(), 2000) : '';
   Object.assign(request, { status: 'done', done: now(), by }, choice ? { answer: choice } : {}, written ? { note: written } : {}, ownerSaid ? { ownerSaid } : {});
+  // A step still at work that no longer waits on the request (it never waited, or its wait ended) hears the answer at
+  // its next safe point, as a message from the owner (src/talk.mjs); a run parked on it hears it as it resumes (pauseAbout).
+  const l = liveOf(run.id);
+  const late = by !== 'check' && !!l?.talking && l.step === request.step && (!request.wait || !!request.waitEnded) && run.parked?.request !== request.id;
   // The owner's answer stays in the run's conversation (the agent's panel, the step's report, the manager).
-  if (choice || written || ownerSaid) {
-    const text = ownerSaid ? t('Told the manager in the conversation: "{words}"', { words: ownerSaid }) : [choice, written].filter(Boolean).join(' — ');
-    (run.talk ??= []).push({ id: randomUUID().slice(0, 8), at: now(), who: 'owner', step: request.step, agent: request.agent, text, status: 'delivered', delivered: now(), via: ownerSaid ? 'manager' : 'request', request: request.id });
+  if (choice || written || ownerSaid || late) {
+    const said = ownerSaid ? t('Told the manager in the conversation: "{words}"', { words: ownerSaid }) : [choice, written].filter(Boolean).join(' — ');
+    const text = late ? t('About your request "{what}": {answer}', { what: clip(request.what, 200), answer: said || t('I did it') }) : said;
+    (run.talk ??= []).push({
+      id: randomUUID().slice(0, 8), at: now(), who: 'owner', step: request.step, agent: request.agent, text, via: ownerSaid ? 'manager' : 'request', request: request.id,
+      ...(late ? { status: 'pending' } : { status: 'delivered', delivered: now() }),
+    });
+    if (late) l.process?.interrupt?.();
   }
   if (ownerSaid) noteLive(run.id, t('The manager marked "{what}" done on your word in the conversation: "{words}"', { what: clip(request.what, 120), words: ownerSaid }));
   // Parked on this request: back to the queue, ahead of the project's other runs.
@@ -270,9 +279,14 @@ export function parkRun(runId, { by = 'manager', request: requestId = null } = {
   if (!run) throw new Error(t('Run not found.'));
   if (run.parked && run.status === 'paused') return { run: run.id, request: run.parked.request, parked: run.parked, already: true };
   if (!liveOf(run.id)) throw new Error(t('Only a run going on can be parked.'));
-  const request = (run.requests ?? []).filter(r => r.status === 'open' && r.wait && (!requestId || r.id === requestId)).at(-1);
+  // A call whose step stopped waiting (away mode, "Not now", the longest wait) holds nothing: its step went on.
+  const request = (run.requests ?? []).filter(r => r.status === 'open' && r.wait && !r.waitEnded && !r.deferred && (!requestId || r.id === requestId)).at(-1);
   if (!request) throw new Error(t('This run is not waiting for you: nothing to park.'));
-  const open = () => runFor(run.id)?.requests?.find(r => r.id === request.id)?.status === 'open';
+  // Held while the call is open; "Not now" while it parks sends it back to the queue at its safe point.
+  const open = () => {
+    const r = runFor(run.id)?.requests?.find(x => x.id === request.id);
+    return r?.status === 'open' && !r.deferred;
+  };
   if (!pauseLive(run.id, 'park', { holdWhile: open })) throw new Error(t('This run is already pausing or stopping.'));
   run.parked = { request: request.id, at: now(), by };
   request.parked = now();

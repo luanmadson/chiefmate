@@ -4298,6 +4298,15 @@ try {
     const notNow = pollRequest(ends.run.id, holding.id, { away: false });
     expect(notNow.later && notNow.status === 'open' && ends.run.requests[0].waitEnded?.why === 'later' && (ends.run.speech ?? []).some(x => x.by === 'auto' && /not now/i.test(x.text)),
       `"Not now" did not end the wait with a line in the bubble: ${JSON.stringify(notNow)}`);
+    expect(await Promise.resolve().then(() => parkRun(ends.run.id)).then(() => false, e => /not waiting/.test(e.message)) && !ends.l.pauseRequest,
+      'a call left for later still parked its run');
+    // Answered after its step stopped waiting: the step still at work hears it at its next safe point (src/talk.mjs).
+    Object.assign(ends.l, { talking: true, step: 1 });
+    finishRequest(ends.run.id, holding.id, 'owner', null, 'Use the test key.');
+    const lateTalk = ends.run.talk?.find(m => m.who === 'owner' && m.request === holding.id);
+    expect(lateTalk?.status === 'pending' && lateTalk.text.includes('Sign in to the bank') && lateTalk.text.includes('Use the test key.') && ends.l.interrupted === 1,
+      `an answer given after the step went on did not reach it: ${JSON.stringify(lateTalk)}`);
+    ends.l.talking = false;
     const late = await askOwner({ run: ends.run.id, step: 1, what: 'Confirm the domain', wait: true });
     ends.run.requests.find(r => r.id === late.id).at = new Date(Date.now() - 31 * 60_000).toISOString();
     const timedOut = pollRequest(ends.run.id, late.id, { away: false });
@@ -4336,7 +4345,14 @@ try {
     const resumed = readRun(parkedLater.run.id);
     expect(resumed.status === 'queued' && resumed.resumeFirst && resumed.requests[0].status === 'open' && !!resumed.requests[0].deferred,
       `"Not now" left a parked run parked: ${JSON.stringify({ status: resumed.status, resumeFirst: resumed.resumeFirst })}`);
-    for (const id of ['smoke-park', 'smoke-park-next', 'smoke-away', 'smoke-fresh', 'smoke-ends', 'smoke-parked-later']) saveRun(Object.assign(readRun(id), { status: 'canceled', ended: new Date().toISOString() }));
+    // "Not now" while its run is still parking: not held at its safe point, so it goes back to the queue there.
+    const parking = going('smoke-parking-later', 'parking-later-sample');
+    const parkingCall = await askOwner({ run: parking.run.id, step: 1, what: 'Allow the script', wait: true });
+    parkRun(parking.run.id, { by: 'manager' });
+    deferRequest(parking.run.id, parkingCall.id);
+    expect(parking.l.pauseRequest === 'park' && parking.l.holdWhile?.() === false, 'a call left for later while its run parked kept the run held');
+    live.delete(parking.run.id);
+    for (const id of ['smoke-park', 'smoke-park-next', 'smoke-away', 'smoke-fresh', 'smoke-ends', 'smoke-parked-later', 'smoke-parking-later'])saveRun(Object.assign(readRun(id), { status: 'canceled', ended: new Date().toISOString() }));
 
     // A file the antivirus probably took: the project's queue waits, the notice carries the steps, it goes on once the file is back.
     const { checkQuarantine, holdForQuarantine, quarantineHold, releaseQuarantine } = await load('quarantine');
