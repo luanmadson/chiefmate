@@ -2172,16 +2172,14 @@ function leadPlan(a) {
   // A task or a mission has no planning step: only a request (or a plan already made) has a plan to show.
   const parts = a.request || plan ? [`<div class="label">${esc(t("{lead}'s plan", { lead: who }))}</div>`] : [];
   if (a.request) parts.push(`<p class="lead-request">${esc(a.request)}</p>`);
-  if (!a.request && !plan) {
-    // nothing planned: the lead only reviews this run
-  } else if (plan) {
+  if (plan) {
     parts.push(plan.tasks.length
       ? `<ol class="lead-tasks">${plan.tasks.map(x => `<li>${face(member(x.agent, a.project), 'still', 20)}<div><span class="name">${esc(agentName(x.agent, a.project))}</span><span class="hint">${esc(x.part)}</span></div></li>`).join('')}</ol>`
       : `<div class="hint">${esc(t('No task planned.'))}</div>`);
     if (plan.note) parts.push(`<div class="hint">${esc(plan.note)}</div>`);
     if (plan.error) parts.push(`<div class="hint">${esc(t('Problem with the plan: {error}', { error: plan.error }))}</div>`);
     if (plan.dropped?.length) parts.push(`<div class="hint">${esc(t('Left out: {list}', { list: plan.dropped.join('; ') }))}</div>`);
-  } else parts.push(`<div class="hint">${esc(planning ? t('Planning the request into tasks for the crew…') : t('The plan comes after the planning step.'))}</div>`);
+  } else if (a.request) parts.push(`<div class="hint">${esc(planning ? t('Planning the request into tasks for the crew…') : t('The plan comes after the planning step.'))}</div>`);
   // Its final review in a level 1 run (delegated review): each round's decision, and why the manager took it over.
   const reviews = a.lead?.reviews ?? [];
   if (reviews.length) {
