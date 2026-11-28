@@ -21,15 +21,15 @@ import { attentionArchive, mainPushNotice, markSeen } from './attention.mjs';
 import { ownerAnswered } from './charge.mjs';
 import { loadConfig } from './config.mjs';
 import { GRANT_MINUTES, logPush, mainPushTarget, mainPushTargets, plainPush, pushesFile, pushFacts, readPushes, repoOf, samePath } from './guard.mjs';
-import { formatDateTime, t } from './i18n.mjs';
-import { discardRun, mergeRun, prNumber, verdict } from './merge.mjs';
+import { formatDateTime, locale, t } from './i18n.mjs';
+import { discardRun, fixFor, fixState, mergeRun, prNumber, verdict } from './merge.mjs';
 import { refuseWhileLocked } from './lockdown.mjs';
 import { logPower, REBOOT_CONFIRM_MINUTES, REBOOT_COUNTDOWN_S, rebootRefusal, stopSystem } from './power.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { decideItem } from './planning.mjs';
 import { sayToSession } from './sessions.mjs';
-import { readRun } from './store.mjs';
+import { listRuns, readRun } from './store.mjs';
 import { localDeliveryClone } from './workspace.mjs';
 import { clip, DATA, ensureDir, now, parseLevel, readJson, ROOT, writeJson } from './util.mjs';
 
@@ -409,7 +409,44 @@ function noticeRun(notice, items) {
   return item?.run ? readRun(item.run) : null;
 }
 
-function mergeCard(notice, run, item, config) {
+/** A time on a card: the hour today ("22:47"), else the date and hour. */
+function cardTime(iso) {
+  const d = new Date(iso);
+  return d.toDateString() === new Date().toDateString() ? new Intl.DateTimeFormat(locale(), { timeStyle: 'short' }).format(d) : formatDateTime(iso);
+}
+
+/**
+ * Why a merge card has no Approve now (src/merge.mjs): a merge that failed ("mergeFailed", until the work is merged or a
+ * check finds it merges cleanly again), or a conflict found before any click ("conflict"). { kind: failed | conflict,
+ * text, files, retry (a failure that was not a conflict: tried again only with "retry", once its cause is fixed),
+ * progress (the fix's: queued, running, ready, merged, or "manager" when there is none), fix }, or null.
+ */
+function mergeHold(run, runs) {
+  const failed = run.mergeFailed;
+  const cleanSince = at => run.mergeCheck?.clean && String(run.mergeCheck.at) > String(at);
+  const kind = failed && !(failed.conflict && cleanSince(failed.at)) ? 'failed' : run.conflict ? 'conflict' : null;
+  if (!kind) return null;
+  let text;
+  if (kind === 'conflict') {
+    text = t('In conflict with {base} since {time}: it no longer merges cleanly, so approving it would fail.', { base: run.conflict.base ?? 'main', time: cardTime(run.conflict.at) });
+  } else {
+    const pr = failed.how !== 'local';
+    const values = { base: failed.base ?? 'main', why: clip(failed.why, 160) };
+    const problem = failed.conflict
+      ? pr ? t('GitHub refused it: a conflict with {base}', values) : t('the merge into {base} failed: a conflict', values)
+      : pr ? t('GitHub refused it: {why}', values) : t('the merge failed: {why}', values);
+    text = failed.by === 'manager' ? t('The manager tried to merge it at {time}; {problem}.', { time: cardTime(failed.at), problem })
+      : t('You approved at {time}; {problem}.', { time: cardTime(failed.at), problem });
+  }
+  const conflict = kind === 'conflict' || failed.conflict;
+  const fix = conflict ? fixFor(run, runs()) : null;
+  return {
+    kind, text, files: run.conflict?.files ?? [], retry: kind === 'failed' && !failed.conflict,
+    progress: conflict ? fixState(fix) : 'manager', fix: fix ? { run: fix.id, title: fix.title, url: fix.pullRequest ?? null } : null,
+  };
+}
+
+function mergeCard(notice, run, item, config, runs = listRuns) {
   const project = run.project;
   const name = projectName(config, project);
   const number = prNumber(run.pullRequest);
@@ -429,15 +466,21 @@ function mergeCard(notice, run, item, config) {
   ].filter(Boolean).join(' ');
   const how = run.pullRequest ? t('Chiefmate merges the pull request on GitHub.') : t('Chiefmate merges the branch into the branch checked out in your clone; nothing is sent to GitHub.');
   const advice = review ? verdictRecommendation(review) : null;
+  const hold = byOwner ? mergeHold(run, runs) : null;
   return {
     id: notice.id, kind: 'merge', level: notice.level, seen: !!notice.seen, at: notice.at, project, label,
     title: run.title, what: clip(run.summary || run.title, 300),
     change: !byOwner ? '' : inClone ? [how, run.outcome?.change].filter(Boolean).join(' ') : t("The branch is in the crew's working copy, not in a clone of yours (local_clone): merge it by hand."),
     risk: risk || t('No risk noted.'),
     recommend: advice?.text ?? '', recommendShort: advice?.short ?? '',
-    detail: [review ? `${t("Manager's verdict")}:\n${review}` : '', run.outcome?.done?.length ? `${t('What was done')}:\n- ${run.outcome.done.join('\n- ')}` : ''].filter(Boolean).join('\n\n'),
-    url: run.pullRequest ?? null, run: run.id, item: item?.id ?? null, approve: byOwner && inClone, thirdParty: !byOwner,
-    approval: run.level ?? item?.level ?? null,
+    detail: [
+      hold?.files.length ? listed(t('Files in conflict'), hold.files.slice(0, 10), hold.files.length, true) : '',
+      review ? `${t("Manager's verdict")}:\n${review}` : '', run.outcome?.done?.length ? `${t('What was done')}:\n- ${run.outcome.done.join('\n- ')}` : '',
+    ].filter(Boolean).join('\n\n'),
+    url: run.pullRequest ?? null, run: run.id, item: item?.id ?? null, approve: byOwner && inClone && !hold, thirdParty: !byOwner,
+    approval: run.level ?? item?.level ?? null, hold,
+    // The fix of a conflict whose work the owner approved already: the manager merges it after its review.
+    approvedBefore: run.ownerApproved ? { at: run.ownerApproved.at, run: run.ownerApproved.run, text: t('You already approved the content; the manager merges it after the review.') } : null,
   };
 }
 
@@ -526,8 +569,11 @@ function repoCard(notice, r) {
  * The cards, in the notices' order (not seen first, then by level and time): { id (the notice's), kind (merge,
  * decision, question, push, repo), level, approval, seen, label, title, what, change, risk, recommend, detail, approve, ... }.
  */
-export function decisionCards({ config = loadConfig(), attention = [], items = [], questions = openQuestions(), pushes = openPushes(), repos = openRepoRequests() } = {}) {
+export function decisionCards({ config = loadConfig(), attention = [], items = [], questions = openQuestions(), pushes = openPushes(), repos = openRepoRequests(), runs = null } = {}) {
   const cards = [];
+  // Every run, read only when a card needs to find the fix of its conflict.
+  let all = runs;
+  const allRuns = () => (all ??= listRuns());
   for (const n of attention) {
     try {
       if (n.kind === 'repo') {
@@ -545,7 +591,7 @@ export function decisionCards({ config = loadConfig(), attention = [], items = [
       } else if (n.id.startsWith('pr:') || n.id.startsWith('plan:')) {
         const run = noticeRun(n, items);
         const item = items.find(i => n.id.startsWith(`plan:${i.id}:`)) ?? items.find(i => run && i.run === run.id) ?? null;
-        if (run?.status === 'done' && !run.merged && !run.discarded && (run.pullRequest || run.delivered)) cards.push(mergeCard(n, run, item, config));
+        if (run?.status === 'done' && !run.merged && !run.discarded && (run.pullRequest || run.delivered)) cards.push(mergeCard(n, run, item, config, allRuns));
       }
     } catch (error) {
       console.error(`Decisions: card ${n.id}:`, error.message);
@@ -582,8 +628,11 @@ export async function decide({ card, action, option, note, reason } = {}, cards 
     return { card: c.id, done: 'later' };
   }
   if (c.kind === 'merge') {
-    if (action === 'approve') {
-      if (!c.approve) throw new Error(t('Someone else reviews and merges the work of this project.'));
+    if (action === 'approve' || (action === 'retry' && c.hold?.retry)) {
+      if (!c.approve && !c.hold) throw new Error(t('Someone else reviews and merges the work of this project.'));
+      // An Approve that failed is never tried again by a new click: the card shows how its fix goes. Only "retry" tries
+      // again a failure that was not a conflict, once its cause is fixed.
+      if (c.hold?.kind === 'failed' && action !== 'retry') return { card: c.id, done: 'waiting_fix', progress: c.hold.progress };
       const merge = await mergeRun(c.run, { by: 'owner' });
       return { card: c.id, done: merge.discarded ? 'branch_deleted' : merge.merged.by === 'outside' ? 'already_merged' : 'merged', merge };
     }

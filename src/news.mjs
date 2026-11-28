@@ -24,6 +24,7 @@ export const NEWS_EVENTS = [
   'update_installed', 'update_blocked', 'memory_alert', 'usage_alert', 'session_ended', 'plan_proposed',
   'idle', 'autopilot_report', 'watchdog', 'away', 'back', 'owner_decided', 'push_allowed', 'repo_allowed', 'owner_request',
   'lockdown', 'security_warning', 'power', 'owner_working', 'defect', 'focus', 'run_parked', 'quarantine', 'session_spare',
+  'conflict',
 ];
 
 // The owner's own switches (away mode, the power modes of src/power.mjs, the focus of src/steer.mjs), a push the owner
@@ -39,7 +40,7 @@ const OWNER_EVENTS = ['away', 'back', 'push_allowed', 'repo_allowed', 'lockdown'
  */
 export const HELD_WHILE_AWAY = [
   'run_finished', 'run_failed', 'run_paused', 'pr_ready', 'merged', 'update_installed', 'update_blocked',
-  'memory_alert', 'usage_alert', 'session_ended', 'autopilot_report', 'defect', 'run_parked', 'session_spare',
+  'memory_alert', 'usage_alert', 'session_ended', 'autopilot_report', 'defect', 'run_parked', 'session_spare', 'conflict',
 ];
 
 // Events within a minute of the first one go to the manager together.

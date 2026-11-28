@@ -1117,6 +1117,7 @@ async function main() {
         const { startWatch } = await import('./plan.mjs');
         const { startAutopilot } = await import('./autopilot.mjs');
         const { startSpending } = await import('./spending.mjs');
+        const { startMergeChecks } = await import('./merge.mjs');
         const { powerOffCommand, startPower } = await import('./power.mjs');
         const { updating } = await import('./update.mjs');
         // In "pause" mode (and on "update now") the update pauses the runs and the live sessions' turns going on and
@@ -1170,6 +1171,7 @@ async function main() {
         startWatch();
         startAutopilot();
         startSpending();
+        startMergeChecks();
         startSessions();
         startUpdates({
           ...pausing,
