@@ -405,3 +405,14 @@ export function markSeen(ids) {
   saveState(state);
   return Object.keys(seen).length;
 }
+
+/** Takes the seen mark off notices ("Not now" undone): they come back to the top. */
+export function unmarkSeen(ids) {
+  const state = readState();
+  for (const id of ids ?? []) {
+    delete state.attention_seen?.[id];
+    // An info notice archived because it was seen comes back too.
+    if (state.attention_archive?.[id]?.reason === 'seen') delete state.attention_archive[id];
+  }
+  saveState(state);
+}

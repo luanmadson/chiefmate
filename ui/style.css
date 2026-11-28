@@ -64,7 +64,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .away[hidden], .away-notice[hidden] { display: none; }
 .away-notice { display: flex; align-items: center; gap: 8px; padding: 4px 16px; background: var(--raised); border-bottom: 1px solid var(--line); color: var(--strong); }
 .away-notice select { width: auto; max-width: 55%; margin: 0; padding: 4px 8px; border-radius: 0; }
-/* Emergency lockdown: the red button in the title bar, the red band on every page and the release dialog */
+/* Emergency lockdown: the red button (in the power dialog), the red band on every page and the release dialog */
 .lockdown-button { appearance: none; flex: none; background: transparent; border: 1px solid rgba(255, 92, 82, 0.55); border-radius: 0; color: var(--urgent); font: inherit; font-size: 12px; letter-spacing: 0.04em; padding: 3px 9px; cursor: pointer; white-space: nowrap; }
 .lockdown-button:hover { background: var(--urgent-bg); border-color: var(--urgent); }
 .lockdown-button:focus-visible { outline: 1px solid var(--urgent); outline-offset: 1px; }
@@ -108,6 +108,12 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 .power-mode.danger { border-left-color: var(--error); }
 .power-mode:disabled { opacity: 0.45; cursor: default; }
 .power-mode:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+/* The emergency lockdown, in the power dialog, below a line, apart from the modes; gone while it is on */
+.power-emergency { margin: 4px 0 0; padding-top: 12px; border-top: 1px solid var(--line); }
+.power-emergency:has(.lockdown-button[hidden]) { display: none; }
+.power-emergency .label { color: var(--urgent); margin-bottom: 6px; }
+.power-emergency .hint { margin: 0 0 10px; line-height: 1.5; }
+.power-emergency .lockdown-button { padding: 8px 14px; font-size: 12.5px; }
 .tag.late { color: var(--warn); border-color: var(--warn); }
 .presence { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
 .presence .state { overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
@@ -411,6 +417,17 @@ textarea { resize: vertical; min-height: 64px; }
 .decision-buttons .button { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 0 14px; font-size: 13px; }
 .decision-buttons .short { display: none; }
 .decisions-later > summary { padding: 10px 18px; color: var(--muted); font-size: 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+/* Your recent decisions (decisionHistoryHtml in ui/app.js): time, what, from → to, who and where; Undo while it can */
+.decision-history > summary { padding: 10px 18px; color: var(--muted); font-size: 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.decision-history > .hint { margin: 0; padding: 8px 18px; border-bottom: 1px solid var(--line); line-height: 1.5; }
+.decision-history ol { list-style: none; margin: 0; padding: 0; }
+.history-row { display: grid; grid-template-columns: 82px minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; padding: 8px 18px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.history-when { color: var(--muted); font: 12px var(--mono); }
+.history-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.history-text .primary { color: var(--strong); overflow-wrap: anywhere; }
+.history-text .hint { overflow-wrap: anywhere; }
+.history-row[data-undone] .primary { color: var(--muted); text-decoration: line-through; }
+.history-block { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .chat-queue { max-height: 32vh; overflow-y: auto; border-top: 1px solid var(--line); background: var(--raised); }
 .chat-queue[hidden] { display: none; }
 .chat-queue-head { display: flex; gap: 10px; align-items: baseline; padding: 8px 18px 0; }
@@ -686,6 +703,25 @@ details summary { cursor: pointer; }
 .context-text { max-height: 70vh; overflow: auto; }
 .toast { position: fixed; right: 20px; bottom: 40px; max-width: 420px; padding: 10px 14px; background: var(--raised); border: 1px solid var(--line-strong); border-left: 2px solid var(--accent); color: var(--strong); font-size: 13px; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
 .toast.visible { opacity: 1; }
+/* The band "Done: … Undo" (showUndo in ui/app.js), where the toast shows, above an agent's panel, for 10 seconds */
+.undo-bar { position: fixed; right: 20px; bottom: 40px; z-index: 30; display: flex; align-items: center; gap: 14px; max-width: min(560px, calc(100vw - 40px)); padding: 7px 8px 7px 14px; background: var(--raised); border: 1px solid var(--line-strong); border-left: 2px solid var(--accent); color: var(--strong); font-size: 13px; }
+.undo-bar[hidden] { display: none; }
+.undo-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.undo-bar .button { flex: none; }
+/* What a confirmation can't undo afterwards (a merge, what a push sends), apart, in red */
+.confirm .confirm-final { margin: 8px 0 0; padding: 7px 10px; border-left: 2px solid var(--error); background: rgba(224, 112, 106, 0.08); color: var(--strong); }
+.confirm-final[hidden] { display: none; }
+/* Strong confirmation (strongConfirm in ui/app.js): hold the red button for 2 seconds, or type the word */
+.strong-confirm { border-color: var(--urgent); }
+.hold-button { position: relative; display: flex; align-items: center; justify-content: center; width: 100%; min-height: 48px; margin: 14px 0 12px; padding: 8px 14px; overflow: hidden; appearance: none; background: transparent; border: 1px solid var(--urgent); border-radius: 0; color: var(--urgent); font: inherit; font-size: 13px; font-weight: 600; letter-spacing: 0.03em; cursor: pointer; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: none; }
+.hold-button:hover { background: var(--urgent-bg); }
+.hold-button:focus-visible { outline: 1px solid var(--urgent); outline-offset: 2px; }
+.hold-fill { position: absolute; inset: 0; background: rgba(255, 92, 82, 0.3); transform: scaleX(0); transform-origin: left; transition: transform 0.15s ease-out; }
+.hold-button.holding { color: #fff; }
+.hold-button.holding .hold-fill { transform: scaleX(1); transition: transform 2s linear; }
+.hold-label { position: relative; }
+.strong-type { display: grid; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.strong-type input { font: 14px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; }
 
 /* The file viewer (#viewer; the file viewer in ui/app.js): almost the whole window (all of it on phones), a top line
    with the name, the facts, the tools and the close button, and the file below. */
@@ -797,6 +833,8 @@ button.tab { background: transparent; border-top: 0; border-left: 0; border-righ
 .plan-decide .button { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 0 14px; }
 .plan-reason { display: block; font-size: 12px; color: var(--muted); margin-top: 6px; }
 .plan-turn { margin: -8px 0 18px; font-size: 12px; }
+.plan-undo { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+.plan-undo > span { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .plan-quick .tab { background: transparent; border-top: 0; border-left: 0; border-right: 0; font: inherit; font-size: 12.5px; cursor: pointer; }
 .plan-row.plan-triaged td { background: var(--important-bg); }
 .plan-row.plan-triaged td:first-child { box-shadow: inset 2px 0 0 var(--important); color: var(--important); }
@@ -1139,7 +1177,13 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   .compose-buttons { margin-left: auto; }
   .live-facts .compose-buttons { margin-left: 0; }
   .agent-panel { padding: 12px; }
-  .toast { left: 12px; right: 12px; max-width: none; }
+  .toast, .undo-bar { left: 12px; right: 12px; max-width: none; }
+  .undo-text { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+  /* A decision of the history: the time on its own line, then what and its button */
+  .history-row { grid-template-columns: minmax(0, 1fr) auto; padding: 8px 12px; font-size: 14px; }
+  .history-when { grid-column: 1 / -1; }
+  .decision-history > summary { padding: 13px 12px; }
+  .decision-history > .hint { padding: 8px 12px; }
   .statusbar { overflow-x: auto; padding: 0 12px; }
   .statusbar .group { flex: none; overflow: visible; }
   /* The board: each item is a card; title on top, then project, priority, status, links and buttons */
@@ -1269,7 +1313,7 @@ tr.may-close td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
   .attn-band .attn-actions .button, .attn-more .button { min-width: 44px; }
 
   /* The toasts above the bottom bar; an agent's panel from the title bar down to the visible bottom (above the keyboard) */
-  .toast { bottom: calc(68px + env(safe-area-inset-bottom)); }
+  .toast, .undo-bar { bottom: calc(68px + env(safe-area-inset-bottom)); }
   .agent-panel { top: calc(48px + env(safe-area-inset-top)); bottom: auto; height: calc(var(--app-h, 100dvh) - 48px - env(safe-area-inset-top)); width: 100vw; }
 
   /* With the keyboard open, the bottom bar, the status bar (unless the connection is lost) and the notices step aside; in a

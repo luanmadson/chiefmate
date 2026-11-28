@@ -10,6 +10,8 @@
 // In a project whose owner lets its main branch go through a card ("main_push": "card"), so does a push of the main
 // branch, by the manager or by a "Work now" session, with what goes at a glance (commits, files, migrations).
 // So does a private repository the manager asks to create (cli.mjs repo-create; see repoCreate).
+// Every click is on record (recordDecision in src/store.mjs): who, when, from where, from what to what. What has had
+// no effect yet can be undone (undoDecision): the card comes back for another answer. A merge or a discard can't.
 // Each card carries the approval level the manager gave its run, item or question ("approval": 1, the manager
 // decides and does it; 2, the owner approves; 3, never without the owner; null, not given). The app folds the level 1
 // cards apart and counts only the others as needing the owner.
@@ -17,19 +19,20 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { attentionArchive, mainPushNotice, markSeen } from './attention.mjs';
+import { attentionArchive, mainPushNotice, markSeen, unmarkSeen } from './attention.mjs';
 import { ownerAnswered } from './charge.mjs';
 import { loadConfig } from './config.mjs';
 import { GRANT_MINUTES, logPush, mainPushTarget, mainPushTargets, plainPush, pushesFile, pushFacts, readPushes, repoOf, samePath } from './guard.mjs';
 import { formatDateTime, t } from './i18n.mjs';
 import { discardRun, mergeRun, prNumber, verdict } from './merge.mjs';
 import { refuseWhileLocked } from './lockdown.mjs';
+import { reopenRequest, requestUndoBlock } from './needs.mjs';
 import { logPower, REBOOT_CONFIRM_MINUTES, REBOOT_COUNTDOWN_S, rebootRefusal, stopSystem } from './power.mjs';
-import { reportEvent } from './news.mjs';
+import { newsPending, reportEvent, withdrawNews } from './news.mjs';
 import { notify } from './notify.mjs';
-import { decideItem } from './planning.mjs';
+import { decideItem, itemUndoBlock, undoItemDecision } from './planning.mjs';
 import { sayToSession } from './sessions.mjs';
-import { readRun } from './store.mjs';
+import { readDecisionLog, readRun, readState, recordDecision, saveDecisionLog, UNDO_GRACE_MS } from './store.mjs';
 import { localDeliveryClone } from './workspace.mjs';
 import { clip, DATA, ensureDir, now, parseLevel, readJson, ROOT, writeJson } from './util.mjs';
 
@@ -96,6 +99,17 @@ function closeQuestion(id, answer, note = null) {
   return q;
 }
 
+/** A question answered or discarded comes back open (its answer undone, undoDecision). */
+function reopenQuestion(id, was) {
+  const questions = readQuestions();
+  const q = questions.find(x => x.id === Number(id));
+  if (!q || q.status !== was) throw new Error(t('This decision can no longer be undone.'));
+  Object.assign(q, { status: 'open', answer: null, answered_at: null });
+  delete q.note;
+  saveQuestions(questions);
+  return q;
+}
+
 /** The "owner_decided" news of a question closed from its card: the option, what the owner wrote, or the discard. */
 export function questionNews(q) {
   const asked = `your question #${q.id} "${q.question}"`;
@@ -147,6 +161,19 @@ const PUSHES_MAX = 100;
 const PUSH_OPEN_FOR = 24 * 3600_000; // a request not answered in a day leaves the cards
 export { pushesFile };
 const cliPush = p => `node src/cli.mjs push "${p.dir.replaceAll('\\', '/')}" ${p.branch}`;
+/** A push in words, for the manager's news and a session's conversation. */
+const pushWhat = p => (p.main ? `push of the main branch ${p.branch} of ${p.project ?? p.repo} to ${p.repo}` : `push of branch ${p.branch} to ${p.repo}`);
+
+/** Tells the "Work now" session that asked for a push, in its conversation, what the owner did ("text" follows the name). */
+function tellSession(p, text) {
+  const owner = loadConfig().owner || 'The owner';
+  try {
+    sayToSession(p.session, `${owner} ${text}`);
+  } catch (error) {
+    console.error(`Decisions: session ${p.session}:`, error.message); // the answer stands; the session is gone
+  }
+}
+
 /** Whether a request still has its card: the main branch only while its project lets it go through one. */
 const mainCardOn = (config, p) => !p.main || config?.projects?.[p.project]?.main_push === 'card';
 
@@ -221,6 +248,18 @@ function answerRequest(file, open, id, allow) {
   Object.assign(p, allow
     ? { status: 'allowed', decided: now(), expires: new Date(Date.now() + GRANT_MINUTES * 60_000).toISOString() }
     : { status: 'refused', decided: now() });
+  writeJson(file, list);
+  return p;
+}
+
+/** A push or repository request answered comes back open, its grant taken back. Refused once used or past its day. */
+function reopenRequestIn(file, open, id, was) {
+  const list = readPushes(file);
+  const p = list.find(x => x.id === String(id ?? ''));
+  if (!p || p.status !== was || !open([{ ...p, status: 'open' }]).length) throw new Error(t('This decision can no longer be undone.'));
+  p.status = 'open';
+  delete p.decided;
+  delete p.expires;
   writeJson(file, list);
   return p;
 }
@@ -409,13 +448,25 @@ function noticeRun(notice, items) {
   return item?.run ? readRun(item.run) : null;
 }
 
-function mergeCard(notice, run, item, config) {
-  const project = run.project;
-  const name = projectName(config, project);
+/** "PR #34 of Chiefmate", "Branch x of Riffdex": a run's delivery, as its card and the record name it. */
+function deliveryLabel(run, config) {
+  const name = projectName(config, run.project);
   const number = prNumber(run.pullRequest);
-  const label = run.pullRequest
+  return run.pullRequest
     ? number ? t('PR #{number} of {project}', { number, project: name }) : t('Pull request of {project}', { project: name })
     : t('Branch {branch} of {project}', { branch: run.branch ?? '-', project: name });
+}
+
+/** A merge on record with the owner's decisions, from a card, the run's page or the manager's: it can't be undone. */
+export function recordMerge(id, { by = 'owner', via = 'app' } = {}, config = loadConfig()) {
+  const run = readRun(String(id ?? ''));
+  if (!run?.merged || run.merged.by === 'outside') return null;
+  return recordDecision({ kind: 'merge', ref: run.id, label: deliveryLabel(run, config), title: run.title ?? run.id, from: 'pending', to: 'merged', by, via });
+}
+
+function mergeCard(notice, run, item, config) {
+  const project = run.project;
+  const label = deliveryLabel(run, config);
   const byOwner = mergedByOwner(config, project);
   // A branch left in the crew's working copy (no local_clone) is merged by hand, not from here (src/merge.mjs).
   const inClone = !!run.pullRequest || !!localDeliveryClone(run, config);
@@ -461,6 +512,8 @@ function questionCard(notice, q, config) {
     label: q.project ? t('Question from the manager about {project}', { project: projectName(config, q.project) }) : t('Question from the manager'),
     title: q.question, what: q.context, change: '', risk: '', recommend: q.recommend ?? '', recommendShort: q.recommend ?? '', detail: '',
     question: q.id, options: q.options, approve: false, approval: q.level ?? null,
+    // A restart's question: its yes takes a strong confirmation in the app, as shutting down does.
+    restartYes: q.reboot?.yes ?? null,
   };
 }
 
@@ -556,14 +609,15 @@ export function decisionCards({ config = loadConfig(), attention = [], items = [
 
 // ---------- The owner's click ----------
 
-const tell = text => reportEvent('owner_decided', text);
+/** Tells the manager; "ref" lets an undo take the news back while it waits. Returns the ref when told, else null. */
+const tell = (text, ref = null, urgent = false) => (reportEvent('owner_decided', text, { ref, urgent }) && ref) || null;
 
 /**
  * The owner decides a card from the app: { card (its id), action: approve | later | discard | answer, option (the
  * answer to a question), note (what the owner wrote to a question: with the option, or instead of one), reason }.
  * The card is checked against "cards", what is pending now.
  */
-export async function decide({ card, action, option, note, reason } = {}, cards = []) {
+export async function decide({ card, action, option, note, reason, via = 'app' } = {}, cards = []) {
   const id = String(card ?? '');
   const c = cards.find(x => x.id === id);
   if (!c) {
@@ -576,57 +630,66 @@ export async function decide({ card, action, option, note, reason } = {}, cards 
     throw new Error(t('This decision is no longer pending.'));
   }
   const about = `${c.label} "${c.title}"`;
+  const ref = randomUUID().slice(0, 8);
+  // On record: who, when, from where, from what to what, and what undoing it needs (none: it can't be undone). The
+  // record's id goes back to the app only when it can be undone, for its Undo band ("logged").
+  const log = (fields, news = null) => {
+    const entry = recordDecision({ kind: c.kind, ref: c.id, label: c.label, title: c.title, from: 'pending', by: 'owner', via, news, ...fields });
+    return entry.final ? null : entry.id;
+  };
   if (action === 'later') {
     markSeen([c.id]);
-    tell(`The owner chose "not now" for ${about} from the app: it stays pending; don't ask again today.`);
-    return { card: c.id, done: 'later' };
+    const news = tell(`The owner chose "not now" for ${about} from the app: it stays pending; don't ask again today.`, ref);
+    return { card: c.id, done: 'later', logged: log({ kind: 'seen', to: 'later', undo: { seen: c.id } }, news) };
   }
   if (c.kind === 'merge') {
     if (action === 'approve') {
       if (!c.approve) throw new Error(t('Someone else reviews and merges the work of this project.'));
       const merge = await mergeRun(c.run, { by: 'owner' });
-      return { card: c.id, done: merge.discarded ? 'branch_deleted' : merge.merged.by === 'outside' ? 'already_merged' : 'merged', merge };
+      const done = merge.discarded ? 'branch_deleted' : merge.merged.by === 'outside' ? 'already_merged' : 'merged';
+      if (done === 'merged') recordMerge(c.run, { via });
+      return { card: c.id, done, merge };
     }
     if (action === 'discard') {
       // Someone else's review: its pull request is theirs to close.
       if (c.thirdParty) throw new Error(t('Someone else reviews and merges the work of this project.'));
       const result = await discardRun(c.run);
-      if (c.item) await decideItem(c.item, 'discard', { reason: clip(reason, 200) || 'Discarded by the owner', by: 'owner' }).catch(() => null);
+      if (c.item) await decideItem(c.item, 'discard', { reason: clip(reason, 200) || 'Discarded by the owner', by: 'owner', via, undoable: false }).catch(() => null);
       tell(`The owner discarded ${about} (run ${c.run}) from the app: ${result.kind === 'pr' ? `pull request ${result.url} closed on GitHub` : `branch ${result.branch} left unmerged`}.`);
+      log({ to: 'discarded' });
       return { card: c.id, done: 'discarded' };
     }
   } else if (c.kind === 'decision' && ['approve', 'discard'].includes(action)) {
-    await decideItem(c.item, action, { reason, by: 'owner' });
-    tell(`The owner ${action === 'approve' ? 'approved' : 'discarded'} ${about} (planning item #${c.item}) from the app${action === 'approve' ? ': its task starts in its turn' : ''}.`);
-    return { card: c.id, done: action === 'approve' ? 'approved' : 'discarded' };
+    // The item's own record (decideItem) is the decision's: it carries this news, to take back with an undo. An
+    // approval from the app starts its task after the undo window.
+    const item = await decideItem(c.item, action, { reason, by: 'owner', via, news: ref, grace: action === 'approve' && via !== 'cli' ? UNDO_GRACE_MS : 0 });
+    tell(`The owner ${action === 'approve' ? 'approved' : 'discarded'} ${about} (planning item #${c.item}) from the app${action === 'approve' ? ': its task starts in its turn' : ''}.`, ref);
+    return { card: c.id, done: action === 'approve' ? 'approved' : 'discarded', logged: item.logged };
   } else if (c.kind === 'push' && ['approve', 'discard'].includes(action)) {
     const p = answerPush(c.push, action === 'approve');
-    const what = p.main ? `push of the main branch ${p.branch} of ${p.project ?? p.repo} to ${p.repo}` : `push of branch ${p.branch} to ${p.repo}`;
+    const what = pushWhat(p);
     if (p.status === 'allowed') logPush(pushesFile(), 'allowed', p);
+    let news = null;
     // A "Work now" session hears it in its conversation, as a message from the app; the manager, as news.
     if (p.session) {
-      const owner = loadConfig().owner || 'The owner';
-      try {
-        sayToSession(p.session, p.status === 'allowed'
-          ? `${owner} allowed, on its card in the Chiefmate app, your ${what} (from ${p.dir}), once, until ${formatDateTime(p.expires)}. Run the same command again now: ${p.command}`
-          : `${owner} refused, on its card in the Chiefmate app, your ${what} (from ${p.dir}). Don't try it again.`);
-      } catch (error) {
-        console.error(`Decisions: session ${p.session}:`, error.message); // the answer stands; the session is gone
-      }
+      tellSession(p, p.status === 'allowed'
+        ? `allowed, on its card in the Chiefmate app, your ${what} (from ${p.dir}), once, until ${formatDateTime(p.expires)}. Run the same command again now: ${p.command}`
+        : `refused, on its card in the Chiefmate app, your ${what} (from ${p.dir}). Don't try it again.`);
     } else if (p.status === 'allowed') {
       reportEvent('push_allowed', `The owner allowed, from the app, your ${what} (from ${p.dir}), once, until ${formatDateTime(p.expires)}. Run it now: the same command (${p.command}) or ${cliPush(p)}.`, { urgent: true });
     } else {
-      tell(`The owner refused, from the app, your ${what} (from ${p.dir}). Don't try it again.`);
+      news = tell(`The owner refused, from the app, your ${what} (from ${p.dir}). Don't try it again.`, ref);
     }
-    return { card: c.id, done: p.status };
+    return { card: c.id, done: p.status, logged: log({ to: p.status, undo: { push: p.id } }, news) };
   } else if (c.kind === 'repo' && ['approve', 'discard'].includes(action)) {
     const r = answerRepo(c.repoRequest, action === 'approve');
+    let news = null;
     if (r.status === 'allowed') {
       reportEvent('repo_allowed', `The owner allowed, from the app, the private repository ${r.repo} with ${r.dir} sent to it (branch ${r.branch}), once, until ${formatDateTime(r.expires)}. Run it now: ${cliRepo(r)}.`, { urgent: true });
     } else {
-      tell(`The owner refused, from the app, the private repository ${r.repo} from ${r.dir}. Don't ask for it again.`);
+      news = tell(`The owner refused, from the app, the private repository ${r.repo} from ${r.dir}. Don't ask for it again.`, ref);
     }
-    return { card: c.id, done: r.status };
+    return { card: c.id, done: r.status, logged: log({ to: r.status, undo: { repo: r.id } }, news) };
   } else if (c.kind === 'question' && ['answer', 'discard'].includes(action)) {
     if (action === 'answer' && !String(option ?? '').trim() && !String(note ?? '').trim()) throw new Error(t('Choose an option or write your answer.'));
     // A restart confirmed: still fresh, and nothing forbids it now (else the card stays open, with the reason).
@@ -653,6 +716,8 @@ export async function decide({ card, action, option, note, reason } = {}, cards 
         }
         // What the owner wrote with the yes reaches the manager too.
         if (q.note) tell(questionNews(q));
+        // On record; a restart started can't be undone (its countdown is cancelled in the app's power dialog).
+        log({ to: q.status, answer: [q.answer, q.note].filter(Boolean).join(' — ') || null });
         return { card: c.id, done: 'answered', answer: q.answer, note: q.note ?? null, run: null, reboot: true };
       }
       logPower({ action: 'reboot', outcome: 'refused', by: q.reboot.by, reason: q.reboot.reason, why: 'the owner did not confirm it' });
@@ -662,10 +727,111 @@ export async function decide({ card, action, option, note, reason } = {}, cards 
     const request = !followed ? '' : followed.error
       ? ` Request #${q.request} could not follow it (${followed.error}).`
       : ` Chiefmate applied it to request #${q.request}: ${followed.status}${followed.run ? `, run ${followed.run} queued` : ''}; don't answer that request again.`;
-    tell(questionNews(q) + request);
-    return { card: c.id, done: q.status === 'answered' ? 'answered' : 'discarded', answer: q.answer, note: q.note ?? null, run: followed?.run ?? null };
+    const news = tell(questionNews(q) + request, ref);
+    // A request of an agent in charge already followed the answer (a run queued, perhaps): that one can't be undone.
+    const logged = log({ to: q.status, answer: [q.answer, q.note].filter(Boolean).join(' — ') || null, undo: followed ? null : { question: q.id } }, news);
+    return { card: c.id, done: q.status === 'answered' ? 'answered' : 'discarded', answer: q.answer, note: q.note ?? null, run: followed?.run ?? null, logged };
   }
   throw new Error(t('This decision does not take that action.'));
+}
+
+// ---------- Undoing a decision ----------
+
+const HISTORY_HOURS = 24; // the decisions the app lists
+
+/**
+ * Whether a decision on record can still be undone: null when it can, else why not ("final": a merge, a discard or
+ * anything else that can't; "undone"; "read": the manager or the agent already has it; "started", "used", "expired",
+ * "ended", "changed", "gone").
+ */
+export function undoBlock(entry) {
+  if (entry.final) return 'final';
+  if (entry.undone) return 'undone';
+  // No news on record (the manager's updates off): nobody read it.
+  const unread = entry.news ? newsPending(entry.news) : true;
+  switch (entry.kind) {
+    case 'seen':
+      return readState().attention_seen?.[entry.ref] ? null : 'changed';
+    case 'plan':
+      return itemUndoBlock(entry);
+    case 'request':
+      return requestUndoBlock(entry);
+    case 'question': {
+      const q = readQuestions().find(x => x.id === Number(entry.undo.question));
+      if (!q || q.status !== entry.to) return 'changed';
+      return unread ? null : 'read';
+    }
+    case 'push':
+    case 'repo': {
+      const [file, open, id] = entry.kind === 'push' ? [pushesFile(), openPushes, entry.undo.push] : [reposFile(), openRepoRequests, entry.undo.repo];
+      const p = readPushes(file).find(x => x.id === id);
+      if (!p) return 'gone';
+      if (p.status === 'used') return 'used';
+      if (p.status !== entry.to) return 'changed';
+      if (!open([{ ...p, status: 'open' }]).length) return 'expired';
+      // A permission is taken back any time before it is used; a refusal, until the manager reads it.
+      return p.status === 'allowed' || unread ? null : 'read';
+    }
+    default:
+      return 'final';
+  }
+}
+
+/** The owner's decisions of the last day, newest first, each with whether it can still be undone ("canUndo"). */
+export function recentDecisions(max = 20) {
+  const since = Date.now() - HISTORY_HOURS * 3600_000;
+  return readDecisionLog().filter(e => Date.parse(e.at) >= since).reverse().slice(0, max).map(e => {
+    let block;
+    try {
+      block = undoBlock(e);
+    } catch {
+      block = 'gone';
+    }
+    const { undo, news, ...shown } = e;
+    return { ...shown, block, canUndo: !block };
+  });
+}
+
+/**
+ * Undoes a decision while it has had no effect: the card (the request, the item) is back as it was, for another answer.
+ * Its news is taken back if the manager hasn't read it yet, else the manager is told. On record too, from and to swapped.
+ */
+export function undoDecision(id, { by = 'owner', via = 'app' } = {}) {
+  const list = readDecisionLog();
+  const entry = list.find(e => e.id === String(id ?? ''));
+  if (!entry) throw new Error(t('This decision is not on record.'));
+  const why = undoBlock(entry);
+  if (why) {
+    throw new Error({
+      final: t("This decision can't be undone."), undone: t('This decision was already undone.'),
+      read: t('The agent already read your answer: it can no longer be changed.'), started: t("Its task has already started: it can't be undone."),
+      used: t('The permission was already used.'), expired: t('This request expired.'), ended: t('The run has ended.'),
+    }[why] ?? t('This decision can no longer be undone.'));
+  }
+  if (entry.kind === 'seen') unmarkSeen([entry.ref]);
+  else if (entry.kind === 'plan') undoItemDecision(entry);
+  else if (entry.kind === 'request') reopenRequest(entry);
+  else if (entry.kind === 'question') reopenQuestion(entry.undo.question, entry.to);
+  else if (entry.kind === 'repo') reopenRequestIn(reposFile(), openRepoRequests, entry.undo.repo, entry.to);
+  const allowed = ['push', 'repo'].includes(entry.kind) && entry.to === 'allowed';
+  // A push: its grant is taken back on record, and a "Work now" session that asked hears of it in its conversation.
+  const push = entry.kind === 'push' ? reopenRequestIn(pushesFile(), openPushes, entry.undo.push, entry.to) : null;
+  if (push && allowed) logPush(pushesFile(), 'taken back', push);
+  // Its news, not read yet, goes back; already read (or a permission given), the manager hears of the change.
+  const withdrawn = withdrawNews(entry.news);
+  if (push?.session) {
+    tellSession(push, allowed
+      ? `took back, in the Chiefmate app, the permission for your ${pushWhat(push)} (from ${push.dir}): don't run it; it waits for their decision again.`
+      : `undid, in the Chiefmate app, the refusal of your ${pushWhat(push)} (from ${push.dir}): it waits for their decision again.`);
+  } else if (!withdrawn && (allowed || entry.news)) {
+    tell(allowed
+      ? `The owner took back, from the app, the permission they gave for ${entry.label} "${entry.title}": don't do it; it waits for their decision again.`
+      : `The owner undid, from the app, their decision on ${entry.label} "${entry.title}" (${entry.from} → ${entry.to}): it is back to ${entry.from}, waiting for their new decision. Ignore the earlier news about it.`, null, allowed);
+  }
+  entry.undone = { at: now(), by, via };
+  saveDecisionLog(list);
+  recordDecision({ kind: entry.kind, ref: entry.ref, label: entry.label, title: entry.title, from: entry.to, to: entry.from, by, via, undoes: entry.id });
+  return { undone: entry.id, kind: entry.kind, to: entry.from };
 }
 
 /** The manager's line: the questions it asked that still wait for the owner. */

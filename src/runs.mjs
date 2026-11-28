@@ -9,7 +9,7 @@ import { contextWindow, runClaude } from './claude.mjs';
 import { loadConfig, projectCrew } from './config.mjs';
 import { currentEffort, effortChangeLine, runEffortChanges } from './effort.mjs';
 import { guardHooks } from './guard.mjs';
-import { askOwner, finishRequest, needsSettings } from './needs.mjs';
+import { askOwner, finishRequest, markRead, needsSettings, settlingNow } from './needs.mjs';
 import {
   fullReport, generateBrief, generateOutcome, mergeOutcomes, outcomeLine, outcomeMarkdown, outcomeTemplate, parseOutcome, shortSummary, shortTitle,
   TITLE_MAX,
@@ -856,13 +856,19 @@ async function signInFirst(l, run, index, tool) {
   while (Date.now() < until && !l.cancelRequest && !l.pauseRequest) {
     l.heldUntil = Date.now() + 20_000;
     await new Promise(resolve => setTimeout(resolve, 10_000));
-    const done = run.requests?.find(r => r.id === request.id)?.status === 'done';
+    // The owner's "I did it" counts once its undo window is over (src/needs.mjs); from then on, it can't be undone.
+    const asked = run.requests?.find(r => r.id === request.id);
+    const done = asked?.status === 'done' && !settlingNow(asked);
     if (await signedIn(tool)) {
-      if (!done) finishRequest(run.id, request.id, 'check');
+      if (asked?.status === 'done') markRead(run, asked);
+      else finishRequest(run.id, request.id, 'check');
       l.heldUntil = 0;
       return true;
     }
-    if (done) break;
+    if (done) {
+      markRead(run, asked);
+      break;
+    }
   }
   l.heldUntil = 0;
   return false;

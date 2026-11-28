@@ -347,7 +347,7 @@ export async function autopilotApprove(id, { config = loadConfig(), usage = read
   if (item.archived || item.status !== 'triaged' || item.recommend !== 'now') throw new Error(`Item #${item.id} is not triaged "now": the autopilot only starts those, the rest waits for the owner.`);
   if (holdReason(item.project)) throw new Error(`${item.project} is held by the owner's focus (paused, or out of the focus): the autopilot starts nothing there until it is free.`);
   if (!idleProjects(config).has(item.project)) throw new Error(`${item.project} has work queued or going on: the autopilot waits for its queue to empty.`);
-  const approved = await decideItem(item.id, 'approve', { by: 'autopilot' });
+  const approved = await decideItem(item.id, 'approve', { by: 'autopilot', via: 'cli' });
   const state = readState();
   const a = (state.autopilot ??= { woken: {}, log: [], wakes: [] });
   a.log = [...(a.log ?? []), { at: now(), item: item.id, project: item.project, title: item.title, agent: item.agent }].slice(-MAX_LOG);

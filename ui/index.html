@@ -20,7 +20,6 @@
         <div class="titlebar-right">
           <select id="project-jump" class="project-jump" aria-label="Go to a project's page" data-t-label="Go to a project's page"></select>
           <span id="power" class="power" hidden></span>
-          <button type="button" id="lockdown" class="lockdown-button" hidden></button>
           <button type="button" id="away" class="away" aria-pressed="false" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 4.6V8l2.3 1.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="away-label" data-t="Away mode">Away mode</span><span id="away-since" aria-hidden="true" hidden></span></button>
           <div id="presence" class="presence"></div>
           <span id="clock" class="clock"></span>
@@ -394,6 +393,7 @@
     <form method="dialog">
       <div class="label" id="confirm-title"></div>
       <p id="confirm-text"></p>
+      <p id="confirm-final" class="confirm-final" hidden></p>
       <div class="actions">
         <button value="no" class="button secondary" data-t="Cancel">Cancel</button>
         <button value="yes" class="button" id="confirm-yes"></button>
@@ -463,6 +463,19 @@
       </div>
     </form>
   </dialog>
+  <!-- A strong confirmation (strongConfirm in app.js): hold the button for 2 seconds, or type the word. -->
+  <dialog id="strong-confirm" class="confirm strong-confirm">
+    <form method="dialog">
+      <div class="label" id="strong-title"></div>
+      <p id="strong-text"></p>
+      <button type="button" class="hold-button" id="strong-hold"><span class="hold-fill" aria-hidden="true"></span><span class="hold-label" id="strong-hold-label"></span></button>
+      <label class="strong-type"><span id="strong-type-label"></span><input id="strong-word" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false"></label>
+      <div class="actions">
+        <button value="no" class="button secondary" data-t="Cancel" autofocus>Cancel</button>
+        <button value="yes" class="button danger" id="strong-yes" disabled></button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="escalation-dialog" class="confirm escalation-dialog">
     <form method="dialog">
       <div class="label" data-t="Calling you outside the app">Calling you outside the app</div>
@@ -477,6 +490,12 @@
       <div class="label" data-t="Power">Power</div>
       <p class="hint" id="power-now"></p>
       <div class="power-modes" id="power-modes"></div>
+      <!-- The emergency lockdown, kept here, apart from the everyday buttons; it asks for a strong confirmation. -->
+      <div class="power-emergency">
+        <div class="label" data-t="Emergency">Emergency</div>
+        <p class="hint" data-t="Stops every run, the queue, the agents and their browsers at once, and refuses pushes, merges and the remote access until you release it on this computer.">Stops every run, the queue, the agents and their browsers at once, and refuses pushes, merges and the remote access until you release it on this computer.</p>
+        <button type="button" id="lockdown" class="lockdown-button" hidden></button>
+      </div>
       <div class="actions">
         <button value="no" class="button secondary" data-t="Close">Close</button>
       </div>
@@ -541,6 +560,7 @@
       </div>
     </form>
   </dialog>
+  <div id="undo-bar" class="undo-bar" role="status" aria-live="polite" hidden></div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/app.js" type="module"></script>
 </body>

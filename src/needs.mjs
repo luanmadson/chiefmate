@@ -7,7 +7,9 @@
 // the owner writes an explanation with the option, or an answer of their own instead. While it waits,
 // the step's time limit stands still. The wait ends without an answer (endWait) past the longest wait, at once in away
 // mode, or when the owner says "Not now" (deferRequest): the command returns, the step goes on with what it can and
-// the request stays open. Any open request closes when the run ends.
+// the request stays open. Any open request closes when the run ends. The owner's click to a step waiting on it reaches
+// the step after the undo window (UNDO_GRACE_MS, src/store.mjs), and the owner can take it back until then (undoDecision
+// in src/decisions.mjs); so can a "Not now", while the call is open.
 // The manager handles the open calls too ("cli.mjs calls"): it marks one done on the owner's own words in its
 // conversation (confirmByOwnerWords), and parks a run that waits for the owner (parkRun), freeing its project's turn
 // for the next run in the queue; a parked run resumes first once the owner answers. In away mode, a call that still
@@ -18,7 +20,7 @@ import { t } from './i18n.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
 import { activeRun, liveOf, liveRuns, noteLive, pauseLive } from './runs.mjs';
-import { listRuns, readRun, readState, runEnded, saveRun, stepsOf } from './store.mjs';
+import { listRuns, readRun, readState, recordDecision, runEnded, saveRun, stepsOf, UNDO_GRACE_MS } from './store.mjs';
 import { addSpeech } from './speech.mjs';
 import { agentSays } from './talk.mjs';
 import { openOwnerPage } from './usagepage.mjs';
@@ -151,23 +153,40 @@ export function pollRequest(runId, id, { away = !!awayNow() } = {}) {
   const waited = Date.now() - Date.parse(request.at);
   const max = needsSettings().maxWaitMinutes * 60_000;
   const going = liveOf(run.id);
-  const parked = request.status === 'open' && parkedOn(run, id);
-  const open = request.status === 'open' && !parked;
-  const ended = !open ? null : request.deferred ? 'later' : away ? 'away' : waited >= max ? 'timeout' : null;
+  // An answer clicked in the app waits out its undo window ("undo_until", finishRequest) before the agent gets it: until
+  // then it can be taken back, and the step keeps waiting. A message from the agent's panel that answers it goes at once.
+  const settling = settlingNow(request);
+  const status = settling ? 'open' : request.status;
+  const parked = status === 'open' && !settling && parkedOn(run, id);
+  const open = status === 'open' && !parked;
+  const ended = !open || settling ? null : request.deferred ? 'later' : away ? 'away' : waited >= max ? 'timeout' : null;
   if (ended) endWait(run, request, ended);
   else if (open) {
     // Waiting again (the owner is back, or the step asked to wait once more): the call is a call again.
-    if (request.waitEnded) {
+    if (request.waitEnded && !settling) {
       delete request.waitEnded;
       saveRun(run);
     }
     if (going) going.heldUntil = Date.now() + 20_000;
   }
+  // The agent has the answer now: from here, the owner can no longer take it back (requestUndoBlock).
+  if (status === 'done') markRead(run, request);
+  const given = status === 'done' ? request : {};
   return {
-    status: request.status, by: request.by ?? null, answer: request.answer ?? null, note: request.note ?? null, ownerSaid: request.ownerSaid ?? null, parked,
+    status, by: given.by ?? null, answer: given.answer ?? null, note: given.note ?? null, ownerSaid: given.ownerSaid ?? null, parked,
     question: !!request.options?.length, waitedMinutes: Math.floor(waited / 60_000), maxWaitMinutes: max / 60_000,
     ended, timedOut: ended === 'timeout', away: ended === 'away', later: ended === 'later',
   };
+}
+
+/** Whether the owner's answer is still in its undo window: done, but not handed to the agent yet. */
+export const settlingNow = request => request?.status === 'done' && Date.parse(request.undo_until ?? '') > Date.now();
+
+/** The agent has the owner's answer (its waiting command, or the sign-in wait of src/runs.mjs): no longer undone. */
+export function markRead(run, request) {
+  if (request.read) return;
+  request.read = now();
+  saveRun(run);
 }
 
 /** Records why a step stopped waiting without an answer, once, with a line in its bubble; past the wait, the on-call. */
@@ -184,17 +203,51 @@ function endWait(run, request, why) {
   if (why !== 'later') callOnDuty(run, request, why);
 }
 
+/** A call's decision on record (recordDecision, src/store.mjs): the run, what the step asked and from what. */
+const requestRecord = (run, request) => ({ kind: 'request', ref: `${run.id}:${request.id}`, label: run.title ?? run.id, title: request.what, from: 'open' });
+
 /**
  * "Not now": the owner can't see to a call now. It stays open (out of the call bar, among what waits for them), and the
  * step waiting on it stops waiting at its next check and goes on with what it can; a run parked on it goes back to the
- * queue, ahead of its project's other runs, to go on without the answer.
+ * queue, ahead of its project's other runs, to go on without the answer. On record: undone (reopenRequest), the call is
+ * back in the bar, unless its run was parked on it.
  */
-export function deferRequest(runId, id) {
+export function deferRequest(runId, id, { via = 'app' } = {}) {
   const { run, request } = findRequest(runId, id);
   if (request.status !== 'open' || request.deferred) return request;
   request.deferred = now();
   if (run.parked?.request === request.id && run.status === 'paused' && !liveOf(run.id)) {
     Object.assign(run, { status: 'queued', resumeFirst: true, note: t("You left the call for later: it resumes first in its project's queue, without your answer.") });
+  }
+  saveRun(run);
+  const logged = recordDecision({ ...requestRecord(run, request), to: 'later', via, undo: run.parked?.request === request.id ? null : { run: run.id, request: request.id } });
+  return { ...request, logged: logged.final ? null : logged.id };
+}
+
+/** Whether the owner's decision on a call can still be taken back: null when it can, else why not. */
+export function requestUndoBlock(entry) {
+  const run = runFor(String(entry.undo?.run ?? ''));
+  const request = run?.requests?.find(r => r.id === entry.undo?.request);
+  if (!request) return 'gone';
+  if (runEnded(run)) return 'ended';
+  if (entry.to === 'later') return request.status === 'open' && request.deferred ? null : 'changed';
+  if (request.status !== 'done') return 'changed';
+  return request.read ? 'read' : null;
+}
+
+/**
+ * Takes the owner's decision on a call back: an answer the agent has not read yet (the request is open again, the
+ * answer out of the talk), or a "Not now" (the call is back in the bar; a step that already went on stays on its way).
+ */
+export function reopenRequest(entry) {
+  const why = requestUndoBlock(entry);
+  if (why) throw new Error(why === 'read' ? t('The agent already read your answer: it can no longer be changed.') : t('This decision can no longer be undone.'));
+  const { run, request } = findRequest(entry.undo.run, entry.undo.request);
+  if (entry.to === 'later') delete request.deferred;
+  else {
+    for (const key of ['done', 'by', 'answer', 'note', 'undo_until']) delete request[key];
+    request.status = 'open';
+    run.talk = (run.talk ?? []).filter(m => !(m.via === 'request' && m.request === request.id));
   }
   saveRun(run);
   return request;
@@ -203,9 +256,10 @@ export function deferRequest(runId, id) {
 /**
  * "I did it": the owner did it (or the agent's check succeeded); for a question, the option the owner chose and/or
  * what they wrote ("note": an explanation with the option, an answer of their own instead of one, or their answer to
- * a request to act, written in the call bar).
+ * a request to act, written in the call bar). The owner's click to a step still waiting on it reaches the step after
+ * the undo window (UNDO_GRACE_MS, pollRequest) and can be taken back until then (reopenRequest); anywhere else it goes at once.
  */
-export function finishRequest(runId, id, by = 'owner', answer = null, note = null, { ownerSaid = null } = {}) {
+export function finishRequest(runId, id, by = 'owner', answer = null, note = null, { ownerSaid = null, via = 'app' } = {}) {
   const { run, request } = findRequest(runId, id);
   const given = answer == null || String(answer).trim() === '' ? null : answer;
   const choice = given == null ? null : request.options?.find(o => same(o, given));
@@ -217,6 +271,9 @@ export function finishRequest(runId, id, by = 'owner', answer = null, note = nul
   // its next safe point, as a message from the owner (src/talk.mjs); a run parked on it hears it as it resumes (pauseAbout).
   const l = liveOf(run.id);
   const late = by !== 'check' && !!l?.talking && l.step === request.step && (!request.wait || !!request.waitEnded) && run.parked?.request !== request.id;
+  // A step still waiting on it gets the owner's click once the undo window is over; delivered late or to a parked run, at once.
+  const waiting = by === 'owner' && !late && request.wait && !request.waitEnded && !request.deferred && run.parked?.request !== request.id;
+  if (waiting) request.undo_until = new Date(Date.now() + UNDO_GRACE_MS).toISOString();
   // The owner's answer stays in the run's conversation (the agent's panel, the step's report, the manager).
   if (choice || written || ownerSaid || late) {
     const said = ownerSaid ? t('Told the manager in the conversation: "{words}"', { words: ownerSaid }) : [choice, written].filter(Boolean).join(' — ');
@@ -233,7 +290,13 @@ export function finishRequest(runId, id, by = 'owner', answer = null, note = nul
     Object.assign(run, { status: 'queued', resumeFirst: true, note: t("You answered: it resumes first in its project's queue.") });
   }
   saveRun(run);
-  return request;
+  if (by === 'check') return request;
+  // On record, the owner's and the manager's on the owner's word; only an answer still in its window can be undone.
+  const logged = recordDecision({
+    ...requestRecord(run, request), to: choice || written || ownerSaid ? 'answered' : 'done', answer: [choice, written, ownerSaid].filter(Boolean).join(' — ') || null,
+    by, via: by === 'manager' ? 'cli' : via, undo: waiting ? { run: run.id, request: request.id } : null,
+  });
+  return { ...request, logged: logged.final ? null : logged.id };
 }
 
 // ---------- The manager's handling of the calls ----------

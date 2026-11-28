@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { loadConfig, projectCrew } from './config.mjs';
 import { reportEvent } from './news.mjs';
-import { onRunSaved, readRun, stepsOf } from './store.mjs';
+import { onRunSaved, readRun, recordDecision, saveRun, stepsOf, UNDO_GRACE_MS } from './store.mjs';
 import { parseTool } from './tools.mjs';
 import { clip, DATA, now, parseLevel, readJson, writeJson } from './util.mjs';
 
@@ -437,11 +437,12 @@ export function triageItem(id, { priority, agent, recommend, note, risk, order, 
  * "later" (future) or "discard" (with a reason; "restore" brings it back). by: who decided, the owner, the manager
  * (which discards proposals that make no sense or repeat another) or the autopilot (src/autopilot.mjs).
  */
-export async function decideItem(id, decision, { reason, by = 'owner', tool } = {}) {
+export async function decideItem(id, decision, { reason, by = 'owner', tool, via = 'app', news = null, undoable = true, grace = 0 } = {}) {
   const board = readBoard();
   const item = findIn(board, id);
   if (item.archived) throw new Error(`Item #${item.id} is archived: restore it first.`);
   const stamp = now();
+  const before = Object.fromEntries(UNDONE_FIELDS.map(k => [k, item[k] ?? null]));
   if (decision === 'approve') {
     if (!TRIAGE_FROM.includes(item.status)) throw new Error(`Item #${item.id} is ${item.status}: there is nothing to approve.`);
     if (!item.agent) throw new Error(`Item #${item.id} has no agent to do it: the manager's triage sets one (plan triage ${item.id} --agent <member>).`);
@@ -449,6 +450,8 @@ export async function decideItem(id, decision, { reason, by = 'owner', tool } = 
     checkAgent(item.project, item.agent);
     if (tool !== undefined && tool !== null) item.tool = parseTool(tool);
     Object.assign(item, { status: 'approved', approved_at: stamp, decided_by: by });
+    // The owner's click in the app: its task starts after the undo window ("grace", UNDO_GRACE_MS in src/store.mjs).
+    if (grace > 0) item.starts_at = new Date(Date.now() + grace).toISOString();
     placeAt(board, item, item.rank ?? Number.MAX_SAFE_INTEGER);
   } else if (decision === 'later') {
     if (CLOSED.includes(item.status) || ACTIVE.includes(item.status) || item.status === 'waiting_owner') throw new Error(`Item #${item.id} is ${item.status}: it can't wait for later.`);
@@ -460,8 +463,51 @@ export async function decideItem(id, decision, { reason, by = 'owner', tool } = 
   } else throw new Error(`Unknown decision "${decision}". Use: approve, later, discard.`);
   item.updated = stamp;
   saveBoard(board);
-  if (decision === 'approve') await startApproved();
-  return planItem(item.id);
+  // On record, with what undoing it needs (undoItemDecision), while its task has not started.
+  const logged = recordDecision({
+    kind: 'plan', ref: item.id, label: `#${item.id} ${item.project}`, title: item.title, from: before.status, to: item.status,
+    answer: decision === 'discard' ? item.discard_reason : null, by, via, undo: undoable ? { item: item.id, before } : null, news,
+  });
+  if (decision === 'approve' && grace > 0) setTimeout(() => startApproved().catch(error => console.error('Planning:', error.message)), grace + 250).unref?.();
+  else if (decision === 'approve') await startApproved();
+  return { ...planItem(item.id), logged: logged.final ? null : logged.id };
+}
+
+// What a decision changes on an item, put back when it is undone.
+const UNDONE_FIELDS = ['status', 'rank', 'approved_at', 'discarded_at', 'discard_reason', 'decided_by', 'tool', 'starts_at'];
+
+/**
+ * Whether a decision on an item can still be undone: null when it can, else why not. An approval can while its task
+ * has not started (the item approved and waiting its turn, or its run still queued, never begun).
+ */
+export function itemUndoBlock(entry) {
+  const item = readBoard().items.find(i => i.id === Number(entry.undo?.item));
+  if (!item) return 'gone';
+  if (entry.to === 'approved') {
+    if (item.status === 'approved' && !item.run) return null;
+    const run = item.run && readRun(item.run);
+    return item.status === 'queued' && run?.status === 'queued' && !run.started ? null : 'started';
+  }
+  return item.status === entry.to ? null : 'changed';
+}
+
+/** Undoes a decision on an item: its task, if queued and never begun, is canceled, and the item goes back as it was. */
+export function undoItemDecision(entry) {
+  const why = itemUndoBlock(entry);
+  if (why) throw new Error(why === 'started' ? "Its task has already started: it can't be undone." : 'The item changed since: this decision can no longer be undone.');
+  const item = findIn(readBoard(), entry.undo.item);
+  const run = item.run && readRun(item.run);
+  if (run) {
+    // Unlinked first, so the canceled run does not pull the item back to "to do".
+    Object.assign(run, { status: 'canceled', ended: now(), note: 'canceled before it started: the owner undid the approval', plan: null });
+    saveRun(run);
+  }
+  const fresh = readBoard();
+  const back = findIn(fresh, entry.undo.item);
+  Object.assign(back, entry.undo.before, { run: run ? null : back.run, run_status: run ? null : back.run_status, updated: now() });
+  if (back.status === 'triaged' || back.status === 'approved') placeAt(fresh, back, back.rank ?? Number.MAX_SAFE_INTEGER);
+  saveBoard(fresh);
+  return back;
 }
 
 /** A discarded item comes back: to the owner's decision when it was triaged, else to the proposals. */
@@ -516,7 +562,8 @@ async function startNext() {
   // a project held by the owner's focus (src/steer.mjs) keeps its approved items until it is free
   const { holdReason, readSteer } = await import('./steer.mjs');
   const steer = readSteer();
-  for (const item of open.filter(i => i.status === 'approved').sort(byRank)) {
+  // An item still in its undo window (starts_at, decideItem) waits: its own timer starts it.
+  for (const item of open.filter(i => i.status === 'approved' && !(Date.parse(i.starts_at ?? '') > Date.now())).sort(byRank)) {
     if (!busy.has(item.project) && !next.has(item.project) && !holdReason(item.project, steer)) next.set(item.project, item);
   }
   if (!next.size) return [];
@@ -559,7 +606,11 @@ export async function changePlan(body = {}) {
     // falls through
     case 'later':
     case 'discard':
-      return decideItem(body.id, body.action, { reason: body.reason, by: body.by === 'manager' ? 'manager' : 'owner', tool: body.tool });
+      return decideItem(body.id, body.action, {
+        reason: body.reason, by: body.by === 'manager' ? 'manager' : 'owner', tool: body.tool, via: body.via,
+        // The owner's "Do" in the app starts the task after the undo window; the manager's and the command line's at once.
+        grace: body.action === 'approve' && body.by !== 'manager' && ['app', 'remote'].includes(body.via) ? UNDO_GRACE_MS : 0,
+      });
     case 'reorder':
       return reorderItems(body.ids);
     default:
