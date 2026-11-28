@@ -9,7 +9,7 @@ import { effortChangeLine, effortHistory } from './effort.mjs';
 import { formatDateTime, formatDuration, formatNumber, formatPercent, t } from './i18n.mjs';
 import { LEAD, leadReviews, leadSituation, openInbox } from './leads.mjs';
 import { processes } from './machine.mjs';
-import { autopilotLine } from './autopilot.mjs';
+import { autopilotLine, weekLine } from './autopilot.mjs';
 import { awayInfo, awayLine } from './news.mjs';
 import { computerLine, planLine } from './plan.mjs';
 import { pushesFile, pushesLine, pushRequestsFrom, questionsLine, reposLine } from './decisions.mjs';
@@ -19,7 +19,7 @@ import { requestsLine } from './charge.mjs';
 import { defectsLine, senderLabel } from './defects.mjs';
 import { planningLine } from './planning.mjs';
 import { radarLine } from './radar.mjs';
-import { focus, maxParallel, queued } from './queue.mjs';
+import { focus, maxParallel, queueManagerLines } from './queue.mjs';
 import { activeRun, ALWAYS_DISALLOWED, crewGuard, doingNow, liveRuns, prepareLibraries } from './runs.mjs';
 import { describeSchedule, nextRun } from './schedule.mjs';
 import { listSessions, readSession, sessionsLine } from './sessions.mjs';
@@ -30,6 +30,7 @@ import { isLocked, ownerKeyFile, secretsFolder } from './lockdown.mjs';
 import { denyRules } from './access.mjs';
 import { updateInfo, updating } from './update.mjs';
 import { stopping } from './power.mjs';
+import { sessionLine } from './spending.mjs';
 import { steerManagerLine } from './steer.mjs';
 import { DATA, ensureDir, languageName, now, ROOT, VERSION } from './util.mjs';
 import { noTrace } from './workspace.mjs';
@@ -143,11 +144,9 @@ export function situation(libraries = []) {
       ? `Running (${going.length} of at most ${maxParallel(config)} at once, one per project): ${going.map(l => `${l.title} (project ${l.project}, step ${l.step ?? '-'}: ${l.agent ?? 'preparing'}${doingNow(l) ? `, ${doingNow(l)}` : ''}), run ${l.run}`).join('; ')}.`
       : `Running: nothing (up to ${maxParallel(config)} runs of different projects go on at once).`,
   );
-  const queue = queued();
-  // In the order it runs (one per project at a time); "queue move|hold|release" changes it.
-  const queueEntry = (r, i) => `${i + 1}. ${r.title} [${r.id}] (project ${r.project}${r.onHold ? ', ON HOLD until you release it' : ''}${r.notBefore ? `, not before ${formatDateTime(r.notBefore)}` : ''})`;
-  lines.push(queue.length ? `Queue, in order: ${queue.map(queueEntry).join('; ')}.` : 'Queue: empty.');
   const runs = listRuns();
+  // In the order it runs, with what holds each run and why, the owner's "Do now" and the latest changes (src/queue.mjs).
+  lines.push(...queueManagerLines(config, runs));
   const latest = runs.filter(r => !['queued', 'waiting'].includes(r.status)).slice(0, 5);
   lines.push('Latest runs:');
   for (const r of latest) {
@@ -160,8 +159,10 @@ export function situation(libraries = []) {
   const talked = [...going.map(l => activeRun(l.run)).filter(Boolean), ...latest].filter((r, i, all) => all.findIndex(x => x.id === r.id) === i);
   lines.push(talkSituation(talked, config.owner || 'the owner'));
   const window = (w, name) => `${name} ${formatPercent(w?.used)}${w?.resets ? ` (resets ${formatDateTime(w.resets)})` : ''}`;
-  const limits = config.limits ?? {};
-  lines.push(`${config.owner}'s account: ${window(usage.five_hour, '5-hour window')}; ${window(usage.seven_day, 'plan week')}. Measured ${usage.updated ? formatDateTime(usage.updated) : 'never'}. Runs pause at ${formatPercent(limits.pause_at_5h_window)} of the 5-hour window and ${formatPercent(limits.pause_at_plan_week)} of the plan week.`);
+  lines.push(`${config.owner}'s account: ${window(usage.five_hour, '5-hour window')}; ${window(usage.seven_day, 'plan week')}. Measured ${usage.updated ? formatDateTime(usage.updated) : 'never'}.`);
+  // the spending modes the owner chose in Usage (src/spending.mjs, src/autopilot.mjs), and what will be left of the session
+  lines.push(sessionLine(config, { usage, runs }));
+  lines.push(weekLine(config));
   lines.push(planLine(config, usage));
   lines.push(computerLine(config));
   const login = loginLine(config.owner || 'the owner');

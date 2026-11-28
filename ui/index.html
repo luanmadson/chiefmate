@@ -332,10 +332,10 @@
           </div>
         </div>
         <div id="usage"></div>
+        <div id="spending" class="panel form"></div>
         <form id="limits-form" class="panel form">
-          <div class="label" data-t="Limits">Limits</div>
+          <div class="label" data-t="The week's limit">The week's limit</div>
           <div class="fields">
-            <label><span data-t="Pause at this share of the 5-hour window (%)">Pause at this share of the 5-hour window (%)</span><input name="window" type="number" min="5" max="100" step="5"></label>
             <label><span data-t="Pause at this share of the plan's week (%)">Pause at this share of the plan's week (%)</span><input name="week" type="number" min="5" max="100" step="5"></label>
           </div>
           <div class="actions"><button type="submit" class="button" data-t="Save limits">Save limits</button></div>
@@ -405,6 +405,31 @@
         <button value="no" class="button secondary" data-t="Cancel">Cancel</button>
         <button value="pause" class="button secondary" data-t="Pause it now">Pause it now</button>
         <button value="finish" class="button" data-t="Let it finish">Let it finish</button>
+      </div>
+    </form>
+  </dialog>
+  <!-- The queue's controls (drawQueue in ui/app.js): "Do now" and holding a run, with its reason -->
+  <dialog id="do-now-dialog" class="confirm" aria-labelledby="do-now-title">
+    <form method="dialog">
+      <div class="label" id="do-now-title" data-t="Do now">Do now</div>
+      <p id="do-now-text"></p>
+      <p class="hint" id="do-now-note" hidden></p>
+      <div class="actions wrap">
+        <button value="" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="all" class="button secondary" data-t="All the others">All the others</button>
+        <button value="project" class="button" id="do-now-project"></button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="hold-dialog" class="confirm" aria-labelledby="hold-title">
+    <form method="dialog">
+      <div class="label" id="hold-title" data-t="Hold this run">Hold this run</div>
+      <p id="hold-text"></p>
+      <label class="hold-reason"><span data-t="Why (optional, shown in the queue)">Why (optional, shown in the queue)</span>
+        <input id="hold-reason" type="text" maxlength="200" autocomplete="off" placeholder="For example: waiting for the client's answer" data-t-placeholder="For example: waiting for the client's answer"></label>
+      <div class="actions">
+        <button value="" class="button secondary" data-t="Cancel">Cancel</button>
+        <button value="hold" class="button" data-t="Hold">Hold</button>
       </div>
     </form>
   </dialog>

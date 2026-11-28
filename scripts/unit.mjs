@@ -2,7 +2,8 @@
 // its readers of tables; a copy behind its origin and the fast forward of a clone; the approval levels; the app's dictation;
 // the band of what a live session asks; the emergency lockdown, its detection, its emergency watch and the call to the
 // owner outside the app; the warning before Claude Code's sign-in expires; each agent's effort; the redacted backup of
-// the settings; the usage resets' countdowns; the team leads' delegated review and the crew writing to its lead first.
+// the settings; the usage resets' countdowns; the session's spending modes, the queue's fair turn and the session's spare;
+// the team leads' delegated review and the crew writing to its lead first.
 // Usage: npm test. Everything is made up, in a temporary folder removed at the end.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -30,7 +31,11 @@ import { sendMail } from '../src/smtp.mjs';
 import { analystPrompt, commandsInLog, decide, githubRead, parseVerdict, protectedChanges, reviewIncident, sendsOut } from '../src/sentinel.mjs';
 import { startedAt } from '../src/machine.mjs';
 import { parseCsv, readXlsx, zipEntries } from '../src/sheets.mjs';
-import { copyHolders, pickNext } from '../src/queue.mjs';
+import { copyHolders, heldByDoNow, holdOf, lastRan, pickNext, placeFor, turnOrder } from '../src/queue.mjs';
+import {
+  changeSession, checkSpending, effectiveLimits, forecast, projectsWithWork, readSpending, SAFETY, sessionMode, sessionNow, SPEND_TO, spendingStatus,
+} from '../src/spending.mjs';
+import { HELD_WHILE_AWAY, NEWS_EVENTS } from '../src/news.mjs';
 import { askedTool, copyHolder, endLine, holdsCopy, limitWaitCleared, pausedLine, stepTool } from '../src/runs.mjs';
 import { addSpeech, askedBy, SPEECH_KEEP, SPEECH_MAX, SPEECH_SHOWN, speechLine, speechNow, speechRule, speechView } from '../src/speech.mjs';
 import {
@@ -801,6 +806,55 @@ test('a run paused in the middle of its work keeps the copy: no other run of the
   assert.deepEqual(pickNext([answered, runB], [], 3, Date.now(), copyHolders([answered, runB])).map(r => r.id), ['a']);
   assert.equal(holdsCopy({ ...runA, parked: { request: 'q' } }), true);
   assert.equal(holdsCopy({ ...parked, shelf: { commit: 'x' } }), true);
+});
+
+test("the queue's controls: a held run keeps its place, \"Do now\" holds its project's runs or all, and the manager never undoes the owner's order", () => {
+  const at = '2026-11-27T12:00:00.000Z';
+  const run = (id, project, extra = {}) => ({ id, project, title: `Run ${id}`, created: at, status: 'queued', ...extra });
+  // A held run never starts and doesn't hold up the ones behind it.
+  const a = run('a', 'demo', { onHold: { at, by: 'owner', reason: 'wait' } });
+  const b = run('b', 'demo');
+  const c = run('c', 'other');
+  assert.deepEqual(pickNext([a, b, c], [], 3).map(r => r.id), ['b', 'c']);
+  // "Do now" on b for its project: the other runs of demo wait, the other projects go on; for all, every other run waits.
+  const d = { run: 'b', project: 'demo', scope: 'project', title: 'Run b', by: 'owner', at };
+  const x = run('x', 'demo');
+  assert.equal(heldByDoNow(b, d), false);
+  assert.equal(heldByDoNow(x, d), true);
+  assert.equal(heldByDoNow(c, d), false);
+  assert.equal(heldByDoNow(c, { ...d, scope: 'all' }), true);
+  assert.equal(heldByDoNow(x, null), false);
+  // never a run that keeps the project's working copy: it resumes before the run to do now can start there
+  assert.equal(heldByDoNow(run('p', 'demo', { prepared: true, resumeFirst: true }), d), false);
+  assert.deepEqual(holdOf(x, d), { by: 'owner', at, reason: null, doNow: { run: 'b', title: 'Run b', project: 'demo', scope: 'project' } });
+  assert.deepEqual(holdOf(a, d), { by: 'owner', at, reason: 'wait', doNow: null });
+  assert.deepEqual(holdOf(run('m', 'other', { onHold: { at, by: 'manager' } }), null), { by: 'manager', at, reason: null, doNow: null });
+  assert.equal(holdOf(c, d), null);
+  // Moves: up, down, to the top, before and after another run; a run that resumes first stays ahead.
+  const q = [run('r1', 'p1', { resumeFirst: true }), run('r2', 'p2'), run('r3', 'p3'), run('r4', 'p4')];
+  const place = (id, where, by = 'owner') => {
+    const from = q.findIndex(r => r.id === id);
+    return placeFor(q[from], from, q.filter(r => r.id !== id), where, by);
+  };
+  assert.equal(place('r4', { top: true }), 1);
+  assert.equal(place('r3', { up: true }), 1);
+  assert.equal(place('r2', { up: true }), 1);
+  assert.equal(place('r2', { down: true }), 2);
+  assert.equal(place('r4', { down: true }), 3);
+  assert.equal(place('r4', { before: 'r2' }), 1);
+  assert.equal(place('r2', { after: 'r4' }), 3);
+  assert.equal(place('r1', { down: true }), 0);
+  assert.throws(() => place('r2', { before: 'nope' }));
+  assert.throws(() => place('r2', {}));
+  // The manager never undoes the owner's order: not a run the owner placed or held, nor past one.
+  q[1].movedBy = 'owner';
+  assert.throws(() => place('r2', { down: true }, 'manager'));
+  assert.throws(() => place('r4', { top: true }, 'manager'), /Run r2/);
+  assert.equal(place('r4', { up: true }, 'manager'), 2);
+  assert.equal(place('r3', { down: true }, 'manager'), 3);
+  q[2].onHold = { at, by: 'owner' };
+  assert.throws(() => place('r3', { down: true }, 'manager'));
+  assert.equal(place('r4', { top: true }), 1);
 });
 
 // ---------- The crew's tools (src/tools.mjs): which one a member runs on, until when, and how each is started ----------
@@ -1906,6 +1960,11 @@ test('without the key, a command may do only what an agent may, never as the own
     ['/api/quarantine', { action: 'release', project: 'p', by: 'owner' }], ['/api/quarantine', { action: 'release', project: 'p' }],
     ['/api/power', { action: 'reboot', by: 'owner', reason: 'x' }], ['/api/power', { action: 'reboot', reason: 'x' }], ['/api/power', { action: 'cancel', by: 'manager' }],
     ['/api/power', { action: 'stop', by: 'manager' }],
+    // The owner's changes to the queue from the app (src/queue.mjs).
+    ['/api/queue', { action: 'move', id: 'r', top: true }], ['/api/queue', { action: 'hold', id: 'r', reason: 'x' }], ['/api/queue', { action: 'release', id: 'r' }],
+    ['/api/queue', { action: 'do-now', id: 'r', scope: 'all' }], ['/api/queue', { action: 'do-now-end' }], ['/api/queue', { action: 'cancel', id: 'r' }],
+    // The session's mode and "Spend all until" the renewal (src/spending.mjs).
+    ['/api/spending', { mode: 'all' }], ['/api/spending', { boost: true }], ['/api/spending', { mode: 'save', by: 'manager' }],
   ];
   for (const [route, body] of owners) assert.equal(ownerOnly(route, body), true, `${route} ${JSON.stringify(body)} goes without the key`);
   // What the command line sends for an agent (a step, a live session, the manager, the watchdog and its rescuer).
@@ -2625,4 +2684,172 @@ test('the crew writes to its lead first: the lead answers or passes it on, and t
   const line = leadSituation('site', { name: 'Site lead', base: 'manager' }, null, null, null, { delegated: true, open: openInbox('site', file) });
   assert.ok(line.includes('final review of level 1 runs') && line.includes('1 message(s)') && line.includes(`#${later.id} designer: "May I rename`) && line.includes('inbox site take <n>'), `the lead's line is wrong: ${line}`);
   assert.match(leadSituation('quiet', { name: 'Quiet lead', base: 'manager' }, null, null, null, { delegated: false, open: [] }), /it does the first review, you the final one; nothing open from its crew/);
+});
+
+// ---------- The session's spending (src/spending.mjs) and the queue's fair turn (src/queue.mjs), on a fixed clock ----------
+
+test("the session's modes: shortcuts fill both settings, a value changed by hand shows as custom, the week's pause stays", () => {
+  assert.equal(sessionMode(1, null), 'save');
+  assert.equal(sessionMode(1, SAFETY), 'save'); // no early pause and one at the margin pause alike
+  assert.equal(sessionMode(3, SAFETY), 'normal');
+  assert.equal(sessionMode(4, SPEND_TO), 'all');
+  assert.equal(sessionMode(2, SAFETY), 'custom');
+  assert.equal(sessionMode(1, 0.7), 'custom');
+  // the settings' defaults are "normal"; what this installation holds today (1 at a time, 85%) is "save"
+  assert.deepEqual(sessionNow({}, {}).configured, { parallel: 3, pause: null, limit: SAFETY, mode: 'normal' });
+  assert.equal(sessionNow({ max_parallel: 1, limits: { pause_at_5h_window: 0.85 } }, {}).mode, 'save');
+  const file = path.join(temp, 'spending-modes.json');
+  const saved = [];
+  const notes = [];
+  const config = { max_parallel: 3, limits: { pause_at_5h_window: 0.85, pause_at_plan_week: 0.9 } };
+  const usage = { five_hour: { used: 0.2, resets: new Date(Date.now() + 3_600_000).toISOString() } };
+  const change = body => changeSession(body, { config, file, usage, by: 'app', save: c => saved.push(structuredClone(c)), note: (by, changes) => notes.push([by, changes]) });
+  assert.equal(change({ mode: 'save' }).mode, 'save');
+  assert.equal(config.max_parallel, 1);
+  assert.equal(config.limits.pause_at_5h_window, null);
+  assert.equal(config.limits.pause_at_plan_week, 0.9);
+  assert.equal(sessionNow(config, {}).limit, SAFETY);
+  assert.deepEqual(notes.at(-1), ['app', { max_parallel: [3, 1], pause_at_5h_window: [0.85, null] }]);
+  // by hand: custom
+  assert.equal(change({ parallel: 2 }).mode, 'custom');
+  assert.equal(change({ parallel: 1, pause: 0.6 }).mode, 'custom');
+  assert.equal(effectiveLimits(config, {}).pause_at_5h_window, 0.6);
+  assert.equal(change({ pause: 'off' }).mode, 'save');
+  assert.equal(change({ mode: 'all' }).mode, 'all');
+  assert.deepEqual([config.max_parallel, config.limits.pause_at_5h_window], [4, SPEND_TO]);
+  assert.equal(change({ mode: 'normal' }).mode, 'normal');
+  assert.deepEqual([config.max_parallel, config.limits.pause_at_5h_window, config.limits.pause_at_plan_week], [3, SAFETY, 0.9]);
+  assert.equal(saved.length, 6);
+  assert.throws(() => change({ mode: 'max' }), /save, normal or all/);
+  assert.throws(() => change({ parallel: 5 }), /1 to 4|1 a 4/);
+  assert.throws(() => change({ pause: 'much' }), /0.05 to 1|0.05 a 1/);
+});
+
+test("the queue's fair turn: the room goes to the project longest without running, in each project's order", () => {
+  const at = '2026-11-27T12:00:00.000Z';
+  const run = (id, project, created, extra = {}) => ({ id, project, created, status: 'queued', ...extra });
+  // a long queue of one project, and a newer run of another
+  const c1 = run('c1', 'chiefmate', '2026-11-27T08:00:00.000Z');
+  const c2 = run('c2', 'chiefmate', '2026-11-27T08:30:00.000Z');
+  const c3 = run('c3', 'chiefmate', '2026-11-27T09:00:00.000Z');
+  const r1 = run('r1', 'riffdex', '2026-11-27T11:50:00.000Z');
+  const queue = [c1, c2, c3, r1];
+  const ran = lastRan([
+    { project: 'chiefmate', started: '2026-11-27T10:00:00.000Z', ended: '2026-11-27T11:55:00.000Z' },
+    { project: 'riffdex', started: '2026-11-26T09:00:00.000Z', ended: '2026-11-26T09:40:00.000Z' },
+    { project: 'riffdex', created: at, status: 'canceled', ended: at }, // canceled before it ran: not a turn
+  ]);
+  assert.equal(ran.get('riffdex'), '2026-11-26T09:40:00.000Z');
+  assert.deepEqual(pickNext(queue, [], 1, Date.parse(at), new Map(), ran).map(r => r.id), ['r1']);
+  // riffdex ran last: chiefmate's oldest goes first, never its second one
+  const after = new Map([['chiefmate', '2026-11-27T09:00:00.000Z'], ['riffdex', '2026-11-27T11:59:00.000Z']]);
+  assert.deepEqual(pickNext(queue, [], 1, Date.parse(at), new Map(), after).map(r => r.id), ['c1']);
+  // a project never run goes first; a run marked to go first (resumeFirst) before all
+  const a1 = run('a1', 'acervo', '2026-11-27T11:58:00.000Z');
+  assert.deepEqual(pickNext([...queue, a1], [], 2, Date.parse(at), new Map(), ran).map(r => r.id), ['a1', 'r1']);
+  const back = { ...c2, resumeFirst: true };
+  assert.deepEqual(pickNext([back, c1, c3, r1, a1], [], 1, Date.parse(at), new Map(), ran).map(r => r.id), ['c2']);
+  // room for all: one per project, as before; a busy project waits
+  assert.deepEqual(pickNext(queue, [], 3, Date.parse(at), new Map(), ran).map(r => r.id).sort(), ['c1', 'r1']);
+  assert.deepEqual(pickNext(queue, ['riffdex'], 1, Date.parse(at), new Map(), ran).map(r => r.id), ['c1']);
+  // the order shown: round by round, one per project
+  assert.deepEqual(turnOrder([...queue, a1], ran).map(r => r.id), ['a1', 'r1', 'c1', 'c2', 'c3']);
+  assert.deepEqual(turnOrder([...queue, a1, run('a2', 'acervo', '2026-11-27T11:59:00.000Z')], ran).map(r => r.id), ['a1', 'r1', 'c1', 'a2', 'c2', 'c3']);
+});
+
+test('the queue in one order: the runs placed by a move as given, then the fair turn for the rest; the spare counts only work that can start', () => {
+  const at = Date.parse('2026-11-27T12:00:00.000Z');
+  const run = (id, project, created, extra = {}) => ({ id, project, created, status: 'queued', ...extra });
+  // A move (the owner's or the manager's) ranked every run then in the queue: that order stands, though riffdex has
+  // gone longer without running than chiefmate.
+  const c1 = run('c1', 'chiefmate', '2026-11-27T08:00:00.000Z', { rank: 0, movedBy: 'owner' });
+  const c2 = run('c2', 'chiefmate', '2026-11-27T08:30:00.000Z', { rank: 1 });
+  const r1 = run('r1', 'riffdex', '2026-11-27T09:00:00.000Z', { rank: 2 });
+  // queued after it: in turn among themselves, after the runs placed
+  const r2 = run('r2', 'riffdex', '2026-11-27T11:00:00.000Z');
+  const a1 = run('a1', 'acervo', '2026-11-27T11:10:00.000Z');
+  const ran = new Map([['chiefmate', '2026-11-27T11:55:00.000Z'], ['riffdex', '2026-11-26T09:40:00.000Z']]);
+  const queue = [c1, c2, r1, r2, a1];
+  assert.deepEqual(turnOrder(queue, ran).map(r => r.id), ['c1', 'c2', 'r1', 'a1', 'r2']);
+  assert.deepEqual(pickNext(queue, [], 1, at, new Map(), ran).map(r => r.id), ['c1']);
+  assert.deepEqual(pickNext(queue, ['chiefmate'], 2, at, new Map(), ran).map(r => r.id), ['r1', 'a1']);
+  // a run marked to go first still goes before them
+  const back = run('b1', 'acervo', '2026-11-27T11:20:00.000Z', { resumeFirst: true, rank: 3 });
+  assert.equal(turnOrder([back, ...queue], ran)[0].id, 'b1');
+  assert.deepEqual(pickNext([back, ...queue], [], 1, at, new Map(), ran).map(r => r.id), ['b1']);
+  // The session's spare: a run on hold, or one waiting for the owner's "Do now", is no work the crew can do now.
+  const free = { mode: 'free', only: [], paused: [] };
+  const work = [run('w1', 'a', '2026-11-27T10:00:00.000Z', { onHold: { by: 'owner' } }), run('w2', 'b', '2026-11-27T10:00:00.000Z'), run('w3', 'c', '2026-11-27T10:00:00.000Z', { status: 'running' })];
+  assert.equal(projectsWithWork({}, work, [], free, null), 2);
+  assert.equal(projectsWithWork({}, work, [], free, { run: 'w3', project: 'c', scope: 'all' }), 1);
+});
+
+test("the session's spare near its renewal: spent alone while the owner is away, offered once when present, back after the renewal", () => {
+  assert.ok(NEWS_EVENTS.includes('session_spare') && HELD_WHILE_AWAY.includes('session_spare')); // told in the summary when back
+  const at = Date.parse('2026-11-27T17:10:00.000Z');
+  const resets = '2026-11-27T18:00:00.000Z'; // 50 minutes left
+  const usage = { updated: '2026-11-27T17:09:00.000Z', five_hour: { used: 0.4, resets }, seven_day: { used: 0.6, resets: '2026-11-30T08:00:00.000Z' } };
+  const samples = [{ at: '2026-11-27T16:00:00.000Z', used: 0.3, resets, running: 1 }];
+  const config = { owner: 'Luan', max_parallel: 1, limits: { pause_at_5h_window: 0.85, pause_at_plan_week: 0.95 } };
+  const runs = [{ id: 'x', project: 'chiefmate', status: 'running' }];
+  // the estimate: 10% an hour with one run; 3 projects with work could spend about 3 times as fast
+  const f = forecast({ usage, samples, session: sessionNow(config, {}), running: 1, capacity: 3, at });
+  assert.equal(Math.round(f.pace * 100), 10);
+  assert.equal(f.minutes, 50);
+  assert.equal(Math.round(f.left * 100), 52);
+  assert.equal(f.all.runs, 3);
+  assert.equal(Math.round(f.all.left * 100), 35);
+  assert.equal(f.worth, true);
+  // far from the renewal, the margin is the owner's; with little left, nothing to do
+  assert.equal(forecast({ usage: { ...usage, five_hour: { used: 0.4, resets: '2026-11-27T20:00:00.000Z' } }, samples: [], session: sessionNow(config, {}), running: 1, capacity: 3, at }).worth, false);
+  assert.equal(forecast({ usage: { ...usage, five_hour: { used: 0.9, resets } }, samples: [], session: sessionNow(config, {}), running: 1, capacity: 3, at }).worth, false);
+
+  const told = [];
+  const report = (kind, text) => told.push([kind, text]);
+  const notes = [];
+  const note = (by, changes) => notes.push([by, changes]);
+  const check = (file, extra = {}) => checkSpending({ config, usage, at, runs, capacity: 3, file, report, note, away: false, ...extra });
+  // the plan's week at its pause holds the crew: nothing to spend, so nothing is offered nor spent (its pause stays)
+  const weekFile = path.join(temp, 'spending-week.json');
+  writeFileSync(weekFile, JSON.stringify({ samples }));
+  const atPause = { ...usage, seven_day: { used: 0.95, resets: '2026-11-30T08:00:00.000Z' } };
+  assert.deepEqual([check(weekFile, { usage: atPause }).offered, check(weekFile, { usage: atPause, away: true }).boosted], [false, false]);
+  const heldStatus = spendingStatus(config, { usage: atPause, runs, items: [], data: readSpending(weekFile), at });
+  assert.deepEqual([heldStatus.week_holds, heldStatus.offer], [true, null]);
+  assert.equal(told.length, 0);
+  // present: offered once per window, with its button's time; "not now" until the renewal
+  const present = path.join(temp, 'spending-present.json');
+  writeFileSync(present, JSON.stringify({ samples }));
+  assert.equal(check(present).offered, true);
+  assert.equal(told.length, 1);
+  assert.match(told[0][1], /is here: the app offers "Spend all until/);
+  assert.equal(check(present).offered, false);
+  assert.equal(told.length, 1);
+  const offer = spendingStatus(config, { usage, runs, items: [], data: readSpending(present), at }).offer;
+  assert.equal(offer.until, resets);
+  changeSession({ dismiss: true }, { config, file: present, usage, at, save: () => {}, note });
+  assert.equal(spendingStatus(config, { usage, runs, items: [], data: readSpending(present), at }).offer, null);
+  assert.equal(check(present, { away: true }).boosted, false); // "not now" holds while away too
+  // its button: "all" until the renewal, then back by itself; a mode chosen meanwhile ends it
+  const button = path.join(temp, 'spending-button.json');
+  writeFileSync(button, JSON.stringify({ samples }));
+  const boosted = changeSession({ boost: true }, { config, file: button, usage, at, by: 'app', save: () => {}, note });
+  assert.deepEqual([boosted.mode, boosted.parallel, boosted.limit, boosted.configured.mode], ['all', 4, SPEND_TO, 'save']);
+  assert.equal(changeSession({ mode: 'save' }, { config, file: button, usage, at, save: () => {}, note }).boost, null);
+
+  // away: "all" until the renewal by itself, the safety margin included; the week's pause unchanged
+  const away = path.join(temp, 'spending-away.json');
+  writeFileSync(away, JSON.stringify({ samples }));
+  assert.equal(check(away, { away: true }).boosted, true);
+  assert.match(told.at(-1)[1], /is away, so Chiefmate put the session in "Spend all" until/);
+  assert.deepEqual(notes.at(-1), ['away', { session_boost: [null, resets] }]);
+  const data = readSpending(away);
+  assert.deepEqual([sessionNow(config, data, at).parallel, effectiveLimits(config, data, at).pause_at_5h_window, effectiveLimits(config, data, at).pause_at_plan_week], [4, SPEND_TO, 0.95]);
+  assert.equal(check(away, { away: true }).boosted, false); // once
+  // renewed: the boost ends and the mode before it holds again
+  const later = Date.parse(resets) + 60_000;
+  const renewed = { updated: new Date(later).toISOString(), five_hour: { used: 0.01, resets: '2026-11-27T23:01:00.000Z' } };
+  const end = checkSpending({ config, usage: renewed, at: later, runs, capacity: 3, file: away, report, note, away: true });
+  assert.equal(end.ended?.until, resets);
+  assert.deepEqual([sessionNow(config, readSpending(away), later).mode, effectiveLimits(config, readSpending(away), later).pause_at_5h_window], ['save', SAFETY]);
 });
