@@ -1477,7 +1477,8 @@ html.chat-focus #view-manager .chat-column { width: min(100%, 1000px); margin: 0
 }
 /* Phones: the Conversation's header and its queue fold with one tap, each choice kept on the device (setFold in
    ui/app.js: html.fold-top, html.fold-queue). The folded header is one thin line with the manager's state and the marks
-   of what needs you, the lockdown's band still above it; the queue, one line "N in the queue". The field never folds. */
+   of what needs you, the lockdown's band and the call bar still above it; the queue, one line "N in the queue". The
+   field never folds. */
 .chat-top, .fold-button { display: none; }
 @media (max-width: 600px) {
   #view-manager .view-header-actions .fold-button, .focus-bar .fold-button { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 44px; padding: 0; }
@@ -1489,6 +1490,9 @@ html.chat-focus #view-manager .chat-column { width: min(100%, 1000px); margin: 0
     background: var(--panel); border: 0; border-bottom: 1px solid var(--line); border-radius: 0; color: var(--text); font: inherit; text-align: left; cursor: pointer;
   }
   html.fold-top.chat-focus .chat-top { margin: 0; }
+  /* A call or the lockdown's band then leads the screen: the top inset (the phone's clock, a notch) moves to it */
+  html.fold-top:not(.chat-focus):has(#view-manager.active) .alerts:has(.call-bar, .lockdown-band) { padding-top: env(safe-area-inset-top); background: var(--panel); }
+  html.fold-top:not(.chat-focus):has(.alerts .call-bar, .alerts .lockdown-band) .chat-top { min-height: 34px; padding-top: 0; }
   html.typing-chat .chat-top { display: none; }
   .chat-top:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
   .chat-top-state { flex: 1 1 auto; min-width: 0; }
