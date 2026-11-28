@@ -341,6 +341,18 @@ try {
     await post('/api/needs-you/done', { run: waitingRun.id, id: answered.id, answer: 'B', note: 'My reason' });
     // A question also goes in the agent's speech bubble, as a call for the owner written by Chiefmate.
     expect((JSON.parse(readFileSync(waitingFile, 'utf8')).speech ?? []).some(x => x.by === 'auto' && x.state === 'calling' && x.text.includes('Which?')), "a question for the owner left no call in the speech bubble");
+    // "Not now" (the owner's only): the call stays open, as important, out of the call bar; the calls' settings in the state.
+    const toAct = await (await post('/api/needs-you', { run: waitingRun.id, what: 'Sign in to the bank', wait: true })).json();
+    expect((await keyless('/api/needs-you/later', { run: waitingRun.id, id: toAct.id })).status === 403, '"Not now" went without the owner\'s key');
+    const leftForLater = await (await post('/api/needs-you/later', { run: waitingRun.id, id: toAct.id })).json();
+    const laterState = await (await fetch(`${base}/api/state`)).json();
+    expect(leftForLater.status === 'open' && !!leftForLater.deferred && laterState.needs.some(n => n.id === toAct.id && n.deferred && !n.waiting)
+      && laterState.attention.items.some(n => n.id === `needs:${waitingRun.id}:${toAct.id}` && n.level === 'important' && n.request?.deferred),
+    `"Not now" did not leave the call open for later: ${JSON.stringify(leftForLater)}`);
+    expect(laterState.calls?.maxWaitMinutes > 0 && Array.isArray(laterState.calls.choices) && laterState.calls.onCall?.enabled === false && laterState.calls.onCall.channel === false,
+      `the state has no calls' settings, or the on-call is on: ${JSON.stringify(laterState.calls)}`);
+    expect((await keyless('/api/needs-you/settings', { max_wait_minutes: 10 })).status === 403 && (await post('/api/needs-you/settings', { max_wait_minutes: 0 })).status === 400
+      && (await post('/api/needs-you/settings', { max_wait_minutes: 'abc' })).status === 400, "the longest wait changed without the owner's key, or took a wrong value");
     const noticeId = `needs:${waitingRun.id}:${request.id}`;
     const beforeCancel = await (await fetch(`${base}/api/state`)).json();
     expect(beforeCancel.attention.items.some(n => n.id === noticeId && n.level === 'urgent'), 'a paused run lost its open request');
@@ -4211,7 +4223,7 @@ try {
   process.env.CHIEFMATE_SMOKE = '1';
   const load = name => import(pathToFileURL(path.join(root, 'src', `${name}.mjs`)).href);
   try {
-    const { askOwner, confirmByOwnerWords, finishRequest, openCalls, parkRun, parkWaitingWhileAway, pollRequest } = await load('needs');
+    const { askOwner, callOnDuty, confirmByOwnerWords, deferRequest, finishRequest, openCalls, parkRun, parkWaitingWhileAway, pollRequest, setOnCall } = await load('needs');
     const { live } = await load('runs');
     const { listRuns, readRun, saveRun } = await load('store');
     const { focus, queued } = await load('queue');
@@ -4265,7 +4277,82 @@ try {
     expect(byAway.length === 1 && byAway[0].run === away.run.id && away.run.parked?.by === 'away' && !fresh.l.pauseRequest, `away mode parked the wrong runs: ${JSON.stringify(byAway)}`);
     expect(parkWaitingWhileAway({ away: { since: at }, settings: { parkAfterMinutes: 0 }, force: true }).length === 0, 'park_after_minutes 0 still parked');
     for (const x of [away, fresh]) live.delete(x.run.id);
-    for (const id of ['smoke-park', 'smoke-park-next', 'smoke-away', 'smoke-fresh']) saveRun(Object.assign(readRun(id), { status: 'canceled', ended: new Date().toISOString() }));
+
+    // The wait ends without an answer: away mode, "Not now" or past the longest wait (30 minutes by default). The step
+    // is told and goes on, its bubble says so, its call stays open and away mode never parks it; the on-call is off.
+    const ends = going('smoke-ends', 'ends-sample');
+    const holding = await askOwner({ run: ends.run.id, step: 1, what: 'Sign in to the bank', wait: true });
+    const held = pollRequest(ends.run.id, holding.id, { away: false });
+    const listed = openCalls().find(c => c.id === holding.id);
+    expect(held.ended === null && ends.l.heldUntil > Date.now() && listed?.waiting === true && Date.parse(listed.until) > Date.now(),
+      `a call within its wait did not hold its step, or has no deadline: ${JSON.stringify([held, listed])}`);
+    const awayNow = pollRequest(ends.run.id, holding.id, { away: true });
+    expect(awayNow.away && awayNow.status === 'open' && ends.run.requests[0].waitEnded?.why === 'away' && openCalls().find(c => c.id === holding.id)?.waiting === false,
+      `away mode did not end the wait: ${JSON.stringify(awayNow)}`);
+    ends.l.heldUntil = 0;
+    expect(parkWaitingWhileAway({ away: { since: at }, settings: { parkAfterMinutes: 0.01 }, at: Date.now() + 60_000, force: true }).every(p => p.run !== ends.run.id) && !ends.l.pauseRequest,
+      'away mode parked a run whose step went on');
+    const again = pollRequest(ends.run.id, holding.id, { away: false });
+    expect(again.ended === null && !ends.run.requests[0].waitEnded, 'a step waiting again once the owner is back was not held');
+    deferRequest(ends.run.id, holding.id);
+    const notNow = pollRequest(ends.run.id, holding.id, { away: false });
+    expect(notNow.later && notNow.status === 'open' && ends.run.requests[0].waitEnded?.why === 'later' && (ends.run.speech ?? []).some(x => x.by === 'auto' && /not now/i.test(x.text)),
+      `"Not now" did not end the wait with a line in the bubble: ${JSON.stringify(notNow)}`);
+    expect(await Promise.resolve().then(() => parkRun(ends.run.id)).then(() => false, e => /not waiting/.test(e.message)) && !ends.l.pauseRequest,
+      'a call left for later still parked its run');
+    // Answered after its step stopped waiting: the step still at work hears it at its next safe point (src/talk.mjs).
+    Object.assign(ends.l, { talking: true, step: 1 });
+    finishRequest(ends.run.id, holding.id, 'owner', null, 'Use the test key.');
+    const lateTalk = ends.run.talk?.find(m => m.who === 'owner' && m.request === holding.id);
+    expect(lateTalk?.status === 'pending' && lateTalk.text.includes('Sign in to the bank') && lateTalk.text.includes('Use the test key.') && ends.l.interrupted === 1,
+      `an answer given after the step went on did not reach it: ${JSON.stringify(lateTalk)}`);
+    ends.l.talking = false;
+    const late = await askOwner({ run: ends.run.id, step: 1, what: 'Confirm the domain', wait: true });
+    ends.run.requests.find(r => r.id === late.id).at = new Date(Date.now() - 31 * 60_000).toISOString();
+    const timedOut = pollRequest(ends.run.id, late.id, { away: false });
+    expect(timedOut.timedOut && timedOut.maxWaitMinutes === 30 && ends.run.requests.find(r => r.id === late.id).waitEnded?.why === 'timeout', `the longest wait is not 30 minutes: ${JSON.stringify(timedOut)}`);
+    // A request to act answered in the owner's own words (the call bar's "Answer here"): done, with the words.
+    const words = await askOwner({ run: ends.run.id, step: 1, what: 'Send me the invoice', wait: true });
+    finishRequest(ends.run.id, words.id, 'owner', null, '  It is in the shared folder.  ');
+    const inWords = pollRequest(ends.run.id, words.id, { away: false });
+    expect(inWords.status === 'done' && inWords.note === 'It is in the shared folder.' && inWords.question === false
+      && ends.run.talk?.some(m => m.via === 'request' && m.request === words.id && m.text === 'It is in the shared folder.'), `an answer in words to a request to act was lost: ${JSON.stringify(inWords)}`);
+    // In away mode a step doesn't wait at all, and its bubble doesn't call.
+    const { setAway } = await load('news');
+    setAway(true, { owner: 'Owner' });
+    const whileAway = await askOwner({ run: ends.run.id, step: 1, what: 'Approve the payment', wait: true });
+    setAway(false, { owner: 'Owner' });
+    expect(whileAway.away && ends.run.requests.find(r => r.id === whileAway.id).waitEnded?.why === 'away' && !(ends.run.speech ?? []).some(x => x.state === 'calling' && x.text.includes('Approve the payment')),
+      `a call made in away mode waited, or its bubble called: ${JSON.stringify(whileAway)}`);
+    // The on-call: nothing while off; once on with a channel, each call handed over once.
+    const handed = [];
+    setOnCall(call => handed.push(call));
+    const first = ends.run.requests[0];
+    expect(callOnDuty(ends.run, first, 'timeout', { onCall: false }) === false && callOnDuty(ends.run, first, 'timeout', { onCall: true }) === true && callOnDuty(ends.run, first, 'timeout', { onCall: true }) === false,
+      'the on-call acted while off, or twice for one call');
+    setOnCall(null);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(handed.length === 1 && handed[0].why === 'timeout' && handed[0].run === ends.run.id && callOnDuty(ends.run, ends.run.requests[1], 'away', { onCall: true }) === false,
+      'the on-call channel did not get the call, or acted with no channel');
+    live.delete(ends.run.id);
+    // "Not now" on a parked run: back to the front of its project's queue, to go on without the answer.
+    const parkedLater = going('smoke-parked-later', 'parked-later-sample');
+    const parkedCall = await askOwner({ run: parkedLater.run.id, step: 1, what: 'Allow the macro', wait: true });
+    parkRun(parkedLater.run.id, { by: 'manager' });
+    live.delete(parkedLater.run.id);
+    saveRun(Object.assign(parkedLater.run, { status: 'paused' }));
+    deferRequest(parkedLater.run.id, parkedCall.id);
+    const resumed = readRun(parkedLater.run.id);
+    expect(resumed.status === 'queued' && resumed.resumeFirst && resumed.requests[0].status === 'open' && !!resumed.requests[0].deferred,
+      `"Not now" left a parked run parked: ${JSON.stringify({ status: resumed.status, resumeFirst: resumed.resumeFirst })}`);
+    // "Not now" while its run is still parking: not held at its safe point, so it goes back to the queue there.
+    const parking = going('smoke-parking-later', 'parking-later-sample');
+    const parkingCall = await askOwner({ run: parking.run.id, step: 1, what: 'Allow the script', wait: true });
+    parkRun(parking.run.id, { by: 'manager' });
+    deferRequest(parking.run.id, parkingCall.id);
+    expect(parking.l.pauseRequest === 'park' && parking.l.holdWhile?.() === false, 'a call left for later while its run parked kept the run held');
+    live.delete(parking.run.id);
+    for (const id of ['smoke-park', 'smoke-park-next', 'smoke-away', 'smoke-fresh', 'smoke-ends', 'smoke-parked-later', 'smoke-parking-later'])saveRun(Object.assign(readRun(id), { status: 'canceled', ended: new Date().toISOString() }));
 
     // A file the antivirus probably took: the project's queue waits, the notice carries the steps, it goes on once the file is back.
     const { checkQuarantine, holdForQuarantine, quarantineHold, releaseQuarantine } = await load('quarantine');
