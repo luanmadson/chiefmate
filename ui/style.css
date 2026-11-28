@@ -1415,13 +1415,56 @@ html.chat-focus .focus-bar {
 .focus-chip:hover { background: var(--hover); border-color: var(--muted); text-decoration: none; }
 .focus-chip:has([data-level="urgent"]) { border-color: var(--urgent); color: var(--strong); }
 .focus-chip:has([data-level="important"]) { border-color: rgba(232, 189, 95, 0.55); }
+.focus-bar .short { display: none; }
 html.chat-focus #view-manager .chat-column { width: min(100%, 1000px); margin: 0 auto; border-top: 0; border-bottom: 0; }
 .button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
 @media (max-width: 600px) {
   html.chat-focus .focus-bar { gap: 10px; padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(8px, env(safe-area-inset-right)); }
   html.chat-focus .focus-bar-state .state { font-size: 0; gap: 0; } /* the dot only: the room is for the marks */
   html.chat-focus #view-manager .chat-column { margin: 0; border-left: 0; border-right: 0; padding-bottom: env(safe-area-inset-bottom); }
-  .focus-chip { min-height: 36px; font-size: 13.5px; }
+  .focus-bar .long { display: none; }
+  .focus-bar .short { display: inline; }
+  /* Every mark stays in view: the names give way, cut short, before a section would scroll out of the line */
+  .focus-chip { flex: 0 1 auto; min-width: 0; min-height: 36px; gap: 6px; padding: 0 7px; font-size: 13.5px; }
+  .focus-chip > span:not(.attn-mark) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+/* Phones: the Conversation's header and its queue fold with one tap, each choice kept on the device (setFold in
+   ui/app.js: html.fold-top, html.fold-queue). The folded header is one thin line with the manager's state and the marks
+   of what needs you, the lockdown's band still above it; the queue, one line "N in the queue". The field never folds. */
+.chat-top, .fold-button { display: none; }
+@media (max-width: 600px) {
+  #view-manager .view-header-actions .fold-button, .focus-bar .fold-button { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 44px; padding: 0; }
+  html.fold-top:has(#view-manager.active) .app-header, html.fold-top #view-manager .view-header, html.fold-top.chat-focus .focus-bar { display: none; }
+  html.fold-top #view-manager { padding-top: 0; }
+  html.fold-top .chat-top {
+    appearance: none; display: flex; align-items: center; gap: 10px; flex: none; width: auto; min-height: calc(34px + env(safe-area-inset-top));
+    margin: 0 -12px; padding: env(safe-area-inset-top) max(4px, env(safe-area-inset-right)) 0 max(12px, env(safe-area-inset-left));
+    background: var(--panel); border: 0; border-bottom: 1px solid var(--line); border-radius: 0; color: var(--text); font: inherit; text-align: left; cursor: pointer;
+  }
+  html.fold-top.chat-focus .chat-top { margin: 0; }
+  html.typing-chat .chat-top { display: none; }
+  .chat-top:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+  .chat-top-state { flex: 1 1 auto; min-width: 0; }
+  .chat-top-state .state { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+  .chat-top-state .state::before { display: inline-block; margin-right: 8px; vertical-align: 1px; }
+  .chat-top-marks { display: flex; align-items: center; gap: 6px; flex: none; }
+  .chat-top-marks:empty { display: none; }
+  .chat-top-toggle { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 36px; color: var(--muted); }
+  .chat-top:hover .chat-top-toggle, .chat-top:focus-visible .chat-top-toggle { color: var(--accent); }
+
+  /* The queue's head is its fold: closed, a brass rule, "N in the queue", why they wait and "See all" */
+  #chat-queue .chat-queue-head {
+    appearance: none; position: sticky; top: 0; z-index: 1; align-items: center; width: 100%; min-height: 34px; padding: 0 12px;
+    background: var(--raised); border: 0; border-left: 2px solid rgba(201, 164, 93, 0.5); border-radius: 0; color: var(--text); font: inherit; text-align: left; cursor: pointer;
+  }
+  #chat-queue .chat-queue-head .label { flex: none; color: var(--accent); }
+  #chat-queue .chat-queue-head .hint { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+  #chat-queue .chat-queue-head .attn-toggle { margin-left: 0; }
+  #chat-queue .chat-queue-head[aria-expanded="true"] { border-bottom: 1px solid var(--line); }
+  #chat-queue .chat-queue-head[aria-expanded="true"] .attn-toggle::after { content: " ▴"; }
+  #chat-queue .chat-queue-head[aria-expanded="false"] .when-open, #chat-queue .chat-queue-head[aria-expanded="true"] .when-closed { display: none; }
+  #chat-queue .chat-queue-head:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+  html.fold-queue #chat-queue .queued-msg { display: none; }
 }
 /* Dictation's microphone by each message field (ui/voice.js): red and pulsing, with "Listening…", while it listens */
 .button.mic { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding-left: 9px; padding-right: 9px; }

@@ -66,8 +66,11 @@
           <div class="view-header-actions">
             <button type="button" class="button secondary" id="focus-mode" aria-pressed="false"><span class="long" data-t="Focus on the conversation">Focus on the conversation</span><span class="short" data-t="Focus">Focus</span></button>
             <button type="button" class="button secondary" id="new-conversation"><span class="long" data-t="New conversation">New conversation</span><span class="short" data-t="New">New</span></button>
+            <button type="button" class="button secondary fold-button" data-fold="top" aria-expanded="true" aria-label="Minimize the header" title="Minimize the header" data-t-label="Minimize the header" data-t-title="Minimize the header"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3.5 10.5 8 6l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg></button>
           </div>
         </div>
+        <!-- Phones: the header folded into one thin line (the manager's state, the marks of what needs you); a tap unfolds it -->
+        <button type="button" id="chat-top" class="chat-top" data-fold="top" aria-expanded="false"></button>
         <!-- Focus mode: only the conversation, with one thin line for what needs you and the way out -->
         <div id="focus-bar" class="focus-bar" aria-live="polite"></div>
         <div class="chat-column">

@@ -149,6 +149,13 @@ try {
       && !/id="chat"[^]*?<\/section>/.exec(html)?.[0].includes('id="decisions"'), 'the app lacks the Decisions tab or the focus mode, or the decisions are still in the conversation');
     expect(/html\.chat-focus \.app-header, html\.chat-focus \.nav, html\.chat-focus \.alerts, html\.chat-focus \.statusbar/.test(styles)
       && /prefers-reduced-motion: reduce\) \{ \.nav a\[data-level="urgent"\][^}]*animation: none/.test(styles), 'the focus mode leaves a bar or band on screen, or an urgent tab pulses with reduced motion');
+    // Phones: the Conversation's header folds into one thin line that keeps the marks of what needs the owner, and the
+    // messages in the queue into one line "N in the queue", each choice kept on the device; the field to write never folds.
+    expect(html.includes('id="chat-top"') && /class="[^"]*fold-button[^"]*" data-fold="top"/.test(html)
+      && /html\.fold-top:has\(#view-manager\.active\) \.app-header/.test(phone) && /html\.fold-queue #chat-queue \.queued-msg \{ display: none; \}/.test(phone)
+      && !/html\.fold-[a-z]+[^{,]*(\.compose|#manager-form|#message)/.test(styles)
+      && /FOLDS_KEY = 'chiefmate\.folds'/.test(appJs) && /data-fold="queue"/.test(appJs) && /attnMark\(bandItems\('manager'\)/.test(appJs) && /focusSections\(\)\.map\(x => x\.mark\)/.test(appJs),
+      "the phone's Conversation lacks its folds (the header's thin line with the marks, the queue's line, kept on the device), or the field folds");
     expect(['project-status', 'project-actions', 'project-more', 'project-needs', 'project-overview', 'project-crew', 'project-tasks', 'project-planning', 'project-context', 'project-builder', 'builder-body', 'builder-view', 'builder-edit']
       .every(id => html.includes(`id="${id}"`)), "the app's page lacks a part of the project's page or of the prompt builder");
     const unsigned = await fetch(`${base}/api/limits`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
