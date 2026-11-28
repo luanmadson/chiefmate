@@ -2049,6 +2049,13 @@ try {
   defectsModule.releaseDefect(heldDefect.defect.id, { note: 'A real defect of Chiefmate', lead: 'Gamma lead', news: false });
   expect(defectsModule.defectsLine().includes('build command is missing'), "a defect the lead passed on did not reach the manager's list");
   defectsModule.closeDefect(heldDefect.defect.id, 'smoke', 'owner');
+  // Held by the lead, then reported from outside its crew too: the manager's at once; again from the crew, it stays.
+  const twice = 'Gamma: the deploy log prints no error at all. Expected: the error.';
+  const heldAgain = defectsModule.reportDefect(twice, { kind: 'step', id: 'smoke-lead', step: 1 }, { holdFor: 'gamma' });
+  expect(defectsModule.reportDefect(twice, { kind: 'step', id: 'smoke-lead', step: 1 }, { holdFor: 'gamma' }).repeated && defectsModule.openDefects().find(d => d.id === heldAgain.defect.id)?.held, 'a defect reported again by the same crew left its lead');
+  expect(defectsModule.reportDefect(twice, { kind: 'session', id: 'smoke-session' }).repeated && !defectsModule.openDefects().find(d => d.id === heldAgain.defect.id)?.held && defectsModule.defectsLine().includes('deploy log prints no error'),
+    "a defect waiting with a lead and reported from outside its crew did not reach the manager");
+  defectsModule.closeDefect(heldAgain.defect.id, 'smoke', 'owner');
 
   const mcp = stepMcp(config, config.projects.alpha, alpha.builder);
   expect(mcp.names.join() === 'browser' && mcp.tools.join() === 'mcp__browser', "the project's MCP server was not released");

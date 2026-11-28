@@ -393,7 +393,7 @@ const stepRole = s => (s.review ? (s.delegated ? t('review, left to the team lea
 
 /** Why the manager reviews a run its team lead reviewed first (ESCALATIONS in src/leads.mjs; the same words as the server's). */
 const escalationText = why => ({
-  lead: t('the team lead asked for it'), checks: t("the project's checks failed"), rounds: t('{count} rounds of fixes were not enough', { count: 2 }),
+  lead: t('the team lead asked for it'), checks: t("the project's checks failed"), rounds: t('{count} rounds of fixes were not enough', { count: state?.leadRounds ?? 2 }),
   level: t('the run is no longer level 1'), failed: t("the team lead's review failed"), unclear: t("the team lead's review gave no clear decision"),
 })[why] ?? why;
 

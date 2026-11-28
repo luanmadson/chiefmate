@@ -1,9 +1,9 @@
 // The team leads: a project with "lead" in its settings has one. The lead keeps the project's memory
 // (data/projects/<id>/memory.md), plans each request sent with "ask" into at most MAX_TASKS tasks for the project's
-// crew, and reviews the crew's work. In a level 1 run with a final review, its review is the final one (delegated
-// review, unless the project sets "delegated_review": false): it approves (its report is the pull request's text),
-// returns the work to the crew with what to fix (at most MAX_ROUNDS times) or escalates it to the manager, who also
-// reviews when the project's checks fail. In any other run, its review is an opinion the manager reads in its own.
+// crew, and reviews the crew's work. In a level 1 run with the manager's final review, its review is the final one
+// (delegated review, unless the project sets "delegated_review": false): it approves (its report is the pull request's
+// text), returns the work to the crew with what to fix (at most MAX_ROUNDS times) or escalates it to the manager, who
+// also reviews when the project's checks fail. In any other run, its review is an opinion the final review reads.
 // The lead only runs as steps of the project's runs: it is never on when the project has no work.
 import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -137,8 +137,11 @@ export function leadReviews(config, projectId) {
   return spec === true || (!!spec && typeof spec === 'object' && spec.delegated_review !== false);
 }
 
-/** Whether a run's final review is its team lead's: level 1, with a final review planned, in a project whose lead does it. */
-export const delegatedReview = (run, config) => !!run?.review && run.level === 1 && leadReviews(config, run.project);
+/**
+ * Whether a run's final review is its team lead's: level 1, with the manager's final review planned, in a project whose
+ * lead does it. A mission's own reviewer (another member) keeps its review.
+ */
+export const delegatedReview = (run, config) => !!run?.review && (run.review.agent ?? 'manager') === 'manager' && run.level === 1 && leadReviews(config, run.project);
 
 /**
  * Marks a lead's review step as the final one or not, when it starts (not when it resumes from a pause): the level may

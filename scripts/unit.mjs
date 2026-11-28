@@ -2546,6 +2546,7 @@ test("delegated review: in a level 1 run the lead's approval is final once the c
   assert.equal(delegatedReview(levelOne({ level: 2 }), leadConfig), false, "level 2 is the manager's");
   assert.equal(delegatedReview(levelOne({ level: null }), leadConfig), false, "no level: the manager's");
   assert.equal(delegatedReview(levelOne({ review: null }), leadConfig), false, 'no final review planned: the lead only reviews first');
+  assert.equal(delegatedReview(levelOne({ review: { agent: 'designer', part: 'Review it', status: 'pending' } }), leadConfig), false, "a mission's own reviewer keeps its review");
   assert.equal(delegatedReview(levelOne({ project: 'quiet' }), leadConfig), false, '"delegated_review": false turns it off');
   assert.equal(delegatedReview(levelOne({ project: 'plain' }), leadConfig), false, 'no lead, as before');
   assert.deepEqual([leadReviews(leadConfig, 'site'), leadReviews(leadConfig, 'quiet'), leadReviews(leadConfig, 'plain'), leadReviews({ projects: { x: { lead: true } } }, 'x')], [true, false, false, true]);

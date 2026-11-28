@@ -18,7 +18,7 @@ import { previewChanges, projectContext, saveChanges } from './context.mjs';
 import { addQuestion, askReboot, decide, decisionCards, openPushes, openQuestions, openRepoRequests } from './decisions.mjs';
 import { listFolder, openOnComputer, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
-import { LEAD, leadReviews, memoryInfo, readInbox, reviewedBy, takeFromLead, toLead } from './leads.mjs';
+import { LEAD, leadReviews, MAX_ROUNDS, memoryInfo, readInbox, reviewedBy, takeFromLead, toLead } from './leads.mjs';
 import { changeEscalation, escalationView } from './escalation.mjs';
 import { addNote, engage, isLocked, lockdownView, recordSignal, release } from './lockdown.mjs';
 import { watchView } from './sentinel.mjs';
@@ -437,6 +437,8 @@ function buildState() {
     crew: (general = crew(agents, config, runs, going.map(x => x.run), queue, conversation)),
     effortHistory: effortHistory().slice(-12).reverse(),
     teams: teams(config, agents, general, runs, going.map(x => x.run), queue, conversation),
+    // The most rounds of fixes a team lead's final review sends back (src/leads.mjs), for the app's words.
+    leadRounds: MAX_ROUNDS,
     needs,
     prompts: { ...builderStatus(config), syncing: isSyncing(), cdp: !!config.browser_cdp },
     focus: focus(config),

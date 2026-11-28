@@ -7,7 +7,7 @@ import { instructionFiles, stepAccess, stepMcp } from './access.mjs';
 import { browserServers, closeAfterRun } from './browsers.mjs';
 import { contextWindow, runClaude } from './claude.mjs';
 import { loadConfig, projectCrew } from './config.mjs';
-import { closeDefect, releaseDefect, senderLabel } from './defects.mjs';
+import { closeDefect, openDefects, releaseDefect, senderLabel } from './defects.mjs';
 import { currentEffort, effortChangeLine, runEffortChanges } from './effort.mjs';
 import { guardHooks } from './guard.mjs';
 import { askOwner, finishRequest, needsSettings } from './needs.mjs';
@@ -1145,13 +1145,15 @@ function pullRequestBody(run, checks, agents, lang) {
 
 /**
  * The lead's answers to its crew's messages and defects (src/leads.mjs, applyAnswers): a defect it answered is closed
- * with its answer (it was not one of Chiefmate's, or it is settled); what it passes on reaches the manager, a defect as
- * the manager's own ("defect" news), a message as "lead_forward" news, never as a message of the owner's.
+ * with its answer (it was not one of Chiefmate's, or it is settled), unless it left the lead meanwhile (reported from
+ * outside the crew too, src/defects.mjs); what it passes on reaches the manager, a defect as the manager's own
+ * ("defect" news), a message as "lead_forward" news, never as a message of the owner's.
  */
 function settleAnswers(run, answers, leadName, log) {
   const { answered, forwarded } = applyAnswers(run.project, answers, { run: run.id });
+  const held = new Set(openDefects().filter(d => d.held?.project === run.project).map(d => d.id));
   for (const x of answered) {
-    if (x.kind !== 'defect' || x.defect == null) continue;
+    if (x.kind !== 'defect' || !held.has(x.defect)) continue;
     try {
       closeDefect(x.defect, `${leadName}: ${x.answer}`, 'lead');
     } catch {

@@ -44,9 +44,10 @@ export function senderLabel(s) {
 
 /**
  * Records a defect an agent reported. sender: { kind, id, step, name, agent, project, tool } (see agentSender in
- * src/manager.mjs). Returns { defect, repeated, held }: a repeat of an open defect only counts; a new one (or one closed
- * and reported again) is news for the manager, unless holdFor names the project whose team lead sees it first (a
- * member of its crew reported it, src/leads.mjs): then it waits with the lead (defect.held) and the caller hands it over.
+ * src/manager.mjs). Returns { defect, repeated, held }: a repeat of an open defect only counts (one held by a team lead
+ * and reported from outside its crew becomes the manager's); a new one (or one closed and reported again) is news for
+ * the manager, unless holdFor names the project whose team lead sees it first (a member of its crew reported it,
+ * src/leads.mjs): then it waits with the lead (defect.held) and the caller hands it over.
  */
 export function reportDefect(text, sender = null, { config, holdFor = null } = {}) {
   const said = clip(String(text ?? '').trim(), MAX_TEXT);
@@ -58,7 +59,11 @@ export function reportDefect(text, sender = null, { config, holdFor = null } = {
   const same = matches.find(d => d.status === 'open') ?? matches.sort((a, b) => b.last.localeCompare(a.last))[0];
   if (same?.status === 'open') {
     Object.assign(same, { count: (same.count ?? 1) + 1, last: at, reporters: [...(same.reporters ?? []), reporter].slice(-MAX_REPORTERS) });
+    // Waiting with a team lead and reported from outside its crew too: not one crew's misunderstanding, so the manager's.
+    const heldBy = same.held && same.held.project !== holdFor ? same.held.project : null;
+    if (heldBy) delete same.held;
     saveDefects(list);
+    if (heldBy) reportEvent('defect', `Defect #${same.id}, waiting with the team lead of project ${heldBy}, reported again by ${senderLabel(sender)} (${same.count} reports): ${clip(same.text, 600)}`, { config });
     return { defect: same, repeated: true };
   }
   let defect;
