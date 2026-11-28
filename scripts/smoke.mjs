@@ -3113,7 +3113,7 @@ try {
     "  if (prompt.includes('through the API')) {",
     "    const hook = JSON.parse(args[args.indexOf('--settings') + 1]).hooks.PreToolUse[0].hooks[0].command;",
     "    const run = command => execSync(hook, { input: JSON.stringify({ tool_name: 'Bash', tool_use_id: 't3', tool_input: { command } }), encoding: 'utf8' });",
-    `    appendFileSync(${JSON.stringify(path.join(liveDir, 'guard.txt'))},JSON.stringify([run('cd x && gh api repos/a/b/pulls -f title=T -f head=h'), run('git -C sub push origin main'), run('git status'), run('tailscale funnel --bg 3000')]));`,
+    `    appendFileSync(${JSON.stringify(path.join(liveDir, 'guard.txt'))},JSON.stringify([run('cd x && gh api repos/a/b/pulls -f title=T -f head=h'), run('git -C sub push origin main'), run('git status'), run('tailscale funnel --bg 3000'), run('tailscale serve reset')]));`,
     "  }",
     "  const wait = prompt.includes('waiting for the environment test') ? 750 : prompt.includes('take long') ? 20000 : 300;",
     "  setTimeout(() => say({ type: 'result', subtype: 'success', result: 'done', session_id: id, num_turns: 1, permission_denials: denials }), wait);",
@@ -3220,17 +3220,21 @@ try {
     sessions.sayToSession(s.id, 'Open it through the API');
     await idle(s.id);
     const hooked = JSON.parse(called().at(-1).args[called().at(-1).args.indexOf('--settings') + 1]).hooks?.PreToolUse?.[0]?.hooks?.[0]?.command ?? '';
-    const [api, sideways, plainGit, funnel] = JSON.parse(readFileSync(path.join(liveDir, 'guard.txt'), 'utf8'));
-    expect(hooked.includes('guard.mjs') && hooked.includes('--allow "Bash(git push:*)"') && [api, funnel].every(d => JSON.parse(d).hookSpecificOutput?.permissionDecision === 'deny') && sideways === '' && plainGit === '',
-      `the guard did not refuse a pull request opened through the API or a Tailscale Funnel, or refused what was allowed or harmless: ${JSON.stringify([hooked, api, sideways, plainGit, funnel])}`);
+    const [api, sideways, plainGit, funnel, reset] = JSON.parse(readFileSync(path.join(liveDir, 'guard.txt'), 'utf8'));
+    expect(hooked.includes('guard.mjs') && hooked.includes('--allow "Bash(git push:*)"') && [api, funnel, reset].every(d => JSON.parse(d).hookSpecificOutput?.permissionDecision === 'deny') && sideways === '' && plainGit === '',
+      `the guard did not refuse a pull request opened through the API or a Tailscale Serve or Funnel, or refused what was allowed or harmless: ${JSON.stringify([hooked, api, sideways, plainGit, funnel, reset])}`);
     const asked = rule => sessions.readSession(s.id).requests.find(r => r.kind === 'permission' && r.status === 'open' && r.rule === rule);
     const viaApi = asked('Bash(gh api:*)');
     expect(viaApi?.explain?.summary === "Open a pull request on a/b through GitHub's API" && viaApi.explain.command.startsWith('cd x && gh api'), `what the guard refused did not become a request explained in plain words: ${JSON.stringify(viaApi)}`);
     // A Tailscale Funnel gets the same card as a publication: the port opened to the internet, at high risk.
     const toInternet = asked('Bash(tailscale funnel:*)');
     expect(toInternet?.explain?.summary === 'Open a port of this computer to the internet (Tailscale Funnel)' && toInternet.explain.risk === 'high', `a Tailscale Funnel the guard refused did not become a request explained in plain words: ${JSON.stringify(toInternet)}`);
+    // Turning Serve off says so, and that allowing it lets the agent share ports for the rest of the session.
+    const turnOff = asked('Bash(tailscale serve:*)');
+    expect(turnOff?.explain?.summary === 'Turn off what this computer shares through Tailscale (tailscale serve reset)' && turnOff.explain.why.includes('share ports'), `a Tailscale Serve turned off did not become a request explained in plain words: ${JSON.stringify(turnOff)}`);
     sessions.answerPermission(s.id, viaApi.id, false);
     sessions.answerPermission(s.id, toInternet.id, false);
+    sessions.answerPermission(s.id, turnOff.id, false);
 
     sessions.sayToSession(s.id, 'Please take long');
     for (let i = 0; i < 50 && !sessions.turnOf(s.id)?.last; i++) await new Promise(r => setTimeout(r, 100));
