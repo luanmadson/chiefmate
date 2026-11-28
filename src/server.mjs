@@ -13,7 +13,7 @@ import { openWork, releaseWork, workNotesView } from './worknow.mjs';
 import { checkClaude, checkLogin, claudeInfo, readFeed } from './claude.mjs';
 import { EFFORTS, loadAgents, loadConfig, projectCrew, projectEfforts, projectLead, saveConfig } from './config.mjs';
 import { effortHistory, effortSource, runEffortChanges, setEffort } from './effort.mjs';
-import { agentTool, runTools, toolModel } from './tools.mjs';
+import { agentTool, runTools, toolModel, toolsUsage } from './tools.mjs';
 import { previewChanges, projectContext, saveChanges } from './context.mjs';
 import { addQuestion, askReboot, decide, decisionCards, openPushes, openQuestions, openRepoRequests } from './decisions.mjs';
 import { listFolder, openOnComputer, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
@@ -434,7 +434,8 @@ function buildState() {
     queue: queue.map(r => ({ ...summary(r), ...queueMarks(r, doNowInForce) })),
     queueControl: control,
     history: runs.filter(r => !['queued', 'waiting'].includes(r.status) && !goingIds.has(r.id)).slice(0, 30).map(summary),
-    usage: { limits: config.limits ?? {}, account: usage },
+    // Codex's and Grok's plans, and the steps each tool ran (src/tools.mjs).
+    usage: { limits: config.limits ?? {}, account: usage, tools: toolsUsage(runs) },
     computer: machine,
     // The crew's browsers open (src/browsers.mjs): project, task, since when and whether the task still goes on.
     browsers: openBrowsers(config, latestProcesses()),
