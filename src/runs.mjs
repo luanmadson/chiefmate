@@ -27,7 +27,7 @@ import { addSpeech, askedBy, speechRule } from './speech.mjs';
 import { effectiveLimits } from './spending.mjs';
 import { listRuns, readRun, readUsage, runDir, runFile, saveRun, stepsOf } from './store.mjs';
 import { agentSays, ownerTurn, pendingTalk, talkSection } from './talk.mjs';
-import { chooseTool, GROK_DENY, LOGIN_COMMAND, parseTool, recordQuality, runTool, signedIn, stepRecords, TOOL_NAMES, toolEffort, toolModel } from './tools.mjs';
+import { chooseTool, GROK_DENY, LOGIN_COMMAND, parseTool, recordQuality, runTool, signedIn, stepDue, stepRecords, TOOL_NAMES, toolEffort, toolModel } from './tools.mjs';
 import { clip, languageName, now, parseLevel, ROOT, slug, stamp } from './util.mjs';
 import {
   advanceClone, baseBranch, changedFiles, checkoutBranch, commitPending, commitSubjects, createBranch, deliverToClone, discardSince, freeBranch, freshenBranch, headCommit,
@@ -1555,8 +1555,8 @@ export async function execute(run) {
   } finally {
     live.delete(run.id);
     closeAfterRun();
-    // Each crew step that ran, once (a step redone by retry again, as a new attempt): how it did, for its agent's record
-    // (src/agents.mjs) and for the manager's choice of tools (node src/cli.mjs tools).
+    // Each crew step due (stepDue: in a failed run only the one that failed), once (a step redone by retry again, as a
+    // new attempt): how it did, for its agent's record (src/agents.mjs) and the manager's choice of tools (cli.mjs tools).
     if (['done', 'failed'].includes(run.status)) {
       try {
         const fresh = s => !s.recorded;
@@ -1564,7 +1564,7 @@ export async function execute(run) {
         const records = stepRecords(run, run.review?.commits ?? [], { who: id => agentKey(config, run.project, id), names, only: fresh });
         if (records.length) {
           recordQuality(records);
-          for (const s of run.steps) if (s.agent !== 'manager' && s.agent !== LEAD && ['done', 'failed'].includes(s.status)) s.recorded = true;
+          for (const s of run.steps) if (fresh(s) && stepDue(run, s)) s.recorded = true;
           if (records.some(r => r.tool !== 'claude')) run.qualityRecorded = true;
           saveRun(run);
         }

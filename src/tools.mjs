@@ -129,23 +129,25 @@ export function namedCorrections(said, members = {}) {
 }
 
 /**
- * The records of a run that ended, one per crew step that ran (done or failed; never the manager's nor the team
- * lead's): the tool, the kind of task, how long it took, whether the checks passed (null: none ran) and whether the
- * final review had to correct the step's work (null: no review), with one line on what. The review's "Corrections:"
+ * The records of a run that ended, one per crew step due (stepDue: never the manager's nor the team lead's; in a
+ * failed run, only the step that failed): the tool, the kind of task, how long it took, whether the checks passed
+ * (null: none ran) and whether the final review had to correct the step's work (null: no review), with one line on what. The review's "Corrections:"
  * line decides, for each member it names; else its commits or a line about the whole work count for every step.
  * reviewCommits: the subjects of the commits the final review made. who: the agent behind a member id (src/agents.mjs,
  * agentKey); names: { member id: name }, to read the line; only: which of the steps that ran (the ones not recorded
  * yet). Each record has v: 2 (every crew step of its run is recorded).
  */
 export function stepRecords(run, reviewCommits = [], { who = () => null, names = {}, only = () => true } = {}) {
-  const ran = (run.steps ?? []).filter(s => s.agent !== 'manager' && s.agent !== 'lead' && ['done', 'failed'].includes(s.status) && only(s));
+  const ran = (run.steps ?? []).filter(s => stepDue(run, s) && only(s));
   if (!ran.length) return [];
   const at = now();
   const checks = run.checks?.length ? run.checks.every(c => c.ok) : null;
   const review = run.review && ['done', 'failed'].includes(run.review.status) ? run.review : null;
   const said = review ? correctionLine(review.report) : null;
   const saidNone = !said || NONE.test(said);
-  const named = said && !saidNone ? namedCorrections(said, Object.fromEntries(ran.map(s => [s.agent, names[s.agent] ?? null]))) : new Map();
+  // Every member of the run may be named, the ones recorded before too: a line that names any member is read by member.
+  const crew = (run.steps ?? []).filter(s => s.agent !== 'manager' && s.agent !== 'lead');
+  const named = said && !saidNone ? namedCorrections(said, Object.fromEntries(crew.map(s => [s.agent, names[s.agent] ?? null]))) : new Map();
   const whole = { corrected: review ? reviewCommits.length > 0 || !saidNone : null, note: !review ? '' : said && !saidNone ? said : reviewCommits.length ? clip(reviewCommits.join('; '), 200) : '' };
   const verdict = s => (!review || !named.size ? whole : named.has(s.agent) ? { corrected: !!named.get(s.agent), note: named.get(s.agent) } : { corrected: false, note: '' });
   return ran.map(s => ({
@@ -154,6 +156,13 @@ export function stepRecords(run, reviewCommits = [], { who = () => null, names =
     durationMs: s.durationMs ?? null, checks, run_status: run.status, ...verdict(s),
   }));
 }
+
+/**
+ * Whether a step of a run that ended is recorded now: a crew step (never the manager's nor the team lead's) that
+ * failed, or that was done in a run done. In a failed run the steps done wait for its end after a retry or resume,
+ * with its checks and review: a failure after them (another member's step, the review, the delivery) is not theirs.
+ */
+export const stepDue = (run, s) => s.agent !== 'manager' && s.agent !== 'lead' && (s.status === 'failed' || (s.status === 'done' && run.status === 'done'));
 
 /** The records of a run's steps that ran on Codex or Grok (how each tool does: node src/cli.mjs tools). */
 export const qualityRecords = (run, reviewCommits = [], options = {}) => stepRecords(run, reviewCommits, options).filter(r => r.tool !== 'claude');

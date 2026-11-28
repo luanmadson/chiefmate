@@ -27,7 +27,7 @@ An agent of your own joins the crew of each project it lists, whether that proje
 
 - `base` gives the face, the tools and the instructions (`agents/<base>.md`, with the installation's notes for that base, `crew.<base>.extra_instructions`); `instructions` comes after them, under "Your own instructions", and the prompt says who the agent is (name, specialty, rank).
 - `model`, `effort`, `tool` and `max_minutes` override the base's. The effort follows [docs/effort.md](effort.md): `effort <id> <level>` writes `agents.<id>.effort`, and `projects.<id>.effort` still sets it for one project.
-- `status`: `active`, or `inactive` for an agent that takes no new work (tasks, missions, the team lead's plans and the board stop offering it). A run already queued for it still runs. The base agents and the projects' members take `status` too, in `crew.<id>` and in the project's crew.
+- `status`: `active`, or `inactive` for an agent that takes no new work (tasks, missions, the team lead's plans and the board stop offering it). A run already queued for it still runs. The base agents and the projects' members take `status` too, in `crew.<id>` and in the project's crew. A base agent's status and rank are its own, in the general crew: a project's member or team lead based on it keeps its own.
 - Tasks, missions, `ask` (the lead plans for the agents of the project's crew) and `plan triage --agent` take the agent's id, or its key: `generalist@site` names the member `generalist` of the project `site`.
 
 ## Its memory, one per project
@@ -40,9 +40,9 @@ An agent of your own joins the crew of each project it lists, whether that proje
 
 ## Its record
 
-Every crew step that runs (done or failed) is recorded once when its run ends, in the same register that tells how Codex and Grok do (`data/manager/tools-quality.jsonl`, now for every tool), with the agent behind it. A step redone by `retry` is recorded again, as a new attempt. The runs that ended before this record existed are read from their own files, so the record starts with the history already there.
+Every crew step that runs is recorded once when its run ends: each step of a run done and, in a failed run, only the step that failed (the steps done wait for its end after a retry or resume, so a failure after them, such as another member's step or the delivery, is not counted against them). It goes to the same register that tells how Codex and Grok do (`data/manager/tools-quality.jsonl`, now for every tool), with the agent behind it. A step redone by `retry` is recorded again, as a new attempt. The runs that ended before this record existed are read from their own files, so the record starts with the history already there.
 
-- **Tasks**: steps that ran. **Approved with no correction**: the step done, no check failed, the run done and the final review fixed nothing in it. **Corrected by the review**: what the review's "Corrections:" line names for the agent (the review writes one line, member by member: `Corrections: writer: two claims without a source; curator: none`); without names, its commits or a line about the whole work count for every step. **Failed**: the step or its run failed. **Mean time** of a step and **last activity**.
+- **Tasks**: steps that ran. **Approved with no correction**: the step done, no check failed, the run done and the final review fixed nothing in it. **Corrected by the review**: what the review's "Corrections:" line names for the agent (the review writes one line, member by member: `Corrections: writer: two claims without a source; curator: none`); without names, its commits or a line about the whole work count for every step. **Failed**: the step failed. **Mean time** of a step and **last activity**.
 - **Defects found**: the defects of Chiefmate the agent reported from a step (`defect report`).
 
 ## Its rank

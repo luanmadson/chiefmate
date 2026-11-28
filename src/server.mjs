@@ -425,8 +425,16 @@ function buildState() {
     crew: (general = crew(agents, config, runs, going.map(x => x.run), queue, conversation)),
     effortHistory: effortHistory().slice(-12).reverse(),
     teams: teams(config, agents, general, runs, going.map(x => x.run), queue, conversation),
-    // The agents as entities (src/agents.mjs): each one's facts, record, rank, the manager's proposal and memory.
-    agents: agentsView({ config, runs, agents, questions }),
+    // The agents as entities (src/agents.mjs): each one's facts, record, rank, the manager's proposal and memory. A
+    // failure here leaves the Crew section with its plain rows (null), never the whole app without its state.
+    agents: (() => {
+      try {
+        return agentsView({ config, runs, agents, questions });
+      } catch (error) {
+        console.error('Agents:', error.message);
+        return null;
+      }
+    })(),
     needs,
     prompts: { ...builderStatus(config), syncing: isSyncing(), cdp: !!config.browser_cdp },
     focus: focus(config),

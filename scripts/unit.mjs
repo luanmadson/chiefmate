@@ -1671,6 +1671,11 @@ test('agents: the settings\' agents join their projects\' crews, the roles and t
   assert.equal(list.find(a => a.key === 'promoter').status, 'inactive');
   assert.equal(list.find(a => a.key === 'ana').rank, 'senior');
   assert.equal(list.find(a => a.key === 'generalist').rank, 'mid', 'the rank by default');
+  // A base agent's status and rank are its own: a project's member or team lead based on it keeps its own.
+  const based = { ...agentsConfig(), crew: { generalist: { status: 'inactive', rank: 'senior' } } };
+  based.projects.shop.lead = { agent: 'generalist' };
+  assert.ok(projectCrew(based, 'shop').generalist && projectCrew(based, 'shop').lead && !projectCrew(based, 'site').generalist, 'a base agent deactivated leaves the members and leads based on it at work');
+  assert.equal(roster(based).find(a => a.key === 'generalist@shop').rank, 'mid', "a member never takes its base's rank");
 
   const site = projectCrew(config, 'site');
   assert.ok(site.ana && site.generalist && !site.promoter && !site.old, 'an inactive agent takes no new work');
@@ -1742,6 +1747,11 @@ test("agents: each one's record from every crew step, the corrections member by 
   assert.deepEqual(namedCorrections('README: a typo', { generalist: null }), new Map(), 'a word that names no member is about the whole work');
   assert.deepEqual(stepRecords(two, [], { only: s => s.agent === 'ana' }).map(r => r.agent), ['ana'], 'only the steps not recorded yet');
   assert.deepEqual(qualityRecords(two), [], 'how each tool does keeps only the steps on Codex or Grok');
+  const onlyAna = { ...two, review: { status: 'done', report: 'Corrections: ana: two images without alt text' } };
+  assert.deepEqual(stepRecords(onlyAna, [], { names: { generalist: 'Shop dev', ana: 'Ana' }, only: s => s.agent === 'generalist' }).map(r => r.corrected), [false], 'a member recorded before may be named: the others were not corrected');
+  // In a failed run only the step that failed is recorded: the steps done wait for its end, after a retry or resume.
+  const broke = run('r2', [{ agent: 'generalist', status: 'done' }, { agent: 'ana', status: 'failed' }], '', { status: 'failed', review: null });
+  assert.deepEqual(stepRecords(broke).map(r => [r.agent, r.status]), [['ana', 'failed']]);
 
   // The register's records cover their run; a run that ended before is read from itself, never twice.
   const older = run('r0', [{ agent: 'ana', status: 'failed', durationMs: 30000, ended: '2026-10-01T10:00:00Z' }], 'Corrections: none', { status: 'failed' });
@@ -1825,6 +1835,7 @@ test("the settings' backup: a redacted copy in backup_dir, the full one only on 
     prompt_builder: { doc_id: '1AbCdEfGh', environment: 'Home' },
     plan_resets: [{ kind: 'full', expires: '2026-12-10T19:00:00-03:00', used: false, note: 'Free reset' }],
     sessions: { live: { name: 'Live', tool: 'claude', setup: 'Budget of US$ 300; CPF 123.456.789-09; write to ana@example.com' } },
+    agents: { ana: { name: 'Ana', base: 'writer', projects: ['demo'], instructions: 'Private: Jane Roe reads every draft' } },
   };
   const before = JSON.stringify(config);
   const red = redactConfig(config);

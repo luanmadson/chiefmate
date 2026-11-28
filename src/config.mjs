@@ -63,8 +63,8 @@ function writeIfChanged(dir, value) {
 }
 
 // Free text written by the owner (notes, instructions, descriptions): it is where personal data ends up, so the
-// redacted copy drops it whole, wherever it is (projects, their crews and leads, the crew, missions, libraries).
-const FREE_TEXT_KEYS = new Set(['about', 'notes', 'agent_notes', 'extra_instructions', 'description', 'part', 'note']);
+// redacted copy drops it whole, wherever it is (projects, their crews and leads, the crew, the agents, missions, libraries).
+const FREE_TEXT_KEYS = new Set(['about', 'notes', 'agent_notes', 'extra_instructions', 'instructions', 'description', 'part', 'note']);
 // What names a secret: a setting's key, a command's flag ("--api-key") or an address's parameter ("?token=").
 const SECRET = String.raw`token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|auth(?:orization)?(?![a-z])|cookie|credential|(?<![a-z])pin(?![a-z])`;
 const SECRET_KEY = new RegExp(SECRET, 'i');
@@ -170,6 +170,9 @@ export function loadAgents(config = loadConfig()) {
 }
 
 const joinParts = parts => parts.map(p => p.text).join('');
+// A base agent without what is each agent's own (src/agents.mjs): a project's member or lead never takes its base's
+// status nor rank, so deactivating or ranking an agent of the general crew leaves them as they are.
+const baseOf = agent => Object.fromEntries(Object.entries(agent).filter(([k]) => k !== 'status' && k !== 'rank'));
 /** An agent's instruction parts; an agent made elsewhere (without them) has one: its whole instructions. */
 const partsOf = agent => agent.instructionParts ?? [{ key: 'agent', source: agent.file ?? `agents/${agent.id}.md`, text: agent.instructions ?? '' }];
 
@@ -224,7 +227,7 @@ export function projectCrew(config = loadConfig(), projectId, agents = loadAgent
         ...partsOf(base),
         ...(extra ? [{ key: 'project-member', source: `projects.${projectId}.crew.${id}.extra_instructions`, text: `\n\n## Notes for this project's crew (${project.name ?? projectId})\n\n${extra}` }] : []),
       ];
-      team[id] = { ...base, ...settings, id, base: baseId, project: projectId, instructions: joinParts(instructionParts), instructionParts };
+      team[id] = { ...baseOf(base), ...settings, id, base: baseId, project: projectId, instructions: joinParts(instructionParts), instructionParts };
     }
   }
   if (project) {
@@ -305,7 +308,7 @@ export function projectLead(config, projectId, agents = loadAgents(config)) {
     ...(extra ? [{ key: 'lead-notes', source: `projects.${projectId}.lead.extra_instructions`, text: `\n\n## Notes for the team lead of ${projectName}\n\n${extra}` }] : []),
   ];
   return {
-    ...base,
+    ...baseOf(base),
     ...settings,
     id: 'lead',
     name: name || 'Team lead',
