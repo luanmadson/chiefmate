@@ -18,14 +18,14 @@ import { previewChanges, projectContext, saveChanges } from './context.mjs';
 import { addQuestion, askReboot, decide, decisionCards, openPushes, openQuestions, openRepoRequests } from './decisions.mjs';
 import { listFolder, openOnComputer, rootsFor, runFiles, viewerRoots, viewFile } from './files.mjs';
 import { t } from './i18n.mjs';
-import { LEAD, memoryInfo } from './leads.mjs';
+import { LEAD, leadReviews, memoryInfo, readInbox, reviewedBy, takeFromLead, toLead } from './leads.mjs';
 import { changeEscalation, escalationView } from './escalation.mjs';
 import { addNote, engage, isLocked, lockdownView, recordSignal, release } from './lockdown.mjs';
 import { watchView } from './sentinel.mjs';
 import { closeBrowser, focusBrowser, openBrowsers } from './browsers.mjs';
 import { computer, latestProcesses, processes, stoppable, stopProject } from './machine.mjs';
-import { agentSender, chat, editPending, interruptManager, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
-import { closeDefect, reportDefect } from './defects.mjs';
+import { agentSender, chat, editPending, interruptManager, leadFirst, managerContext, newConversation, removePending, sendToManager } from './manager.mjs';
+import { closeDefect, releaseDefect, reportDefect } from './defects.mjs';
 import { closeReplaced, mergeRun, previewClose, previewMerge } from './merge.mjs';
 import { awayInfo, reportEvent, setAway } from './news.mjs';
 import { askOwner, confirmByOwnerWords, finishRequest, openCalls, openRequests, parkRun, pollRequest } from './needs.mjs';
@@ -146,12 +146,23 @@ const summary = run => ({
   pullRequest: run.pullRequest, needsYou: (run.requests ?? []).filter(r => r.status === 'open').length, onHold: !!run.onHold,
   // The run's speech bubble lines (src/speech.mjs), while it has not ended: a paused or waiting run shows its last ones.
   speech: runEnded(run) ? null : speechView(run),
-  steps: stepsOf(run).map(s => ({ agent: s.agent, status: s.status, review: s === run.review, role: s.role ?? null, task: s.task ?? null, tool: s.tool ?? null })),
+  steps: stepsOf(run).map(s => ({
+    agent: s.agent, status: s.status, review: s === run.review, role: s.role ?? null, task: s.task ?? null, tool: s.tool ?? null,
+    // A team lead's final review (delegated review) and its round, or a fix it sent back to the crew (src/leads.mjs).
+    ...(s.final ? { final: true, round: s.round ?? 1 } : {}), ...(s.fix ? { fix: s.fix } : {}), ...(s.delegated ? { delegated: true } : {}),
+  })),
   // Codex or Grok, when the run's crew steps ran (or were chosen to run) on them: the cards, the queue and the log show it.
   tools: runTools(run),
-  // A request to a project's team lead, and what the lead decided: its plan and its opinion (src/leads.mjs).
+  // A request to a project's team lead, and what the lead decided: its plan, its opinion and, in a delegated review,
+  // each round's decision and why the manager reviewed it after all (src/leads.mjs).
   request: run.kind === 'ask' ? run.instruction : null,
-  lead: run.lead ? { plan: run.lead.plan ?? null, opinion: run.lead.opinion ? clip(run.lead.opinion, 700) : null } : null,
+  lead: run.lead ? {
+    plan: run.lead.plan ?? null, opinion: run.lead.opinion ? clip(run.lead.opinion, 700) : null,
+    reviews: (run.lead.reviews ?? []).map(r => ({ round: r.round, decision: r.decision, note: r.note, fixes: (r.fixes ?? []).map(x => ({ agent: x.agent, part: clip(x.part, 200) })) })),
+    escalated: run.lead.escalated ? { why: run.lead.escalated.why, note: clip(run.lead.escalated.note, 200) } : null,
+  } : null,
+  // Who reviewed it: the manager, or the team lead in a delegated review (src/leads.mjs).
+  reviewedBy: reviewedBy(run),
 });
 
 /**
@@ -163,8 +174,16 @@ function teams(config, agents, general, runs, going, queue, conversation) {
     const mine = r => r.project === id;
     // The project's team lead, shown above its crew: its presence counts on this project's runs only.
     const leader = projectLead(config, id, agents);
+    // With it, whether it does the final review of level 1 runs and what its crew wrote to it (the latest, open first).
+    const inbox = leader ? readInbox(id) : [];
     const lead = leader
-      ? { ...crew({ [LEAD]: leader }, config, runs.filter(mine), going.filter(mine), queue.filter(mine), [])[0], base: leader.base, extra: !!p.lead?.extra_instructions, memory: memoryInfo(id) }
+      ? {
+        ...crew({ [LEAD]: leader }, config, runs.filter(mine), going.filter(mine), queue.filter(mine), [])[0], base: leader.base, extra: !!p.lead?.extra_instructions, memory: memoryInfo(id),
+        delegated: leadReviews(config, id),
+        inbox: [...inbox.filter(x => x.status === 'open'), ...inbox.filter(x => x.status !== 'open').slice(-5).reverse()].slice(0, 12)
+          .map(x => ({ id: x.id, kind: x.kind, text: clip(x.text, 300), at: x.at, status: x.status, agent: x.agent, run: x.run, answer: x.answer ? clip(x.answer, 300) : null, forward: x.forward ? clip(x.forward, 200) : null })),
+        open: inbox.filter(x => x.status === 'open').length,
+      }
       : null;
     // The project's own effort (projects.<id>.effort) over the general crew's.
     const own = projectEfforts(config, id);
@@ -611,6 +630,7 @@ const KEYLESS = {
   '/api/quarantine': b => b.action !== 'release' || b.by === 'manager',
   '/api/defect': true,
   '/api/defect/close': b => b.by === 'manager',
+  '/api/inbox': b => b.by === 'manager',
   '/api/manager': b => !!b.from && typeof b.from === 'object', // an agent's message, marked as the agent's
   '/api/request': true,
   '/api/ask-owner': true,
@@ -979,15 +999,37 @@ export function startServer() {
           // Closes a run's pull request replaced by a newer run's (src/merge.mjs): "preview" only shows it.
           if (body.preview) return reply(res, 200, previewClose(body.run, body.replacedBy));
           return reply(res, 200, await closeReplaced(body.run, body.replacedBy, { by: body.by === 'manager' ? 'manager' : 'owner' }));
-        case '/api/manager':
+        case '/api/manager': {
           // Accepted at any time: while the manager answers, the message waits in the queue. "from": an agent's
-          // (a live session or a step, from the command line), marked as the agent's, never as the owner's.
-          return reply(res, 202, { ok: true, ...sendToManager(body.message, { sender: body.from ? agentSender(body.from) : null }) });
-        case '/api/defect':
-          // A defect of Chiefmate an agent reports on its own (src/defects.mjs): recorded, and news for the manager.
-          return reply(res, 200, reportDefect(body.text, agentSender(body.from ?? {})));
+          // (a live session or a step, from the command line), marked as the agent's, never as the owner's. A member
+          // of a project's crew with a team lead writes to its lead first (src/leads.mjs), who answers or passes it on.
+          const sender = body.from ? agentSender(body.from) : null;
+          const lead = sender ? leadFirst(body.from) : null;
+          if (lead) {
+            const item = toLead(lead.project, { kind: 'message', text: body.message, sender, run: lead.run, step: lead.step, agent: lead.agent });
+            return reply(res, 202, { ok: true, id: item.id, lead: lead.name, project: lead.project });
+          }
+          return reply(res, 202, { ok: true, ...sendToManager(body.message, { sender }) });
+        }
+        case '/api/defect': {
+          // A defect of Chiefmate an agent reports on its own (src/defects.mjs): recorded, and news for the manager;
+          // from a member of a project's crew with a team lead, the lead sees it first (src/leads.mjs).
+          const sender = agentSender(body.from ?? {});
+          const lead = leadFirst(body.from ?? {});
+          const r = reportDefect(body.text, sender, { holdFor: lead?.project ?? null });
+          if (lead && r.held) toLead(lead.project, { kind: 'defect', text: r.defect.text, sender, run: lead.run, step: lead.step, agent: lead.agent, defect: r.defect.id });
+          return reply(res, 200, { ...r, ...(lead && r.held ? { lead: lead.name, project: lead.project } : {}) });
+        }
         case '/api/defect/close':
           return reply(res, 200, { defect: closeDefect(body.id, body.note, body.by === 'manager' ? 'manager' : 'owner') });
+        case '/api/inbox': {
+          // The manager (or the owner) takes an item of a team lead's inbox itself (src/leads.mjs), when it can't wait
+          // for the lead's next step: it leaves the lead, and a defect becomes the manager's own.
+          if (!loadConfig().projects?.[body.project]) return reply(res, 404, { error: t('Unknown project: {id}', { id: String(body.project ?? '') }) });
+          const item = takeFromLead(body.project, body.id, body.by === 'manager' ? 'manager' : 'owner');
+          if (item.kind === 'defect' && item.defect != null) releaseDefect(item.defect, { news: false });
+          return reply(res, 200, { item });
+        }
         case '/api/manager/edit':
         case '/api/manager/remove': {
           const id = String(body.id ?? '');

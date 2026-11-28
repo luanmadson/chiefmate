@@ -230,8 +230,8 @@ const LEAD_NO_EDIT = ['Edit', 'Write', 'NotebookEdit', 'MultiEdit'];
  * A project's team lead, from "projects.<id>.lead": { "name": "...", "agent": "<base agent, manager by default>",
  * "extra_instructions": "...", "model": "...", "max_minutes": 30, "delegated_review": true }. It is a member of the
  * project's crew with the id "lead": it keeps the project's memory, plans the requests sent with "ask", reviews the
- * crew's work (the final review of the level 1 runs, unless "delegated_review" is false; src/leads.mjs). It sees only
- * its project. null when the project has no lead.
+ * crew's work (the final review of the level 1 runs, unless "delegated_review" is false) and hears its crew first
+ * (src/leads.mjs). It sees only its project. null when the project has no lead.
  */
 export function projectLead(config, projectId, agents = loadAgents(config)) {
   const project = config.projects?.[projectId];
@@ -246,6 +246,7 @@ export function projectLead(config, projectId, agents = loadAgents(config)) {
     ? `- You do the first review of the crew's work and write your opinion for the manager, who does the final review and talks with ${owner}.`
     : `- You review the crew's work. In a level 1 run your review is the final one (delegated review): you approve it, and your report becomes the text that goes to ${owner}; you send it back to the crew with what to fix; or you escalate it to the manager. In any other run you do the first review and write your opinion for the manager, who does the final review and talks with ${owner}.`;
   const role = `In this run you work only as the team lead of the project ${projectName}: not as Chiefmate's manager, and not as any other agent the instructions above describe. You don't talk to ${owner}, you don't queue work with Chiefmate's command line (proposing items for the planning board, as the crew's rules say, is fine) and you don't look at other projects: you see only this project, its working copy and its own documentation.
+- You answer to the manager, and the project's crew answers to you: what its members write to the manager (their messages and the defects they report) reaches you first. You answer what you can settle and pass on to the manager only what is the manager's to decide.
 - You keep the project's memory: the decisions, the history, ${owner}'s preferences in this project and what was tried. Chiefmate gives it to you in each prompt and saves the version you return.
 - You plan each request sent to this project into a few tasks for the project's crew.
 ${review}
@@ -262,8 +263,8 @@ ${review}
     name: name || 'Team lead',
     title: 'Team lead',
     role: delegated === false
-      ? "Keeps the project's memory, plans each request into tasks for the crew and reviews their work first."
-      : "Keeps the project's memory, plans each request into tasks for the crew and reviews their work (the final review of level 1 runs).",
+      ? "Keeps the project's memory, plans each request into tasks for the crew, reviews their work first and hears them first."
+      : "Keeps the project's memory, plans each request into tasks for the crew, reviews their work (the final review of level 1 runs) and hears them first.",
     base: base.id,
     project: projectId,
     lead: true,

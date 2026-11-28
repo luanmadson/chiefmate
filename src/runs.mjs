@@ -7,6 +7,7 @@ import { instructionFiles, stepAccess, stepMcp } from './access.mjs';
 import { browserServers, closeAfterRun } from './browsers.mjs';
 import { contextWindow, runClaude } from './claude.mjs';
 import { loadConfig, projectCrew } from './config.mjs';
+import { closeDefect, releaseDefect, senderLabel } from './defects.mjs';
 import { currentEffort, effortChangeLine, runEffortChanges } from './effort.mjs';
 import { guardHooks } from './guard.mjs';
 import { askOwner, finishRequest, needsSettings } from './needs.mjs';
@@ -16,8 +17,8 @@ import {
 } from './digest.mjs';
 import { formatDate, formatDateTime, formatDuration, formatNumber, formatPercent, t } from './i18n.mjs';
 import {
-  applyPlan, applyReview, awaitsDelegation, delegatedReview, ESCALATIONS, finalReviewLines, finalStep, LEAD, leadLines, leadPlanStep, leadReviewStep, markReview, MAX_ROUNDS,
-  memberLines, readMemory, reviewedBy, saveMemory, settleDelegation, takeMemory,
+  answerLines, applyAnswers, applyPlan, applyReview, awaitsDelegation, delegatedReview, ESCALATIONS, finalReviewLines, finalStep, LEAD, leadLines, leadPlanStep,
+  leadReviewStep, markReview, MAX_ROUNDS, memberLines, openInbox, readMemory, reviewedBy, saveMemory, settleDelegation, takeAnswers, takeMemory,
 } from './leads.mjs';
 import { reportEvent } from './news.mjs';
 import { notify } from './notify.mjs';
@@ -629,15 +630,19 @@ export function promptParts({ run, step, project, previous, finalReview, changes
   ]);
   // What the manager added to the run's instructions while it was in the queue (cli.mjs edit --instruction-append).
   if (run.additions?.length) add('additions', 'Chiefmate (cli.mjs edit)', ['', '## Added by the manager before the run started', ...run.additions.map(a => a.text)]);
-  // In a project with a team lead: the lead gets its memory and how to plan or review; the crew, the memory to read.
+  // In a project with a team lead: the lead gets its memory, how to plan or review and its crew's open messages; the
+  // crew, the memory to read, the lead's latest answers and whom they answer to.
   const lead = agents?.[LEAD] ?? null;
   const memorySource = `data/projects/${run.project}/memory.md`;
   if (lead && step.agent === LEAD) {
-    const lines = leadLines({ run, step, agents, memory: readMemory(run.project), base, project, owner: config.owner || 'the owner', lang: prLanguage });
+    const inbox = openInbox(run.project);
+    const lines = leadLines({ run, step, agents, memory: readMemory(run.project), base, project, owner: config.owner || 'the owner', lang: prLanguage, inbox });
     // Its first three lines are the memory ('', its heading, its text); the rest, how to plan or to review.
     add('memory', memorySource, lines.slice(0, 3));
     add('lead', 'Chiefmate (src/leads.mjs)', lines.slice(3));
-  } else if (lead && !finalReview) add('memory', memorySource, memberLines({ run, step, lead, memory: readMemory(run.project) }));
+  } else if (lead && !finalReview) {
+    add('memory', memorySource, memberLines({ run, step, lead, memory: readMemory(run.project), answers: answerLines(run.project, lead) }));
+  }
   if (project.playbook && run.kind === 'mission') {
     add('playbook', `projects.${run.project}.playbook`, ['', `This mission's playbook is \`${project.playbook}\`. Read it before you start and do only your part.`]);
   }
@@ -1134,6 +1139,30 @@ function pullRequestBody(run, checks, agents, lang) {
   ].join('\n');
 }
 
+/**
+ * The lead's answers to its crew's messages and defects (src/leads.mjs, applyAnswers): a defect it answered is closed
+ * with its answer (it was not one of Chiefmate's, or it is settled); what it passes on reaches the manager, a defect as
+ * the manager's own ("defect" news), a message as "lead_forward" news, never as a message of the owner's.
+ */
+function settleAnswers(run, answers, leadName, log) {
+  const { answered, forwarded } = applyAnswers(run.project, answers, { run: run.id });
+  for (const x of answered) {
+    if (x.kind !== 'defect' || x.defect == null) continue;
+    try {
+      closeDefect(x.defect, `${leadName}: ${x.answer}`, 'lead');
+    } catch {
+      // closed meanwhile
+    }
+  }
+  for (const x of forwarded) {
+    if (x.kind === 'defect' && x.defect != null) releaseDefect(x.defect, { note: x.forward, lead: leadName });
+    else reportEvent('lead_forward', `The team lead ${leadName} of project ${run.project} passes on a message its crew wrote to you, for you to decide: "${clip(x.forward, 400)}". The message (#${x.id}, ${formatDateTime(x.at)}, by ${senderLabel(x.sender)}): ${clip(x.text, 1200)}`);
+  }
+  if (answered.length || forwarded.length) {
+    log(t('{lead} answered {answered} message(s) from the crew and passed {forwarded} on to the manager', { lead: t(leadName), answered: answered.length, forwarded: forwarded.length }));
+  }
+}
+
 /** Why the manager reviews a run its team lead reviewed first (ESCALATIONS in src/leads.mjs), in the owner's words. */
 export function escalationText(why, lang) {
   return {
@@ -1163,6 +1192,10 @@ function afterLead(run, step, agents, log, canceled = false) {
         log(t("Couldn't save the project memory: {error}", { error: error.message }));
       }
     }
+    // What its crew wrote to the manager (src/leads.mjs, the inbox): answered here, or passed on to the manager.
+    const taken = takeAnswers(step.report);
+    step.report = taken.report;
+    if (taken.answers.length && !canceled) settleAnswers(run, taken.answers, agents[LEAD]?.name ?? LEAD, log);
   }
   if (step.role === 'plan') {
     const plan = applyPlan(run, step, agents);

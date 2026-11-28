@@ -7,7 +7,7 @@ import { loginLine, runClaude } from './claude.mjs';
 import { loadAgents, loadConfig, projectCrew, projectEfforts, projectLead } from './config.mjs';
 import { effortChangeLine, effortHistory } from './effort.mjs';
 import { formatDateTime, formatDuration, formatNumber, formatPercent, t } from './i18n.mjs';
-import { LEAD, leadSituation } from './leads.mjs';
+import { LEAD, leadReviews, leadSituation, openInbox } from './leads.mjs';
 import { processes } from './machine.mjs';
 import { autopilotLine } from './autopilot.mjs';
 import { awayInfo, awayLine } from './news.mjs';
@@ -204,11 +204,12 @@ export function situation(libraries = []) {
     const team = Object.values(projectCrew(config, id, agents)).filter(a => a.id !== 'manager' && a.id !== LEAD);
     lines.push(`Crew of project ${id} (only these take its tasks): ${team.map(a => `${a.id} (${a.name}${a.base !== a.id ? `, based on ${a.base}` : ''})`).join(', ') || 'none'}.`);
   }
-  // The team leads (src/leads.mjs): one line each, with what it is on now. They only run when their project has work.
+  // The team leads (src/leads.mjs): one line each, with what it is on now, its review and what its crew sent that is
+  // still open with it (the crew's messages and defects reach the lead first). They only run when their project has work.
   const projectRun = id => going.map(l => activeRun(l.run)).find(r => r?.project === id) ?? null;
   for (const id of Object.keys(config.projects ?? {})) {
     const lead = projectLead(config, id, agents);
-    if (lead) lines.push(leadSituation(id, lead, projectRun(id), queue.find(r => r.project === id) ?? null));
+    if (lead) lines.push(leadSituation(id, lead, projectRun(id), queue.find(r => r.project === id) ?? null, undefined, { delegated: leadReviews(config, id), open: openInbox(id) }));
   }
   for (const [id, m] of Object.entries(config.missions ?? {})) {
     const next = nextRun(m.schedule);
@@ -248,6 +249,23 @@ export function agentSender(from = {}) {
     return { kind: 'step', id, step, name: run?.title ?? null, agent: memberName(agent), project: run?.project ?? null, tool: null };
   }
   return { kind: 'agent', id: null, name: null, agent: null, project: null, tool: null };
+}
+
+/**
+ * Whom a crew step's message (or defect) goes to first: { project, name, agent, run, step } for a step of a run of a
+ * project with a team lead, by a member of its crew (src/leads.mjs, toLead); null for the lead's own steps, the
+ * manager's final review, a live session or a project without a lead: those go to the manager as before.
+ */
+export function leadFirst(from = {}, config = loadConfig()) {
+  if (!from?.run || from.session) return null;
+  const run = readRun(plainId(from.run));
+  const lead = run ? projectLead(config, run.project) : null;
+  if (!lead) return null;
+  const n = Number(from.step) || null;
+  const step = n ? stepsOf(run)[n - 1] ?? null : null;
+  const agent = step?.agent ?? liveRuns().find(l => l.run === run.id)?.agent ?? null;
+  if (!agent || agent === LEAD || agent === 'manager' || (step && step === run.review)) return null;
+  return { project: run.project, name: lead.name, agent, run: run.id, step: n };
 }
 
 /**

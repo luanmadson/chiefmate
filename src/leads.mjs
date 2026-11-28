@@ -8,7 +8,7 @@
 import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { formatDateTime, t } from './i18n.mjs';
-import { clip, DATA, ensureDir, languageName, now } from './util.mjs';
+import { clip, DATA, ensureDir, languageName, now, readJson, writeJson } from './util.mjs';
 
 /** The lead's member id in the project's crew (src/config.mjs). */
 export const LEAD = 'lead';
@@ -266,6 +266,117 @@ export function reviewedBy(run) {
   return rounds ? { agent: LEAD, delegated: false, rounds, why: null } : null;
 }
 
+// ---------- The crew writes to its lead first (data/projects/<id>/inbox.json) ----------
+
+const MAX_INBOX = 200;
+/** At most this many open items go in a lead's prompt, the oldest first. */
+const INBOX_SHOWN = 10;
+/** The lead's answers of the last days that the crew's steps read. */
+const ANSWERS_DAYS = 7;
+const ANSWERS_SHOWN = 5;
+
+export const inboxFile = projectId => path.join(DATA, 'projects', safeId(projectId), 'inbox.json');
+export const readInbox = (projectId, file = inboxFile(projectId)) => readJson(file, []);
+export const openInbox = (projectId, file = inboxFile(projectId)) => readInbox(projectId, file).filter(x => x.status === 'open');
+
+/**
+ * What a member of a project's crew sent the manager (a message with "chat say", or a defect it reported), kept for
+ * the project's team lead first: { kind ('message' or 'defect'), text, sender (agentSender in src/manager.mjs), run,
+ * step, agent (its member id), defect (the defect's id) }. Returns the item, open until the lead answers it or passes
+ * it on.
+ */
+export function toLead(projectId, { kind = 'message', text, sender = null, run = null, step = null, agent = null, defect = null }, file = inboxFile(projectId)) {
+  const body = clip(String(text ?? '').trim(), 2000);
+  if (!body) throw new Error(t('Write a message.'));
+  const list = readInbox(projectId, file);
+  const item = {
+    id: list.reduce((max, x) => Math.max(max, x.id), 0) + 1, kind: kind === 'defect' ? 'defect' : 'message', text: body, at: now(), status: 'open',
+    sender, run, step, agent, ...(defect != null ? { defect } : {}),
+  };
+  writeJson(file, [...list, item].slice(-MAX_INBOX));
+  return item;
+}
+
+/** The open items in a lead's prompt (plan or review), with how to answer them; empty when there are none. */
+export function inboxLines(items) {
+  if (!items.length) return [];
+  const shown = items.slice(0, INBOX_SHOWN);
+  return [
+    '',
+    '## Open messages from your crew (answer them or pass them on)',
+    "Your crew wrote these to the manager, and they reach you first. Answer each one you can settle yourself (a question about the work, the project or its rules; a defect that is in fact a misunderstanding, saying what to do instead). Pass on to the manager only what is the manager's to decide: a real defect of Chiefmate, a request beyond this project or beyond level 1, anything about money, accounts, security or the owner. Leave open what you can't settle yet.",
+    ...shown.map(x => `- #${x.id} (${x.kind === 'defect' ? `defect${x.defect != null ? ` #${x.defect} of Chiefmate` : ''}` : 'message'}, ${formatDateTime(x.at)}, from ${x.agent ?? 'a member'}${x.run ? ` in run ${x.run}` : ''}): ${clip(x.text, 600)}`),
+    ...(items.length > shown.length ? [`- and ${items.length - shown.length} more, for your next step.`] : []),
+    'End your report, before the memory block, with what you did with each, in this exact format (JSON):',
+    '~~~crew-answers',
+    '[{"id": 1, "answer": "<your answer to the member>"}, {"id": 2, "forward": "<one line for the manager: what it has to decide>"}]',
+    '~~~',
+  ];
+}
+
+/** The lead's answers to its crew, from the ~~~crew-answers block of its report: { answers: [{ id, answer, forward }], report }. */
+export function takeAnswers(report) {
+  const text = String(report ?? '');
+  const b = lastBlock(text, 'crew-answers');
+  if (!b) return { answers: [], report: text };
+  let data;
+  try {
+    data = JSON.parse(b.body);
+  } catch {
+    data = [];
+  }
+  const answers = (Array.isArray(data) ? data : []).map(x => ({
+    id: Number(x?.id), answer: clip(String(x?.answer ?? '').trim(), 1200), forward: clip(String(x?.forward ?? '').trim(), 600),
+  })).filter(x => Number.isInteger(x.id) && (x.answer || x.forward));
+  return { answers, report: cut(text, b) };
+}
+
+/**
+ * Applies the lead's answers to its project's inbox: an item answered keeps the answer; one passed on goes to the
+ * manager (the caller tells it). Only open items change. by: where it was done ({ run }). Returns { answered, forwarded }.
+ */
+export function applyAnswers(projectId, answers, { run = null } = {}, file = inboxFile(projectId)) {
+  const list = readInbox(projectId, file);
+  const answered = [];
+  const forwarded = [];
+  for (const a of answers) {
+    const item = list.find(x => x.id === a.id && x.status === 'open');
+    if (!item) continue;
+    if (a.forward) {
+      Object.assign(item, { status: 'forwarded', forward: a.forward, done: now(), doneIn: run });
+      forwarded.push(item);
+    } else {
+      Object.assign(item, { status: 'answered', answer: a.answer, done: now(), doneIn: run });
+      answered.push(item);
+    }
+  }
+  if (answered.length || forwarded.length) writeJson(file, list);
+  return { answered, forwarded };
+}
+
+/** The manager (or the owner) takes an open item itself: it leaves the lead's inbox. Returns the item. */
+export function takeFromLead(projectId, id, by = 'manager', file = inboxFile(projectId)) {
+  const list = readInbox(projectId, file);
+  const item = list.find(x => x.id === Number(id));
+  if (!item) throw new Error(t('No message #{id} for the team lead of {project}.', { id, project: projectId }));
+  if (item.status !== 'open') throw new Error(t('Message #{id} was already handled ({status}).', { id: item.id, status: item.status }));
+  Object.assign(item, { status: 'taken', by, done: now() });
+  writeJson(file, list);
+  return item;
+}
+
+/** For the crew's steps: the lead's latest answers to the crew's messages (of the last days), so the members learn them. */
+export function answerLines(projectId, lead, file = inboxFile(projectId), today = Date.now()) {
+  const since = today - ANSWERS_DAYS * 86400_000;
+  const recent = readInbox(projectId, file).filter(x => x.status === 'answered' && Date.parse(x.done) >= since).slice(-ANSWERS_SHOWN);
+  if (!recent.length) return [];
+  return [
+    '',
+    `## The team lead's answers to the crew's messages (${lead.name}, the latest)`,
+    ...recent.map(x => `- To ${x.agent ?? 'a member'} (${formatDateTime(x.at)}), who wrote "${clip(x.text, 300)}": ${x.answer}`),
+  ];
+}
+
 // ---------- What the steps read ----------
 
 const memoryText = memory => memory || '(empty: this is the first run with a team lead, so start it)';
@@ -279,10 +390,10 @@ const MEMORY_RULES = [
 ];
 
 /**
- * The lead's own part of the prompt: the memory, and how to plan or how to review. project, owner and lang (the
- * language of the text that goes to the owner) matter for a final review (step.final).
+ * The lead's own part of the prompt: the memory, how to plan or how to review, and the crew's open messages (inbox).
+ * project, owner and lang (the language of the text that goes to the owner) matter for a final review (step.final).
  */
-export function leadLines({ run, step, agents, memory, base, project = {}, owner = 'the owner', lang = 'en' }) {
+export function leadLines({ run, step, agents, memory, base, project = {}, owner = 'the owner', lang = 'en', inbox = [] }) {
   const lines = ['', '## Project memory (you keep it)', memoryText(memory)];
   const crew = Object.values(taskTakers(agents)).map(a => `- \`${a.id}\` (${a.name}${a.base && a.base !== a.id ? `, based on ${a.base}` : ''}): ${a.role ?? ''}`.trim());
   const goal = run.instruction && run.kind === 'ask' ? 'the request' : "the run's goal";
@@ -333,15 +444,16 @@ export function leadLines({ run, step, agents, memory, base, project = {}, owner
     );
     if (run.kind === 'ask' && run.instruction) lines.push('', '## The request', run.instruction);
   }
-  lines.push('', ...MEMORY_RULES);
+  lines.push(...inboxLines(inbox), '', ...MEMORY_RULES);
   return lines;
 }
 
 /**
  * For a crew member's step in a project with a lead: the memory (read only) and, for a planned task, the request; for a
- * fix the lead's final review asked (step.fix), what it is.
+ * fix the lead's final review asked (step.fix), what it is; and the lead's latest answers to the crew (answers: lines
+ * from answerLines).
  */
-export function memberLines({ run, step, lead, memory }) {
+export function memberLines({ run, step, lead, memory, answers = [] }) {
   const lines = [];
   if (step.fix) {
     lines.push(
@@ -354,6 +466,9 @@ export function memberLines({ run, step, lead, memory }) {
     lines.push('', '## The request this task is part of', `Task ${step.task} of ${step.tasks} that the team lead (${lead.name}) planned for this request from the owner:`, run.instruction);
   }
   if (memory) lines.push('', `## Project memory (kept by the team lead, ${lead.name}; read only)`, memory, '', 'If you learn something the team lead should remember, say it in your report.');
+  if (answers.length) lines.push(...answers);
+  // Who answers to whom: what the member writes to the manager reaches the lead first.
+  lines.push('', `## Your team lead (${lead.name})`, `In this project you answer to the team lead, who answers to the manager. What you write to the manager (\`chat say\`) and the defects you report reach the team lead first: it answers you or passes on to the manager what is the manager's to decide.`);
   return lines;
 }
 
@@ -389,10 +504,12 @@ export function finalReviewLines(run, lead) {
 // ---------- What the manager sees ----------
 
 /**
- * One line about a project's lead for the manager's situation: what it is on now and its memory.
+ * One line about a project's lead for the manager's situation: what it is on now, its memory, whether it does the
+ * final review of level 1 runs and what its crew sent that is still open with it (instead of each message).
  * going: the project's run going on (as in memory), or null; next: the project's next run in the queue, or null.
+ * extra: { delegated (leadReviews), open (openInbox) }.
  */
-export function leadSituation(projectId, lead, going, next, info = memoryInfo(projectId)) {
+export function leadSituation(projectId, lead, going, next, info = memoryInfo(projectId), { delegated = false, open = [] } = {}) {
   let doing;
   if (going) {
     const s = [...(going.steps ?? []), ...(going.review ? [going.review] : [])].find(x => x.status === 'running');
@@ -404,5 +521,13 @@ export function leadSituation(projectId, lead, going, next, info = memoryInfo(pr
   } else if (next) doing = `next in the queue: "${clip(next.title, 80)}" [${next.id}]`;
   else doing = 'off (it only runs when the project has work)';
   const memory = info ? `memory of ${info.lines} line(s), updated ${formatDateTime(info.updated)}` : 'no memory yet';
-  return `Team lead of project ${projectId}: ${lead.name} (based on ${lead.base}): ${doing}; ${memory}. Send it requests with \`node src/cli.mjs ask ${projectId} "<request>"\`.`;
+  const review = delegated
+    ? 'it does the final review of level 1 runs (delegated review: you get only its verdict, and review yourself only what it escalates or what fails its checks)'
+    : 'it does the first review, you the final one';
+  const messages = open.filter(x => x.kind !== 'defect').length;
+  const defects = open.length - messages;
+  const inbox = open.length
+    ? `open with it from its crew (it answers them at its next step; take one yourself only when it can't wait, with \`node src/cli.mjs inbox ${projectId} take <n>\`): ${[messages ? `${messages} message(s)` : '', defects ? `${defects} defect(s)` : ''].filter(Boolean).join(', ')}, the oldest from ${formatDateTime(open[0].at)}: ${open.slice(0, 3).map(x => `#${x.id} ${x.agent ?? '?'}: "${clip(x.text, 140)}"`).join('; ')}${open.length > 3 ? `; and ${open.length - 3} more` : ''}`
+    : 'nothing open from its crew';
+  return `Team lead of project ${projectId}: ${lead.name} (based on ${lead.base}): ${doing}; ${memory}; ${review}; ${inbox}. Send it requests with \`node src/cli.mjs ask ${projectId} "<request>"\`.`;
 }

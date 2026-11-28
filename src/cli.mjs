@@ -149,13 +149,19 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs chat say "<message>"         writes to the manager; while it answers, the message waits in the queue
                                                 and goes with the others, in order, when the answer ends. From a live
                                                 session or a step, it goes as that agent's message (CHIEFMATE_SESSION,
-                                                --from <session id>, or the step's run), never as the owner's
+                                                --from <session id>, or the step's run), never as the owner's. From a
+                                                member of a project's crew with a team lead, it goes to the lead first
   node src/cli.mjs defect report "<text>"       an agent reports a defect of Chiefmate or of the communication between
                                                 agents (also chat say --defect): recorded in data/defects.json, repeats
-                                                joined, and the manager hears of it with its news
+                                                joined, and the manager hears of it with its news (from a project's
+                                                crew with a team lead, after the lead passes it on)
   node src/cli.mjs defect list [--all]          the open defects (--all: the closed too)
   node src/cli.mjs defect close <id> [--note "..."]
                                                 the manager (or the owner) closes a defect once its fix is in
+  node src/cli.mjs inbox [<project>] [--all]    what a project's crew wrote to the manager, with its team lead first:
+                                                the open ones (--all: answered and passed on too)
+  node src/cli.mjs inbox <project> take <n>     for the manager (or the owner): takes an open one itself, when it
+                                                can't wait for the lead's next step
   node src/cli.mjs chat edit <id> "<message>"   changes a message still in the queue (chat remove <id> takes it out)
   node src/cli.mjs chat interrupt               ends the current answer (the conversation goes on); the queue goes next
   node src/cli.mjs session [<profile>] [--window] [--dry-run]
@@ -408,16 +414,25 @@ function agentFrom() {
   return null;
 }
 
-/** Records a defect of Chiefmate (src/defects.mjs): through the running Chiefmate, or on disk when it is off. */
+/**
+ * Records a defect of Chiefmate (src/defects.mjs): through the running Chiefmate, or on disk when it is off. From a
+ * member of a project's crew with a team lead, the lead sees it first (src/leads.mjs).
+ */
 async function reportDefectCommand(text, from = agentFrom()) {
   if (!String(text ?? '').trim()) throw new Error('Which defect? node src/cli.mjs defect report "<what happened. Expected: what should have happened>"');
   const r = await apiOr('/api/defect', { text, from: from ?? {} }, async () => {
-    const { agentSender } = await import('./manager.mjs');
-    return (await import('./defects.mjs')).reportDefect(text, agentSender(from ?? {}));
+    const { agentSender, leadFirst } = await import('./manager.mjs');
+    const sender = agentSender(from ?? {});
+    const lead = leadFirst(from ?? {});
+    const done = (await import('./defects.mjs')).reportDefect(text, sender, { holdFor: lead?.project ?? null });
+    if (!lead || !done.held) return done;
+    (await import('./leads.mjs')).toLead(lead.project, { kind: 'defect', text: done.defect.text, sender, run: lead.run, step: lead.step, agent: lead.agent, defect: done.defect.id });
+    return { ...done, lead: lead.name, project: lead.project };
   });
   console.log(r.repeated
     ? `Defect #${r.defect.id} was already open: your report was joined to it (${r.defect.count} reports).`
-    : `Defect #${r.defect.id} recorded; the manager hears of it with its next news.`);
+    : r.lead ? `Defect #${r.defect.id} recorded; your team lead (${r.lead}) sees it first and passes it on to the manager if it is the manager's.`
+      : `Defect #${r.defect.id} recorded; the manager hears of it with its next news.`);
 }
 
 /** "defect": the defects of Chiefmate the agents report on their own; the manager (or the owner) closes them. */
@@ -441,6 +456,42 @@ async function defectCommand() {
   throw new Error('Use: defect report "<text>" | list [--all] | close <id> [--note "<what fixed it>"]');
 }
 
+/**
+ * "inbox": what the crew of a project with a team lead wrote to the manager, kept for the lead first (src/leads.mjs):
+ * the list (open ones, or --all), and the manager (or the owner) taking one itself when it can't wait for the lead.
+ */
+async function inboxCommand() {
+  const [project, action, id] = words();
+  const config = loadConfig();
+  const { readInbox } = await import('./leads.mjs');
+  const { senderLabel } = await import('./defects.mjs');
+  if (action === 'take') {
+    if ((process.env.CHIEFMATE_RUN || process.env.CHIEFMATE_SESSION) && !process.env.CHIEFMATE_MANAGER) throw new Error('Only the manager (or the owner) takes a message from a team lead.');
+    if (!id) throw new Error('Which message? node src/cli.mjs inbox <project> take <n>');
+    const by = process.env.CHIEFMATE_MANAGER ? 'manager' : 'owner';
+    const r = await apiOr('/api/inbox', { project, id, by }, async () => {
+      const item = (await import('./leads.mjs')).takeFromLead(project, id, by);
+      if (item.kind === 'defect' && item.defect != null) (await import('./defects.mjs')).releaseDefect(item.defect, { news: false });
+      return { item };
+    });
+    console.log(`Message #${r.item.id} taken from the team lead of ${project}: it is yours now${r.item.kind === 'defect' ? ` (defect #${r.item.defect}, back in the open defects)` : ''}.\n${r.item.text}`);
+    return;
+  }
+  if (action) throw new Error('Use: inbox [<project>] [--all] | inbox <project> take <n>');
+  const ids = project ? [project] : Object.keys(config.projects ?? {}).filter(p => config.projects[p].lead);
+  if (project && !config.projects?.[project]) throw new Error(`Unknown project: ${project}`);
+  let shown = 0;
+  for (const p of ids) {
+    const items = readInbox(p).filter(x => has('--all') || x.status === 'open');
+    for (const x of items) {
+      shown++;
+      const done = x.status === 'answered' ? `\n     Answered: ${x.answer}` : x.status === 'forwarded' ? `\n     Passed on to the manager: ${x.forward}` : x.status === 'taken' ? `\n     Taken by the ${x.by}.` : '';
+      console.log(`${p} #${String(x.id).padEnd(3)} ${x.status.padEnd(9)} ${x.kind}, ${formatDateTime(x.at)}, ${senderLabel(x.sender)}\n     ${x.text.replace(/\s+/g, ' ')}${done}`);
+    }
+  }
+  if (!shown) console.log(has('--all') ? 'Nothing written to the team leads.' : 'Nothing open with the team leads.');
+}
+
 /** "chat": the conversation with the manager, through the running Chiefmate. */
 async function chatCommand() {
   const [action, ...args] = rest;
@@ -455,7 +506,9 @@ async function chatCommand() {
       // A defect of Chiefmate goes to its own record (--defect, or "[Defect]" written by an agent): see "defect".
       if (has('--defect') || (from && /^\s*\[(defect|defeito)\]/i.test(message))) return reportDefectCommand(message, from);
       const m = await api('/api/manager', { message, ...(from ? { from } : {}) });
-      console.log(m.queued ? `Queued (${m.position} waiting, id ${m.id}): it goes when the manager finishes its answer.` : 'Sent. The manager is answering: node src/cli.mjs chat');
+      // A member of a project's crew with a team lead writes to its lead first (src/leads.mjs).
+      if (m.lead) console.log(`Sent to your team lead (${m.lead}) first, as message #${m.id}: it answers you or passes it on to the manager when it is the manager's to decide.`);
+      else console.log(m.queued ? `Queued (${m.position} waiting, id ${m.id}): it goes when the manager finishes its answer.` : 'Sent. The manager is answering: node src/cli.mjs chat');
       if (from) console.log("Marked as an agent's message, not the owner's.");
       return;
     }
@@ -1319,6 +1372,9 @@ async function main() {
       return;
     case 'defect':
       await defectCommand();
+      return;
+    case 'inbox':
+      await inboxCommand();
       return;
     case 'ask-owner': {
       // The manager's (or the owner's) question; a step of a run asks with needs-you instead.
