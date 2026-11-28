@@ -2776,7 +2776,7 @@ function teamLead(a, project, bubbles = false) {
 /** A member's row as it was before the agents had cards: for one the state does not list among the agents. */
 const plainRow = (a, project, bubbles) => `<div class="team-member"${online ? opensPanel(a.runs?.[0]) : ''}>${face(a, faceState(a), 30)}<div><div class="name">${esc(t(a.name))} <span class="model" title="${esc(a.model ?? '')}">${esc(modelLabel(a))}</span></div><div class="hint">${esc([a.base && a.base !== a.id ? t('Based on {agent}', { agent: agentName(a.base) }) : t(a.title ?? ''), a.extra ? t('with instructions for this project') : '', (a.mcp ?? []).length ? t('tools: {list}', { list: a.mcp.join(', ') }) : ''].filter(Boolean).join(' · '))}</div>${bubbles ? speechBubble(speechFor(a.id, project)) : ''}</div><div class="team-side">${effortPick(a, { project })}${stateHtml(agentStatus(a))}</div></div>`;
 
-// ---------- The agents (src/agents.mjs, docs/agents.md): the org chart by project and each agent's card ----------
+// ---------- The agents (src/agents.mjs, docs/crew.md): the org chart by project and each agent's card ----------
 
 /** An agent the state lists (state.agents), by its key ("ana", "writer", "generalist@site"). */
 const agentByKey = key => (state?.agents?.list ?? []).find(a => a.key === key) ?? null;
@@ -4372,6 +4372,7 @@ function contextSessionsHtml(sessions) {
 function extraScopeLabel(scope) {
   if (scope === 'lead') return t("The team lead's extra instructions, in this project");
   if (scope === 'project') return t("Extra instructions for this member, in this project's crew");
+  if (scope === 'agent') return t('Its own instructions, in every project it works in');
   return t('Extra instructions for this agent in every project of this installation');
 }
 

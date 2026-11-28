@@ -1,4 +1,4 @@
-// The agents as entities (docs/agents.md): each one with a name, a base agent (its role, from agents/*.md), the
+// The agents as entities (docs/crew.md): each one with a name, a base agent (its role, from agents/*.md), the
 // projects it works in, a specialty, a rank, a status, its own memory in each project and its record. Three kinds:
 // - "agent": one of the settings' "agents" ({ name, base, projects, specialty, instructions, model, effort, tool, rank,
 //   status, hired_at }), with its own id;
@@ -16,7 +16,7 @@ import { listRuns, stepsOf } from './store.mjs';
 import { agentTool, cleanRecord, localDay, readQuality, stepRecords, sumRecords, TOOLS, toolModel } from './tools.mjs';
 import { clip, DATA, ensureDir, now } from './util.mjs';
 
-/** The ranks, from the first to the highest: more autonomy and responsibility as they go up (docs/agents.md). */
+/** The ranks, from the first to the highest: more autonomy and responsibility as they go up (docs/crew.md). */
 export const RANKS = ['junior', 'mid', 'senior', 'lead'];
 export const RANK_DEFAULT = 'mid';
 export const STATUSES = ['active', 'inactive'];
@@ -58,7 +58,7 @@ function entry({ key, id, kind, member, projects, source }) {
 /**
  * Every agent, explicit or not: [{ key, id (its id in a project's crew), kind, name, base, title, specialty, rank,
  * status, hired_at, projects, source (where its settings are), member (the crew member as built) }]. The manager and
- * the team leads are not among them: the manager is global, each lead is its project's (docs/agents.md).
+ * the team leads are not among them: the manager is global, each lead is its project's (docs/crew.md).
  */
 export function roster(config = loadConfig(), agents = loadAgents(config)) {
   const projects = Object.keys(config.projects ?? {});
@@ -537,7 +537,7 @@ export function teamLines(config, view, owner = 'the owner') {
   if (waiting.length) lines.push(`- Your rank proposals waiting for ${owner}'s card: ${waiting.map(a => `#${a.proposal.question} ${a.name} [${a.key}] ${a.proposal.from} to ${a.proposal.to}`).join('; ')}.`);
   const advised = active.filter(a => a.advice && !a.proposal);
   if (advised.length) {
-    lines.push(`- The record meets the criteria (docs/agents.md) to ${advised.map(a => `${a.advice.move} ${a.name} [${a.key}] to ${a.advice.to} (${a.advice.clean} of the latest ${a.advice.count} approved with no correction, ${a.advice.failed} failed)`).join('; ')}. When you agree, propose it: \`node src/cli.mjs agents propose <key> --rank <rank> --why "<one sentence>"\`.`);
+    lines.push(`- The record meets the criteria (docs/crew.md) to ${advised.map(a => `${a.advice.move} ${a.name} [${a.key}] to ${a.advice.to} (${a.advice.clean} of the latest ${a.advice.count} approved with no correction, ${a.advice.failed} failed)`).join('; ')}. When you agree, propose it: \`node src/cli.mjs agents propose <key> --rank <rank> --why "<one sentence>"\`.`);
   }
   return lines;
 }

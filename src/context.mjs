@@ -384,6 +384,18 @@ function extraField(config, id, memberId) {
       },
     };
   }
+  // An agent of the settings (src/agents.mjs): its own instructions, in every project it works in; it takes the place of
+  // a member of the project's crew with its id, as in projectCrew.
+  if (memberId !== 'manager' && (config.agents?.[memberId]?.projects ?? []).includes(id)) {
+    return {
+      scope: 'agent', field: `agents.${memberId}.instructions`,
+      get: c => c.agents?.[memberId]?.instructions,
+      set: (c, v) => {
+        if (v) c.agents[memberId].instructions = v;
+        else delete c.agents[memberId].instructions;
+      },
+    };
+  }
   const crew = project.crew;
   const inCrew = Array.isArray(crew)
     ? crew.some(x => (typeof x === 'string' ? x : x?.id ?? x?.agent) === memberId)

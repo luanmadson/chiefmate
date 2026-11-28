@@ -200,7 +200,7 @@ export function memberSpecs(crew) {
  * { "<member id>": { "agent": "<base agent, the member id by default>", "name": "...", "extra_instructions": "...",
  * "model": "...", "effort": "high", "max_minutes": 60, "mcp": ["playwright"] } } or simply ["generalist", "designer"].
  * Without it, the general crew. Each member keeps its base agent's face and instructions.
- * The agents of the settings ("agents", docs/agents.md) that list the project join its crew, either way; one with the id
+ * The agents of the settings ("agents", docs/crew.md) that list the project join its crew, either way; one with the id
  * of a member of the project's own crew takes its place.
  * "projects.<id>.effort" ({ "<member id>": "<level>" }) sets the effort of any member for this project only, the manager's
  * reviews of its runs included.
@@ -250,7 +250,7 @@ export const reservedAgentId = (id, agents) => id === 'manager' || id === 'lead'
 const RANK_WORDS = { junior: 'junior', mid: 'mid-level', senior: 'senior', lead: 'team lead' };
 
 /**
- * An agent of the settings ("agents.<id>", docs/agents.md) as a crew member: its base agent's face, tools and
+ * An agent of the settings ("agents.<id>", docs/crew.md) as a crew member: its base agent's face, tools and
  * instructions, its own name, specialty, rank and instructions, and its own model, effort, tool and time limit over the
  * base's. projectId: the project it works in now (its notes and memory are that project's). null when the id is
  * reserved or its base is not an agent (the manager is never a base).

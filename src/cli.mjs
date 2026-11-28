@@ -105,7 +105,7 @@ const HELP = `Chiefmate: a command center for AI agents
   node src/cli.mjs effort history [--project <id>]
                                                 the recorded effort changes: who, when, from and to
   node src/cli.mjs agents [--project <id>] [--json]
-                                                the agents (docs/agents.md): projects, specialty, rank, status and
+                                                the agents (docs/crew.md): projects, specialty, rank, status and
                                                 record (tasks, % approved with no correction, failures, mean time)
   node src/cli.mjs agents show <key> | memory <key> --project <id> | history [<key>]
                                                 one agent: its record, latest tasks, memory and changes; a member of a
@@ -849,7 +849,7 @@ async function effortCommand() {
 }
 
 /**
- * "agents": the agents as entities (src/agents.mjs, docs/agents.md). Anyone reads them; the manager adjusts one and
+ * "agents": the agents as entities (src/agents.mjs, docs/crew.md). Anyone reads them; the manager adjusts one and
  * proposes a rank; hiring, deactivating and the rank are the owner's; a step only reads.
  */
 async function agentsCommand() {

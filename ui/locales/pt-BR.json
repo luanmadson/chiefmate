@@ -2496,5 +2496,6 @@
   "The agent's memory in this project": "A memória do agente neste projeto",
   "Who is on board, by project: the manager, the team leads and the agents, each with its rank, record and memory. Give any of them a one-off task.": "Quem está a bordo, por projeto: o gerente, os chefes de equipe e os agentes, cada um com cargo, desempenho e memória. Dê a qualquer um uma tarefa avulsa.",
   "Org chart by project": "Organograma por projeto",
-  "The manager and the base agents": "O gerente e os agentes-base"
+  "The manager and the base agents": "O gerente e os agentes-base",
+  "Its own instructions, in every project it works in": "Instruções próprias, em todo projeto em que ele trabalha"
 }
