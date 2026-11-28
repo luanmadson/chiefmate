@@ -162,7 +162,7 @@ export function placeFor(run, from, order, { before = null, after = null, top = 
  * Moves a run in the queue as it is shown, in the order the turns go (where: see placeFor). The queue keeps that order
  * with the change from then on: every run in it gets its place (rank), so the fair turn no longer rearranges them, and
  * new runs go after them, in turn among themselves (turnOrder). One run per project still goes at a time. by: "owner"
- * or "manager"; record: false leaves the change to the caller. Returns the queue, in order.
+ * or "manager"; record: false leaves recording the change and nudging the queue to the caller. Returns the queue, in order.
  */
 export function moveInQueue(id, where = {}, by = 'manager', { record = true } = {}) {
   const run = inQueue(id);
@@ -180,8 +180,10 @@ export function moveInQueue(id, where = {}, by = 'manager', { record = true } = 
     saveRun(r);
   });
   const to = where.top ? 'top' : where.up ? 'up' : where.down ? 'down' : 'place';
-  if (record) keep({ by, action: 'move', ...runRef(run), to, place: at + 1 });
-  nudgeQueue();
+  if (record) {
+    keep({ by, action: 'move', ...runRef(run), to, place: at + 1 });
+    nudgeQueue();
+  }
   return queueInTurn();
 }
 
