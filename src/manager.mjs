@@ -450,7 +450,7 @@ export function cutNotice(items, until, at = Date.now()) {
 /** What tells the manager, as the conversation goes on after the renewal, that its previous answer was cut off. */
 export function cutMessage(owner, cut) {
   const window = { five_hour: ', the 5-hour window', seven_day: ", the plan's week" }[cut.window] ?? '';
-  return `[System message from Chiefmate, not from ${owner}] Your previous answer was cut off at ${formatDateTime(cut.at)}: the plan's usage ran out${window} and Claude Code stopped before you finished. Now that it renewed (${formatDateTime(cut.until)}), Chiefmate resumes the conversation on its own; ${owner} did not write again. Finish that answer now, from where it stopped. What you did before the cut may be half done, or done without your seeing its result: check it before you carry on, and don't do it twice. Start with one line saying your answer had been cut off by the usage limit. What it answered is below again, with whatever arrived while the usage was out.`;
+  return `[System message from Chiefmate, not from ${owner}] Your previous answer was cut off at ${formatDateTime(cut.at)}: the plan's usage ran out${window} and Claude Code stopped before you finished. Now that it renewed (${formatDateTime(cut.until)}), Chiefmate resumes the conversation on its own; ${owner} did not write again. Finish that answer now, from where it stopped. What you did before the cut may be half done, or done without your seeing its result: check it before you carry on, and don't do it twice. Start with one line saying your answer had been cut off by the usage limit (after the mark of its kind, when your instructions ask for one). What it answered is below again, with whatever arrived while the usage was out.`;
 }
 
 /**
@@ -472,7 +472,7 @@ export function newsMessage(owner, events, alongside = false, away = awayInfo())
   const lines = events.map(e => `- [${formatDateTime(e.at)}] ${e.kind}: ${e.text}`);
   const ask = alongside
     ? `Answer ${owner}'s message(s) and, in the same reply, tell ${owner} about these events in a few lines.`
-    : `Write ${owner} a short, clear notice in the conversation: what happened and, when something needs ${owner}, what to do. A few lines, no headings, no greeting. Check the records when the situation is not enough, but don't queue or change anything because of this notice alone.`;
+    : `Write ${owner} a short, clear notice in the conversation: what happened and, when something needs ${owner}, what to do. A few lines, no headings, no greeting, beginning with the mark of its kind ([report], [alarm], [failure], [needs-you], [done] or [info], as your instructions say). Check the records when the situation is not enough, but don't queue or change anything because of this notice alone.`;
   // The changes a notice asks for: the triage of new proposals, which is the manager's job (the decision stays the
   // owner's), and, with the autopilot on, the next item of a project whose queue emptied.
   const triage = events.some(e => e.kind === 'plan_proposed')
